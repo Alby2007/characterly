@@ -1,4 +1,4 @@
-import type { AttributeStatus, Companion, CompanionSpec, EvidenceEffect, EvidenceType, GuildCompanion, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, VerificationVerdict, WebhookMessageRecord } from "./types.js";
+import type { AttributeStatus, Companion, CompanionSpec, EvidenceEffect, EvidenceType, GuildCompanion, JournalCandidate, JournalEntry, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, VerificationVerdict, WebhookMessageRecord } from "./types.js";
 import { sql as defaultSql, type Sql } from "./db.js";
 import { runMigrations } from "./migrations.js";
 import { findMentionedUsers } from "./entity-resolution.js";
@@ -377,6 +377,7 @@ export class MemoryStore {
       await tx`DELETE FROM alias_candidates WHERE guild_id = ${guildId}`;
       await tx`DELETE FROM unresolved_names WHERE guild_id = ${guildId}`;
       await tx`DELETE FROM members WHERE guild_id = ${guildId}`;
+      await tx`DELETE FROM companion_journal WHERE origin_scope = ${guildId}`;
       await tx`DELETE FROM messages WHERE guild_id = ${guildId}`;
       await tx`DELETE FROM webhook_messages WHERE guild_id = ${guildId}`;
       await tx`DELETE FROM guild_companions WHERE guild_id = ${guildId}`;
@@ -407,7 +408,8 @@ export class MemoryStore {
       UNION SELECT guild_id FROM events WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
       UNION SELECT guild_id FROM relationship_observations WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
       UNION SELECT guild_id FROM profile_attributes WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
-      UNION SELECT guild_id FROM jobs WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'`;
+      UNION SELECT guild_id FROM jobs WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
+      UNION SELECT origin_scope FROM companion_journal WHERE NOT (origin_scope = ANY(${guildIds})) AND origin_scope NOT LIKE 'dm:%'`;
     return rows.map(r => r.guild_id);
   }
 
@@ -2093,14 +2095,15 @@ export class MemoryStore {
     return { messages: messages[0].count, memories: memories[0].count, lore: lore[0].count };
   }
 
-  async exportSubject(guildId: string, subjectId: string): Promise<{ memories: Array<Memory & { evidence: MemoryEvidence[] }>; attributes: ProfileAttribute[] }> {
+  async exportSubject(guildId: string, subjectId: string): Promise<{ memories: Array<Memory & { evidence: MemoryEvidence[] }>; attributes: ProfileAttribute[]; journal: JournalEntry[] }> {
     const rows = await this.sql<MemoryRow[]>`SELECT * FROM memories WHERE guild_id = ${guildId} AND subject_id = ${subjectId} ORDER BY id`;
     const memories = await Promise.all(rows.map(async r => {
       const mem = rowToMemory(r);
       return { ...mem, evidence: await this.evidence(guildId, mem.id) };
     }));
     const attributes = await listAttributes(this.sql, guildId, subjectId);
-    return { memories, attributes };
+    const journal = await this.journalAboutSubject(guildId, subjectId);
+    return { memories, attributes, journal };
   }
 
   /** Structured profile attributes for a subject — the provenance-backed facet set. */
@@ -2346,6 +2349,141 @@ export class MemoryStore {
       SELECT owner_user_id FROM companions WHERE onboarding_state = 'active'
     `;
     return rows.map(r => `dm:${r.owner_user_id}`);
+  }
+
+  // ── Companion journal (v25) ──────────────────────────────────────────────
+  // First-person entries about what a companion itself experienced. Origin
+  // scope keys recall: entries are read only where they formed; owner-DM
+  // entries additionally reach servers via the vault subtext path.
+
+  /** Save first-person entries for a companion in a scope. Entries about
+   * non-consenting humans are dropped at write time (same rule as memory
+   * extraction); near-duplicates against existing entries are skipped. */
+  async saveJournalEntries(
+    companionId: number,
+    scope: string,
+    candidates: JournalCandidate[],
+    sourceMessageId: string | null,
+    isConsented: (subjectId: string) => Promise<boolean>,
+  ): Promise<number> {
+    let saved = 0;
+    for (const c of candidates) {
+      const content = c.content?.trim();
+      if (!content) continue;
+      const kind = ["moment", "opinion", "inside_joke", "promise"].includes(c.kind) ? c.kind : "moment";
+      const aboutIds = [...new Set(c.aboutSubjects ?? [])];
+      let blocked = false;
+      for (const s of aboutIds) {
+        if (!(await isConsented(s))) { blocked = true; break; }
+      }
+      if (blocked) continue;
+      // Near-duplicate suppression against this companion's live entries in the
+      // same scope — a paraphrased repeat shouldn't stack journal rows.
+      const dup = await this.sql<Array<{ id: number }>>`
+        SELECT id FROM companion_journal
+        WHERE companion_id = ${companionId} AND origin_scope = ${scope} AND status = 'active'
+          AND similarity(content, ${content}) >= 0.75
+        LIMIT 1
+      `;
+      if (dup.length) continue;
+      const importance = Math.max(0, Math.min(1, Number(c.importance ?? 0.5)));
+      const res = await this.sql`
+        INSERT INTO companion_journal (companion_id, origin_scope, kind, content, about_subject_ids, importance, source_message_id)
+        VALUES (${companionId}, ${scope}, ${kind}, ${content}, ${aboutIds}, ${importance}, ${sourceMessageId})
+        ON CONFLICT (companion_id, origin_scope, source_message_id, kind, content) DO NOTHING
+      `;
+      saved += res.count;
+    }
+    return saved;
+  }
+
+  /** Recall this companion's active journal entries formed in this scope.
+   * Ranked by importance then recency; subjects who opted out since writing
+   * are filtered out at read time so a stale entry can't leak them. */
+  async journalFor(
+    companionId: number,
+    scope: string,
+    opts: { aboutIds?: string[]; limit?: number } = {},
+  ): Promise<JournalEntry[]> {
+    const limit = opts.limit ?? 6;
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM companion_journal
+      WHERE companion_id = ${companionId} AND origin_scope = ${scope} AND status = 'active'
+      ORDER BY importance DESC, created_at DESC
+      LIMIT ${limit * 4}
+    `;
+    const entries = rows.map(r => this.rowToJournal(r));
+    const optedOut = new Set<string>();
+    for (const e of entries) {
+      for (const s of e.aboutSubjectIds) {
+        if (s.startsWith("companion:") || s === "server" || s === "unknown") continue;
+        const m = await this.getMember(scope, s);
+        if (m?.optedOut) optedOut.add(s);
+      }
+    }
+    const kept = entries.filter(e => !e.aboutSubjectIds.some(s => optedOut.has(s)));
+    const aboutSet = new Set(opts.aboutIds ?? []);
+    const ranked = aboutSet.size
+      ? kept.sort((a, b) => Number(b.aboutSubjectIds.some(s => aboutSet.has(s))) - Number(a.aboutSubjectIds.some(s => aboutSet.has(s))))
+      : kept;
+    const out = ranked.slice(0, limit);
+    if (out.length) {
+      await this.sql`UPDATE companion_journal SET last_recalled_at = NOW() WHERE id = ANY(${out.map(e => e.id)})`;
+    }
+    return out;
+  }
+
+  /** Hard-delete journal entries in a scope that mention a subject — opt-out
+   * removes derived person data entirely, and journal entries are derived. */
+  async forgetJournalAbout(scope: string, subjectId: string): Promise<number> {
+    const res = await this.sql`
+      DELETE FROM companion_journal
+      WHERE origin_scope = ${scope} AND ${subjectId} = ANY(about_subject_ids)
+    `;
+    return res.count;
+  }
+
+  /** Cap entries per (companion, scope): evict the least important stale rows
+   * first, then oldest. Runs from the nightly maintenance loop. */
+  async pruneJournal(cap = 200): Promise<number> {
+    const res = await this.sql`
+      DELETE FROM companion_journal WHERE id IN (
+        SELECT id FROM (
+          SELECT id, ROW_NUMBER() OVER (
+            PARTITION BY companion_id, origin_scope
+            ORDER BY importance * EXP(-EXTRACT(EPOCH FROM (NOW() - COALESCE(last_recalled_at, created_at))) / 86400.0 / 30) DESC,
+                     created_at DESC
+          ) rn FROM companion_journal WHERE status = 'active'
+        ) ranked WHERE rn > ${cap}
+      )
+    `;
+    return res.count;
+  }
+
+  /** Journal entries a subject appears in — feeds /memory-export and opt-out
+   * inspection so the journal isn't invisible to the person it describes. */
+  async journalAboutSubject(scope: string, subjectId: string): Promise<JournalEntry[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM companion_journal
+      WHERE origin_scope = ${scope} AND ${subjectId} = ANY(about_subject_ids)
+      ORDER BY created_at DESC
+    `;
+    return rows.map(r => this.rowToJournal(r));
+  }
+
+  private rowToJournal(r: any): JournalEntry {
+    return {
+      id: Number(r.id),
+      companionId: Number(r.companion_id),
+      originScope: r.origin_scope,
+      kind: r.kind,
+      content: r.content,
+      aboutSubjectIds: r.about_subject_ids ?? [],
+      importance: Number(r.importance),
+      status: r.status,
+      sourceMessageId: r.source_message_id,
+      createdAt: ts(r.created_at),
+    };
   }
 
   async recordWebhookMessage(

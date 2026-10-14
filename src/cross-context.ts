@@ -20,10 +20,13 @@ export async function gatherOwnerSubtextForServer(
 ): Promise<string | undefined> {
   const dmScope = `dm:${ownerUserId}`;
   const compSubj = MemoryStore.companionSubjectId(companionId);
-  const [ownerMemories, compMemories, attrs] = await Promise.all([
+  const [ownerMemories, compMemories, attrs, dmJournal] = await Promise.all([
     store.relevantMemories(dmScope, ownerUserId, maxMemories),
     store.relevantMemories(dmScope, compSubj, 3),
     store.attributesFor(dmScope, ownerUserId),
+    // The companion's private-DM journal rides the same confidential-subtext
+    // lane as owner memories — first-person beats from 1:1 time together.
+    store.journalFor(companionId, dmScope, { limit: 3 }),
   ]);
 
   const activeAttrs = attrs.filter(a => a.status === "active");
@@ -41,6 +44,9 @@ export async function gatherOwnerSubtextForServer(
   }
   for (const m of activeCompMems.slice(0, 3)) {
     lines.push(`- [Shared DM moment] ${m.content}`);
+  }
+  for (const j of dmJournal.slice(0, 3)) {
+    lines.push(`- [Your private DM memory] ${j.content}`);
   }
 
   return lines.length ? lines.join("\n") : undefined;

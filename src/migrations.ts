@@ -690,6 +690,48 @@ const migrations: Migration[] = [
       await sql`DROP INDEX IF EXISTS webhook_messages_companion`;
     },
   },
+  // ── v25: companion first-person journal ─────────────────────────────────────
+  // A companion's own episodic memory — first-person, origin-tagged entries
+  // about what it personally experienced ("Alice and I roasted her tea take").
+  // origin_scope keys recall: entries surface only where they formed, and the
+  // owner's dm:<id> entries additionally ride the vault subtext into servers.
+  {
+    version: 25,
+    name: "v25_companion_journal",
+    up: async (sql) => {
+      await sql`
+        CREATE TABLE IF NOT EXISTS companion_journal (
+          id                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          companion_id      BIGINT NOT NULL REFERENCES companions(id) ON DELETE CASCADE,
+          origin_scope      TEXT NOT NULL,
+          kind              TEXT NOT NULL,
+          content           TEXT NOT NULL,
+          about_subject_ids TEXT[] NOT NULL DEFAULT '{}',
+          importance        DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+          status            TEXT NOT NULL DEFAULT 'active',
+          source_message_id TEXT,
+          created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          last_recalled_at  TIMESTAMPTZ,
+          -- Retry idempotency: a crashed job resaves identical output without
+          -- stacking rows. content is in the key so two same-kind entries from
+          -- one reply both land; trgm dedup at write time covers paraphrases.
+          UNIQUE(companion_id, origin_scope, source_message_id, kind, content)
+        )
+      `;
+      await sql`CREATE INDEX IF NOT EXISTS companion_journal_lookup ON companion_journal(companion_id, origin_scope, status, importance DESC)`;
+      await sql`CREATE INDEX IF NOT EXISTS companion_journal_about ON companion_journal USING gin(about_subject_ids)`;
+      // Same lockdown as v23 — a new public table needs RLS or the Supabase
+      // Data API could reach it. Conditional so plain Postgres test/local
+      // databases run it unchanged.
+      await sql`ALTER TABLE companion_journal ENABLE ROW LEVEL SECURITY`;
+    },
+    down: async (sql) => {
+      await sql`DROP INDEX IF EXISTS companion_journal_about`;
+      await sql`DROP INDEX IF EXISTS companion_journal_lookup`;
+      await sql`DROP TABLE IF EXISTS companion_journal`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

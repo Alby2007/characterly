@@ -787,7 +787,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         { name: "Derived data", value: "Memories, profiles, and relationship notes form **only for members who opt in** — never automatically." },
         { name: "Your consent", value: consent },
         { name: "Processing", value: "Messages are sent to an OpenAI-compatible LLM provider for analysis using each companion owner's personal API key (`/companion action:key`) or the operator's default." },
-        { name: "Controls & guarantees", value: "`/opt-out` forgets your memories and deletes your profile, attributes, relationships, and stored quotes · `/memory-export` downloads everything stored about you · **removing Characterly from this server deletes every row it holds here**." },
+        { name: "Controls & guarantees", value: "`/opt-out` forgets your memories and deletes your profile, attributes, relationships, stored quotes, and companion journal entries about you · `/memory-export` downloads everything stored about you · **removing Characterly from this server deletes every row it holds here**." },
       )] });
   }
   if (interaction.commandName === "memory") {
@@ -1080,6 +1080,10 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     await store.setMemberOptOut(guildId, userId, true);
     const forgotten = await store.forgetAllFor(guildId, userId);
     const relForgotten = await store.forgetRelationshipsFor(guildId, userId);
+    // Companion journal entries about this user are derived person data too —
+    // hard-delete them in this scope (and the user's DM scope if they have one).
+    await store.forgetJournalAbout(guildId, userId);
+    await store.forgetJournalAbout(`dm:${userId}`, userId);
     await store.deleteAttributesFor(guildId, userId);
     // Verbatim evidence (quotes, message snapshots) is scrubbed now, not at
     // retention expiry — opt-out shouldn't wait days to stop holding the words.

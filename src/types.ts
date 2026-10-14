@@ -304,6 +304,28 @@ export type OnboardingTurnResult = {
   spec: CompanionSpec;
 };
 
+/** A first-person journal entry — what the companion itself experienced.
+ * originScope tags where it formed; recall is origin-scoped. */
+export type JournalEntry = {
+  id: number;
+  companionId: number;
+  originScope: string;
+  kind: "moment" | "opinion" | "inside_joke" | "promise";
+  content: string;
+  aboutSubjectIds: string[];
+  importance: number;
+  status: "active" | "forgotten";
+  sourceMessageId?: string | null;
+  createdAt: string;
+};
+
+export type JournalCandidate = {
+  kind: JournalEntry["kind"];
+  content: string;
+  importance?: number;
+  aboutSubjects?: string[];
+};
+
 export type CompanionPersona = {
   companionId: number;
   name: string;
@@ -317,6 +339,8 @@ export type CompanionPersona = {
   ownerSubtext?: string;
   /** Recent server activity digest injected when speaking in 1:1 DMs with the owner. */
   serverDigest?: string;
+  /** The companion's own first-person journal entries, origin-scoped to where it's speaking. */
+  journal?: JournalEntry[];
 };
 
 export type GuildCompanion = Companion & {

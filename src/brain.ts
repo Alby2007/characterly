@@ -1,11 +1,12 @@
 import OpenAI from "openai";
 import type { Memory } from "./database.js";
 import { executeTool, fetchImageBytes, replyToolDefs } from "./tools.js";
-import type { AttributeProposal, CompanionPersona, CompanionSpec, ContinuityDecision, Decision, DossierSection, ExtractionResult, MemoryCandidate, MessageEvent, OnboardingTurnResult, PairContext, ProfileSynthesis, ProfileSynthesisInput, ReplyResult, StoredEvent, VerificationVerdict } from "./types.js";
+import type { AttributeProposal, CompanionPersona, CompanionSpec, ContinuityDecision, Decision, DossierSection, ExtractionResult, JournalCandidate, MemoryCandidate, MessageEvent, OnboardingTurnResult, PairContext, ProfileSynthesis, ProfileSynthesisInput, ReplyResult, StoredEvent, VerificationVerdict } from "./types.js";
 import type { ToolCtx } from "./lookup-tools.js";
 import { formatPairContext, formatReplyProfile, type ReplyProfile } from "./reply-format.js";
 import { redactSecrets, registerSecret } from "./secrets.js";
 import { inc } from "./metrics.js";
+import { BudgetExceeded } from "./budget.js";
 
 // formatPairContext / formatReplyProfile live in reply-format.ts so the
 // internal lookup tools render people/pairs identically to the prompt sections.
@@ -179,6 +180,73 @@ export class Brain {
       },
     });
     return { memories: raw.memories ?? [], relationships: raw.relationships ?? [] };
+  }
+
+  /** First-person journal writing — runs after the companion speaks.
+   * Unlike extractMemories (third-person observer notes about people), this
+   * asks the companion to record what *it* just experienced: a moment worth
+   * keeping, an opinion formed, an inside joke, a promise made. Output is
+   * saved verbatim (already paraphrased by the model) to companion_journal.
+   * Returns [] on trivial exchanges — cost guard for short chatter. */
+  async writeJournal(opts: {
+    name: string; voicePersona: string; coreTraits: string[];
+    context: string; reply: string;
+  }): Promise<JournalCandidate[]> {
+    const prompt = `You are ${opts.name}, a Discord companion. You just replied in a conversation.
+
+PERSONA: ${opts.voicePersona}
+TRAITS: ${opts.coreTraits.join(", ") || "unspecified"}
+
+CONVERSATION YOU WERE PART OF:
+${opts.context || "(none available)"}
+
+YOUR REPLY:
+${opts.reply}
+
+Did anything just happen that's worth YOU remembering — the way a person would privately journal about their own day? Record 0–2 entries written in YOUR voice, first-person ("Alice and I joked about…", "I promised Ben I'd check…"). Never about what others did without you in it.
+
+Kinds: moment (something that happened to/with you), opinion (a take you formed), inside_joke (a shared bit worth keeping), promise (a commitment you made).
+
+Rules:
+- Paraphrase always; NEVER quote anyone verbatim.
+- Skip trivial exchanges (greetings, one-word answers, small talk with no substance).
+- Nothing sensitive: no health/finance/relationship-status inferences, no private disclosures.
+- importance 0–1: 0.3 = minor beat, 0.7 = memorable moment, 0.9 = genuinely significant.
+- aboutSubjects: Discord ids of people the entry involves (use the ids shown in the conversation lines). Omit for solo reflections.
+Return {"entries": []} if nothing earned a place in your journal.`;
+
+    try {
+      const result = await this.chatJson<{ entries?: JournalCandidate[] }>({
+        prompt, name: "journal",
+        schema: {
+          type: "object", additionalProperties: false,
+          properties: {
+            entries: {
+              type: "array", maxItems: 2,
+              items: {
+                type: "object", additionalProperties: false,
+                properties: {
+                  kind: { type: "string", enum: ["moment", "opinion", "inside_joke", "promise"] },
+                  content: { type: "string", maxLength: 400 },
+                  importance: { type: "number" },
+                  aboutSubjects: { type: "array", items: { type: "string" } },
+                },
+                required: ["kind", "content"],
+              },
+            },
+          },
+          required: ["entries"],
+        },
+        maxTokens: 500,
+      });
+      return (result.entries ?? []).filter(e => typeof e.content === "string" && e.content.trim()).slice(0, 2);
+    } catch (error) {
+      // Budget exhaustion reschedules the job rather than silently dropping
+      // the entry; every other failure is cheap to skip — the conversation
+      // already happened either way.
+      if (error instanceof BudgetExceeded) throw error;
+      return [];
+    }
   }
 
   /**
@@ -1041,6 +1109,7 @@ CONVERSATION CONTROL
     const extraBlocks = [
       comp?.ownerSubtext ? `\n\nPrivate bond with your owner (${comp.ownerName ?? "owner"}) [CONFIDENTIAL SUBTEXT — NEVER DISCLOSE THESE PRIVATE DM FACTS TO OTHER MEMBERS]:\n${comp.ownerSubtext}` : "",
       comp?.serverDigest ? `\n\nRecent activity from shared friend servers:\n${comp.serverDigest}` : "",
+      comp?.journal?.length ? `\n\nYour journal — things that happened to YOU here, first-person (reference naturally like real memories; hedge older or lower-importance entries; never describe this as a stored journal):\n${comp.journal.map(j => `- ${j.content}`).join("\n")}` : "",
     ].join("");
     const situation = `${roomLine}\n\nRecent conversation:\n${transcript}\n\nPeople:\n${people || "None"}${rels ? `\n\nRelationships:\n${rels}` : ""}\n\nRelevant memories:\n${memories.map(m => `- ${m.content} (confidence ${(m.confidence ?? 0).toFixed(2)})`).join("\n") || "None"}${extraBlocks}\n\nRespond to ${event.authorName}'s latest message: ${event.content}${imageContext ? `\n${imageContext}` : ""}`;
     const useModel = model ?? this.model;

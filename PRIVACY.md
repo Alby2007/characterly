@@ -16,6 +16,8 @@ ASB ("the bot") is a Discord bot that participates in servers like a member. Thi
 
 **Derived personal data — opt-in only.** Memories about a person, structured profile attributes (pronouns, interests, timezone, etc.), generated profile cards and dossiers, and relationship observations/edges are created **only for members who explicitly opt in** via `/profile-build` or `/opt-in`. Members who never opt in get no derived data.
 
+**Companion journal.** When a companion speaks it may privately journal — short first-person notes about what it experienced (a shared moment, a joke, a promise). Entries are paraphrased, never verbatim quotes; an entry that involves you is only written if you are opted in, and it stays scoped to where it formed. Entries about you are deleted on `/opt-out`, shown in `/memory-export`, and a server's entries are wiped if the bot is removed.
+
 **Third-party processing.** Message content is sent to a large-language-model API (currently Groq; configurable to any OpenAI-compatible provider) for memory extraction, verification, and reply generation. Servers may supply their own provider key via `/setup` — stored encrypted, never shown after entry.
 
 ## What the bot does not do
@@ -28,7 +30,7 @@ ASB ("the bot") is a Discord bot that participates in servers like a member. Thi
 
 - **Deleting a Discord message** removes its archived copy and scrubs the verbatim text from any evidence it produced (audit metadata like evidence type is kept).
 - **Editing a message** updates the archived copy. Evidence snapshots deliberately keep the original text, as the record of what a memory was derived from.
-- **`/opt-out`** removes all your derived data and prevents any new derived data about you: relationships, profile, and attributes are deleted outright; memories are marked forgotten (invisible to every read path — the row's audit metadata is kept, while its verbatim quotes are scrubbed immediately). Your raw messages remain in the archive until retention expires.
+- **`/opt-out`** removes all your derived data and prevents any new derived data about you: relationships, profile, and attributes are deleted outright; memories are marked forgotten (invisible to every read path — the row's audit metadata is kept, while its verbatim quotes are scrubbed immediately); companion journal entries involving you are deleted. Your raw messages remain in the archive until retention expires.
 - **`/forget`** removes a single memory.
 - **`/memory-export`** lets you download everything the bot holds about you.
 - Server admins can set a shorter retention window via `/memory-purge` or disable memory/reply features entirely via `/memory-pause`.

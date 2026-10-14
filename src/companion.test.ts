@@ -305,6 +305,7 @@ test("/companion commands and cross-context bridges enforce privacy boundaries a
       scope === "dm:u-alice"
         ? [{ id: 1, guildId: "dm:u-alice", subjectId: "u-alice", field: "occupation", value: "Designer", valueNorm: "designer", confidence: 0.9, memoryIds: [10], status: "active", supersededBy: null, firstSeenAt: "", lastSeenAt: "" }]
         : [],
+    journalFor: async () => [],
     listCompanionGuilds: async () => [...summonedGuilds],
     recentMemories: async () => [{ id: 20, status: "active", subjectLabel: "Bob", content: "Bob burned his toast" }],
   } as unknown as MemoryStore;

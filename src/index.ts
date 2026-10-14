@@ -36,6 +36,7 @@ import { announceIfNeeded, handleGuildDelete } from "./guild-lifecycle.js";
 import { isSafeUrl } from "./tools.js";
 import { BudgetExceeded, meteredClient } from "./budget.js";
 import { runExtractJob, type ExtractJobPayload } from "./extract-job.js";
+import { runJournalJob, type JournalJobPayload } from "./journal-job.js";
 import { selectCompanionForTurn } from "./scene-router.js";
 import { sendAsCompanion } from "./webhooks.js";
 import { gatherOwnerSubtextForServer, gatherServerDigestForDm } from "./cross-context.js";
@@ -133,6 +134,9 @@ async function init() {
         }
         return runPairAnalysisJob(job.guild_id, p, pairAnalysisDeps);
       }
+      if (job.type === "journal-write") {
+        return runJournalJob(job.guild_id, job.payload as JournalJobPayload, journalDeps);
+      }
       // Unknown types are a code bug, not a transient fault — dead-letter
       // immediately rather than retrying something that can never succeed.
       if (job.type !== "extract") {
@@ -192,6 +196,12 @@ async function applyRetention() {
       console.log(`Purged zombie rows for removed guild ${orphanId}`);
     }
   } catch (error) { inc("maintenance.error"); logError("Zombie-guild sweep failed", error); }
+  // Journal cap is global (per companion+scope partition inside) — one pass
+  // per maintenance run evicts the least-important stale entries past 200.
+  try {
+    const pruned = await store.pruneJournal();
+    if (pruned) console.log(`Pruned ${pruned} stale companion journal entries`);
+  } catch (error) { inc("maintenance.journal_error"); logError("Journal prune failed", error); }
   const dmScopes = await store.listActiveDmScopes().catch(() => [] as string[]);
   const scopes: Array<{ id: string; name: string }> = [
     ...[...client.guilds.cache.values()].map(g => ({ id: g.id, name: g.name })),
@@ -578,6 +588,14 @@ const pairAnalysisDeps = {
   get analysisModel() { return config.verifyModel; },
 };
 
+// Journal-write jobs — same deps-injection pattern; the companion's
+// first-person journal is written off the live reply path.
+const journalDeps = {
+  get store() { return store; },
+  brainFor,
+  get botId() { return client.user!.id; },
+};
+
 async function handleDmMessage(
   message: OmitPartialGroupDMChannel<Message>,
   images: Array<AttachmentMeta & { contentType: string }>,
@@ -784,6 +802,7 @@ async function handleDmMessage(
       companion,
       gId => client.guilds.cache.get(gId)?.name,
     );
+    const journal = await store.journalFor(companion.id, dmScope, { aboutIds: [userId] }).catch(() => []);
     const persona: CompanionPersona = {
       companionId: companion.id,
       name: companion.name,
@@ -794,6 +813,7 @@ async function handleDmMessage(
       ownerDynamic: companion.ownerDynamic,
       backstory: companion.backstory,
       serverDigest,
+      journal,
     };
 
     const meteredVision = visionClient
@@ -847,6 +867,12 @@ async function handleDmMessage(
         mentionsBot: false,
       }, event.messageId, false, true);
       await store.setTriageResults([{ id: sent.id, result: "noise" }]);
+      // Deferrable first-person journaling — a failed enqueue must not lose
+      // the reply that already landed; the job no-ops on empty exchanges.
+      enqueue(sql, dmScope, "journal-write", {
+        companionId: companion.id, triggerMessageId: event.messageId,
+        replyMessageId: sent.id, channelId: message.channel.id,
+      }).catch(() => inc("jobs.enqueue_error"));
     } else {
       inc("reply.empty");
       replyThrottle.refund(dmScope, userId);
@@ -1073,6 +1099,9 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     const ownerName = message.guild.ownerId ? await store.displayNameFor(event.guildId, message.guild.ownerId) : undefined;
     const companionOwnerName = await store.displayNameFor(event.guildId, chosen.ownerUserId);
     const ownerSubtext = await gatherOwnerSubtextForServer(store, chosen.ownerUserId, chosen.id);
+    // Origin-scoped journal: only entries formed in THIS guild — a dismissed
+    // companion's dormant entries never surface elsewhere.
+    const journal = await store.journalFor(chosen.id, event.guildId, { aboutIds: [event.authorId, chosen.ownerUserId] }).catch(() => []);
 
     const persona: CompanionPersona = {
       companionId: chosen.id,
@@ -1084,6 +1113,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       ownerDynamic: chosen.ownerDynamic,
       backstory: chosen.backstory,
       ownerSubtext,
+      journal,
     };
 
     const imgParts: string[] = [];
@@ -1133,6 +1163,11 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
         content: clean, createdAt: sent.createdAt, mentionsBot: false,
       }, event.messageId, false, true);
       await store.setTriageResults([{ id: sent.id, result: "noise" }]);
+      // Same deferred journaling as the DM path — fire-and-forget enqueue.
+      enqueue(sql, event.guildId, "journal-write", {
+        companionId: chosen.id, triggerMessageId: event.messageId,
+        replyMessageId: sent.id, channelId: event.channelId,
+      }).catch(() => inc("jobs.enqueue_error"));
     } else {
       inc("reply.empty"); replyThrottle.refund(event.guildId, throttleActor);
     }
