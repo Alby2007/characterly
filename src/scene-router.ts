@@ -100,10 +100,11 @@ export function selectCompanionForTurn(
     if (input.senderCompanionId === c.id) continue;
 
     const cKey = companionConvoKey(event.guildId, event.channelId, c.id);
+    // Companions are addressed ONLY by their own name or by replying to their
+    // webhook message — never by @-mentioning the Characterly system bot.
     const isAddressed =
       namedIds.has(c.id) ||
-      input.repliedToCompanionId === c.id ||
-      (event.mentionsBot && companions.length === 1);
+      input.repliedToCompanionId === c.id;
 
     // If the speaker explicitly addressed a different companion, stay out of the way.
     if (anyCompanionExplicitlyTargeted && !isAddressed) continue;
@@ -156,7 +157,7 @@ export function selectCompanionForTurn(
       reasons.push("in conversation");
     }
 
-    if (isOwner && (engaged || isQuestion || event.mentionsBot)) {
+    if (isOwner && (engaged || isQuestion || isAddressed)) {
       score += 0.15;
       reasons.push("owner affinity");
     }

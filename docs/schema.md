@@ -1,10 +1,63 @@
 # Database Schema
 
-ASB stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts`.
+Characterly stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts` (`v1`–`v21`).
 
 ---
 
 ## Tables
+
+### `companions`
+
+One row per user account (v21). Each user awakens **one permanent companion per account** in 1:1 DMs (`dm:<owner_user_id>`); once `onboarding_state = 'active'`, the companion's identity is permanently locked.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT PK | `GENERATED ALWAYS AS IDENTITY`; referenced as subject ID `companion:<id>` in `members`, `memories`, and `relationships` |
+| `owner_user_id` | TEXT UNIQUE | Discord user ID of the companion's owner (enforces 1 companion per account) |
+| `name` | TEXT | Companion's display name |
+| `avatar_url` | TEXT NULL | Public image URL used for webhook avatars and profile cards |
+| `voice_persona` | TEXT | How the companion talks and acts |
+| `core_traits` | TEXT[] | Up to 8 core personality trait tags |
+| `owner_dynamic` | TEXT | The companion's bond/relationship with their owner |
+| `backstory` | TEXT | Optional slice-of-life background or lore |
+| `onboarding_state` | TEXT | `'onboarding'` (mutable draft) or `'active'` (permanently locked) |
+| `onboarding_turns` | INTEGER | Number of DM onboarding turns completed |
+| `created_at` / `updated_at` | TIMESTAMPTZ | Creation and last-update timestamps |
+
+---
+
+### `guild_companions`
+
+Tracks which personal companions have been summoned into which Discord servers (v21).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `guild_id` | TEXT | Discord server ID (composite PK) |
+| `companion_id` | BIGINT | FK → `companions.id ON DELETE CASCADE` (composite PK) |
+| `summoned_by` | TEXT | Discord user ID of the owner who summoned them |
+| `active` | SMALLINT | `1` = active in server (`listGuildCompanions`); `0` = dismissed (`/companion action:dismiss`) |
+| `summoned_at` | TIMESTAMPTZ | Timestamp of most recent summon |
+
+**Index:** `guild_companions_lookup (guild_id, active)`.
+
+---
+
+### `webhook_messages`
+
+Maps Discord webhook message IDs sent via `sendAsCompanion` back to the speaking companion and tracks consecutive companion-to-companion `chain_depth` (v21).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `message_id` | TEXT PK | Discord message snowflake ID returned by the channel webhook |
+| `guild_id` | TEXT | Discord server ID |
+| `channel_id` | TEXT | Discord channel ID |
+| `companion_id` | BIGINT | FK → `companions.id ON DELETE CASCADE` |
+| `chain_depth` | INTEGER | `0` when replying to a human; increments on each companion-to-companion hop (capped by `MAX_COMPANION_CHAIN_DEPTH`) |
+| `created_at` | TIMESTAMPTZ | Send timestamp |
+
+**Index:** `webhook_messages_guild (guild_id, created_at DESC)`.
+
+---
 
 ### `messages`
 
@@ -181,18 +234,18 @@ Per-guild daily LLM-call counters (v17) — the `meteredClient` seam charges her
 
 ### `guild_keys`
 
-One row per guild — the server's own LLM key (BYOK), written by `/setup`. Lives in a dedicated table so export/purge paths never casually touch ciphertext.
+Encrypted LLM API keys (BYOK), written by `/companion action:key`, `/setup`, or the onboarding **Paste API Key** modal. Keyed by scope (`dm:<userId>` for a user's personal key, or `<guildId>`). Lives in a dedicated table so export/purge paths never casually touch ciphertext.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `guild_id` | TEXT PK | Discord server ID |
-| `key_enc` | BYTEA | AES-256-GCM ciphertext (`iv ‖ tag ‖ ciphertext`, `src/secrets.ts`) — there is no plaintext key column |
+| `guild_id` | TEXT PK | Scope ID: `dm:<userId>` for personal user keys (primary in Characterly) or Discord server ID |
+| `key_enc` | BYTEA | AES-256-GCM ciphertext (`iv ‖ ciphertext ‖ tag`, `src/secrets.ts`) — there is no plaintext key column |
 | `key_hint` | TEXT | Last 4 chars of the key, for masked display (`…abcd`) |
-| `base_url` | TEXT NULL | Per-guild OpenAI-compatible endpoint; NULL = env default |
-| `validated_at` | TIMESTAMPTZ NULL | NULL = stored but never verified live (provider unreachable at /setup) |
+| `base_url` | TEXT NULL | Custom OpenAI-compatible endpoint; NULL = auto-detected from key prefix (`gsk_`, `sk-or-`, `sk-`, `xai-`) or env default |
+| `validated_at` | TIMESTAMPTZ NULL | NULL = stored but never verified live (provider unreachable at setup time) |
 | `created_at` / `updated_at` | TIMESTAMPTZ | Upsert timestamps |
 
-Decryption requires `KEY_ENCRYPTION_SECRET`; rotating that secret orphans existing rows (recovery = re-run `/setup`).
+Decryption requires `KEY_ENCRYPTION_SECRET`; rotating that secret orphans existing rows (recovery = re-run `/companion action:key` or `/setup`).
 
 ---
 
@@ -415,6 +468,10 @@ Version tracking for the migration system.
 | 12 | `v12_profile_attributes` | `profile_attributes` table + `profiles.attr_hash` — structured provenance-backed facets become the profile source of truth; create-only, no backfill |
 | 13 | `v13_proactive_enabled` | `proactive_enabled` on `server_settings` — per-server opt-in for proactive speaking, default off |
 | 14 | `v14_member_opted_in` | `opted_in` on `members` — derived data becomes consent-gated: person memories, relationships, attributes, profiles form only for `opted_in=1 AND opted_out=0` |
-| 15 | `v15_guild_keys` | `guild_keys` table — BYOK: per-guild LLM keys encrypted AES-256-GCM, written by `/setup` |
+| 15 | `v15_guild_keys` | `guild_keys` table — AES-256-GCM encrypted API keys keyed by scope (`dm:<userId>` or `<guildId>`) |
 | 16 | `v16_consent_posture` | `server_settings` defaults flip to dormant (`memory_enabled=0`, `reply_enabled=0`); `announced_at` marks the join disclosure |
 | 17 | `v17_scale_rails` | `jobs` queue + `guild_usage` daily counters; `ignored_channels` and `llm_daily_cap` on `server_settings` |
+| 18 | `v18_bot_flag_and_event_classifications` | `messages.author_is_bot` (archive-only context for other bots) and `events.classifications` (bounds re-classification passes) |
+| 19 | `v19_relationship_observation_author` | `relationship_observations.author_id` — assertor provenance for opt-out deletion and party-authored weighting |
+| 20 | `v20_relationship_intelligence` | `relationship_observations.source` (`'message'` vs `'pair_window'`); `relationships.behavioral_count`, `party_count`, `trend`, and `inferred` |
+| 21 | `v21_companions_and_webhooks` | `companions` (1 permanent companion per user account), `guild_companions` (server summons), and `webhook_messages` (webhook attribution + `chain_depth`) |

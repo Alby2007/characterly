@@ -17,11 +17,9 @@ import {
   handleMemoryCommand,
   handleSetupModal,
 } from "./commands.js";
-import { detectWakeWord, looksLikeSchemaLeak, questionKeywords, shouldInspectForMemory, toolCues } from "./perception.js";
+import { looksLikeSchemaLeak, shouldInspectForMemory, toolCues } from "./perception.js";
 import { ConversationTracker } from "./conversation.js";
-import { evaluateSpeechTurn } from "./speech-gate.js";
 import { ReplyThrottle } from "./reply-throttle.js";
-import { ProactiveScheduler } from "./proactive.js";
 import { EventStore } from "./events.js";
 import { EventPipeline } from "./event-detection.js";
 import { ProfileStore } from "./profiles.js";
@@ -106,24 +104,6 @@ const convo = new ConversationTracker(config.engagementTtlMs);
 // Per-user reply budget — bounds the worst-case drain a single user can cause
 // against the guild's daily LLM cap (a burst is free, then ~1/refill sustained).
 const replyThrottle = new ReplyThrottle({ capacity: config.replyBurst, refillMs: config.replyRefillMs });
-// Stranded-question trigger: a question arms a durable 'proactive-fire' job —
-// the row's run_after IS the debounce timer, so a restart doesn't drop armed
-// questions. Any follow-up (message or reaction) cancels the pending entry;
-// the job still fires but release() no-ops on it. Cap/backoff/sent state stays
-// in-memory like ConversationTracker — restart resets it gracefully.
-const proactive = new ProactiveScheduler({
-  delayMs: config.proactiveDelayMs,
-  dailyCap: config.proactiveDailyCap,
-  responseWindowMs: config.proactiveResponseWindowMs,
-  backoffMs: config.proactiveBackoffMs,
-  baseMinConfidence: 0.6,
-  backoffMinConfidence: 0.85,
-  schedule: (key, messageId, runAfter) => {
-    const [guildId, channelId] = key.split(":");
-    void enqueue(sql, guildId, "proactive-fire", { channelId, messageId }, runAfter)
-      .catch(error => { inc("jobs.enqueue_error"); logError("Proactive arm enqueue failed", error); });
-  },
-});
 
 // MemoryStore.create() runs migrations; EventStore shares the same sql connection.
 let store: MemoryStore;
@@ -135,42 +115,15 @@ async function init() {
   store = await MemoryStore.create();
   eventStore = new EventStore();
   profileStore = new ProfileStore();
-  // Armed questions survive restarts as 'proactive-fire' rows — repopulate
-  // the pending map so release() dedup keeps working. A row already past
-  // run_after claims on the next poll and fires normally.
-  // Newest row first — restore() is first-wins, and a channel can hold a
-  // superseded 'proactive-fire' row alongside its replacement (re-armed
-  // questions don't delete the old job). Without ordering Postgres could
-  // return the stale row first and arm the superseded question.
-  for (const row of await sql<Array<{ guild_id: string; payload: { channelId?: string; messageId?: string } }>>`
-    SELECT guild_id, payload FROM jobs WHERE type = 'proactive-fire' AND attempts < 5 ORDER BY id DESC
-  `) {
-    if (row.payload.channelId && row.payload.messageId) {
-      proactive.restore(`${row.guild_id}:${row.payload.channelId}`, row.payload.messageId, Date.now());
-    }
-  }
   // Deferrable cognition runs here — extract jobs claimed per-guild-serial,
   // global cap 8. LISTEN 'jobs' for wake hints, 3s poll as the baseline.
   worker = startWorker({
     sql,
     handle: job => {
       if (job.type === "proactive-fire") {
-        const p = job.payload as { channelId?: string; messageId?: string };
-        if (!p?.channelId || !p.messageId) {
-          return Promise.reject(new FatalJobError("malformed proactive-fire payload"));
-        }
-        const key = `${job.guild_id}:${p.channelId}`;
-        // The pending map is the truth for "still armed" — a cancelled or
-        // superseded arm completes as a no-op, deleting the row.
-        if (!proactive.release(key, p.messageId)) { inc("proactive.arm_stale"); return Promise.resolve(); }
-        return fireProactive(key, p.messageId).catch(error => {
-          // A capped guild isn't a fault — and parking a 75-second-old
-          // question to UTC midnight is nonsense, so BudgetExceeded completes
-          // the job rather than rescheduling it.
-          if (error instanceof BudgetExceeded) { inc("budget.proactive_blocked"); return; }
-          inc("proactive.error");
-          throw error;
-        });
+        // Legacy proactive-fire jobs are a no-op: the Characterly bot is pure
+        // server plumbing and never speaks on its own.
+        return Promise.resolve();
       }
       if (job.type === "pair-analysis") {
         const p = job.payload as PairAnalysisPayload;
@@ -206,7 +159,7 @@ client.once(Events.ClientReady, async ready => {
   applyRetention().catch(error => { inc("maintenance.error"); logError("Retention run failed", error); });
   sweepMissedSignals(24 * 60 * 60_000).catch(error => { inc("sweep.error"); logError("Boot sweep failed", error); }); // wide window on boot to cover downtime
   if (!config.visionModel) console.warn("[vision] VISION_MODEL unset — image attachments will be ignored");
-  console.log(`ASM online as ${ready.user.tag}`);
+  console.log(`Characterly online as ${ready.user.tag}`);
 });
 
 // ── Guild lifecycle (announce / kick-purge) ─────────────────────────────────
@@ -250,9 +203,6 @@ async function applyRetention() {
     try {
       const settings = await store.settings(guild.id, config.rawMessageRetentionDays);
       retentionDays = settings.rawRetentionDays;
-      // The bot opts itself in — memories the room forms about it are part of
-      // its persona surface (framed as community claims, not self-truth).
-      await store.setMemberOptIn(guild.id, client.user!.id, true);
       const deleted = await store.deleteRawMessagesOlderThan(guild.id, settings.rawRetentionDays);
       await store.maintain(guild.id, config.candidateConfidenceThreshold);
       if (deleted) console.log(`Retention deleted ${deleted} raw messages in ${guild.name}`);
@@ -327,11 +277,14 @@ async function applyRetention() {
       // with no claims materialize as inferred edges. Computed once — the
       // pair-analysis enqueue below reuses the same list.
       const aliasMap = (await guildLookups(guild.id)).map;
+      const companionSubjects = (await store.listGuildCompanions(guild.id)).map(c =>
+        MemoryStore.companionSubjectId(c.id),
+      );
       // Ignored channels are invisible to the interaction graph too, and other
-      // bots' rows don't form pairs — allowBotIds keeps the member↔ASB edge.
+      // bots' rows don't form pairs — allowBotIds admits summoned companions.
       guildInteractions = await store.interactionPairs(guild.id, aliasMap, {
         excludeChannels: (await store.settings(guild.id, config.rawMessageRetentionDays)).ignoredChannels,
-        allowBotIds: [client.user!.id],
+        allowBotIds: companionSubjects,
       });
       const edgeCount = await store.recomputeEdges(guild.id, guildInteractions);
       if (unverified.length) console.log(`Verified ${judged} relationship observations in ${guild.name}; recomputed ${edgeCount} edges`);
@@ -345,7 +298,9 @@ async function applyRetention() {
       const consented = new Set(
         (await store.listMembers(guild.id)).filter(m => m.optedIn && !m.optedOut).map(m => m.userId)
       );
-      consented.add(client.user!.id); // the bot opts itself in
+      for (const c of await store.listGuildCompanions(guild.id)) {
+        consented.add(MemoryStore.companionSubjectId(c.id));
+      }
       let enqueued = 0;
       for (const p of guildInteractions) {
         if (enqueued >= 5 || p.count < 10) break; // sorted desc — the tail is thinner
@@ -544,27 +499,8 @@ client.on(Events.MessageDelete, message => {
   if (!store) return;
   if (!message.guild) return;
   if (config.guildId && message.guild.id !== config.guildId) return;
-  // A deleted question is no longer stranded — drop any pending proactive arm.
-  proactive.cancelPending(`${message.guild.id}:${message.channelId}`, message.id);
   store.deleteMessage(message.guild.id, message.id)
     .catch(error => { inc("handler.message_error"); logError("Message delete handling failed", error); });
-});
-
-// Reactions are observable signals only — the bot never places them. A
-// reaction on the pending question means the room engaged with it (answered or
-// acknowledged) → cancel; a reaction on a proactive reply means it landed →
-// don't count it as ignored toward backoff.
-client.on(Events.MessageReactionAdd, async (reaction, user) => {
-  try {
-    if (reaction.partial) reaction = await reaction.fetch().catch(() => reaction);
-    const msg = reaction.message.partial ? await reaction.message.fetch().catch(() => undefined) : reaction.message;
-    if (!msg?.guildId) return;
-    if (config.guildId && msg.guildId !== config.guildId) return;
-    if (user.id === client.user?.id) return;
-    const key = `${msg.guildId}:${msg.channelId}`;
-    if (proactive.isProactiveTarget(msg.id)) proactive.observeEngagement(msg.id);
-    else proactive.cancelPending(key, msg.id);
-  } catch (error) { inc("handler.reaction_error"); logError("Reaction handling failed", error); }
 });
 
 // Alias maps are shared per guild rather than built per message — the same map
@@ -634,63 +570,6 @@ const pairAnalysisDeps = {
   get botId() { return client.user!.id; },
   get analysisModel() { return config.verifyModel ?? config.model; },
 };
-
-/**
- * A pending question's timer survived — the room stayed silent. Re-verify
- * everything at send time: kill switches, the question still existing and
- * still being a question, the daily cap, then the two-stage gate (grounded
- * context first, one LLM proposal only if something came back).
- */
-async function fireProactive(key: string, messageId: string): Promise<void> {
-  const [guildId, channelId] = key.split(":");
-  if (!config.proactiveEnabled) return;
-  const settings = await store.settings(guildId, config.rawMessageRetentionDays);
-  if (!settings.proactiveEnabled || !settings.replyEnabled) return;
-  const brain = await brainFor(guildId);
-  if (!brain) return; // dormant guild — no grounded answers to propose with
-  const gate = proactive.allow(key);
-  if (!gate.allowed) { inc("proactive.capped"); return; }
-  // Re-fetch: a deleted question fails the fetch, an edited one may no longer
-  // be a question — neither should earn a stale proactive answer.
-  const channel = await client.channels.fetch(channelId).catch(() => undefined);
-  if (!channel?.isTextBased()) return;
-  const question = await channel.messages.fetch(messageId).catch(() => undefined);
-  if (!question || !question.content.trimEnd().endsWith("?")) { inc("proactive.stale"); return; }
-  // Grounded context is server lore + promoted events ONLY — person facts and
-  // preferences are excluded at the query layer, not filtered after the fact,
-  // because opt-out-of-storage never consented to unprompted public surfacing.
-  // Zero hits → zero LLM calls; that bound is the feature's cost control.
-  const terms = questionKeywords(question.content);
-  const grounded = new Set<string>();
-  for (const t of terms) {
-    for (const m of await store.searchMemories(guildId, t, 3, ["server_lore"])) grounded.add(m.content);
-    for (const e of await eventStore.searchEvents(guildId, t, 2)) grounded.add(`event: ${e.title}${e.summary ? ` — ${e.summary}` : ""}`);
-    if (grounded.size >= 8) break;
-  }
-  if (!grounded.size) { inc("proactive.ungrounded"); return; }
-  const names = (await guildLookups(guildId)).names;
-  const proposal = await brain.proposeGroundedAnswer(demangleMentions(question.content, names), [...grounded].slice(0, 8), gate.minConfidence, config.replyModel);
-  if (!proposal) { inc("proactive.gated"); return; }
-  const clean = scrubMentions(proposal.answer, names);
-  if (!clean) return;
-  // Same send-boundary guard as the reply path — the answer is a parsed JSON
-  // field, but a model could still embed end_conversation or think-tail text
-  // inside it. The rule is "no matter which path produced it."
-  if (looksLikeSchemaLeak(clean)) { inc("proactive.schema_leak"); return; }
-  const sent = await question.reply({ content: clean, allowedMentions: { parse: [], repliedUser: false } });
-  proactive.recordFire(key);
-  proactive.noteSent(key, sent.id);
-  // Proactive speech counts toward share-of-voice like any other reply — an
-  // invisible reply would corrupt the pacing accounting.
-  convo.noteReply(key);
-  inc("proactive.fired");
-  await store.recordMessage({
-    guildId, channelId, messageId: sent.id,
-    authorId: client.user!.id, authorName: question.guild?.members.me?.displayName ?? client.user!.username,
-    content: clean, createdAt: sent.createdAt ?? new Date(), mentionsBot: false,
-  }, messageId, false, true);
-  await store.setTriageResults([{ id: sent.id, result: "noise" }]);
-}
 
 async function handleDmMessage(
   message: OmitPartialGroupDMChannel<Message>,
@@ -1002,12 +881,9 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     authorId: senderCompanion ? MemoryStore.companionSubjectId(senderCompanion.id) : message.author.id,
     authorName: senderCompanion ? senderCompanion.name : (message.member?.displayName ?? message.author.username),
     content: message.content, createdAt: message.createdAt,
-    // Wake words ("asb", the bot's username/display name, its server nick)
-    // count as addressing the bot — same flag, same downstream behavior.
-    mentionsBot: message.mentions.has(client.user!) || message.mentions.repliedUser?.id === client.user!.id
-      || (config.wakeWord && detectWakeWord(message.content, [
-        "asb", client.user!.username, client.user!.globalName, message.guild.members.me?.displayName,
-      ])),
+    // Direct @-mention or reply to the Characterly system bot (only triggers a
+    // system status card — Characterly itself never speaks as a character).
+    mentionsBot: message.mentions.has(client.user!) || message.mentions.repliedUser?.id === client.user!.id,
     imageAttachments: images.length ? images : undefined,
   };
   const settings = await store.settings(event.guildId, config.rawMessageRetentionDays);
@@ -1021,22 +897,24 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   if (settings.ignoredChannels.includes(event.channelId)) return;
   // Pure companion mode: only user-summoned companions speak in guild channels.
   const guildCompanions = await store.listGuildCompanions(event.guildId);
-  if (!guildCompanions.length) {
-    if (!senderCompanion && settings.replyEnabled && event.mentionsBot && noCompanionNoticeOnce(event.channelId)) {
-      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder()
-          .setCustomId("onboard:start")
-          .setLabel("Awaken / Summon Companion")
-          .setStyle(ButtonStyle.Primary),
-      );
-      await message.reply({
-        content: "No companions have been summoned to this server yet! Click below (or send me a DM) to awaken your personal companion, then summon them here with `/companion action:summon`.",
-        components: [row],
-        allowedMentions: { parse: [], repliedUser: false },
-      }).catch(() => {});
-    }
-    return;
+  if (!senderCompanion && settings.replyEnabled && event.mentionsBot && noCompanionNoticeOnce(event.channelId)) {
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId("onboard:start")
+        .setLabel("Awaken / Summon Companion")
+        .setStyle(ButtonStyle.Primary),
+    );
+    const activeList = guildCompanions.length
+      ? `Active companions here: ${guildCompanions.map(c => `**${c.name}**`).join(", ")}. Say a companion's name in chat (or reply to their message) to talk to them!`
+      : "No companions have been summoned to this server yet! Click below (or send me a DM) to awaken your personal companion, then summon them here with `/companion action:summon`.";
+    await message.reply({
+      content: `*System — Characterly Host:* ${activeList}`,
+      components: [row],
+      allowedMentions: { parse: [], repliedUser: false },
+    }).catch(() => {});
+    if (!guildCompanions.length) return;
   }
+  if (!guildCompanions.length) return;
 
   // Server plumbing resolves a Brain from summoned companions' owners (or env fallback).
   const brain = await brainFor(event.guildId);
@@ -1100,12 +978,6 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     } catch (error) { inc("jobs.enqueue_error"); logError("Extraction enqueue failed", error); }
   }
 
-  const key = `${event.guildId}:${event.channelId}`;
-  if (!senderCompanion) {
-    proactive.cancelPending(key);
-    if (replyToId) proactive.observeEngagement(replyToId);
-  }
-
   const selection = selectCompanionForTurn(
     {
       event,
@@ -1129,16 +1001,6 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   );
 
   if (!settings.replyEnabled || !selection) {
-    if (
-      !senderCompanion &&
-      settings.replyEnabled &&
-      !selection &&
-      config.proactiveEnabled &&
-      settings.proactiveEnabled &&
-      event.content.trimEnd().endsWith("?")
-    ) {
-      proactive.arm(key, event.messageId);
-    }
     return;
   }
 
@@ -1231,6 +1093,10 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     if (clean && looksLikeSchemaLeak(clean)) { inc("reply.schema_leak"); replyThrottle.refund(event.guildId, throttleActor); return; }
     if (clean) {
       const sent = await sendAsCompanion(message, chosen, clean, client.user!.id);
+      if (!sent) {
+        replyThrottle.refund(event.guildId, throttleActor);
+        return;
+      }
       convo.noteReply(selection.convoKey);
       convo.noteReply(selection.floorKey);
       inc("reply.sent");

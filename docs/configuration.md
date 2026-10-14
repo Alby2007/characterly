@@ -1,6 +1,6 @@
 # Configuration Reference
 
-ASB is configured through environment variables validated at startup by `src/config.ts` using [zod](https://github.com/colinhacks/zod). Copy `.env.example` to `.env` and fill in the required values before starting the bot.
+Characterly is configured through environment variables validated at startup by `src/config.ts` using [zod](https://github.com/colinhacks/zod). Copy `.env.example` to `.env` and fill in the required values before starting the bot.
 
 ---
 
@@ -11,17 +11,23 @@ ASB is configured through environment variables validated at startup by `src/con
 | Variable | Description |
 |----------|-------------|
 | `DISCORD_TOKEN` | Your Discord bot token. Obtain from the [Discord Developer Portal](https://discord.com/developers/applications) under Bot → Token. |
-| `GROQ_API_KEY` | API key for Groq. Used for all LLM calls (memory extraction, continuity decisions, event classification, replies). |
 | `DATABASE_URL` | Postgres connection string. Use the **Session pooler** URL (port 5432) from your Supabase project: **Settings → Database → Connection string → Session mode**. Example: `postgresql://postgres:[password]@db.[ref].supabase.co:5432/postgres` |
+| `GROQ_API_KEY` | Operator default LLM API key (optional when `REQUIRE_GUILD_KEYS=1` and `KEY_ENCRYPTION_SECRET` is set so users connect their own personal keys). |
 
 ### Optional
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GROQ_MODEL` | `openai/gpt-oss-120b` | Model name passed to Groq. `openai/gpt-oss-120b` is the default; `openai/gpt-oss-20b` is faster and cheaper. |
-| `GROQ_BASE_URL` | `https://api.groq.com/openai/v1` | Override the Groq base URL. Useful for proxies or self-hosted endpoints. |
+| `GROQ_MODEL` | `openai/gpt-oss-120b` | Default model name passed to Groq (or custom provider). |
+| `GROQ_BASE_URL` | `https://api.groq.com/openai/v1` | Default OpenAI-compatible base URL when not auto-detected from a user's key prefix. |
+| `KEY_ENCRYPTION_SECRET` | unset | Master passphrase encrypting user API keys at rest (AES-256-GCM, SHA-256-derived). Required for `/companion action:key`, `/setup`, and the onboarding **Paste API Key** modal. When users leave Base URL blank, Characterly auto-detects Groq (`gsk_...`), OpenRouter (`sk-or-...`), OpenAI (`sk-...`), or xAI (`xai-...`). |
+| `REQUIRE_GUILD_KEYS` | `0` | Hosted BYOK mode: `1` disables the operator `GROQ_API_KEY` fallback so companions and servers run strictly on user-supplied personal keys (`dm:<userId>`). |
+| `DM_LLM_DAILY_CAP` | `250` | Per-user daily LLM call cap for 1:1 DMs (`dm:<userId>` scope, resets at UTC midnight). |
+| `MAX_COMPANION_CHAIN_DEPTH` | `2` | Maximum consecutive companion-to-companion replies per human message in a server channel (0–5). Hard-stops runaway bot loops. |
+| `REPLY_BURST` | `4` | Per-user/actor token-bucket burst capacity before reply throttling kicks in (refunded automatically if a reply is unsent). |
+| `REPLY_REFILL_MS` | `30000` | Milliseconds to refill 1 token in the per-user reply throttle bucket. |
 | `GUILD_ID` | (empty) | If set, restricts the bot to a single Discord server. **Recommended during development** to avoid accidental activity in other servers. Leave empty to enable all servers the bot has joined. |
-| `SPEAK_THRESHOLD` | `0.70` | Minimum `brain.decide()` score required to send a reply. Range 0–1. At 0.70 the bot speaks on direct address (0.90) and on in-conversation engaged messages (0.75 before recency decay). Lowering this value enables more frequent unsolicited replies. |
+| `SPEAK_THRESHOLD` | `0.70` | Minimum `selectCompanionForTurn()` / `brain.decide()` score required to send a reply. Range 0–1. |
 | `RAW_MESSAGE_RETENTION_DAYS` | `30` | How many days of raw Discord messages to keep in the `messages` table. Messages older than this are deleted by the daily maintenance job. Evidence quotes in `memory_evidence` are **not** affected by this purge. Range 1–365. |
 | `CANDIDATE_CONFIDENCE_THRESHOLD` | `0.70` | Minimum confidence required to auto-promote a candidate memory to active status (subject to evidence type gates). Range 0–1. |
 | `REPLY_MODEL` | `GROQ_MODEL` | Model used for Discord replies, across all reply paths. Any Groq model id, or `groq/compound*` for Groq's agentic system with built-in web tools. Reasoning models (gpt-oss, qwen3) get `reasoning_effort=low` automatically to cut latency and flatten the register. |
@@ -58,8 +64,10 @@ ASB is configured through environment variables validated at startup by `src/con
 3. Under **OAuth2 → URL Generator**, select scopes `bot` and `applications.commands`, then grant the following permissions:
    - Read Messages / View Channels
    - Send Messages
+   - Send Messages in Threads
    - Read Message History
-4. Use the generated URL to invite the bot to your server.
+   - **Manage Webhooks** *(used by `sendAsCompanion` to post server replies with each summoned companion's custom name and avatar)*
+4. Use the generated URL to invite Characterly to your server. Once joined, click **Enable Characterly (Admins)** on the welcome card (or run `/memory-resume`) — no server API key is required.
 
 ---
 

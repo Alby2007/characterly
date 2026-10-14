@@ -5,6 +5,7 @@ import type { ChatInputCommandInteraction } from "discord.js";
 import { Brain, type LlmClient } from "./brain.js";
 import { createBrainResolver } from "./brains.js";
 import { ConversationTracker } from "./conversation.js";
+import { sendAsCompanion } from "./webhooks.js";
 import { selectCompanionForTurn } from "./scene-router.js";
 import { gatherOwnerSubtextForServer, gatherServerDigestForDm } from "./cross-context.js";
 import {
@@ -221,6 +222,17 @@ test("selectCompanionForTurn routes by wake-word name, webhook reply, owner affi
     null,
   );
 
+  // @-mentioning the Characterly system bot (mentionsBot: true) NEVER triggers a companion,
+  // even when only 1 companion is summoned in the guild.
+  assert.equal(
+    selectCompanionForTurn(
+      { event: msg("hey @Characterly", { mentionsBot: true }), companions: [nyx] },
+      convo,
+      baseOpts,
+    ),
+    null,
+  );
+
   // Naming Kael directly selects Kael and suppresses Nyx
   const pickKael = selectCompanionForTurn(
     { event: msg("hey Kael what do you think?"), companions },
@@ -339,6 +351,51 @@ test("/companion commands and cross-context bridges enforce privacy boundaries a
   } as unknown as ChatInputCommandInteraction;
   await handleMemoryCommand(pauseIx, fakeStore, async () => ({}) as Brain, fakeEventStore);
   assert.match(adminDmReplies[0]?.content ?? "", /only be used inside a Discord server/i);
+
+  // Summoning and dismissing a companion delivers public System embeds to the channel,
+  // and sendAsCompanion never roleplays as a companion if webhooks are unavailable.
+  const channelSystemMessages: any[] = [];
+  const summonIx = {
+    ...cardIx,
+    guildId: "g1",
+    channel: { send: async (p: any) => { channelSystemMessages.push(p); } },
+    options: {
+      getString: (n: string) => (n === "action" ? "summon" : null),
+      getUser: () => null,
+    },
+    reply: async (r: any) => r,
+  } as unknown as ChatInputCommandInteraction;
+  await handleMemoryCommand(summonIx, fakeStore, async () => ({}) as Brain, fakeEventStore);
+  assert.equal(channelSystemMessages.length, 1);
+  assert.match(channelSystemMessages[0].embeds?.[0]?.data?.title ?? "", /System · Nyx joined the chat/);
+
+  const dismissIx = {
+    ...summonIx,
+    options: {
+      getString: (n: string) => (n === "action" ? "dismiss" : null),
+      getUser: () => null,
+    },
+  } as unknown as ChatInputCommandInteraction;
+  await handleMemoryCommand(dismissIx, fakeStore, async () => ({}) as Brain, fakeEventStore);
+  assert.equal(channelSystemMessages.length, 2);
+  assert.match(channelSystemMessages[1].embeds?.[0]?.data?.title ?? "", /System · Nyx left the chat/);
+
+  // Webhook unavailability posts a one-time system notice and returns null (never roleplays)
+  const webhookNotices: any[] = [];
+  const whResult = await sendAsCompanion(
+    {
+      channelId: "ch-no-webhook",
+      channel: { type: 99 },
+      reply: async (r: any) => { webhookNotices.push(r); return r; },
+    } as any,
+    activeComp,
+    "in-character line that must not be spoken by the system bot",
+    "bot-1",
+  );
+  assert.equal(whResult, null);
+  assert.equal(webhookNotices.length, 1);
+  assert.match(webhookNotices[0].content, /System: Characterly needs the \*\*Manage Webhooks\*\* permission/);
+  assert.doesNotMatch(webhookNotices[0].content, /in-character line/);
 });
 
 test("onboarding UX: bare greeting guard, welcome/draft/awakened cards, proactive DM bridge, and permanent 1-companion-per-account lock", async () => {

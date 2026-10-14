@@ -1,6 +1,6 @@
 # Developer Guide
 
-Everything you need to work on ASB locally.
+Everything you need to work on Characterly locally.
 
 ---
 
@@ -8,7 +8,7 @@ Everything you need to work on ASB locally.
 
 - **Node.js** 20+ (the project uses ES modules and `node:test`)
 - A **Discord bot token** — see [configuration.md](configuration.md) for setup
-- A **Groq API key** — free at [console.groq.com](https://console.groq.com)
+- A **Groq API key** (or OpenRouter / OpenAI / xAI key) — free at [console.groq.com](https://console.groq.com)
 - A **Postgres database** — a free [Supabase](https://supabase.com) project works. Use the Session pooler connection string (port 5432).
 - `npm` (bundled with Node)
 
@@ -17,11 +17,11 @@ Everything you need to work on ASB locally.
 ## First-time setup
 
 ```bash
-git clone https://github.com/Alby2007/ASB.git
-cd ASB
+git clone https://github.com/Alby2007/characterly.git
+cd characterly
 npm install
 cp .env.example .env
-# Edit .env and fill in DISCORD_TOKEN, GROQ_API_KEY, and DATABASE_URL
+# Edit .env and fill in DISCORD_TOKEN, GROQ_API_KEY, KEY_ENCRYPTION_SECRET, and DATABASE_URL
 # Set GUILD_ID to your test server's ID while developing
 ```
 
@@ -77,6 +77,10 @@ Tests live alongside source files as `*.test.ts`. Run them all with `npm test`.
 | `perception.test.ts` | Durable-signal pre-filter patterns; bot-addressed bypass; `detectNamingRequest`/`detectSelfNaming` extraction and stopword rejection |
 | `profiles.test.ts` | `recordMessage` member upsert/dedup/`reply_to_id`; `buildProfiles` consent + eligibility gates, attribute pipeline, dossier build |
 | `persist-extraction.test.ts` | Consent-gated extraction writes: person memories only for opted-in subjects, server lore exempt, relationship subject-consent, opt-out beats opt-in |
+| `companion.test.ts` | 1:1 DM conversational onboarding, bare-greeting guard, permanent 1-companion-per-account lock, personal API key onboarding with provider auto-detection, 1-click `server:enable`, `selectCompanionForTurn` multi-companion routing, and DM ↔ Server cross-context bridges (`gatherOwnerSubtextForServer` + `gatherServerDigestForDm`) |
+| `brains.test.ts` | `createBrainResolver` caching, key rotation, undecryptable row handling, `detectProviderFromKey` prefix auto-detection, `brainForUser`, and server plumbing resolution via `getGuildOwnerIds` |
+| `conversation.test.ts` | `ConversationTracker` participant enrollment, TTL expiry, share-of-voice window, and `bystanderVoices` 1:1 vs shared-floor detection |
+| `speech-gate.test.ts` | `evaluateSpeechTurn` transcript replay, dismissal overrides, room-directed suppression, and `ReplyThrottle` burst/refund behavior |
 | `tools.test.ts` | `isSafeUrl` SSRF guards; `stripHtml`/`parseDdgLite` parsing; `executeTool` error strings never throw |
 
 ### Adding a test
@@ -197,26 +201,29 @@ All errors must be resolved before committing. The project uses `strict: true`.
 ## Project structure reference
 
 ```
-ASB/
+characterly/
 ├── src/
-│   ├── index.ts              # Entry point — Discord client and event loop
-│   ├── ingest.ts             # Standalone bulk-ingest script
-│   ├── brain.ts              # All LLM calls
+│   ├── index.ts              # Entry point — Discord client, 1:1 DM onboarding/chat, server message loop
+│   ├── scene-router.ts       # Multi-companion scene router & chain-depth loop guard
+│   ├── webhooks.ts           # Per-companion Discord webhook sender & thread routing
+│   ├── cross-context.ts      # Asymmetric DM ↔ Server consciousness bridges
+│   ├── brains.ts             # User-first Brain resolver & API key prefix provider auto-detection
+│   ├── brain.ts              # All LLM calls (onboarding, extraction, verification, replies)
 │   ├── config.ts             # Env validation
 │   ├── types.ts              # Shared TypeScript types
 │   ├── db.ts                 # Shared postgres.js connection singleton
-│   ├── database.ts           # MemoryStore (Postgres)
+│   ├── database.ts           # MemoryStore (Postgres: companions, webhooks, memories, edges)
 │   ├── events.ts             # EventStore (Postgres)
-│   ├── migrations.ts         # Versioned schema migrations (async Postgres DDL)
+│   ├── migrations.ts         # Versioned schema migrations (v1–v21)
 │   ├── confidence.ts         # Deterministic confidence formulas
-│   ├── perception.ts         # Pre-filter regex
+│   ├── perception.ts         # Pre-filter regex, wake words, dismissals
 │   ├── event-detection.ts    # EventPipeline
 │   ├── event-significance.ts # Significance scoring formula
-│   ├── commands.ts           # Slash command definitions and handlers
+│   ├── commands.ts           # Slash commands, onboarding cards/modals, interaction handlers
 │   └── *.test.ts             # Test files (co-located with source)
 ├── docs/
-│   ├── architecture.md       # Module map and data flow
-│   ├── schema.md             # Database schema reference
+│   ├── architecture.md       # Module map, companion onboarding, scene routing, and data flow
+│   ├── schema.md             # Database schema reference (through v21)
 │   ├── event-pipeline.md     # Event detection explainer
 │   ├── configuration.md      # Env var reference
 │   └── development.md        # This file

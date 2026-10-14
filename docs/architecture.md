@@ -1,6 +1,6 @@
 # Architecture
 
-ASB (Artificial Server Member) is a single TypeScript/Node process that connects to Discord, observes messages, extracts durable memories using an LLM, detects notable server events, and replies conservatively when directly addressed. All state is stored in Postgres (Supabase in production; any Postgres via `DATABASE_URL`).
+Characterly is a single TypeScript/Node process that connects to Discord, lets each user awaken a permanent personal AI companion in 1:1 DMs (`dm:<userId>`), and acts as the shared server host ("plumbing") where summoned companions speak through Discord channel webhooks, banter with humans and each other, form durable provenance-backed memories and relationship edges, and detect notable server events. All state is stored in Postgres (Supabase in production; any Postgres via `DATABASE_URL`).
 
 ---
 
@@ -8,44 +8,87 @@ ASB (Artificial Server Member) is a single TypeScript/Node process that connects
 
 | File | Class / exports | Role |
 |------|----------------|------|
-| `src/index.ts` | — | Discord client, live message loop, daily maintenance scheduler |
+| `src/index.ts` | — | Discord client, 1:1 DM onboarding & chat loop, live guild message loop, daily maintenance scheduler |
+| `src/scene-router.ts` | `selectCompanionForTurn`, `companionConvoKey`, `channelFloorKey` | Multi-companion scene router: coordinates which summoned companion speaks on a guild message (wake-word name match, webhook reply attribution, owner affinity `+0.15`, shared floor pacing, bounded companion-to-companion `maxChainDepth`) |
+| `src/webhooks.ts` | `sendAsCompanion` | Posts guild replies disguised with the speaking companion's name and avatar via a cached Discord channel webhook (`Characterly Companions`), with thread support and graceful bot-reply fallback |
+| `src/cross-context.ts` | `gatherOwnerSubtextForServer`, `gatherServerDigestForDm` | Asymmetric DM ↔ Server consciousness bridges: private DM bond subtext for server replies (guarded by the Vault Rule) + shared server activity digests for 1:1 DMs |
 | `src/ingest.ts` | — | CLI wrapper: connects to Discord and calls `runServerIngest` for the configured channel |
 | `src/server-ingest.ts` | `runServerIngest` | The server-level historical build (archive → triage → extract → events → verify → profiles) shared by `npm run ingest` and `/server-build` |
-| `src/profile-build.ts` | `runProfileBuild`, `PROFILE_BUILD_COOLDOWN_MS` | Self-service opt-in scan (/profile-build): targeted corpus → extraction → verification → scoped profile build |
+| `src/profile-build.ts` | `runProfileBuild`, `PROFILE_BUILD_COOLDOWN_MS` | Self-service opt-in scan (`/profile-build`): targeted corpus → extraction → verification → scoped profile build |
 | `src/persist-extraction.ts` | `persistExtraction` | The single consent-gated write path for extraction results — person memories need an opted-in subject; relationships need one opted-in party |
-| `src/brains.ts` | `createBrainResolver` | Per-guild `Brain` resolver (BYOK): guild's encrypted key → env fallback → null (dormant). Cached per guild, invalidated by `/setup` |
-| `src/guild-lifecycle.ts` | `announceIfNeeded`, `handleGuildDelete` | Join disclosure card (idempotent via `announced_at`) + kick-purge — GuildDelete never fires on outage (`unavailable`) |
+| `src/brains.ts` | `createBrainResolver`, `detectProviderFromKey`, `guardedLlmFetch` | User-first `Brain` resolver (BYOK): user's encrypted personal key (`dm:<userId>`) with prefix auto-detection (Groq, OpenRouter, OpenAI, xAI) → summoned companion owners' keys for server plumbing → operator env fallback → null (dormant) |
+| `src/guild-lifecycle.ts` | `announceIfNeeded`, `handleGuildDelete` | Characterly join disclosure card (with 1-click **Enable Characterly** and **Awaken Your Companion** buttons, idempotent via `announced_at`) + kick-purge |
 | `src/jobs.ts` | `enqueue`, `claimNext`, `startWorker` | Postgres job queue for deferrable cognition — `SKIP LOCKED` claims with a 10-min visibility lease, per-guild serial + global cap 8, backoff retry, 5-attempt dead-letter, `NOTIFY`/`LISTEN` wake + 3s poll |
-| `src/speech-gate.ts` | `evaluateSpeechTurn` | The per-message speak/silence decision extracted from handleMessage — enroll → aim-check → dismissal → share-of-voice → decide(); drives the transcript-replay tests |
-| `src/reply-throttle.ts` | `ReplyThrottle` | Per-user reply budget (token bucket) — bounds the drain one user can cause against the guild's daily LLM cap |
-| `src/extract-job.ts` | `runExtractJob` | The deferred extract pipeline — alias-learn → describe → extract → consent-gated persist → `extracted` mark → contest → event pipeline (extracted from index.ts so it's unit-testable) |
+| `src/speech-gate.ts` | `evaluateSpeechTurn` | Single-turn speak/silence evaluator used for standalone transcript replay tests |
+| `src/reply-throttle.ts` | `ReplyThrottle` | Per-user/actor reply budget (token bucket with refund on unsent replies) — bounds the drain one actor can cause against daily LLM caps |
+| `src/extract-job.ts` | `runExtractJob` | The deferred extract pipeline — alias-learn → describe → extract → consent-gated persist → `extracted` mark → contest → event pipeline |
 | `src/pair-analysis-job.ts` | `runPairAnalysisJob` | `pair-analysis` jobs: holistic LLM reads of top interaction pairs' exchange windows → `pair_window` observations (both-party consent) |
-| `src/budget.ts` | `meteredClient`, `BudgetExceeded` | Per-guild daily LLM budget — wraps every `responses.create`/`chat.completions.create` with an atomic `guild_usage` charge against `llm_daily_cap` |
-| `src/secrets.ts` | `encryptSecret`, `decryptSecret`, `maskKey`, `redactSecrets`, `validateLlmKey` | AES-256-GCM at-rest encryption for guild keys + live key validation against `/models` |
-| `src/brain.ts` | `Brain` | All LLM calls: extract memories, correct, assess continuity, classify events, reply |
+| `src/budget.ts` | `meteredClient`, `BudgetExceeded` | Per-scope daily LLM budget — wraps every `responses.create`/`chat.completions.create` with an atomic `guild_usage` charge against `llm_daily_cap` / `DM_LLM_DAILY_CAP` |
+| `src/secrets.ts` | `encryptSecret`, `decryptSecret`, `maskKey`, `redactSecrets`, `validateLlmKey` | AES-256-GCM at-rest encryption for API keys + live key validation against `/models` |
+| `src/brain.ts` | `Brain` | All LLM calls: `runOnboardingTurn`, extract memories, correct, assess continuity, classify events, reply (with `CompanionPersona` + Vault Rule) |
 | `src/config.ts` | `config` | Env-variable validation (zod); single exported config object |
-| `src/types.ts` | `MessageEvent`, `MemoryCandidate`, `StoredEvent`, `Decision`, … | Shared TypeScript types shared across modules |
-| `src/database.ts` | `MemoryStore` | Postgres persistence: memory CRUD, lifecycle, conflict resolution, episode consolidation |
+| `src/types.ts` | `Companion`, `CompanionPersona`, `GuildCompanion`, `MessageEvent`, … | Shared TypeScript types across modules |
+| `src/database.ts` | `MemoryStore` | Postgres persistence: companions, guild summons, webhook attribution, memory CRUD, lifecycle, conflict resolution, episode consolidation |
 | `src/events.ts` | `EventStore` | Postgres persistence: event CRUD, participants, message/memory attachments |
-| `src/migrations.ts` | `runMigrations`, `getMigrationVersion` | Versioned schema migrations (v1–v17, `LATEST_MIGRATION_VERSION`) with rollback support |
+| `src/migrations.ts` | `runMigrations`, `getMigrationVersion`, `LATEST_MIGRATION_VERSION` | Versioned schema migrations (v1–v21) with rollback support |
 | `src/confidence.ts` | `calculateInitialConfidence`, `updateConfidence`, `calculateDefaultImportance`, `calculateDefaultExplicitness` | Deterministic numeric formulas; no LLM involvement |
 | `src/perception.ts` | `shouldInspectForMemory`, `detectNamingRequest`, `detectSelfNaming`, `detectWakeWord`, `detectDismissal`, `contestCue`, `botMemoryCue`, `toolCues` | Cheap pre-filter: prevents LLM calls for ordinary chat; detects naming requests, self-naming, wake words, and dismissal cues |
 | `src/event-detection.ts` | `EventPipeline` | Heuristic + LLM continuity decisions; nightly maintenance |
 | `src/event-significance.ts` | `calculateSignificance` | Deterministic significance score and tier assignment |
-| `src/entity-resolution.ts` | `buildAliasMap`, `resolveSubject`, `findMentionedUsers` | Maps display names to real user IDs; ambiguous names resolve to `unknown` |
+| `src/entity-resolution.ts` | `buildAliasMap`, `resolveSubject`, `findMentionedUsers` | Maps display names to real user IDs (including `companion:<id>`); ambiguous names resolve to `unknown` |
 | `src/profiles.ts` | `ProfileStore` | Per-chatter profile cards + dossiers: input fingerprinting + LLM synthesis, rebuilt only when inputs change |
 | `src/attributes.ts` | `SINGULAR_FIELDS`, `extractDeterministic`, `applyProposals`, `deriveAttributeStatus`, `recomputeForMemories`, `transferProvenance`, `attributeHash` | Structured profile facets: extraction, the upsert-diff (exact → trgm fold → insert), derived status, and lifecycle cascades |
 | `src/dossier.ts` | `gatherDossierInputs` | Per-section dossier input gathering and hashing — voice, life_situation, temperament, beliefs, relationship_map, reputation, timeline |
-| `src/commands.ts` | `commandDefinitions`, `handleMemoryCommand`, `handleMemoryButton` | Discord slash command schemas and interaction handlers |
+| `src/commands.ts` | `commandDefinitions`, `handleMemoryCommand`, `handleMemoryButton`, `handleSetupModal`, `handleCompanionModal` | Discord slash command schemas, onboarding card/modal builders, and interaction handlers |
 | `src/tools.ts` | `replyToolDefs`, `executeTool` | Never-throw tool dispatcher: SSRF-hardened web fetch + internal lookup routing |
 | `src/lookup-tools.ts` | `ToolCtx`, `executeLookupTool`, `buildPairContext` | Read-only internal lookup tools (person/relationship/memories/event) over the existing stores |
 | `src/reply-format.ts` | `formatReplyProfile`, `formatPairContext` | Pure formatters shared by the reply prompt and tool outputs |
 | `src/vision.ts` | `qualifyingImages`, `formatImageContext` | Pure image-attachment gate (image/*, byte cap, ≤3/message) + observation-framed label |
-| `src/conversation.ts` | `ConversationTracker` | Per-channel conversation objects: opens on addressed messages, closes when the last participant leaves (TTL expiry, regex dismissal, or the model's `end_conversation`); share-of-voice pacing is channel-level and survives close, and `bystanderVoices` distinguishes a shared floor from a 1:1 ping-pong |
+| `src/conversation.ts` | `ConversationTracker` | Per-channel and per-companion conversation objects: opens on addressed messages, closes when the last participant leaves; share-of-voice pacing is channel-level |
 
 ---
 
-## Data flow — live message
+## Personal Companions & 1:1 DM Onboarding (v21)
+
+Each Discord user awakens **one permanent personal AI companion per account** in a private 1:1 DM (`dm:<userId>` scope), then summons them into any Characterly-enabled Discord server:
+
+1. **Step 0 — Personal AI Key (`buildApiKeyOnboardingPayload` & `user-key` Modal):**
+   - If the user has not yet connected an API key (and no operator fallback key is active), DMing the bot or clicking an onboarding button presents the **Connect Your Personal AI Key** card with a 1-click **Paste API Key** button (`onboard:key:<userId>`).
+   - Users only need to paste their API key (`gsk_...`, `sk-or-...`, `sk-...`, or `xai-...`) and **leave the Base URL field blank** — `detectProviderFromKey()` in `src/brains.ts` automatically configures the provider endpoint and default model.
+   - Submitting the modal validates the key live, encrypts it with AES-256-GCM into `guild_keys` under `dm:<userId>`, and immediately attaches the **Awaken Your Personal Companion** welcome card in the same response.
+2. **Step 1 — Conversational Discovery & Archetype Quick-Starts (`handleDmMessage` & `Brain.runOnboardingTurn`):**
+   - Users can shape their companion in 2–4 casual DM exchanges (or click a starter archetype button: **Surprise Me**, **Chaotic Co-Conspirator**, **Dry & Deadpan**, **Ride-or-Die**, or **Fill Form Instead**).
+   - Attaching an image in the DM automatically sets the companion's `avatar_url`.
+   - Every onboarding turn renders a live **Companion Draft** embed (`buildOnboardingDraftEmbed`) showing `Name`, `Bond / Dynamic`, `Voice & Vibe`, `Core Traits`, and `Backstory`, paired with **Awaken & Lock In `<Name>`**, **Edit Draft**, and **Surprise Draft** buttons.
+3. **Step 2 — Permanent 1-Companion-Per-Account Lock (`store.activateCompanion`):**
+   - Throughout onboarding, the UI and LLM prompt make clear that **each account gets one permanent companion**.
+   - Once `activateCompanion()` flips `onboarding_state = 'active'`, the companion's persona (`name`, `voice_persona`, `core_traits`, `owner_dynamic`, `backstory`) is **permanently locked** to that user's account (`WHERE companions.onboarding_state <> 'active'`) and cannot be overwritten or reset.
+   - Awakening seeds `dm:<userId>` consent for both the owner and `companion:<id>` and records initial `owner ↔ companion` relationship edges.
+4. **Step 3 — 1-Click Server Summon (`buildAwakenedCompanionPayload` & `/companion action:summon`):**
+   - The awakened card includes **Summon to `<Server Name>`** buttons (`onboard:summon:<guildId>:<userId>`) for mutual Characterly servers, or the user can run `/companion action:summon` inside any server.
+
+---
+
+## Multi-Companion Server Scene Routing & Webhooks
+
+In Discord servers, Characterly acts as the shared host ("plumbing"):
+
+- **Pure Companion Mode:** Only user-summoned companions (`guild_companions` with `active = 1`) speak in server channels. If a server has 0 summoned companions and someone mentions `@Characterly`, the bot replies (at most once per channel per day) with an **Awaken / Summon Companion** button (`onboard:start`).
+- **Scene Router (`selectCompanionForTurn` in `src/scene-router.ts`):**
+  - Evaluates all active summoned companions in the guild for each incoming message:
+    - **Direct Address (`+0.85`):** Saying a companion's name (`detectWakeWord(content, [companion.name])`) or replying to a webhook message sent by that companion (`repliedToCompanionId` via `webhook_messages`) addresses that companion and suppresses unaddressed companions on that turn.
+    - **Per-Companion Engagement (`+0.70`):** Each companion maintains its own conversation state (`${guildId}:${channelId}:companion:${companionId}`) while sharing the channel-wide floor key (`${guildId}:${channelId}`) for share-of-voice pacing.
+    - **Owner Affinity (`+0.15`):** A companion gets a boost when its own owner (`ownerUserId`) is engaged or asking a question.
+    - **Companion-to-Companion Banter:** When Companion A's webhook message names Companion B (or they share an open conversation on hop 0), Companion B can reply! Each consecutive companion-to-companion hop increments `chain_depth`, applies `-0.15 * (chainDepth + 1)` score decay, and hard-stops at `MAX_COMPANION_CHAIN_DEPTH` (default 2) so bot loops never run away.
+- **Webhook Disguise (`sendAsCompanion` in `src/webhooks.ts`):**
+  - Replies in server channels are sent through a cached Discord channel webhook (`Characterly Companions`) disguised with the speaking companion's `name` and `avatarUrl` (supporting both text channels and threads), and recorded in `webhook_messages` with `companion_id` and `chain_depth`. If `ManageWebhooks` permission is missing, it falls back gracefully to a `**[CompanionName]**` prefixed reply.
+- **Cross-Context Consciousness (`src/cross-context.ts`):**
+  - **DM → Server (`gatherOwnerSubtextForServer`):** Pulls active memories and attributes from `dm:<ownerUserId>` and injects them into the companion's server reply prompt under the **VAULT RULE** — used strictly for subtext, loyalty, and inside jokes with the owner, never disclosed to other server members.
+  - **Server → DM (`gatherServerDigestForDm`):** Summarizes recent events, relationship edges (`companion:<id>` and owner dynamics), and active memories from the servers where the companion is summoned so the companion can gossip and debrief with its owner in 1:1 DMs.
+
+---
+
+## Data flow — live server message
 
 ```
 Discord MessageCreate
@@ -228,13 +271,20 @@ Derived data about a person — `person_*` memories, relationship observations, 
 - **Purge** — `scripts/purge-nonopted.mjs` (`PURGE_CONFIRM=1`) hard-deletes the pre-consent derived corpus for all non-consenting subjects; `buildProfiles` also deletes straggler profiles on sight.
 - **The bot opts itself in** (per guild, at maintenance) so the room's claims about it remain memorable — the reply persona frames them as community claims, not self-truth.
 
-## Per-guild LLM keys (BYOK)
+## User-first LLM keys (BYOK) & Server Plumbing
 
-Every LLM call resolves through `createBrainResolver` (`src/brains.ts`), not a shared singleton. Resolution order: the guild's `guild_keys` row (AES-256-GCM decrypted via `KEY_ENCRYPTION_SECRET`) → the operator's env key → `null`. A `null` brain means **dormant**: `handleMessage` returns before archiving, maintenance and sweep loops `continue`, commands reply with a `/setup` pointer. `REQUIRE_GUILD_KEYS=1` removes the env fallback for hosted mode — each guild's key pays for its own cognition. The resolver caches one `Brain` per guild; `/setup` (a modal, so keys never touch channel history) is the only writer and invalidates the cache on write. Undecryptable rows (rotated master secret, tampering) degrade to dormant + a metric, never a crash — recovery is re-running `/setup`.
+Every LLM call resolves through `createBrainResolver` (`src/brains.ts`). In Characterly, **API keys belong to users** (`dm:<userId>` rows in `guild_keys`, AES-256-GCM encrypted via `KEY_ENCRYPTION_SECRET`), while the bot in a Discord server is the shared plumbing:
+
+1. **In 1:1 DMs (`dm:<userId>`):** Resolves the user's personal key (`dm:<userId>`) → falls back to the operator's `GROQ_API_KEY` → `null` (which prompts the user with the **Connect Your Personal AI Key** onboarding card).
+2. **When a Companion Speaks in a Server (`brainForUser(chosen.ownerUserId, guildId)`):** Uses the speaking companion owner's personal key (`dm:<ownerUserId>`), metered against that guild's daily cap.
+3. **Background Server Plumbing (`brainFor(guildId)` for extraction, events, and pair-analysis):** Resolves via any active summoned companion owner's personal key in that server (`getGuildOwnerIds`), falling back to the operator's `GROQ_API_KEY` (when `REQUIRE_GUILD_KEYS=0`). Server admins never need to configure a server API key.
+4. **Automatic Provider & Model Detection (`detectProviderFromKey`):** When a user pastes a key via `/companion action:key`, `/setup`, or the onboarding **Paste API Key** button and leaves `Base URL` blank, Characterly automatically configures the provider endpoint and default model (`gsk_...` → Groq `openai/gpt-oss-120b`, `sk-or-...` → OpenRouter `openai/gpt-oss-120b`, `sk-...` → OpenAI `gpt-4o-mini`, `xai-...` → xAI `grok-3-mini`).
 
 ## Guild lifecycle — consent posture
 
-New guilds start **dormant**: `server_settings` defaults are `memory_enabled=0, reply_enabled=0` (v16), so `handleMessage` returns before archiving and nothing is recorded. On every `GuildCreate` — which discord.js also fires for cached guilds on connect — `announceIfNeeded` (`guild-lifecycle.ts`) posts a disclosure card to the system channel (what's stored, retention, member controls, admin activation path) and stamps `server_settings.announced_at` **only after a successful send**, making the card idempotent and retryable. An admin activates with `/memory-resume` (optionally `/setup` first for a guild key); `/privacy` shows any member the guild's storage state and their own consent.
+New guilds start **dormant**: `server_settings` defaults are `memory_enabled=0, reply_enabled=0` (v16), so `handleMessage` returns before archiving and nothing is recorded. On every `GuildCreate`, `announceIfNeeded` (`guild-lifecycle.ts`) posts the Characterly disclosure card to the system channel and stamps `server_settings.announced_at` **only after a successful send**. The card includes two buttons:
+- **Enable Characterly (Admins)** (`server:enable`, requires `Manage Server`) — unpauses the server in one click (`setPaused(guildId, false)`), with no server API key required.
+- **Awaken Your Companion** (`onboard:start`) — starts DM companion onboarding for members (or summons their already-awakened companion into the server).
 
 On `GuildDelete`, `handleGuildDelete` runs `store.purgeGuild` — every guild-scoped row in one FK-ordered transaction. `guild.unavailable` (a Discord outage, not a kick) is explicitly never a purge trigger; a kick during an active `/server-build` is absorbed by the build's error path.
 

@@ -187,6 +187,58 @@ export function buildAwakenedCompanionPayload(
   return { embeds: [embed], components };
 }
 
+export async function sendCompanionSystemMessage(
+  channelOrGuild: unknown,
+  companion: Companion,
+  ownerName: string,
+  event: "joined" | "left",
+): Promise<boolean> {
+  if (!channelOrGuild || typeof channelOrGuild !== "object") return false;
+  let sendFn: ((payload: unknown) => Promise<unknown>) | undefined;
+  const candidate = channelOrGuild as {
+    send?: (payload: unknown) => Promise<unknown>;
+    systemChannel?: { send?: (payload: unknown) => Promise<unknown> };
+    channels?: { cache?: { find?: (fn: (c: any) => boolean) => { send?: (payload: unknown) => Promise<unknown> } | undefined } };
+  };
+  if (typeof candidate.send === "function") {
+    sendFn = candidate.send.bind(candidate);
+  } else if (typeof candidate.systemChannel?.send === "function") {
+    sendFn = candidate.systemChannel.send.bind(candidate.systemChannel);
+  } else if (typeof candidate.channels?.cache?.find === "function") {
+    const ch = candidate.channels.cache.find((c: any) => c?.type === ChannelType.GuildText && typeof c?.send === "function");
+    if (ch?.send) sendFn = ch.send.bind(ch);
+  }
+  if (!sendFn) return false;
+
+  if (event === "left") {
+    const embed = new EmbedBuilder()
+      .setTitle(`System · ${companion.name} left the chat`)
+      .setDescription(`**${companion.name}** (${ownerName}'s companion) has stepped out of this server.`);
+    if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
+    await sendFn({ embeds: [embed], allowedMentions: { parse: [] } }).catch(() => {});
+    return true;
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(`System · ${companion.name} joined the chat`)
+    .setDescription(
+      `**${companion.name}** (${ownerName}'s companion) is now hanging out in this server.\n\n` +
+        `**Vibe:** ${companion.voicePersona || "Observant and candid"}\n` +
+        `**Traits:** ${companion.coreTraits.length ? companion.coreTraits.join(", ") : "—"}\n` +
+        `**Bond with ${ownerName}:** ${companion.ownerDynamic || "Close confidant"}`,
+    )
+    .setFooter({ text: `Say "${companion.name}" in chat to talk to them, or awaken your own companion below.` });
+  if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId("onboard:start")
+      .setLabel("Awaken Your Own Companion")
+      .setStyle(ButtonStyle.Primary),
+  );
+  await sendFn({ embeds: [embed], components: [row], allowedMentions: { parse: [] } }).catch(() => {});
+  return true;
+}
+
 export function findMutualGuilds(
   client: { guilds?: { cache?: Iterable<[string, any]> | Map<string, any> } } | undefined,
   userId: string,
@@ -465,6 +517,12 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         );
       }
       await store.summonCompanion(interaction.guildId, companion.id, interaction.user.id, interaction.user.username);
+      await sendCompanionSystemMessage(
+        (interaction as { channel?: unknown; guild?: unknown }).channel ?? (interaction as { guild?: unknown }).guild,
+        companion,
+        interaction.user.username,
+        "joined",
+      );
       const embed = new EmbedBuilder()
         .setTitle(`${companion.name} joined the server`)
         .setDescription(
@@ -474,13 +532,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
           `**Bond with ${interaction.user.username}:** ${companion.ownerDynamic || "Close confidant"}`,
         );
       if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
-      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`onboard:announce:${interaction.guildId}:${interaction.user.id}`)
-          .setLabel("Introduce to Channel")
-          .setStyle(ButtonStyle.Primary),
-      );
-      return interaction.reply({ ephemeral: true, embeds: [embed], components: [row] });
+      return interaction.reply({ ephemeral: true, embeds: [embed] });
     }
     if (action === "dismiss") {
       if (!interaction.guildId) {
@@ -491,6 +543,14 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         return interaction.reply({ content: "You don't have a companion to dismiss.", ephemeral: true });
       }
       const removed = await store.dismissCompanion(interaction.guildId, companion.id);
+      if (removed) {
+        await sendCompanionSystemMessage(
+          (interaction as { channel?: unknown; guild?: unknown }).channel ?? (interaction as { guild?: unknown }).guild,
+          companion,
+          interaction.user.username,
+          "left",
+        );
+      }
       return interaction.reply({
         content: removed
           ? `**${companion.name}** has stepped out of this server. You can bring them back anytime with \`/companion action:summon\`.`
@@ -1234,6 +1294,12 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       if (existing?.onboardingState === "active") {
         if (interaction.guildId) {
           await store.summonCompanion(interaction.guildId, existing.id, userId, ownerName);
+          await sendCompanionSystemMessage(
+            (interaction as { channel?: unknown; guild?: unknown }).channel ?? (interaction as { guild?: unknown }).guild,
+            existing,
+            ownerName,
+            "joined",
+          );
           return interaction.reply({
             content: `**${existing.name}** is now hanging out in this server!`,
             ephemeral: true,
@@ -1375,9 +1441,9 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         return interaction.reply({ content: "Awaken your companion first before summoning.", ephemeral: true });
       }
       await store.summonCompanion(targetGuildId, companion.id, userId, ownerName);
-      const guildName =
-        (interaction.client?.guilds?.cache as Map<string, { name?: string }> | undefined)?.get?.(targetGuildId)?.name ??
-        "the server";
+      const targetGuild = (interaction.client?.guilds?.cache as Map<string, any> | undefined)?.get?.(targetGuildId);
+      await sendCompanionSystemMessage(targetGuild, companion, ownerName, "joined");
+      const guildName = targetGuild?.name ?? "the server";
       return interaction.reply({
         content: `**${companion.name}** has been summoned to **${guildName}**! Say their name there anytime to bring them into the conversation.`,
         ephemeral: true,

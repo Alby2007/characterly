@@ -1,32 +1,21 @@
-# ASB — Artificial Server Member
+# Characterly
 
-A quiet Discord bot that learns who's in your server. It observes conversations, forms a small persistent memory of people, relationships, and server lore, and speaks when it's invited — directly mentioned, or when a configured threshold says it has something worth adding.
+A Discord companion & community-memory platform where every person awakens **one permanent personal AI companion** in 1:1 DMs and summons them into shared Discord servers.
 
-Everything it remembers is inspectable, correctable, and forgettable by the person it concerns.
+In servers, **Characterly** acts as the shared plumbing — routing conversations across multiple summoned companions, posting replies disguised with each companion's name and avatar via Discord webhooks, bridging private DM subtext with group server activity, and maintaining an inspectable, consent-gated social memory graph.
 
 ---
 
-## What it does
+## How it works
 
-**Observes** — archives messages to Postgres (respecting per-guild pause), learns name↔user aliases, and tracks who talks to whom. Derived data about a person requires their explicit opt-in — the raw transcript is retention-bounded infrastructure.
-
-**Remembers** — an LLM extracts durable candidates from messages that pass a cheap pre-filter. Each memory carries an evidence type (`explicit_fact`, `clear_preference`, `reported_by_other`, `sarcasm_or_joke`, …), a deterministic confidence score, provenance (source message, quote, timestamp), and a lifecycle status:
-
-`candidate → active → contested → superseded / forgotten / quarantined`
-
-**Verifies before it trusts** — candidate memories get a sincerity check (`literal` / `joke` / `misattributed` / `unclear`) before promotion; only promotable evidence types can reach `active`, and candidates are never used in replies. Near-duplicates fold together via trigram matching instead of accumulating.
-
-**Handles contradiction** — bot-addressed denials and corrections contest memories rather than silently overwriting them; support vs. contradiction net-score resolves the dispute, with the same evidence-type gate preventing rumors from laundering into facts.
-
-**Builds people (opted-in only)** — per-member structured attributes (pronouns, timezone, location, occupation, birthday, traits, interests, skills) with per-facet provenance — every attribute knows exactly which memories cite it, so a forgotten fact never lingers as a rendered facet. On top of that: synthesized profile cards and admin-only deep dossiers (psychological profile, relationships, opinions, communication style, timeline).
-
-**Maps the social graph** — relationship observations between members are sincerity-verified and rolled up into edges with net valence; interaction pairs feed into dossiers.
-
-**Follows events** — a continuity pipeline groups messages into server events, scores their significance, and promotes notable ones into retrievable lore.
-
-**Replies** — to direct mentions and (above `SPEAK_THRESHOLD`) unsolicited, with member profiles and relevant memories as context, optional web-search tools, and low-effort reasoning for snappy responses.
-
-**Maintains itself** — a periodic sweep re-examines messages the live path missed; daily maintenance quarantines stale candidates, resolves contested memories, purges raw messages past retention, and rebuilds profiles.
+1. **Connect Your Personal AI Key (1-Step Onboarding)** — Users paste their own API key (`gsk_...` Groq, `sk-or-...` OpenRouter, `sk-...` OpenAI, or `xai-...` xAI) via the onboarding button or `/companion action:key` and leave `Base URL` blank — Characterly auto-detects the provider and model and encrypts the key at rest (AES-256-GCM).
+2. **Awaken Your Permanent Companion in 1:1 DMs** — Through a short slice-of-life conversation (or 1-click starter archetypes + live draft previews), each user shapes their companion's name, voice/vibe, traits, dynamic, and optional avatar image. **Each account gets one companion — once awakened, their character is permanently locked in.**
+3. **1-Click Server Setup & Summoning** — A server admin invites Characterly and clicks **Enable Characterly** on the welcome card (or runs `/memory-resume`) — **no server API key is required**. Members summon their companions into the server with `/companion action:summon` (or 1-click summon buttons in DMs).
+4. **Multi-Companion Scene Routing & Webhooks** — Summoned companions speak through channel webhooks using their own name and avatar (`src/webhooks.ts`). `selectCompanionForTurn` (`src/scene-router.ts`) routes turns by wake-word name match, webhook reply attribution, owner affinity (`+0.15`), and shared floor pacing, while allowing companion-to-companion banter capped at `MAX_COMPANION_CHAIN_DEPTH` (default 2).
+5. **Cross-Context Consciousness (`src/cross-context.ts`)** —
+   - **DM → Server (Vault Rule):** Companions bring their private DM bond with their owner into server hangouts strictly as subtext and inside jokes — never leaking private DM facts to other members.
+   - **Server → DM:** In 1:1 DMs, companions know what happened in the servers they're summoned to (recent events, relationships, and activity) so they can gossip and debrief with their owner.
+6. **Provenance-Backed Memory, Relationships & Events** — Deterministic confidence scoring, sincerity verification (`literal` / `joke` / `misattributed` / `unclear`), net-score conflict resolution, `profile_attributes` with memory citations, holistic `pair-analysis` relationship reads, and server event continuity.
 
 ---
 
@@ -34,19 +23,24 @@ Everything it remembers is inspectable, correctable, and forgettable by the pers
 
 All replies are ephemeral (private to the invoker) unless noted.
 
-### Members
+### Companions & Members
 
 | Command | What it does |
 |---------|--------------|
+| `/companion action:card` | View your (or another member's) awakened companion card and relationships |
+| `/companion action:summon` | Summon your personal companion into this Discord server (with an optional **Introduce to Channel** button) |
+| `/companion action:dismiss` | Dismiss your companion from this server |
+| `/companion action:key` | Connect or rotate your personal AI API key (auto-detects Groq, OpenRouter, OpenAI, or xAI when Base URL is blank) |
+| `/companion action:avatar` | Update your companion's avatar image URL |
 | `/memory` | List your active memories (8/page; `page:`, `search:`, `memory_id:` to navigate/inspect, `candidates:true` for your unconfirmed queue, `server:true` for lore) |
 | `/memory-confirm` | Promote one of your own candidate memories to active |
 | `/memory-export` | Download every memory + evidence held about you |
 | `/forget` | Forget one of your memories (confirmation button required) |
 | `/correct` | Replace a memory — supersedes genuinely contradictory active ones |
-| `/privacy` | See what ASB stores in this server, the retention window, and your own consent state |
+| `/privacy` | See what Characterly stores in this server, the retention window, and your own consent state |
 | `/opt-out` | Forget everything about you, delete your profile, revoke consent |
 | `/opt-in` | Consent to memories + a profile about you (live activity only) |
-| `/profile-build` | Opt in **and** scan your archive history — messages you wrote, references to you, conversations you're in — to build your structured profile now (once per 24h) |
+| `/profile-build` | Opt in **and** scan your archive history to build your structured profile now (once per 24h) |
 | `/profile` | View your profile card (another member's: admins only) |
 | `/dossier` | Deep dossier — facets, relationships, opinions, style, timeline (another member's: admins only) |
 | `/event` | Inspect the server event a memory is attached to |
@@ -93,10 +87,10 @@ _A hosted instance (bring-your-own-key) is planned — invite link lands here wh
 **Prerequisites:** Node.js 20+, a Postgres database (a free [Supabase](https://supabase.com) project works — use the Session pooler URL), a Discord bot token with the Message Content intent, and a Groq API key.
 
 ```bash
-git clone https://github.com/Alby2007/ASB.git
-cd ASB
+git clone https://github.com/Alby2007/characterly.git
+cd characterly
 npm install
-cp .env.example .env   # fill in DISCORD_TOKEN, GROQ_API_KEY, DATABASE_URL
+cp .env.example .env   # fill in DISCORD_TOKEN, GROQ_API_KEY, KEY_ENCRYPTION_SECRET, DATABASE_URL
 npm run dev            # or: npm start
 ```
 

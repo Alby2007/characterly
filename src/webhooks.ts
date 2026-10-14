@@ -4,6 +4,14 @@ import { inc } from "./metrics.js";
 
 const WEBHOOK_NAME = "Characterly Companions";
 const webhookCache = new Map<string, Webhook>();
+const webhookPermissionNotices = new Set<string>();
+
+function webhookNoticeOnce(channelId: string): boolean {
+  const key = `${channelId}:${new Date().toISOString().slice(0, 10)}`;
+  if (webhookPermissionNotices.has(key)) return false;
+  webhookPermissionNotices.add(key);
+  return true;
+}
 
 function resolveWebhookHostChannel(channel: Message["channel"]): { host: TextChannel | null; threadId?: string } {
   if (channel.type === ChannelType.GuildText) {
@@ -45,20 +53,21 @@ async function getOrCreateChannelWebhook(host: TextChannel, botUserId: string): 
 
 /**
  * Send a reply in a guild channel disguised with the speaking companion's name
- * and avatar via a Discord channel webhook. If the bot lacks ManageWebhooks
- * permission (or the channel type doesn't support webhooks), falls back to a
- * standard bot reply prefixed with the companion's name so speech never drops.
+ * and avatar via a Discord channel webhook. Characterly itself never roleplays
+ * or speaks a companion's dialogue — if ManageWebhooks permission is missing,
+ * it posts a one-time system notice and returns null.
  */
 export async function sendAsCompanion(
   triggerMessage: Message,
   companion: Pick<Companion, "id" | "name" | "avatarUrl">,
   content: string,
   botUserId: string,
-): Promise<{ id: string; createdAt: Date; viaWebhook: boolean }> {
+): Promise<{ id: string; createdAt: Date; viaWebhook: boolean } | null> {
   const { host, threadId } = resolveWebhookHostChannel(triggerMessage.channel);
   if (host) {
-    const hook = await getOrCreateChannelWebhook(host, botUserId);
-    if (hook) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const hook = await getOrCreateChannelWebhook(host, botUserId);
+      if (!hook) break;
       try {
         const sent = await hook.send({
           content,
@@ -74,21 +83,21 @@ export async function sendAsCompanion(
           viaWebhook: true,
         };
       } catch {
-        // Stale or deleted webhook — evict and retry once before falling back.
+        // Stale or deleted webhook — evict and retry once.
         webhookCache.delete(host.id);
         inc("webhook.send_retry");
       }
     }
   }
 
-  const fallback = await triggerMessage.reply({
-    content: `**[${companion.name}]** ${content}`.slice(0, 2000),
-    allowedMentions: { parse: [], repliedUser: false },
-  });
-  inc("webhook.fallback_sent");
-  return {
-    id: fallback.id,
-    createdAt: fallback.createdAt ?? new Date(),
-    viaWebhook: false,
-  };
+  inc("webhook.unavailable_blocked");
+  if (webhookNoticeOnce(triggerMessage.channelId)) {
+    await triggerMessage
+      .reply({
+        content: `*System: Characterly needs the **Manage Webhooks** permission in this channel so **${companion.name}** can speak here.*`,
+        allowedMentions: { parse: [], repliedUser: false },
+      })
+      .catch(() => {});
+  }
+  return null;
 }
