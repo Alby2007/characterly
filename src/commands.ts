@@ -429,11 +429,10 @@ export const commandDefinitions = [
   { name: "memory-confirm", description: "Confirm one of your candidate memories", options: [{ name: "memory_id", description: "The candidate memory number", type: 4, required: true }] },
   { name: "memory-export", description: "Download all memory stored about you" },
   { name: "memory-purge", description: "Admin: delete old raw messages for this server", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [{ name: "older_than_days", description: "Delete messages older than this many days", type: 4, required: true }] },
-  { name: "memory-pause", description: "Admin: immediately pause observing and replying", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
-  { name: "memory-resume", description: "Admin: resume observing and replying", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
-  { name: "memory-settings", description: "Admin: view memory and retention settings", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
-  { name: "proactive", description: "Admin: turn proactive answering of stranded questions on/off for this server", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [{ name: "enabled", description: "On = the bot may answer an unanswered question after a silence, when it has grounded lore", type: 5, required: true }] },
-  { name: "status", description: "Admin: bot uptime and operational counters", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
+  { name: "memory-pause", description: "Admin: immediately pause Characterly in this server", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
+  { name: "memory-resume", description: "Admin: enable or resume Characterly in this server", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
+  { name: "memory-settings", description: "Admin: view server memory and retention settings", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
+  { name: "status", description: "Admin: server status, active companions, and operational counters", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
   { name: "memory-triage", description: "Admin: the most recent memories stored for any member", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
   { name: "event", description: "Inspect the event linked to one of your memories", options: [
     { name: "memory_id", description: "A memory number returned by /memory", type: 4, required: true }
@@ -444,33 +443,35 @@ export const commandDefinitions = [
   { name: "dossier", description: "View a member's detailed profile dossier", options: [
     { name: "user", description: "Member to inspect (admins can view anyone)", type: 6, required: false }
   ] },
-  { name: "privacy", description: "See what ASB stores in this server and your consent state" },
-  { name: "opt-out", description: "Stop the bot forming memories or a profile about you, and forget what it already holds" },
+  { name: "privacy", description: "See what Characterly stores in this server and your consent state" },
+  { name: "opt-out", description: "Stop Characterly forming memories or a profile about you, and forget what it already holds" },
   { name: "opt-in", description: "Consent to memories and a profile about you — then run /profile-build to scan your history" },
   { name: "profile-build", description: "Opt in and build your profile: scans the archive for your messages and references to you" },
   { name: "server-build", description: "Admin: run the server-level historical build on a channel", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
     { name: "channel", description: "Text channel to build from (defaults to the configured ingest channel)", type: 7, required: false }
   ] },
-  { name: "setup", description: "Admin: configure this server's LLM API key (BYOK)", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
   { name: "limits", description: "Admin: set this server's daily LLM-call cap", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
     { name: "daily_cap", description: "Max LLM calls per day, 0–100000 — 0 blocks all calls (resets at midnight UTC)", type: 4, required: true }
   ] },
-  { name: "ignore-channel", description: "Admin: make ASB fully ignore a channel — no archive, no replies", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
+  { name: "ignore-channel", description: "Admin: make Characterly fully ignore a channel — no archive, no replies", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
     { name: "channel", description: "Channel to ignore", type: 7, required: true }
   ] },
-  { name: "unignore-channel", description: "Admin: restore a channel ASB was ignoring", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
+  { name: "unignore-channel", description: "Admin: restore a channel Characterly was ignoring", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
     { name: "channel", description: "Channel to restore", type: 7, required: true }
   ] },
   { name: "companion", description: "Manage your personal AI companion and summon them into servers", options: [
     { name: "action", description: "Companion action", type: 3, required: true, choices: [
       { name: "card — View a companion's profile card", value: "card" },
+      { name: "list — See all companions active in this server", value: "list" },
       { name: "summon — Bring your companion into this server", value: "summon" },
       { name: "dismiss — Dismiss your companion from this server", value: "dismiss" },
+      { name: "kick — Admin: remove a member's companion from this server", value: "kick" },
       { name: "key — Connect or update your personal AI API key", value: "key" },
+      { name: "status — Check your personal API key, DM usage, and active servers", value: "status" },
       { name: "avatar — Set your companion's avatar URL", value: "avatar" },
     ] },
     { name: "avatar_url", description: "Public http(s) image URL when action is avatar", type: 3, required: false },
-    { name: "user", description: "Member whose companion card to inspect", type: 6, required: false }
+    { name: "user", description: "Member whose companion to inspect (card) or remove (kick)", type: 6, required: false }
   ] }
 ];
 
@@ -614,6 +615,121 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
       return interaction.reply({ ephemeral: true, embeds: [embed] });
     }
+    if (action === "list") {
+      if (!interaction.guildId) {
+        return interaction.reply({
+          content: "Run `/companion action:list` inside a Discord server to see which companions are hanging out there.",
+          ephemeral: true,
+        });
+      }
+      const list = await store.listGuildCompanions(interaction.guildId);
+      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId("onboard:start")
+          .setLabel("Awaken / Summon Companion")
+          .setStyle(ButtonStyle.Primary),
+      );
+      if (!list.length) {
+        const emptyEmbed = new EmbedBuilder()
+          .setTitle("Active Companions in This Server")
+          .setDescription(
+            "No companions are currently summoned in this server.\n\nClick **Awaken / Summon Companion** below (or run `/companion action:summon`) to bring your companion into the hangout!",
+          );
+        return interaction.reply({ ephemeral: true, embeds: [emptyEmbed], components: [row] });
+      }
+      const lines = await Promise.all(
+        list.map(async c => {
+          const ownerName = await store.displayNameFor(interaction.guildId!, c.ownerUserId);
+          return `• **${c.name}** (${ownerName}'s companion) — ${c.voicePersona || "Observant and candid"}\n  *Say "${c.name}" in chat to talk to them*`;
+        }),
+      );
+      const listEmbed = new EmbedBuilder()
+        .setTitle(`Active Companions (${list.length})`)
+        .setDescription(lines.join("\n\n"));
+      return interaction.reply({ ephemeral: true, embeds: [listEmbed], components: [row] });
+    }
+    if (action === "kick") {
+      if (!interaction.guildId) {
+        return interaction.reply({
+          content: "Run `/companion action:kick` inside the Discord server where you want to remove a companion.",
+          ephemeral: true,
+        });
+      }
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+        return interaction.reply({
+          content: "Only server administrators (`Manage Server`) can kick another member's companion.",
+          ephemeral: true,
+        });
+      }
+      const targetUser = interaction.options.getUser("user");
+      if (!targetUser) {
+        return interaction.reply({
+          content: "Specify the companion's owner with `user:@member` to remove their companion from this server.",
+          ephemeral: true,
+        });
+      }
+      const companion = await store.getCompanionByOwner(targetUser.id);
+      if (!companion) {
+        return interaction.reply({
+          content: `${targetUser.username} doesn't have a companion.`,
+          ephemeral: true,
+        });
+      }
+      const removed = await store.dismissCompanion(interaction.guildId, companion.id);
+      if (removed) {
+        await sendCompanionSystemMessage(
+          (interaction as { channel?: unknown; guild?: unknown }).channel ?? (interaction as { guild?: unknown }).guild,
+          companion,
+          targetUser.username,
+          "left",
+        );
+      }
+      return interaction.reply({
+        content: removed
+          ? `Removed **${companion.name}** (${targetUser.username}'s companion) from this server.`
+          : `**${companion.name}** wasn't active in this server.`,
+        ephemeral: true,
+      });
+    }
+    if (action === "status") {
+      const dmScope = `dm:${interaction.user.id}`;
+      const [companion, keyRow, dmUsage] = await Promise.all([
+        store.getCompanionByOwner(interaction.user.id),
+        typeof store.getGuildKey === "function" ? store.getGuildKey(dmScope) : Promise.resolve(null),
+        typeof store.usageToday === "function" ? store.usageToday(dmScope) : Promise.resolve(0),
+      ]);
+      const guildIds =
+        companion && typeof store.listCompanionGuilds === "function"
+          ? await store.listCompanionGuilds(companion.id)
+          : [];
+      const compStatus =
+        companion?.onboardingState === "active"
+          ? `**${companion.name}** (Awakened & Permanently Locked)`
+          : companion
+            ? `Draft in progress (${companion.name || "unnamed"})`
+            : "Not awakened yet — send me a DM to start!";
+      const keyStatus = keyRow
+        ? `Connected (\`${keyRow.keyHint}\`)${keyRow.validatedAt ? ` · verified ${new Date(keyRow.validatedAt).toLocaleDateString()}` : " · unverified"}`
+        : config.groqKey && !config.requireGuildKeys
+          ? "Using operator default key (connect your own anytime with `/companion action:key`)"
+          : "No personal key connected — run `/companion action:key` to connect one";
+      const serversStatus = guildIds.length
+        ? `Summoned in **${guildIds.length}** server${guildIds.length === 1 ? "" : "s"}`
+        : "Not currently summoned in any server";
+      const statusEmbed = new EmbedBuilder()
+        .setTitle("Your Characterly Status")
+        .addFields(
+          { name: "Companion (1 per Account)", value: compStatus, inline: false },
+          { name: "Personal AI Key", value: keyStatus, inline: false },
+          { name: "Active Servers", value: serversStatus, inline: true },
+          {
+            name: "Today's DM Usage",
+            value: `${dmUsage.toLocaleString()} / ${config.dmLlmDailyCap.toLocaleString()} calls (resets at UTC midnight)`,
+            inline: true,
+          },
+        );
+      return interaction.reply({ ephemeral: true, embeds: [statusEmbed] });
+    }
     if (action === "key") {
       if (!config.keyEncryptionSecret) {
         return interaction.reply({
@@ -644,26 +760,24 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     // observing right now, and the caller's own consent state. No admin data.
     const s = await store.settings(guildId, config.rawMessageRetentionDays);
     const member = await store.getMember(guildId, interaction.user.id);
-    // memory_enabled alone overstates reality — a guild with no resolvable key
-    // is dormant in practice (handleMessage bails at brainFor before archiving).
     const brain = await brainFor(guildId);
     const status = !s.memoryEnabled
-      ? "**Dormant** — ASB is not recording messages here (an admin can enable it with `/memory-resume`)."
+      ? "**Dormant** — Characterly is not recording messages here (an admin can enable it with `/memory-resume`)."
       : brain
         ? "**Observing** — messages in this server are being archived and analyzed."
-        : "**Enabled but no LLM key configured** — nothing is being recorded (an admin can set one with `/setup`).";
+        : "**Enabled but no active companion key** — nothing is being recorded until a companion with a connected personal AI key is summoned.";
     const consent = member?.optedOut ? "opted out — nothing derived forms about you"
       : member?.optedIn ? "opted in — derived memories and a profile may form about you"
-      : "not opted in — derived memories and a profile only form if you opt in (`/opt-in` or `/profile-build`)";
+      : "not opted in — derived memories and a profile only form if you opt in (`/opt-in`, `/profile-build`, or `/companion action:summon`)";
     return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder()
-      .setTitle("What ASB stores in this server")
+      .setTitle("What Characterly stores in this server")
       .addFields(
         { name: "Status", value: status },
         { name: "Raw messages", value: `Kept for **${s.rawRetentionDays} days**, then permanently deleted.` },
         { name: "Derived data", value: "Memories, profiles, and relationship notes form **only for members who opt in** — never automatically." },
         { name: "Your consent", value: consent },
-        { name: "Processing", value: "Messages are sent to an OpenAI-compatible LLM provider for analysis — the operator's default, or a provider this server configured with `/setup`." },
-        { name: "Controls & guarantees", value: "`/opt-out` forgets your memories and deletes your profile, attributes, relationships, and stored quotes · `/memory-export` downloads everything stored about you · **removing ASB from this server deletes every row it holds here**." },
+        { name: "Processing", value: "Messages are sent to an OpenAI-compatible LLM provider for analysis using each companion owner's personal API key (`/companion action:key`) or the operator's default." },
+        { name: "Controls & guarantees", value: "`/opt-out` forgets your memories and deletes your profile, attributes, relationships, and stored quotes · `/memory-export` downloads everything stored about you · **removing Characterly from this server deletes every row it holds here**." },
       )] });
   }
   if (interaction.commandName === "memory") {
@@ -765,19 +879,14 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     const uptime = `${Math.floor(uptimeSec / 3600)}h ${Math.floor((uptimeSec % 3600) / 60)}m ${uptimeSec % 60}s`;
     const counterLines = Object.entries(counts).map(([k, v]) => `**${k}:** ${v.toLocaleString()}`).join("\n") || "No events recorded yet.";
     const settings = await store.settings(guildId);
-    const proactiveLine = `**Proactive:** global ${config.proactiveEnabled ? "on" : "off"} · server ${settings.proactiveEnabled ? "on" : "off"}`;
-    // Guild LLM posture: which key serves this server, whether it verified,
-    // today's spend against the cap, and pending background work.
-    const keyRow = await store.getGuildKey(guildId);
-    const keyLine = keyRow
-      ? `**LLM key:** server key \`${keyRow.keyHint}\`${keyRow.validatedAt ? ` · verified ${new Date(keyRow.validatedAt).toLocaleDateString()}` : " · unverified"}`
-      : `**LLM key:** operator default${config.requireGuildKeys ? " (guild key required — none set, dormant)" : ""}`;
+    const activeCompanions = typeof store.listGuildCompanions === "function" ? await store.listGuildCompanions(guildId) : [];
+    const companionsLine = `**Summoned companions (${activeCompanions.length}):** ${activeCompanions.length ? activeCompanions.map(c => c.name).join(", ") : "none"}`;
     const [usage, qstats] = await Promise.all([store.usageToday(guildId), store.queueStats(guildId)]);
     const oldestMin = qstats.oldestPendingAt ? Math.max(0, Math.round((Date.now() - qstats.oldestPendingAt.getTime()) / 60_000)) : null;
     const queueLine = `**queue:** ${qstats.pending} job${qstats.pending === 1 ? "" : "s"} pending${oldestMin !== null ? ` (oldest ${oldestMin}m ago)` : ""}${qstats.dead ? ` · ${qstats.dead} dead-lettered — operator can re-drive with scripts/requeue-dead-jobs.mjs` : ""}`;
     const budgetLine = `**LLM usage:** ${usage.toLocaleString()}/${settings.llmDailyCap.toLocaleString()} calls today · ${queueLine}`;
-    const flagsLine = `**Flags:** memory ${settings.memoryEnabled ? "on" : "paused"} · replies ${settings.replyEnabled ? "on" : "paused"} · ignored channels ${settings.ignoredChannels.length}`;
-    return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle("Bot status").setDescription(`**Uptime:** ${uptime}\n\n${counterLines}\n\n${proactiveLine}\n${flagsLine}\n${keyLine}\n${budgetLine}\n\n*${value.messages.toLocaleString()} raw messages · ${value.memories.toLocaleString()} active memories · ${value.lore.toLocaleString()} lore*`)] });
+    const flagsLine = `**Flags:** memory ${settings.memoryEnabled ? "on" : "paused"} · companion replies ${settings.replyEnabled ? "on" : "paused"} · ignored channels ${settings.ignoredChannels.length}`;
+    return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle("Characterly server status").setDescription(`**Uptime:** ${uptime}\n\n${counterLines}\n\n${companionsLine}\n${flagsLine}\n${budgetLine}\n\n*${value.messages.toLocaleString()} raw messages · ${value.memories.toLocaleString()} active memories · ${value.lore.toLocaleString()} lore*`)] });
   }
   if (interaction.commandName === "memory-triage") {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can triage memories.", ephemeral: true });
@@ -799,7 +908,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     const ignored = settings.ignoredChannels.length
       ? settings.ignoredChannels.map(id => `<#${id}>`).join(", ")
       : "none";
-    return interaction.reply({ content: `Memory collection: **${settings.memoryEnabled ? "on" : "paused"}**\nBot replies: **${settings.replyEnabled ? "on" : "paused"}**\nProactive speaking: **${settings.proactiveEnabled ? "on" : "off"}** (global flag: **${config.proactiveEnabled ? "on" : "off"}**)\nRaw-message retention: **${settings.rawRetentionDays} days**\nIgnored channels: ${ignored}\nDaily LLM cap: **${settings.llmDailyCap.toLocaleString()} calls**`, ephemeral: true });
+    return interaction.reply({ content: `Memory collection: **${settings.memoryEnabled ? "on" : "paused"}**\nCompanion replies: **${settings.replyEnabled ? "on" : "paused"}**\nRaw-message retention: **${settings.rawRetentionDays} days**\nIgnored channels: ${ignored}\nDaily LLM cap: **${settings.llmDailyCap.toLocaleString()} calls**`, ephemeral: true });
   }
   if (interaction.commandName === "limits") {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can change the LLM budget.", ephemeral: true });
@@ -819,12 +928,12 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       if (ignored.has(channel.id)) return interaction.reply({ content: `<#${channel.id}> is already ignored.`, ephemeral: true });
       ignored.add(channel.id);
       await store.setIgnoredChannels(guildId, [...ignored]);
-      return interaction.reply({ content: `<#${channel.id}> is now invisible to ASB — nothing there is archived, answered, or scanned by \`/server-build\`. Restore it with \`/unignore-channel\`.`, ephemeral: true });
+      return interaction.reply({ content: `<#${channel.id}> is now invisible to Characterly — nothing there is archived, answered, or scanned by \`/server-build\`. Restore it with \`/unignore-channel\`.`, ephemeral: true });
     }
     if (!ignored.has(channel.id)) return interaction.reply({ content: `<#${channel.id}> isn't ignored.`, ephemeral: true });
     ignored.delete(channel.id);
     await store.setIgnoredChannels(guildId, [...ignored]);
-    return interaction.reply({ content: `<#${channel.id}> is visible to ASB again — messages there are archived and answered normally.`, ephemeral: true });
+    return interaction.reply({ content: `<#${channel.id}> is visible to Characterly again — messages there are archived and answered normally.`, ephemeral: true });
   }
   if (interaction.commandName === "event") {
     if (!evStore) return interaction.reply({ content: "Event inspection is not available right now.", ephemeral: true });

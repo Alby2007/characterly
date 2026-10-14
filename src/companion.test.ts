@@ -287,6 +287,9 @@ test("/companion commands and cross-context bridges enforce privacy boundaries a
     getCompanionByOwner: async (uid: string) => (uid === "u-alice" ? activeComp : null),
     summonCompanion: async (gId: string) => { summonedGuilds.add(gId); },
     dismissCompanion: async (gId: string) => summonedGuilds.delete(gId),
+    listGuildCompanions: async (gId: string) => (summonedGuilds.has(gId) ? [activeComp] : []),
+    getGuildKey: async (scope: string) => (scope === "dm:u-alice" ? { keyHint: "…9876", validatedAt: "2026-10-01T00:00:00Z" } : null),
+    usageToday: async () => 12,
     relationshipsFor: async (scope: string, subj: string) =>
       scope === "g1" && subj === "companion:1"
         ? [{ id: 1, guildId: "g1", subjectId: "companion:1", otherId: "u-bob", summary: "playful rivals", valence: 0.4, observationCount: 3, lastObservedAt: null, updatedAt: "", behavioralCount: 8, partyCount: 2, trend: "warming", inferred: false }]
@@ -396,6 +399,75 @@ test("/companion commands and cross-context bridges enforce privacy boundaries a
   assert.equal(webhookNotices.length, 1);
   assert.match(webhookNotices[0].content, /System: Characterly needs the \*\*Manage Webhooks\*\* permission/);
   assert.doesNotMatch(webhookNotices[0].content, /in-character line/);
+
+  // /companion action:list shows active summoned companions in the server
+  await handleMemoryCommand(summonIx, fakeStore, async () => ({}) as Brain, fakeEventStore);
+  const listReplies: any[] = [];
+  const listIx = {
+    ...summonIx,
+    options: {
+      getString: (n: string) => (n === "action" ? "list" : null),
+      getUser: () => null,
+    },
+    reply: async (r: any) => { listReplies.push(r); return r; },
+  } as unknown as ChatInputCommandInteraction;
+  await handleMemoryCommand(listIx, fakeStore, async () => ({}) as Brain, fakeEventStore);
+  assert.equal(listReplies.length, 1);
+  assert.match(listReplies[0].embeds?.[0]?.data?.title ?? "", /Active Companions \(1\)/);
+  assert.match(listReplies[0].embeds?.[0]?.data?.description ?? "", /Nyx/);
+
+  // /companion action:status shows personal key, active servers, and DM usage
+  const statusReplies: any[] = [];
+  const statusIx = {
+    ...cardIx,
+    options: {
+      getString: (n: string) => (n === "action" ? "status" : null),
+      getUser: () => null,
+    },
+    reply: async (r: any) => { statusReplies.push(r); return r; },
+  } as unknown as ChatInputCommandInteraction;
+  await handleMemoryCommand(statusIx, fakeStore, async () => ({}) as Brain, fakeEventStore);
+  assert.equal(statusReplies.length, 1);
+  const statusJson = JSON.stringify(statusReplies[0].embeds);
+  assert.match(statusJson, /…9876/);
+  assert.match(statusJson, /12 \/ 250/);
+
+  // /companion action:kick refuses non-admins and allows ManageGuild admins to remove a companion
+  const kickDeniedReplies: any[] = [];
+  await handleMemoryCommand(
+    {
+      ...summonIx,
+      user: { id: "u-bob", username: "Bob" },
+      memberPermissions: { has: () => false },
+      options: {
+        getString: (n: string) => (n === "action" ? "kick" : null),
+        getUser: () => ({ id: "u-alice", username: "Alice" }),
+      },
+      reply: async (r: any) => { kickDeniedReplies.push(r); return r; },
+    } as unknown as ChatInputCommandInteraction,
+    fakeStore,
+    async () => ({}) as Brain,
+    fakeEventStore,
+  );
+  assert.match(kickDeniedReplies[0]?.content ?? "", /Only server administrators/i);
+
+  const kickAllowedReplies: any[] = [];
+  await handleMemoryCommand(
+    {
+      ...summonIx,
+      user: { id: "u-admin", username: "Admin" },
+      memberPermissions: { has: () => true },
+      options: {
+        getString: (n: string) => (n === "action" ? "kick" : null),
+        getUser: () => ({ id: "u-alice", username: "Alice" }),
+      },
+      reply: async (r: any) => { kickAllowedReplies.push(r); return r; },
+    } as unknown as ChatInputCommandInteraction,
+    fakeStore,
+    async () => ({}) as Brain,
+    fakeEventStore,
+  );
+  assert.match(kickAllowedReplies[0]?.content ?? "", /Removed \*\*Nyx\*\*/);
 });
 
 test("onboarding UX: bare greeting guard, welcome/draft/awakened cards, proactive DM bridge, and permanent 1-companion-per-account lock", async () => {

@@ -28,9 +28,11 @@ All replies are ephemeral (private to the invoker) unless noted.
 | Command | What it does |
 |---------|--------------|
 | `/companion action:card` | View your (or another member's) awakened companion card and relationships |
-| `/companion action:summon` | Summon your personal companion into this Discord server (with an optional **Introduce to Channel** button) |
+| `/companion action:list` | See all companions currently active in this server and how to address them |
+| `/companion action:summon` | Summon your personal companion into this Discord server |
 | `/companion action:dismiss` | Dismiss your companion from this server |
 | `/companion action:key` | Connect or rotate your personal AI API key (auto-detects Groq, OpenRouter, OpenAI, or xAI when Base URL is blank) |
+| `/companion action:status` | Check your personal API key status, active servers, and today's DM usage |
 | `/companion action:avatar` | Update your companion's avatar image URL |
 | `/memory` | List your active memories (8/page; `page:`, `search:`, `memory_id:` to navigate/inspect, `candidates:true` for your unconfirmed queue, `server:true` for lore) |
 | `/memory-confirm` | Promote one of your own candidate memories to active |
@@ -49,17 +51,17 @@ All replies are ephemeral (private to the invoker) unless noted.
 
 | Command | What it does |
 |---------|--------------|
+| `/companion action:kick user:@member` | Remove a member's companion from this server |
 | `/memory about:@member` | Inspect another member's memories |
 | `/memory stats:true` | Guild memory counts |
 | `/memory-triage` | Newest memories across all members + contested attributes |
 | `/memory-purge` | Purge raw archived messages older than N days |
-| `/memory-pause` / `/memory-resume` | Stop/restart observing and replying — archiving included |
+| `/memory-pause` / `/memory-resume` | Pause or enable Characterly in this server — archiving included |
 | `/memory-settings` | Show effective guild settings (including the ignored-channel list and daily LLM cap) |
 | `/ignore-channel` / `/unignore-channel` | Exclude a channel entirely — no archiving, no replies, no member writes, no `/server-build` scans |
 | `/limits` | Set this server's daily LLM-call cap (0 = block all calls; usage resets each UTC day) |
-| `/status` | Uptime, error counters, pipeline health, today's LLM usage vs cap |
+| `/status` | Uptime, error counters, active summoned companions, pipeline health, today's LLM usage vs cap |
 | `/server-build` | Backfill a channel's history — asks for an explicit confirm click first, since it archives messages from people who never consented (owner/admin only; archives + lore + events for everyone, derived person data for opted-in members only) |
-| `/setup` | Configure this server's own LLM API key via a secure modal (BYOK — the key is encrypted at rest and pays for this server's cognition; re-run to rotate) |
 
 ---
 
