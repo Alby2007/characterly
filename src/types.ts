@@ -7,7 +7,7 @@ export type MessageEvent = {
   content: string;
   createdAt: Date;
   // The message addresses the bot: @-mention, reply-to-bot, or a wake word
-  // (bot name / server nick / "asb" said in text — see detectWakeWord).
+  // (a companion name said in text — see detectWakeWord).
   mentionsBot: boolean;
   // Transient: populated live from Discord attachments, consumed in-flight by
   // describeImage, never persisted — recordMessage writes explicit columns and

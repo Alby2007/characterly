@@ -860,7 +860,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
   }
   if (interaction.commandName === "memory-export") {
     const data = JSON.stringify(await store.exportSubject(guildId, interaction.user.id), null, 2);
-    return interaction.reply({ content: "Here is the memory data I hold about you.", files: [new AttachmentBuilder(Buffer.from(data), { name: "my-asm-memory.json" })], ephemeral: true });
+    return interaction.reply({ content: "Here is the memory data I hold about you.", files: [new AttachmentBuilder(Buffer.from(data), { name: "my-characterly-memory.json" })], ephemeral: true });
   }
   if (interaction.commandName === "memory-purge") {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can purge raw messages.", ephemeral: true });

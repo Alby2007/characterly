@@ -38,7 +38,7 @@ export async function announceIfNeeded(guild: Guild, store: MemoryStore): Promis
       { name: "Personal Companions (1 per Account)", value: "Click **Awaken Your Companion** below (or DM the bot) to connect your personal AI key and create your permanent companion — each account gets one character, locked in once awakened — then run `/companion action:summon` to bring them into this server." },
       { name: "What it stores (when enabled)", value: `Raw messages for **${s.rawRetentionDays} days**, then deleted. Derived memories, profiles, and relationship notes form **only for members who opt in**.` },
       { name: "Your controls", value: "`/companion` — manage, summon, or set your personal API key · `/privacy` — see what's stored · `/opt-in` `/opt-out` — control your derived data · `/memory-export` — export your data" },
-      { name: "Privacy policy", value: "[github.com/Alby2007/ASB-Docs](https://github.com/Alby2007/ASB-Docs) — kick the bot and every row it stored here is deleted." },
+      { name: "Privacy policy", value: "[github.com/Alby2007/characterly](https://github.com/Alby2007/characterly/blob/main/PRIVACY.md) — kick the bot and every row it stored here is deleted." },
     );
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()

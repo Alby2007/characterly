@@ -898,8 +898,8 @@ export class MemoryStore {
    * (ignored = invisible, including rows archived before the flag — same rule
    * as the sweep). Bot-authored rows are archive context, not partners: a
    * bot's mentions must not mint member↔bot edges, so ids observed posting as
-   * bots are excluded on BOTH sides — allowBotIds re-admits ASB itself, whose
-   * member dynamic is real signal. */
+   * bots are excluded on BOTH sides — allowBotIds re-admits companions, whose
+   * member dynamics are real signal. */
   async interactionPairs(
     guildId: string,
     aliasMap: Map<string, string>,

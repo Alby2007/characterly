@@ -107,21 +107,21 @@ Discord MessageCreate
         ▼◄──────────────────────────────────────────────────────────┘
   brain.ts: decide()
   • baseline 0.05 + direct mention +0.85, else engaged +0.70 + question +0.10
-  • "direct mention" = @-mention, reply-to-bot, or wake word — the bot's
-    username, display name, server nick, or "asb" said in text (perception.ts
-    detectWakeWord, word-boundary matched; WAKE_WORD=0 disables)
+  • "direct mention" = @-mention, reply-to-bot, or wake word — a summoned
+    companion's name said in text (perception.ts detectWakeWord, word-boundary
+    matched; WAKE_WORD=0 disables)
   • "engaged" = the author is a participant in the channel's open
     conversation — enrolled by addressing the bot within ENGAGEMENT_TTL_MS
     (default 120s); TTL refreshes on addressed messages only, NOT on bot
     replies, so drifting side-chatter decays out and the bot drops
     mid-channel-talk (ENGAGEMENT=0 disables). Participants exit three ways:
-    TTL expiry, regex dismissal (the deterministic override — "shut up asb"
+    TTL expiry, regex dismissal (the deterministic override — "shut up Nyx"
     works even if the model wants to keep chatting), or the reply model's
     end_conversation flag (REPLY_EXIT=0 disables honoring it)
   • engaged ≠ every message is at the bot: room-directed cues ("did anyone",
     "you guys" — perception.ts roomAddressCue), replying to another human, or
     @-mentioning someone else suppress the bonus for that message only
-  • dismissals ("shut up asb", "shush", "let's end this") fire addressed OR
+  • dismissals ("shut up Nyx", "shush", "let's end this") fire addressed OR
     while engaged — unaddressed dismissal = silent drop-out, addressed = ack
     reply then out (perception.ts detectDismissal)
   • pacing is per-tier: strangers get proportional recency decay
@@ -322,7 +322,7 @@ Candidate memories pass a **sincerity verification** gate before they can activa
 
 Relationship assertions pass the analogous gate: `Brain.verifyRelationshipsBatch` labels each observation `literal` / `joke` / `misattributed` / `unclear` against its source message and preceding lines, and `recomputeEdges()` rebuilds the derived `relationships` table from `literal` verdicts alone — an unverified, pasted, or ironic claim ("we're basically married") never surfaces in `/profile`, dossier inputs, or the reply prompt. New edges therefore materialize at the next maintenance pass rather than at record time. Each observation also stores its `author_id` (the assertor — v19, backfilled from the source message), which lets `/opt-out` erase a member's authored claims about others and lets the derived-data prune drop rows that can never surface: `NULL`-verdict observations whose source message is gone, and non-literal verdicts aged past 90 days.
 
-**Edge aggregation (v20)** — `recomputeEdges(guildId, interactions)` is the sole writer. Edge `summary` is the *modal* nature over the five most recent literals (`MODE() WITHIN GROUP`) so a contradictory flip doesn't rewrite history on one observation. `valence` is a *weighted* average over the same window — observations authored by an edge party count double a third party's, so a pair's own words outweigh gossip. `observation_count` stays all-time; `party_count` tracks self-report depth (zero → "all secondhand" at render). `trend` marks `warming`/`cooling` when the recent-5 weighted average diverges ±0.2 from the *prior* window — an all-time baseline would include the recent rows themselves, damping the delta and making n≤5 incapable of trending. The deterministic interaction graph (`interactionPairs`: 90d mention/name-ref frequency, honoring the ignored-channel boundary and excluding non-ASB bot authors/targets) stamps `behavioral_count` onto claimed edges — and pairs with ≥5 contacts in 90d but zero claims materialize as **inferred edges** (`inferred=1`, no summary/valence): rows that render strictly as contact frequency, never a relationship claim. Extraction reuses the guild's established nature labels (`relationshipNatureVocab`) so "close friends" doesn't fragment into synonym churn.
+**Edge aggregation (v20)** — `recomputeEdges(guildId, interactions)` is the sole writer. Edge `summary` is the *modal* nature over the five most recent literals (`MODE() WITHIN GROUP`) so a contradictory flip doesn't rewrite history on one observation. `valence` is a *weighted* average over the same window — observations authored by an edge party count double a third party's, so a pair's own words outweigh gossip. `observation_count` stays all-time; `party_count` tracks self-report depth (zero → "all secondhand" at render). `trend` marks `warming`/`cooling` when the recent-5 weighted average diverges ±0.2 from the *prior* window — an all-time baseline would include the recent rows themselves, damping the delta and making n≤5 incapable of trending. The deterministic interaction graph (`interactionPairs`: 90d mention/name-ref frequency, honoring the ignored-channel boundary and excluding non-companion bot authors/targets) stamps `behavioral_count` onto claimed edges — and pairs with ≥5 contacts in 90d but zero claims materialize as **inferred edges** (`inferred=1`, no summary/valence): rows that render strictly as contact frequency, never a relationship claim. Extraction reuses the guild's established nature labels (`relationshipNatureVocab`) so "close friends" doesn't fragment into synonym churn.
 
 **Pair-analysis jobs** (`pair-analysis-job.ts`, job type `pair-analysis`) close the gap extraction can't see: relationships nobody verbalizes. Maintenance enqueues the top interaction pairs (≥10 contacts in 90d, **both** parties consented — stricter than the either-party write rule because the job reads both people's exchanges — ≥7d since last analysis, and only when new interaction happened since). The handler fetches the pair's exchange window (`pairExchanges`, ≤40 messages where one addressed the other) and `Brain.analyzePairWindow` judges the dynamic from the pattern, not single messages — returning *directional* natures (`a_to_b_nature`/`b_to_a_nature`, so "A mentors B" never mints "B mentors A"; symmetric reads repeat the label). Confident reads land as directed `source='pair_window'` observations with `verdict='literal'` — the window read IS the verification, so no second pass is needed — while unconfident runs write `unclear` markers whose timestamps throttle retries. The newest exchange id lands as `pw:<id>` provenance so an extracted observation on the same message can't collide the row out; queued-but-unrun jobs are checked (`hasPendingPairAnalysis`) so a slow pass can't enqueue a duplicate. `author_id` stays NULL: the system is the assertor, and party-side opt-out deletes them like any observation. BudgetExceeded parks to the UTC-day reset like extract.
 

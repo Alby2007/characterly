@@ -1,8 +1,8 @@
-# ASB Privacy Policy
+# Characterly Privacy Policy
 
-_Last updated: 2026-09-18_
+_Last updated: 2026-10-14_
 
-ASB ("the bot") is a Discord bot that participates in servers like a member. This policy describes what it stores, why, and how to remove it. Plain English, no legalese.
+Characterly ("the bot") is a Discord bot that hosts personal AI companions. This policy describes what it stores, why, and how to remove it. Plain English, no legalese.
 
 ## What the bot stores
 
@@ -39,4 +39,4 @@ ASB ("the bot") is a Discord bot that participates in servers like a member. Thi
 
 ## Contact
 
-Operated by [Alby2007](https://github.com/Alby2007). Questions or deletion requests: [open an issue on the public docs repository](https://github.com/Alby2007/ASB-Docs/issues) or contact the operator via GitHub.
+Operated by [Alby2007](https://github.com/Alby2007). Questions or deletion requests: [open an issue on the project repository](https://github.com/Alby2007/characterly/issues) or contact the operator via GitHub.

@@ -86,8 +86,8 @@ export const config = {
   visionApiKey: env.VISION_API_KEY ?? env.GROQ_API_KEY,
   visionBaseUrl: env.VISION_BASE_URL ?? env.GROQ_BASE_URL,
   imageMaxBytes: env.IMAGE_MAX_BYTES,
-  // Saying the bot's name (username, display name, server nick, "asb") counts
-  // as addressing it. Kill switch for if casual name-drops get noisy.
+  // Saying a companion's name in text counts as addressing it. Kill switch
+  // for if casual name-drops get noisy.
   wakeWord: env.WAKE_WORD !== "0",
   // Conversational engagement: addressed users stay "in conversation" for the
   // TTL and get a mid-tier reply bonus without re-mentioning. Kill switch and

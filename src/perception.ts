@@ -15,8 +15,8 @@ export function shouldInspectForMemory(event: MessageEvent) {
   return event.mentionsBot || durableSignals.test(text);
 }
 
-// Wake words: saying the bot's name counts as addressing it, same as an
-// @-mention. Word-boundary matching keeps "asb" from firing inside "hasbeen";
+// Wake words: saying a companion's name counts as addressing it, same as an
+// @-mention. Word-boundary matching keeps "kai" from firing inside "kaiser";
 // names shorter than 3 chars are rejected so a terse nickname can't become a
 // wake word by accident.
 const WAKE_MIN_LEN = 3;
