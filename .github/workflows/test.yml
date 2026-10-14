@@ -74,4 +74,4 @@ jobs:
       - name: Pull, install, and restart on Oracle
         run: >-
           ssh -o StrictHostKeyChecking=yes ${{ secrets.ORACLE_SSH_HOST }}
-          "cd ~/ASB && git pull --ff-only && npm ci && pm2 restart asb --update-env"
+          "cd ~/characterly && git pull --ff-only && npm ci && sudo systemctl restart characterly"
