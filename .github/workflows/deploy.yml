@@ -1,0 +1,33 @@
+name: Deploy to Oracle
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Package and deploy
+        run: |
+          tar --exclude=node_modules --exclude=.git --exclude=.env --exclude=keys --exclude='*.key' --exclude='*.pub' -czf /tmp/deploy.tgz .
+          scp -i ~/.ssh/deploy_key /tmp/deploy.tgz "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/tmp/deploy.tgz"
+          ssh -i ~/.ssh/deploy_key "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" '
+            set -e
+            tar -xzf /tmp/deploy.tgz -C ~/characterly
+            cd ~/characterly
+            npm ci
+            sudo systemctl restart characterly
+            sleep 8
+            sudo systemctl is-active characterly
+          '
