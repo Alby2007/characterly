@@ -675,6 +675,21 @@ const migrations: Migration[] = [
     // No-op: rolling back would reopen public API access to every table.
     down: async () => {},
   },
+  // ── v24: covering indexes for foreign keys ──────────────────────────────────
+  {
+    version: 24,
+    name: "v24_fk_indexes",
+    up: async (sql) => {
+      await sql`CREATE INDEX IF NOT EXISTS guild_companions_companion ON guild_companions(companion_id)`;
+      await sql`CREATE INDEX IF NOT EXISTS memory_history_evidence ON memory_history(evidence_id)`;
+      await sql`CREATE INDEX IF NOT EXISTS webhook_messages_companion ON webhook_messages(companion_id)`;
+    },
+    down: async (sql) => {
+      await sql`DROP INDEX IF EXISTS guild_companions_companion`;
+      await sql`DROP INDEX IF EXISTS memory_history_evidence`;
+      await sql`DROP INDEX IF EXISTS webhook_messages_companion`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a
