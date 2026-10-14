@@ -26,47 +26,137 @@ export const guardedLlmFetch: typeof fetch = (input, init) => {
 };
 
 /**
- * Per-guild Brain resolver (BYOK). Resolution order:
- *   1. guild_keys row → decrypt → Brain on the guild's key (and base_url if set)
- *   2. env key (operator-level fallback for self-hosters)
- *   3. null — the guild is dormant: callers skip archive/reply politely
+ * Auto-detect provider, base URL, and default model from an API key prefix
+ * when the user leaves the optional Base URL field blank.
+ */
+export function detectProviderFromKey(
+  key: string,
+  explicitBaseUrl?: string | null,
+  defaultBaseUrl = "https://api.groq.com/openai/v1",
+  defaultModel = "openai/gpt-oss-120b",
+): { provider: string; baseUrl: string; model: string; autoDetected: boolean } {
+  const custom = explicitBaseUrl?.trim();
+  if (custom) {
+    return { provider: "Custom", baseUrl: custom, model: defaultModel, autoDetected: false };
+  }
+  const k = key.trim();
+  if (k.startsWith("gsk_")) {
+    return {
+      provider: "Groq",
+      baseUrl: "https://api.groq.com/openai/v1",
+      model: defaultModel || "openai/gpt-oss-120b",
+      autoDetected: true,
+    };
+  }
+  if (k.startsWith("sk-or-")) {
+    return {
+      provider: "OpenRouter",
+      baseUrl: "https://openrouter.ai/api/v1",
+      model: "openai/gpt-oss-120b",
+      autoDetected: true,
+    };
+  }
+  if (k.startsWith("xai-")) {
+    return {
+      provider: "xAI",
+      baseUrl: "https://api.x.ai/v1",
+      model: "grok-3-mini",
+      autoDetected: true,
+    };
+  }
+  if (k.startsWith("sk-")) {
+    return {
+      provider: "OpenAI",
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-4o-mini",
+      autoDetected: true,
+    };
+  }
+  return { provider: "Default", baseUrl: defaultBaseUrl, model: defaultModel, autoDetected: false };
+}
+
+/**
+ * Brain resolver (User-first BYOK).
  *
- * `requireGuildKeys` (hosted mode) skips step 2 so keyless guilds get nothing.
- *
- * Caching: one Brain per guild, invalidated only by /setup writes — the sole
- * writer — so no TTL is needed (a rotated key is a new row + invalidate()).
- * Decrypt failure (wrong master key, tampered row) logs + metrics + null —
- * dormant, not crash. Recovery is re-running /setup.
+ * In Characterly, API keys belong to users (`dm:<userId>` in `guild_keys`),
+ * while the bot in a Discord server acts as the shared plumbing:
+ *   1. For `dm:<userId>` (or `brainForUser(userId, meterScope)`):
+ *      - User's personal key (`dm:<userId>`) -> decrypt + auto-detect provider/model
+ *      - Operator env key fallback
+ *   2. For a guild scope (`guildId` background plumbing):
+ *      - Direct key row if present (`getKey(guildId)`)
+ *      - Any active summoned companion owner's personal key (`getGuildOwnerIds`)
+ *      - Operator env key fallback (unless `requireGuildKeys` is true)
+ *      - `null` (dormant)
  */
 export function createBrainResolver(opts: {
-  getKey: (guildId: string) => Promise<{ keyEnc: Buffer; baseUrl: string | null; validatedAt?: string | null } | null>;
+  getKey: (scopeId: string) => Promise<{ keyEnc: Buffer; baseUrl: string | null; validatedAt?: string | null } | null>;
   envKey: string;
   envModel: string;
   envBaseUrl: string;
   requireGuildKeys: boolean;
+  /** Optional lookup of active summoned companion owner user IDs in a guild so
+   *  server background plumbing can run on summoned companion owners' keys. */
+  getGuildOwnerIds?: (guildId: string) => Promise<string[]>;
   /** Persist "key proven good" for rows stored while the provider was
    * unreachable at /setup time. Optional — revalidation is skipped without it. */
-  markValidated?: (guildId: string) => Promise<void>;
+  markValidated?: (scopeId: string) => Promise<void>;
   /** Re-check a stored-unverified key; injectable for tests. */
   revalidate?: (key: string, baseUrl: string) => Promise<boolean>;
   /** Wraps every constructed client — the budget meter hooks in here so ALL
-   * key sources (guild BYOK + env fallback) pay the guild's daily cap.
-   * Injectable so tests can observe/stub without a live counter. */
-  meter?: (guildId: string, client: LlmClient) => LlmClient;
+   * key sources pay the scope's daily cap. */
+  meter?: (scopeId: string, client: LlmClient) => LlmClient;
 }) {
   const cache = new Map<string, Brain | null>();
 
+  function buildFromRow(
+    keyScopeId: string,
+    meterScopeId: string,
+    row: { keyEnc: Buffer; baseUrl: string | null; validatedAt?: string | null },
+  ): Brain | null {
+    const wrap = (c: LlmClient): LlmClient => (opts.meter ? opts.meter(meterScopeId, c) : c);
+    try {
+      const key = decryptSecret(row.keyEnc);
+      const detected = detectProviderFromKey(key, row.baseUrl, opts.envBaseUrl, opts.envModel);
+      const baseUrl = detected.baseUrl;
+      const model = detected.model;
+      const brain = row.baseUrl
+        ? new Brain(key, model, baseUrl, wrap(new OpenAI({ apiKey: key, baseURL: baseUrl, fetch: guardedLlmFetch })))
+        : new Brain(key, model, baseUrl, wrap(new OpenAI({ apiKey: key, ...(baseUrl ? { baseURL: baseUrl } : {}) })));
+      if (!row.validatedAt && opts.markValidated && opts.revalidate) {
+        void opts
+          .revalidate(key, baseUrl)
+          .then(ok => {
+            if (ok) return opts.markValidated!(keyScopeId);
+          })
+          .catch(() => {
+            /* validation is best-effort — the Brain still works */
+          });
+      }
+      return brain;
+    } catch (error) {
+      inc("brain.decrypt_failed");
+      console.warn(`guild_keys decrypt failed for ${keyScopeId} — scope dormant until /setup re-runs`, errorText(error));
+      return null;
+    }
+  }
+
   async function brainFor(guildId: string): Promise<Brain | null> {
     if (cache.has(guildId)) return cache.get(guildId)!;
-    const wrap = (c: LlmClient): LlmClient => opts.meter ? opts.meter(guildId, c) : c;
+    const wrap = (c: LlmClient): LlmClient => (opts.meter ? opts.meter(guildId, c) : c);
 
     let brain: Brain | null = null;
-    // 1:1 DM scopes (dm:<userId>) always run on the operator's env key with a
-    // per-user daily budget in guild_usage — no guild_keys lookup or BYOK gate.
     if (guildId.startsWith("dm:")) {
-      if (opts.envKey) {
-        brain = new Brain(opts.envKey, opts.envModel, opts.envBaseUrl,
-          wrap(new OpenAI({ apiKey: opts.envKey, ...(opts.envBaseUrl ? { baseURL: opts.envBaseUrl } : {}) })));
+      const userRow = await opts.getKey(guildId);
+      if (userRow) {
+        brain = buildFromRow(guildId, guildId, userRow);
+      } else if (opts.envKey) {
+        brain = new Brain(
+          opts.envKey,
+          opts.envModel,
+          opts.envBaseUrl,
+          wrap(new OpenAI({ apiKey: opts.envKey, ...(opts.envBaseUrl ? { baseURL: opts.envBaseUrl } : {}) })),
+        );
       }
       cache.set(guildId, brain);
       return brain;
@@ -74,37 +164,70 @@ export function createBrainResolver(opts: {
 
     const row = await opts.getKey(guildId);
     if (row) {
-      try {
-        const key = decryptSecret(row.keyEnc);
-        const baseUrl = row.baseUrl ?? opts.envBaseUrl;
-        brain = row.baseUrl
-          ? new Brain(key, opts.envModel, baseUrl, wrap(new OpenAI({ apiKey: key, baseURL: baseUrl, fetch: guardedLlmFetch })))
-          : new Brain(key, opts.envModel, baseUrl, wrap(new OpenAI({ apiKey: key, ...(baseUrl ? { baseURL: baseUrl } : {}) })));
-        // Rows stored unverified (provider unreachable at /setup) get one
-        // re-check per process — flips validated_at once the provider answers.
-        if (!row.validatedAt && opts.markValidated && opts.revalidate) {
-          void opts.revalidate(key, baseUrl)
-            .then(ok => { if (ok) return opts.markValidated!(guildId); })
-            .catch(() => { /* validation is best-effort — the Brain still works */ });
+      brain = buildFromRow(guildId, guildId, row);
+    } else {
+      if (opts.getGuildOwnerIds) {
+        for (const ownerId of await opts.getGuildOwnerIds(guildId)) {
+          const ownerScope = `dm:${ownerId}`;
+          const ownerRow = await opts.getKey(ownerScope);
+          if (ownerRow) {
+            brain = buildFromRow(ownerScope, guildId, ownerRow);
+            if (brain) break;
+          }
         }
-      } catch (error) {
-        inc("brain.decrypt_failed");
-        console.warn(`guild_keys decrypt failed for ${guildId} — guild dormant until /setup re-runs`, errorText(error));
       }
-    } else if (opts.envKey && !opts.requireGuildKeys) {
-      brain = new Brain(opts.envKey, opts.envModel, opts.envBaseUrl,
-        wrap(new OpenAI({ apiKey: opts.envKey, ...(opts.envBaseUrl ? { baseURL: opts.envBaseUrl } : {}) })));
+      if (!brain && opts.envKey && !opts.requireGuildKeys) {
+        brain = new Brain(
+          opts.envKey,
+          opts.envModel,
+          opts.envBaseUrl,
+          wrap(new OpenAI({ apiKey: opts.envKey, ...(opts.envBaseUrl ? { baseURL: opts.envBaseUrl } : {}) })),
+        );
+      }
     }
 
     cache.set(guildId, brain);
     return brain;
   }
 
-  function invalidate(guildId: string): void {
-    cache.delete(guildId);
+  /**
+   * Resolve a Brain specifically for a user (used when a user's companion
+   * speaks in a server or DM): uses the user's personal key (`dm:<userId>`)
+   * first, then falls back to `brainFor(meterScope)`.
+   */
+  async function brainForUser(userId: string, meterScopeId?: string): Promise<Brain | null> {
+    const userScope = `dm:${userId}`;
+    const targetMeter = meterScopeId ?? userScope;
+    const cacheKey = `user:${userId}@${targetMeter}`;
+    if (cache.has(cacheKey)) return cache.get(cacheKey)!;
+
+    const userRow = await opts.getKey(userScope);
+    if (userRow) {
+      const brain = buildFromRow(userScope, targetMeter, userRow);
+      cache.set(cacheKey, brain);
+      return brain;
+    }
+    const fallback = await brainFor(targetMeter);
+    cache.set(cacheKey, fallback);
+    return fallback;
   }
 
-  return { brainFor, invalidate };
+  function invalidate(scopeId: string): void {
+    cache.delete(scopeId);
+    for (const k of cache.keys()) {
+      if (k.startsWith("user:") && (k.includes(scopeId) || scopeId.startsWith("dm:"))) {
+        cache.delete(k);
+      }
+    }
+    if (scopeId.startsWith("dm:")) {
+      // A user updating their personal key may also unblock guilds where their companion is summoned.
+      for (const k of cache.keys()) {
+        if (!k.startsWith("dm:")) cache.delete(k);
+      }
+    }
+  }
+
+  return { brainFor, brainForUser, invalidate };
 }
 
 export type BrainResolver = ReturnType<typeof createBrainResolver>;

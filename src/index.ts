@@ -5,6 +5,7 @@ import { sql } from "./db.js";
 import { MemoryStore } from "./database.js";
 import { createBrainResolver, guardedLlmFetch } from "./brains.js";
 import {
+  buildApiKeyOnboardingPayload,
   buildAwakenedCompanionPayload,
   buildOnboardingDraftComponents,
   buildOnboardingDraftEmbed,
@@ -74,19 +75,20 @@ const client = new Client({
 // Per-guild Brain resolver (BYOK): a guild's own key when /setup stored one,
 // env key otherwise, null (dormant) when REQUIRE_GUILD_KEYS blocks the fallback.
 // `store` is assigned in init() before any resolution can be requested.
-const { brainFor, invalidate: invalidateBrain } = createBrainResolver({
-  getKey: guildId => store.getGuildKey(guildId),
+const { brainFor, brainForUser, invalidate: invalidateBrain } = createBrainResolver({
+  getKey: scopeId => store.getGuildKey(scopeId),
+  getGuildOwnerIds: async guildId => (await store.listGuildCompanions(guildId)).map(c => c.ownerUserId),
   envKey: config.groqKey, envModel: config.model, envBaseUrl: config.groqBaseUrl,
   requireGuildKeys: config.requireGuildKeys,
-  markValidated: guildId => store.markGuildKeyValidated(guildId),
+  markValidated: scopeId => store.markGuildKeyValidated(scopeId),
   revalidate: async (key, baseUrl) => (await validateLlmKey(key, baseUrl, guardedLlmFetch)).ok,
-  // Every LLM call a guild makes — BYOK or env key — charges its daily budget.
+  // Every LLM call a scope makes — user BYOK or env key — charges its daily budget.
   // getCap reads settings() (60s cache — fine for a daily bound).
-  meter: (guildId, c) => meteredClient(c, {
-    guildId, store,
-    getCap: async () => guildId.startsWith("dm:")
+  meter: (scopeId, c) => meteredClient(c, {
+    guildId: scopeId, store,
+    getCap: async () => scopeId.startsWith("dm:")
       ? config.dmLlmDailyCap
-      : (await store.settings(guildId, config.rawMessageRetentionDays)).llmDailyCap,
+      : (await store.settings(scopeId, config.rawMessageRetentionDays)).llmDailyCap,
   }),
 });
 // Vision can live on a different provider than the main key (e.g. Gemini's
@@ -704,7 +706,15 @@ async function handleDmMessage(
   const dmScope = `dm:${userId}`;
   const authorName = message.author.globalName ?? message.author.username;
   const brain = await brainFor(dmScope);
-  if (!brain) return;
+  if (!brain) {
+    if (config.keyEncryptionSecret && replyThrottle.consume(dmScope, userId)) {
+      await message.reply({
+        ...buildApiKeyOnboardingPayload(userId),
+        allowedMentions: { parse: [], repliedUser: false },
+      }).catch(() => {});
+    }
+    return;
+  }
 
   const existing = await store.getCompanionByOwner(userId);
   const replyToId = message.reference?.messageId ?? undefined;
@@ -1009,8 +1019,26 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   // Ignored channels are truly invisible: no archive, no replies, no member
   // writes — checked before brainFor/recordMessage so nothing at all happens.
   if (settings.ignoredChannels.includes(event.channelId)) return;
-  // BYOK dormant guild: no key → no archive, no reply — everything below
-  // (extraction, contest, pipeline, decide, reply) binds this guild's brain.
+  // Pure companion mode: only user-summoned companions speak in guild channels.
+  const guildCompanions = await store.listGuildCompanions(event.guildId);
+  if (!guildCompanions.length) {
+    if (!senderCompanion && settings.replyEnabled && event.mentionsBot && noCompanionNoticeOnce(event.channelId)) {
+      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId("onboard:start")
+          .setLabel("Awaken / Summon Companion")
+          .setStyle(ButtonStyle.Primary),
+      );
+      await message.reply({
+        content: "No companions have been summoned to this server yet! Click below (or send me a DM) to awaken your personal companion, then summon them here with `/companion action:summon`.",
+        components: [row],
+        allowedMentions: { parse: [], repliedUser: false },
+      }).catch(() => {});
+    }
+    return;
+  }
+
+  // Server plumbing resolves a Brain from summoned companions' owners (or env fallback).
   const brain = await brainFor(event.guildId);
   if (!brain) return;
   // Resolve the reply target first so it can be persisted with the raw message.
@@ -1048,10 +1076,10 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   const meteredVision = visionClient
     ? meteredClient(visionClient, { guildId: event.guildId, store, getCap: async () => (await store.settings(event.guildId, config.rawMessageRetentionDays)).llmDailyCap })
     : undefined;
-  const describeImages = (list: Array<AttachmentMeta & { contentType: string }>) =>
+  const describeImages = (list: Array<AttachmentMeta & { contentType: string }>, activeBrain = brain) =>
     Promise.all(list.map(async a => {
       try {
-        const d = await brain.describeImage({ url: a.url, contextText: event.content, maxBytes: config.imageMaxBytes }, config.visionModel!, meteredVision);
+        const d = await activeBrain.describeImage({ url: a.url, contextText: event.content, maxBytes: config.imageMaxBytes }, config.visionModel!, meteredVision);
         inc("vision.described");
         return d.description;
       } catch (error) {
@@ -1060,7 +1088,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       }
     })).then(list => list.filter((d): d is string => !!d));
   let imageDescs: Promise<string[]> | undefined;
-  const getImageDescriptions = () => (imageDescs ??= describeImages(images));
+  const getImageDescriptions = (activeBrain = brain) => (imageDescs ??= describeImages(images, activeBrain));
   // Extraction, contest detection, and the event pipeline all defer to the
   // 'extract' job — the live path keeps only recordMessage/decide/reply so a
   // busy guild can't stack unbounded concurrent LLM calls inside one handler.
@@ -1076,25 +1104,6 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   if (!senderCompanion) {
     proactive.cancelPending(key);
     if (replyToId) proactive.observeEngagement(replyToId);
-  }
-
-  // Pure companion mode: only user-summoned companions speak in guild channels.
-  const guildCompanions = await store.listGuildCompanions(event.guildId);
-  if (!guildCompanions.length) {
-    if (!senderCompanion && settings.replyEnabled && event.mentionsBot && noCompanionNoticeOnce(event.channelId)) {
-      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder()
-          .setCustomId("onboard:start")
-          .setLabel("Awaken / Summon Companion")
-          .setStyle(ButtonStyle.Primary),
-      );
-      await message.reply({
-        content: "No companions have been summoned to this server yet! Click below (or send me a DM) to awaken your personal companion, then summon them here with `/companion action:summon`.",
-        components: [row],
-        allowedMentions: { parse: [], repliedUser: false },
-      }).catch(() => {});
-    }
-    return;
   }
 
   const selection = selectCompanionForTurn(
@@ -1134,6 +1143,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   }
 
   const chosen = selection.companion;
+  const companionBrain = (await brainForUser(chosen.ownerUserId, event.guildId)) ?? brain;
   const compSubj = MemoryStore.companionSubjectId(chosen.id);
   const engaged = selection.engaged;
   const throttleActor = senderCompanion ? compSubj : event.authorId;
@@ -1190,12 +1200,12 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     };
 
     const imgParts: string[] = [];
-    if (images.length) imgParts.push(formatImageContext(await getImageDescriptions(), authorName));
+    if (images.length) imgParts.push(formatImageContext(await getImageDescriptions(companionBrain), authorName));
     if (replyToId) {
       const refMsg = await message.channel.messages.fetch(replyToId).catch(() => undefined);
       const refImages = refMsg ? qualifyingImages(refMsg.attachments.values(), config.imageMaxBytes, IMAGE_MAX_PER_MESSAGE) : [];
       if (refImages.length && refMsg)
-        imgParts.push(formatImageContext(await describeImages(refImages), refMsg.member?.displayName ?? refMsg.author.username));
+        imgParts.push(formatImageContext(await describeImages(refImages, companionBrain), refMsg.member?.displayName ?? refMsg.author.username));
     }
     const imageContext = imgParts.filter(Boolean).join("\n") || undefined;
 
@@ -1204,7 +1214,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       resolveName: n => lookups.map.get(n.trim().toLowerCase()),
     };
     const toolsOn = config.replyTools && (toolCues(event.content) || selection.isAddressed || engaged);
-    const { text, endConversation } = await brain.reply(
+    const { text, endConversation } = await companionBrain.reply(
       { ...event, authorName },
       context,
       await store.relevantMemories(event.guildId, event.authorId),

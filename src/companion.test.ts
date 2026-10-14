@@ -8,17 +8,21 @@ import { ConversationTracker } from "./conversation.js";
 import { selectCompanionForTurn } from "./scene-router.js";
 import { gatherOwnerSubtextForServer, gatherServerDigestForDm } from "./cross-context.js";
 import {
+  buildApiKeyOnboardingPayload,
   buildAwakenedCompanionPayload,
   buildCompanionEditModal,
   buildOnboardingDraftComponents,
   buildOnboardingDraftEmbed,
   buildOnboardingWelcomePayload,
+  buildUserApiKeyModal,
   handleCompanionModal,
   handleMemoryButton,
   handleMemoryCommand,
+  handleSetupModal,
 } from "./commands.js";
 import { MemoryStore } from "./database.js";
 import { makeStore, makeTestSql } from "./test-helpers.js";
+import { config } from "./config.js";
 import type { GuildCompanion, MessageEvent } from "./types.js";
 
 function msg(content: string, overrides: Partial<MessageEvent> = {}): MessageEvent {
@@ -534,6 +538,69 @@ test("onboarding UX: bare greeting guard, welcome/draft/awakened cards, proactiv
   );
   assert.equal(lockedBtnReplies.length, 1);
   assert.match(lockedBtnReplies[0].content, /permanently locked/i);
+
+  // 7. Personal API Key Onboarding (user-key modal with blank Base URL auto-detects provider
+  //    and immediately returns the Awaken Welcome Card for an un-onboarded user) + 1-click server:enable.
+  const keyCard = buildApiKeyOnboardingPayload("u-new");
+  assert.match(keyCard.embeds[0].data.description ?? "", /leave the Base URL field completely blank/i);
+  const keyModal = buildUserApiKeyModal("user-key");
+  assert.equal(keyModal.data.custom_id, "user-key");
+
+  const storedKeys = new Map<string, any>();
+  let pausedState = true;
+  const keyStore = {
+    upsertGuildKey: async (scope: string, k: any) => { storedKeys.set(scope, k); },
+    getCompanionByOwner: async () => null,
+    setPaused: async (_gId: string, paused: boolean) => { pausedState = paused; },
+  } as unknown as MemoryStore;
+
+  const keyEditReplies: any[] = [];
+  let validatedUrl = "";
+  const prevSecret = config.keyEncryptionSecret;
+  config.keyEncryptionSecret = "test-master-passphrase";
+  try {
+    await handleSetupModal(
+      {
+        customId: "user-key",
+        guildId: null,
+        user: { id: "u-new", username: "NewUser" },
+        fields: {
+          getTextInputValue: (id: string) => (id === "api-key" ? "sk-or-v1-testkey9876" : ""),
+        },
+        deferReply: async () => {},
+        editReply: async (r: any) => { keyEditReplies.push(r); return r; },
+        reply: async (r: any) => { keyEditReplies.push(r); return r; },
+      } as any,
+      keyStore,
+      () => {},
+      async (_k, url) => {
+        validatedUrl = url;
+        return { ok: true };
+      },
+    );
+  } finally {
+    config.keyEncryptionSecret = prevSecret;
+  }
+  assert.equal(validatedUrl, "https://openrouter.ai/api/v1", "blank Base URL auto-detected OpenRouter from sk-or- prefix");
+  assert.ok(storedKeys.has("dm:u-new"), "stored personal key under dm:<userId>");
+  assert.match(keyEditReplies[0]?.content ?? "", /OpenRouter auto-detected/i);
+  assert.equal(keyEditReplies[0]?.embeds?.length, 1, "immediately attaches the Companion Welcome Card after key setup");
+
+  // 8. 1-click server:enable button unpauses Characterly for server admins without needing a server key.
+  const enableReplies: any[] = [];
+  await handleMemoryButton(
+    {
+      customId: "server:enable",
+      guildId: "g1",
+      user: { id: "u-admin", username: "Admin" },
+      memberPermissions: { has: () => true },
+      reply: async (r: any) => { enableReplies.push(r); return r; },
+      update: async () => {},
+    } as any,
+    keyStore,
+  );
+  assert.equal(pausedState, false, "server:enable unpaused the guild");
+  assert.match(enableReplies[0]?.content ?? "", /Characterly is now \*\*enabled\*\*/i);
 });
 
 // ── DB-backed integration tests ───────────────────────────────────────────────

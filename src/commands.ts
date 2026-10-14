@@ -6,7 +6,7 @@ import { EventPipeline } from "./event-detection.js";
 import { ProfileStore } from "./profiles.js";
 import { encryptSecret, logError, maskKey, validateLlmKey } from "./secrets.js";
 import { isSafeUrl, resolvesToPrivateAddress } from "./tools.js";
-import { guardedLlmFetch } from "./brains.js";
+import { detectProviderFromKey, guardedLlmFetch } from "./brains.js";
 import { runProfileBuild, PROFILE_BUILD_COOLDOWN_MS } from "./profile-build.js";
 import { runServerIngest } from "./server-ingest.js";
 import { pauseGuildClaims, resumeGuildClaims, waitForGuildIdle } from "./jobs.js";
@@ -202,6 +202,62 @@ export function findMutualGuilds(
   return out;
 }
 
+export function buildApiKeyOnboardingPayload(userId: string) {
+  const embed = new EmbedBuilder()
+    .setTitle("Connect Your Personal AI Key")
+    .setDescription(
+      "Your companion runs on your own AI key across DMs and every Characterly server you summon them into.\n\n" +
+        "**Just paste your API key — leave the Base URL field completely blank and Characterly will auto-detect everything and work fine!**",
+    )
+    .addFields(
+      {
+        name: "1. Get a Free Key (30 seconds)",
+        value:
+          "Grab a free key at **[console.groq.com/keys](https://console.groq.com/keys)** (starts with `gsk_...`), or use OpenRouter (`sk-or-...`), OpenAI (`sk-...`), or xAI (`xai-...`).",
+      },
+      {
+        name: "2. Paste & Go (Leave Base URL Blank)",
+        value:
+          "Click **Paste API Key** below, paste your key into the first box, and **leave the Base URL field blank** — provider and model are configured automatically.",
+      },
+    )
+    .setFooter({
+      text: "Your key is encrypted with AES-256-GCM and powers your personal companion everywhere.",
+    });
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`onboard:key:${userId}`)
+      .setLabel("Paste API Key")
+      .setStyle(ButtonStyle.Primary),
+  );
+  return { embeds: [embed], components: [row] };
+}
+
+export function buildUserApiKeyModal(customId: "user-key" | "setup-key" = "user-key"): ModalBuilder {
+  const modal = new ModalBuilder()
+    .setCustomId(customId)
+    .setTitle("Connect Your AI Key");
+  const keyInput = new TextInputBuilder()
+    .setCustomId("api-key")
+    .setLabel("API Key (Groq, OpenRouter, OpenAI, or xAI)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(200)
+    .setPlaceholder("gsk_… or sk-or-… or sk-…");
+  const urlInput = new TextInputBuilder()
+    .setCustomId("base-url")
+    .setLabel("Base URL (Leave blank — auto-detected!)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false)
+    .setMaxLength(200)
+    .setPlaceholder("Leave blank! Everything works automatically.");
+  modal.addComponents(
+    new ActionRowBuilder<TextInputBuilder>().addComponents(keyInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(urlInput),
+  );
+  return modal;
+}
+
 export function buildCompanionEditModal(existing: Companion | null): ModalBuilder {
   const modal = new ModalBuilder()
     .setCustomId("companion-edit")
@@ -265,21 +321,35 @@ export function buildCompanionEditModal(existing: Companion | null): ModalBuilde
 async function promptUnawakenedCompanion(
   interaction: { user: { id: string; username: string; send?: (payload: any) => Promise<any> }; reply: (payload: any) => Promise<any> },
   prefixText: string,
+  brainFor?: BrainFor,
 ) {
+  const hasBrain = brainFor ? Boolean(await brainFor(`dm:${interaction.user.id}`)) : true;
   let dmUrl: string | undefined;
   if (typeof interaction.user.send === "function") {
     try {
-      const sent = await interaction.user.send(buildOnboardingWelcomePayload(interaction.user.id));
+      const dmPayload = hasBrain
+        ? buildOnboardingWelcomePayload(interaction.user.id)
+        : buildApiKeyOnboardingPayload(interaction.user.id);
+      const sent = await interaction.user.send(dmPayload);
       if (sent?.channelId) dmUrl = `https://discord.com/channels/@me/${sent.channelId}`;
     } catch {
       /* User has DMs closed or blocked — fall back to inline buttons */
     }
   }
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+  const row = new ActionRowBuilder<ButtonBuilder>();
+  if (!hasBrain) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`onboard:key:${interaction.user.id}`)
+        .setLabel("Paste API Key")
+        .setStyle(ButtonStyle.Primary),
+    );
+  }
+  row.addComponents(
     new ButtonBuilder()
       .setCustomId(`onboard:edit:${interaction.user.id}`)
       .setLabel("Create via Form")
-      .setStyle(ButtonStyle.Primary),
+      .setStyle(hasBrain ? ButtonStyle.Primary : ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId(`onboard:preset:surprise:${interaction.user.id}`)
       .setLabel("Surprise Me")
@@ -344,6 +414,7 @@ export const commandDefinitions = [
       { name: "card — View a companion's profile card", value: "card" },
       { name: "summon — Bring your companion into this server", value: "summon" },
       { name: "dismiss — Dismiss your companion from this server", value: "dismiss" },
+      { name: "key — Connect or update your personal AI API key", value: "key" },
       { name: "avatar — Set your companion's avatar URL", value: "avatar" },
     ] },
     { name: "avatar_url", description: "Public http(s) image URL when action is avatar", type: 3, required: false },
@@ -366,11 +437,11 @@ const profileBuildsRunning = new Set<string>();
 const display = (memory: Memory) => `**#${memory.id} · ${confidence(memory.confidence)} confidence**\n${memory.content}\n*${memory.mentions} confirmation${memory.mentions === 1 ? "" : "s"}; last confirmed ${new Date(memory.lastConfirmedAt).toLocaleDateString()}*`;
 
 type BrainFor = (guildId: string) => Promise<Brain | null>;
-const NO_KEY_MSG = "This server hasn't configured an LLM key — an admin can set one with /setup.";
+const NO_KEY_MSG = "No AI key is configured yet — connect your personal API key with `/companion action:key` (or `/setup`).";
 
 const SERVER_ONLY_COMMANDS = new Set([
   "memory-purge", "memory-pause", "memory-resume", "memory-settings",
-  "proactive", "status", "memory-triage", "server-build", "setup",
+  "proactive", "status", "memory-triage", "server-build",
   "limits", "ignore-channel", "unignore-channel",
 ]);
 
@@ -390,6 +461,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         return promptUnawakenedCompanion(
           interaction,
           "You haven't awakened your companion yet!",
+          brainFor,
         );
       }
       await store.summonCompanion(interaction.guildId, companion.id, interaction.user.id, interaction.user.username);
@@ -440,6 +512,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       return promptUnawakenedCompanion(
         interaction,
         "You haven't awakened your companion yet!",
+        brainFor,
       );
     }
     if (action === "card") {
@@ -450,6 +523,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
           return promptUnawakenedCompanion(
             interaction,
             "You haven't awakened your companion yet!",
+            brainFor,
           );
         }
         return interaction.reply({
@@ -479,6 +553,18 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         .setFooter({ text: "Permanently bound companion (1 per account)" });
       if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
       return interaction.reply({ ephemeral: true, embeds: [embed] });
+    }
+    if (action === "key") {
+      if (!config.keyEncryptionSecret) {
+        return interaction.reply({
+          content: "The bot operator hasn't configured key storage (KEY_ENCRYPTION_SECRET) — personal keys are unavailable.",
+          ephemeral: true,
+        });
+      }
+      if (typeof interaction.showModal !== "function") {
+        return interaction.reply({ content: "Setting an API key requires modal support.", ephemeral: true });
+      }
+      return interaction.showModal(buildUserApiKeyModal("user-key"));
     }
     if (action === "avatar") {
       const url = interaction.options.getString("avatar_url")?.trim();
@@ -890,73 +976,87 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       content: `**This scans and archives #${channel.name} history** — including messages written before the bot arrived, by people who never consented to it. Only continue if the server expects this.` });
   }
   if (interaction.commandName === "setup") {
-    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
-      return interaction.reply({ content: "Only server administrators can configure the LLM key.", ephemeral: true });
+    if (interaction.guildId && !interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+      return interaction.reply({ content: "Only server administrators can configure the LLM key. Use `/companion action:key` to connect your personal API key.", ephemeral: true });
     }
     if (!config.keyEncryptionSecret) {
       return interaction.reply({ content: "The bot operator hasn't configured key storage (KEY_ENCRYPTION_SECRET) — per-guild keys are unavailable.", ephemeral: true });
     }
-    // Key submission goes through a modal — slash-command options land in
-    // channel history; modal field values don't.
-    const modal = new ModalBuilder().setCustomId("setup-key").setTitle("Server LLM key");
-    const keyInput = new TextInputBuilder()
-      .setCustomId("api-key").setLabel("OpenAI-compatible API key")
-      .setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(200)
-      .setPlaceholder("gsk_…");
-    const urlInput = new TextInputBuilder()
-      .setCustomId("base-url").setLabel("Base URL (optional)")
-      .setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(200)
-      .setPlaceholder(config.groqBaseUrl);
-    modal.addComponents(
-      new ActionRowBuilder<TextInputBuilder>().addComponents(keyInput),
-      new ActionRowBuilder<TextInputBuilder>().addComponents(urlInput),
-    );
-    return interaction.showModal(modal);
+    const modalId = interaction.guildId ? "setup-key" : "user-key";
+    return interaction.showModal(buildUserApiKeyModal(modalId));
   }
 }
 
-/** Modal submission for /setup — validates the key live, encrypts it, stores
- * the row, and drops the guild's cached Brain so the next call resolves the
- * new key. The submitted value is never echoed back — only the last-4 hint. */
+/** Modal submission for /setup or personal key onboarding — validates the key
+ * live (auto-detecting provider from key prefix when Base URL is left blank),
+ * encrypts it, stores the row, and invalidates cached Brains. */
 export async function handleSetupModal(
   interaction: ModalSubmitInteraction, store: MemoryStore,
-  invalidateBrain: (guildId: string) => void,
+  invalidateBrain: (scopeId: string) => void,
   validate: typeof validateLlmKey = validateLlmKey
 ) {
-  if (interaction.customId !== "setup-key" || !interaction.guildId) return;
-  // Re-check on submit — permissions can be revoked between /setup and the
-  // modal submission, and the modal itself carries no permission gate.
-  if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+  const isUserModal = interaction.customId === "user-key";
+  const isSetupModal = interaction.customId === "setup-key";
+  if (!isUserModal && !isSetupModal) return;
+
+  if (isSetupModal && interaction.guildId && !interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
     return interaction.reply({ content: "Setup requires the Manage Server permission.", ephemeral: true });
   }
-  const guildId = interaction.guildId;
+  const userId = (interaction as { user?: { id?: string } }).user?.id;
+  const targetScopeId = isUserModal || !interaction.guildId
+    ? (userId ? `dm:${userId}` : null)
+    : interaction.guildId;
+  if (!targetScopeId) return;
+
   const key = interaction.fields.getTextInputValue("api-key").trim();
   const baseUrl = interaction.fields.getTextInputValue("base-url").trim() || null;
   await interaction.deferReply({ ephemeral: true });
-  // The base URL steers every later LLM call carrying this key — a guild admin
-  // is less trusted than the operator, so apply the same SSRF guard the web
-  // tool uses: public http(s) only, no private/loopback/metadata hosts. The
-  // DNS check catches innocent-looking names that resolve to private/internal
-  // addresses; brains.ts re-validates at connect time on every later call.
   if (baseUrl && !isSafeUrl(baseUrl)) {
-    return interaction.editReply("That base URL isn't allowed — it must be a public http(s) endpoint. Leave it blank to use the default provider.");
+    return interaction.editReply("That base URL isn't allowed — it must be a public http(s) endpoint. Leave it blank to auto-detect your provider.");
   }
   if (baseUrl && await resolvesToPrivateAddress(new URL(baseUrl).hostname)) {
-    return interaction.editReply("That base URL isn't allowed — it resolves to a private or internal address. Leave it blank to use the default provider.");
+    return interaction.editReply("That base URL isn't allowed — it resolves to a private or internal address. Leave it blank to auto-detect your provider.");
   }
   try {
-    const result = await validate(key, baseUrl ?? config.groqBaseUrl, guardedLlmFetch);
+    const detected = detectProviderFromKey(key, baseUrl, config.groqBaseUrl, config.model);
+    const result = await validate(key, detected.baseUrl, guardedLlmFetch);
     if (!result.ok && "status" in result) {
       return interaction.editReply("That key was rejected by the provider (auth failed) — nothing was stored. Check the key and try again.");
     }
-    await store.upsertGuildKey(guildId, {
-      keyEnc: encryptSecret(key), keyHint: maskKey(key), baseUrl,
+    const keyRecord = {
+      keyEnc: encryptSecret(key),
+      keyHint: maskKey(key),
+      baseUrl,
       validatedAt: result.ok ? new Date().toISOString() : null,
-    });
-    invalidateBrain(guildId);
+    };
+    await store.upsertGuildKey(targetScopeId, keyRecord);
+    invalidateBrain(targetScopeId);
+    // When a user submits a key in a server via setup-key, also bind it to their personal dm:<userId> scope.
+    if (userId && targetScopeId !== `dm:${userId}`) {
+      await store.upsertGuildKey(`dm:${userId}`, keyRecord);
+      invalidateBrain(`dm:${userId}`);
+    }
+
+    const providerLabel = detected.autoDetected ? ` (${detected.provider} auto-detected)` : "";
+    if (isUserModal || !interaction.guildId) {
+      const existing = userId ? await store.getCompanionByOwner(userId) : null;
+      const needsOnboarding = userId && (!existing || existing.onboardingState !== "active");
+      const statusText = result.ok
+        ? `Personal AI key connected (${maskKey(key)})${providerLabel}! Your companion will use this key across DMs and servers.`
+        : `Couldn't reach the provider to verify right now, but your key (${maskKey(key)})${providerLabel} is saved and will be checked on first use.`;
+      if (needsOnboarding && userId) {
+        const welcome = buildOnboardingWelcomePayload(userId);
+        return (interaction.editReply as (p: any) => Promise<any>)({
+          content: statusText,
+          ...welcome,
+        });
+      }
+      return interaction.editReply(statusText);
+    }
+
     return interaction.editReply(result.ok
-      ? `Key stored (${maskKey(key)}) — this server now runs on its own key. Re-run /setup any time to rotate it. Run /memory-resume to start observing.`
-      : `Couldn't reach the provider to verify, but the key (${maskKey(key)}) is stored unverified — it'll be checked on first use. Run /memory-resume to start observing.`);
+      ? `Key stored (${maskKey(key)})${providerLabel} — this scope now runs on this key. Re-run /setup or \`/companion action:key\` any time to rotate it.`
+      : `Couldn't reach the provider to verify, but the key (${maskKey(key)})${providerLabel} is stored unverified — it'll be checked on first use.`);
   } catch (error) {
     logError("/setup failed", error);
     return interaction.editReply("Setup failed — nothing was stored. Try again later.");
@@ -1088,10 +1188,46 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
     });
   }
 
+  if (parts[0] === "server" && parts[1] === "enable") {
+    if (!interaction.guildId) {
+      return interaction.reply({ content: "This button can only be used inside a Discord server.", ephemeral: true });
+    }
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+      return interaction.reply({
+        content: "Only server administrators (`Manage Server`) can enable Characterly in this server.",
+        ephemeral: true,
+      });
+    }
+    await store.setPaused(interaction.guildId, false);
+    return interaction.reply({
+      content: "Characterly is now **enabled** for this server! Members can awaken their personal companions in DMs and bring them here anytime with `/companion action:summon`.",
+      ephemeral: true,
+    });
+  }
+
   if (parts[0] === "onboard") {
     const sub = parts[1];
     const userId = interaction.user.id;
     const ownerName = (interaction.user as { globalName?: string; username?: string }).globalName ?? interaction.user.username ?? userId;
+
+    if (sub === "key") {
+      const targetUserId = parts[2];
+      if (targetUserId && targetUserId !== userId) {
+        return interaction.reply({ content: "That button is not for you.", ephemeral: true });
+      }
+      if (!config.keyEncryptionSecret) {
+        return interaction.reply({
+          content: "The bot operator hasn't configured key storage (KEY_ENCRYPTION_SECRET) — personal keys are unavailable.",
+          ephemeral: true,
+        });
+      }
+      if (typeof (interaction as unknown as { showModal?: (m: ModalBuilder) => Promise<unknown> }).showModal !== "function") {
+        return interaction.reply({ content: "Setting an API key requires modal support.", ephemeral: true });
+      }
+      return (interaction as unknown as { showModal: (m: ModalBuilder) => Promise<unknown> }).showModal(
+        buildUserApiKeyModal("user-key"),
+      );
+    }
 
     if (sub === "start") {
       const existing = await store.getCompanionByOwner(userId);
@@ -1111,6 +1247,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       return promptUnawakenedCompanion(
         interaction as unknown as { user: { id: string; username: string; send?: (payload: any) => Promise<any> }; reply: (payload: any) => Promise<any> },
         "Let's awaken your personal companion!",
+        brainFor,
       );
     }
 
@@ -1186,7 +1323,10 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       const dmScope = `dm:${userId}`;
       const brain = brainFor ? await brainFor(dmScope) : null;
       if (!brain) {
-        return interaction.reply({ content: "Companion onboarding isn't available right now.", ephemeral: true });
+        return interaction.reply({
+          ...buildApiKeyOnboardingPayload(userId),
+          ephemeral: true,
+        });
       }
       const turn = await brain.runOnboardingTurn({
         ownerName,

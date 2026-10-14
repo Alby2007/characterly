@@ -29,18 +29,22 @@ export async function announceIfNeeded(guild: Guild, store: MemoryStore): Promis
     return false;
   }
   const embed = new EmbedBuilder()
-    .setTitle("ASB is here — Personal Companions & Community Memory")
+    .setTitle("Characterly is here — Personal Companions & Shared Memory")
     .setDescription(
-      "ASB lets members awaken a personal AI companion in DMs and summon them into the server, while building shared server lore and opt-in member profiles. **Right now this server is dormant — it is not recording anything until an admin enables it.**"
+      "Characterly is the server host that lets members bring their personal AI companions into channels via webhooks and builds opt-in shared lore. **Right now this server is dormant — an admin can enable Characterly in one click below.**"
     )
     .addFields(
-      { name: "Personal Companions (1 per Account)", value: "Click **Awaken Your Companion** below (or DM the bot) to create your permanent companion — each account gets one character, locked in once awakened — then run `/companion action:summon` to bring them into this server." },
+      { name: "Admins — 1-Click Activation (No Server Key Needed)", value: "Click **Enable Characterly** below (or run `/memory-resume`). No server API key is required — each member's companion runs on their own personal key." },
+      { name: "Personal Companions (1 per Account)", value: "Click **Awaken Your Companion** below (or DM the bot) to connect your personal AI key and create your permanent companion — each account gets one character, locked in once awakened — then run `/companion action:summon` to bring them into this server." },
       { name: "What it stores (when enabled)", value: `Raw messages for **${s.rawRetentionDays} days**, then deleted. Derived memories, profiles, and relationship notes form **only for members who opt in**.` },
-      { name: "Your controls", value: "`/companion` — manage or summon your companion · `/privacy` — see what's stored · `/opt-in` `/opt-out` — control your derived data · `/memory-export` — export your data" },
-      { name: "Admins", value: "To activate ASB: run `/setup` to configure an LLM key (or use the operator's), then `/memory-resume`. `/server-build` can additionally backfill history." },
+      { name: "Your controls", value: "`/companion` — manage, summon, or set your personal API key · `/privacy` — see what's stored · `/opt-in` `/opt-out` — control your derived data · `/memory-export` — export your data" },
       { name: "Privacy policy", value: "[github.com/Alby2007/ASB-Docs](https://github.com/Alby2007/ASB-Docs) — kick the bot and every row it stored here is deleted." },
     );
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId("server:enable")
+      .setLabel("Enable Characterly (Admins)")
+      .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
       .setCustomId("onboard:start")
       .setLabel("Awaken Your Companion")

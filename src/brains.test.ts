@@ -2,7 +2,7 @@ import "dotenv/config";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { config } from "./config.js";
-import { createBrainResolver } from "./brains.js";
+import { createBrainResolver, detectProviderFromKey } from "./brains.js";
 import { encryptSecret } from "./secrets.js";
 
 config.keyEncryptionSecret = "test-master-passphrase";
@@ -93,4 +93,68 @@ test("invalidate forces re-resolution (key rotation)", async () => {
   const second = await brainFor("g1");
   assert.ok(second);
   assert.notEqual(second, first);
+});
+
+test("detectProviderFromKey auto-detects Groq, OpenRouter, OpenAI, and xAI when Base URL is blank", () => {
+  const groq = detectProviderFromKey("gsk_abc123456", null);
+  assert.equal(groq.provider, "Groq");
+  assert.equal(groq.baseUrl, "https://api.groq.com/openai/v1");
+  assert.equal(groq.autoDetected, true);
+
+  const openrouter = detectProviderFromKey("sk-or-v1-xyz", "");
+  assert.equal(openrouter.provider, "OpenRouter");
+  assert.equal(openrouter.baseUrl, "https://openrouter.ai/api/v1");
+  assert.equal(openrouter.autoDetected, true);
+
+  const openai = detectProviderFromKey("sk-proj-123456", undefined);
+  assert.equal(openai.provider, "OpenAI");
+  assert.equal(openai.baseUrl, "https://api.openai.com/v1");
+  assert.equal(openai.model, "gpt-4o-mini");
+  assert.equal(openai.autoDetected, true);
+
+  const xai = detectProviderFromKey("xai-key-999", null);
+  assert.equal(xai.provider, "xAI");
+  assert.equal(xai.baseUrl, "https://api.x.ai/v1");
+  assert.equal(xai.model, "grok-3-mini");
+  assert.equal(xai.autoDetected, true);
+
+  const custom = detectProviderFromKey("gsk_abc123456", "https://custom.llm.example/v1");
+  assert.equal(custom.provider, "Custom");
+  assert.equal(custom.baseUrl, "https://custom.llm.example/v1");
+  assert.equal(custom.autoDetected, false);
+});
+
+test("user keys (dm:<userId>) power DMs, brainForUser in servers, and guild plumbing via getGuildOwnerIds", async () => {
+  const keys = new Map<string, { keyEnc: Buffer; baseUrl: string | null }>([
+    ["dm:u-alice", row("gsk_alice_personal_key")],
+  ]);
+  const meteredScopes: string[] = [];
+  const { brainFor, brainForUser } = createBrainResolver({
+    getKey: async scopeId => keys.get(scopeId) ?? null,
+    getGuildOwnerIds: async guildId => (guildId === "g-hangout" ? ["u-alice"] : []),
+    envKey: "",
+    envModel: "openai/gpt-oss-120b",
+    envBaseUrl: "https://api.groq.com/openai/v1",
+    requireGuildKeys: true,
+    meter: (scopeId, client) => {
+      meteredScopes.push(scopeId);
+      return client;
+    },
+  });
+
+  // 1. DM scope uses Alice's personal key even when envKey is empty
+  const dmBrain = await brainFor("dm:u-alice");
+  assert.ok(dmBrain, "dm:u-alice resolves from Alice's personal key");
+
+  // 2. When Alice's companion speaks in g-hangout, brainForUser uses Alice's key and meters against g-hangout
+  const compBrain = await brainForUser("u-alice", "g-hangout");
+  assert.ok(compBrain, "brainForUser resolves Alice's personal key for server speech");
+
+  // 3. Server background plumbing in g-hangout resolves via summoned companion owner (u-alice) with zero server key
+  const guildPlumbingBrain = await brainFor("g-hangout");
+  assert.ok(guildPlumbingBrain, "guild with summoned companion resolves brain without a server key");
+
+  // 4. Empty guild with no summoned companions and no envKey stays dormant
+  assert.equal(await brainFor("g-empty"), null);
+  assert.deepEqual(meteredScopes, ["dm:u-alice", "g-hangout", "g-hangout"]);
 });
