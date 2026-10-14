@@ -569,7 +569,7 @@ export class MemoryStore {
     const member = await this.getMember(guildId, userId);
     if (member && member.knownNames.length > 0) return member.knownNames[member.knownNames.length - 1];
     const rows = await this.sql<Array<{ author_name: string }>>`
-      SELECT author_name FROM messages WHERE guild_id = ${guildId} AND author_id = ${userId} ORDER BY created_at DESC LIMIT 1
+      SELECT author_name FROM messages WHERE guild_id = ${guildId} AND author_id = ${userId} ORDER BY created_at DESC, id DESC LIMIT 1
     `;
     return rows[0]?.author_name ?? userId;
   }
@@ -653,11 +653,11 @@ export class MemoryStore {
       SELECT t.ix, m.author_name, m.content, m.created_at
       FROM unnest(${anchors.map(a => a.ix)}::int[], ${anchors.map(a => a.channelId)}::text[], ${anchors.map(a => new Date(a.createdAt).toISOString())}::timestamptz[]) AS t(ix, channel_id, ts)
       JOIN LATERAL (
-        SELECT author_name, content, created_at FROM messages
+        SELECT author_name, content, created_at, id FROM messages
         WHERE guild_id = ${guildId} AND channel_id = t.channel_id AND created_at < t.ts
-        ORDER BY created_at DESC LIMIT 5
+        ORDER BY created_at DESC, id DESC LIMIT 5
       ) m ON true
-      ORDER BY t.ix, m.created_at DESC
+      ORDER BY t.ix, m.created_at DESC, m.id DESC
     `;
     for (const r of rows) {
       const list = out.get(r.ix) ?? [];
@@ -765,7 +765,7 @@ export class MemoryStore {
     const rows = await this.sql<Array<{ content: string; created_at: Date | string }>>`
       SELECT content, created_at FROM messages
       WHERE guild_id = ${guildId} AND author_id = ${authorId} AND length(content) > 0
-      ORDER BY created_at DESC LIMIT 60
+      ORDER BY created_at DESC, id DESC LIMIT 60
     `;
     return rows.map(r => ({ content: r.content, createdAt: ts(r.created_at) }));
   }
@@ -784,7 +784,7 @@ export class MemoryStore {
       SELECT subject_id, other_id, nature, valence, reason, source, created_at FROM relationship_observations
       WHERE guild_id = ${guildId} AND (subject_id = ${subjectId} OR other_id = ${subjectId})
         AND verdict = 'literal'
-      ORDER BY created_at DESC
+      ORDER BY created_at DESC, id DESC
     `;
     return rows.map(r => ({
       otherId: r.subject_id === subjectId ? r.other_id : r.subject_id,
@@ -834,7 +834,7 @@ export class MemoryStore {
       SELECT subject_id, other_id, nature, valence, reason, source, created_at FROM relationship_observations
       WHERE guild_id = ${guildId} AND verdict = 'literal'
         AND ((subject_id = ${aId} AND other_id = ${bId}) OR (subject_id = ${bId} AND other_id = ${aId}))
-      ORDER BY created_at DESC LIMIT 5
+      ORDER BY created_at DESC, id DESC LIMIT 5
     `;
 
     const claimRows = await this.sql<Array<{ subject_id: string; content: string; confidence: number }>>`
@@ -911,7 +911,7 @@ export class MemoryStore {
       WHERE guild_id = ${guildId} AND length(content) > 0
         AND created_at > NOW() - interval '90 days'
         AND (${channels.length} = 0 OR channel_id <> ALL(${channels}::text[]))
-      ORDER BY created_at
+      ORDER BY created_at, id
     `;
     const skip = new Set(opts.excludeIds ?? []);
     const allow = new Set(opts.allowBotIds ?? []);
@@ -1054,7 +1054,7 @@ export class MemoryStore {
                  MAX(created_at) AS last_at
           FROM (
             SELECT *, CASE WHEN author_id IN (subject_id, other_id) OR source = 'pair_window' THEN 2 ELSE 1 END AS w,
-                   ROW_NUMBER() OVER (PARTITION BY guild_id, subject_id, other_id ORDER BY created_at DESC) rn
+                   ROW_NUMBER() OVER (PARTITION BY guild_id, subject_id, other_id ORDER BY created_at DESC, id DESC) rn
             FROM relationship_observations
             WHERE guild_id = ${guildId} AND verdict = 'literal'
           ) lit
@@ -1123,7 +1123,7 @@ export class MemoryStore {
       WHERE guild_id = ${guildId} AND author_id IN (${aId}, ${bId})
         AND length(content) > 0 AND created_at > NOW() - interval '90 days'
         AND (${excludeChannels.length} = 0 OR channel_id <> ALL(${excludeChannels}::text[]))
-      ORDER BY created_at DESC LIMIT 500
+      ORDER BY created_at DESC, id DESC LIMIT 500
     `;
     const exchanges: Array<{ id: string; authorId: string; authorName: string; content: string; createdAt: string }> = [];
     for (const r of rows) {
@@ -1849,7 +1849,7 @@ export class MemoryStore {
   async messagesByIds(guildId: string, messageIds: string[]): Promise<Array<{ authorName: string; content: string; createdAt: string }>> {
     if (messageIds.length === 0) return [];
     const rows = await this.sql<MessageRow[]>`
-      SELECT author_name, content, created_at FROM messages WHERE guild_id = ${guildId} AND id = ANY(${messageIds}) ORDER BY created_at ASC
+      SELECT author_name, content, created_at FROM messages WHERE guild_id = ${guildId} AND id = ANY(${messageIds}) ORDER BY created_at ASC, id ASC
     `;
     return rows.map(r => ({ authorName: r.author_name, content: r.content, createdAt: ts(r.created_at) }));
   }
