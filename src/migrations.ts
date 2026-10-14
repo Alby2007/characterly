@@ -627,6 +627,54 @@ const migrations: Migration[] = [
       await sql`ALTER TABLE guild_keys DROP COLUMN IF EXISTS model`;
     },
   },
+  // ── v23: Supabase security lockdown ─────────────────────────────────────────
+  // Supabase exposes `public` through the Data API and auto-grants
+  // anon/authenticated CRUD on new tables. Enabling RLS with zero policies is
+  // deny-all for those roles while the backend's postgres role bypasses RLS.
+  // Everything here is conditional so plain-Postgres test/local DBs (no anon/
+  // authenticated roles, no extensions schema) run it unchanged.
+  {
+    version: 23,
+    name: "v23_rls_lockdown",
+    up: async (sql) => {
+      await sql`
+        DO $rls$
+        DECLARE t text;
+        BEGIN
+          FOR t IN SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+          LOOP
+            EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+          END LOOP;
+        END $rls$
+      `;
+      await sql`
+        DO $grants$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+            EXECUTE 'ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL ON TABLES FROM anon';
+          END IF;
+          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+            EXECUTE 'ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL ON TABLES FROM authenticated';
+          END IF;
+        END $grants$
+      `;
+      await sql`
+        DO $ext$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'extensions')
+             AND EXISTS (
+               SELECT 1 FROM pg_extension e
+               JOIN pg_namespace n ON n.oid = e.extnamespace
+               WHERE e.extname = 'pg_trgm' AND n.nspname = 'public'
+             ) THEN
+            EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA extensions';
+          END IF;
+        END $ext$
+      `;
+    },
+    // No-op: rolling back would reopen public API access to every table.
+    down: async () => {},
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a
