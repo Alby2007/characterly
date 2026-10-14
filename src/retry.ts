@@ -16,7 +16,9 @@ export async function withRetry<T>(fn: () => Promise<T>, retries = 6): Promise<T
   for (let i = 0; i < retries; i++) {
     try { return await fn(); } catch (err) {
       const msg = (err as Error).message;
-      const is429 = msg.includes("429");
+      // Prefer the structured status; fall back to a word-boundary match so
+      // a "429" inside an id/count doesn't masquerade as a rate limit.
+      const is429 = (err as { status?: number }).status === 429 || /\b429\b/.test(msg);
       if ((is429 || isTransient(err as Error)) && i < retries - 1) {
         const headers = (err as { headers?: Headers }).headers;
         const tokenReset = headers?.get("x-ratelimit-reset-tokens");

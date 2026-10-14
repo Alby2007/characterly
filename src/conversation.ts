@@ -127,14 +127,17 @@ export class ConversationTracker {
   }
 
   /** Distinct humans in the window who are NOT current participants —
-   * the floor the bot could actually be dominating. A 1:1 has none. */
-  bystanderVoices(key: string): number {
+   * the floor the bot could actually be dominating. A 1:1 has none.
+   * `exclude` subtracts additional ids — the scene router shares one floor
+   * key across companions while participants enroll per-companion, so it
+   * passes the candidate's own participants to keep them out of the count. */
+  bystanderVoices(key: string, exclude?: ReadonlySet<string>): number {
     const ch = this.channels.get(key);
     if (!ch) return 0;
     this.sweepExpired(key, ch); // an expired participant's messages are bystander traffic again
     return new Set(
       ch.recentVoices
-        .filter(v => !v.bot && v.authorId && !ch.participants.has(v.authorId))
+        .filter(v => !v.bot && v.authorId && !ch.participants.has(v.authorId) && !exclude?.has(v.authorId))
         .map(v => v.authorId)
     ).size;
   }

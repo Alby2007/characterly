@@ -112,13 +112,15 @@ test("Brain.runOnboardingTurn merges draft state and graduates when complete=tru
 test("Brain.reply injects CompanionPersona, Vault Rule for ownerSubtext in servers, and serverDigest in DMs", async () => {
   let lastInput = "";
   const fakeClient: LlmClient = {
-    responses: {
-      create: async (params: any) => {
-        lastInput = params.input;
-        return { output_text: JSON.stringify({ text: "Got your back.", end_conversation: false }) };
+    responses: { create: async () => ({ output_text: "{}" }) },
+    chat: {
+      completions: {
+        create: async (params: any) => {
+          lastInput = params.messages[0].content;
+          return { choices: [{ message: { content: JSON.stringify({ text: "Got your back.", end_conversation: false }) } }] };
+        },
       },
     },
-    chat: { completions: { create: async () => ({ choices: [] }) } },
   };
   const brain = new Brain("test-key", "test-model", undefined, fakeClient);
 

@@ -5,10 +5,16 @@ import { inc } from "./metrics.js";
 const WEBHOOK_NAME = "Characterly Companions";
 const webhookCache = new Map<string, Webhook>();
 const webhookPermissionNotices = new Set<string>();
+// Keys carry a date suffix so they never expire — cap the set and evict
+// insertion-oldest so a long-lived process doesn't grow it without bound.
+const WEBHOOK_NOTICE_CAP = 512;
 
 function webhookNoticeOnce(channelId: string): boolean {
   const key = `${channelId}:${new Date().toISOString().slice(0, 10)}`;
   if (webhookPermissionNotices.has(key)) return false;
+  if (webhookPermissionNotices.size >= WEBHOOK_NOTICE_CAP) {
+    webhookPermissionNotices.delete(webhookPermissionNotices.values().next().value!);
+  }
   webhookPermissionNotices.add(key);
   return true;
 }

@@ -6,3 +6,5 @@ data/
 docs/handoff.md
 *.log
 *.tmp.*
+keys/
+*.pub

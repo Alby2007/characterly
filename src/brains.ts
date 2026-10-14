@@ -34,17 +34,19 @@ export function detectProviderFromKey(
   explicitBaseUrl?: string | null,
   defaultBaseUrl = "https://api.groq.com/openai/v1",
   defaultModel = "openai/gpt-oss-120b",
+  explicitModel?: string | null,
 ): { provider: string; baseUrl: string; model: string; autoDetected: boolean } {
+  const pinned = explicitModel?.trim() || null;
   const custom = explicitBaseUrl?.trim();
   if (custom) {
-    return { provider: "Custom", baseUrl: custom, model: defaultModel, autoDetected: false };
+    return { provider: "Custom", baseUrl: custom, model: pinned ?? defaultModel, autoDetected: false };
   }
   const k = key.trim();
   if (k.startsWith("gsk_")) {
     return {
       provider: "Groq",
       baseUrl: "https://api.groq.com/openai/v1",
-      model: defaultModel || "openai/gpt-oss-120b",
+      model: pinned ?? (defaultModel || "openai/gpt-oss-120b"),
       autoDetected: true,
     };
   }
@@ -52,7 +54,7 @@ export function detectProviderFromKey(
     return {
       provider: "OpenRouter",
       baseUrl: "https://openrouter.ai/api/v1",
-      model: "openai/gpt-oss-120b",
+      model: pinned ?? "openai/gpt-oss-120b",
       autoDetected: true,
     };
   }
@@ -60,7 +62,7 @@ export function detectProviderFromKey(
     return {
       provider: "xAI",
       baseUrl: "https://api.x.ai/v1",
-      model: "grok-3-mini",
+      model: pinned ?? "grok-3-mini",
       autoDetected: true,
     };
   }
@@ -68,11 +70,11 @@ export function detectProviderFromKey(
     return {
       provider: "OpenAI",
       baseUrl: "https://api.openai.com/v1",
-      model: "gpt-4o-mini",
+      model: pinned ?? "gpt-4o-mini",
       autoDetected: true,
     };
   }
-  return { provider: "Default", baseUrl: defaultBaseUrl, model: defaultModel, autoDetected: false };
+  return { provider: "Default", baseUrl: defaultBaseUrl, model: pinned ?? defaultModel, autoDetected: false };
 }
 
 /**
@@ -90,7 +92,7 @@ export function detectProviderFromKey(
  *      - `null` (dormant)
  */
 export function createBrainResolver(opts: {
-  getKey: (scopeId: string) => Promise<{ keyEnc: Buffer; baseUrl: string | null; validatedAt?: string | null } | null>;
+  getKey: (scopeId: string) => Promise<{ keyEnc: Buffer; baseUrl: string | null; model?: string | null; validatedAt?: string | null } | null>;
   envKey: string;
   envModel: string;
   envBaseUrl: string;
@@ -108,16 +110,20 @@ export function createBrainResolver(opts: {
   meter?: (scopeId: string, client: LlmClient) => LlmClient;
 }) {
   const cache = new Map<string, Brain | null>();
+  // Which key scopes each guild-scope cache entry resolved through. A dm:
+  // invalidation only needs to evict guilds whose brain came from that user's
+  // key — or from the env fallback, which a newly-added key could displace.
+  const guildProvenance = new Map<string, Set<string>>();
 
   function buildFromRow(
     keyScopeId: string,
     meterScopeId: string,
-    row: { keyEnc: Buffer; baseUrl: string | null; validatedAt?: string | null },
+    row: { keyEnc: Buffer; baseUrl: string | null; model?: string | null; validatedAt?: string | null },
   ): Brain | null {
     const wrap = (c: LlmClient): LlmClient => (opts.meter ? opts.meter(meterScopeId, c) : c);
     try {
       const key = decryptSecret(row.keyEnc);
-      const detected = detectProviderFromKey(key, row.baseUrl, opts.envBaseUrl, opts.envModel);
+      const detected = detectProviderFromKey(key, row.baseUrl, opts.envBaseUrl, opts.envModel, row.model);
       const baseUrl = detected.baseUrl;
       const model = detected.model;
       const brain = row.baseUrl
@@ -165,10 +171,13 @@ export function createBrainResolver(opts: {
     const row = await opts.getKey(guildId);
     if (row) {
       brain = buildFromRow(guildId, guildId, row);
+      guildProvenance.set(guildId, new Set([guildId])); // served by its own key — dm: changes can't touch it
     } else {
+      const consulted = new Set<string>();
       if (opts.getGuildOwnerIds) {
         for (const ownerId of await opts.getGuildOwnerIds(guildId)) {
           const ownerScope = `dm:${ownerId}`;
+          consulted.add(ownerScope);
           const ownerRow = await opts.getKey(ownerScope);
           if (ownerRow) {
             brain = buildFromRow(ownerScope, guildId, ownerRow);
@@ -176,6 +185,7 @@ export function createBrainResolver(opts: {
           }
         }
       }
+      guildProvenance.set(guildId, consulted);
       if (!brain && opts.envKey && !opts.requireGuildKeys) {
         brain = new Brain(
           opts.envKey,
@@ -214,15 +224,23 @@ export function createBrainResolver(opts: {
 
   function invalidate(scopeId: string): void {
     cache.delete(scopeId);
-    for (const k of cache.keys()) {
-      if (k.startsWith("user:") && (k.includes(scopeId) || scopeId.startsWith("dm:"))) {
+    guildProvenance.delete(scopeId);
+    for (const k of [...cache.keys()]) {
+      if (!k.startsWith("user:")) continue;
+      // user cache keys look like `user:<uid>@<meterScope>` — evict entries
+      // that are this user's key, or were metered against this scope.
+      if ((scopeId.startsWith("dm:") && k.startsWith(`user:${scopeId.slice(3)}@`)) || k.endsWith(`@${scopeId}`)) {
         cache.delete(k);
       }
     }
     if (scopeId.startsWith("dm:")) {
-      // A user updating their personal key may also unblock guilds where their companion is summoned.
-      for (const k of cache.keys()) {
-        if (!k.startsWith("dm:")) cache.delete(k);
+      // Evict only guild entries that consulted this user's key, or fell back
+      // to env/no-key (empty provenance) where the new key could now serve.
+      for (const [guild, prov] of guildProvenance) {
+        if (prov.size === 0 || prov.has(scopeId)) {
+          guildProvenance.delete(guild);
+          cache.delete(guild);
+        }
       }
     }
   }

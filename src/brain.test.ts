@@ -5,13 +5,15 @@ import type { MessageEvent } from "./types.js";
 
 const brain = new Brain("test-key", "test-model");
 
-// Fake LlmClient: canned responses.create output_text + chat.completions
-// choices. Captures params so tests can assert model/prompt plumbing.
-function stubClient(opts: { outputText?: string; chatContent?: string } = {}) {
+// Fake LlmClient: the same canned text serves both endpoints — Brain routes
+// every structured call through chat.completions now (Responses API isn't
+// universal across BYOK providers), and assertions read calls.chat.
+function stubClient(opts: { text?: string; outputText?: string; chatContent?: string } = {}) {
+  const text = opts.text ?? opts.chatContent ?? opts.outputText ?? "{}";
   const calls: { responses: any[]; chat: any[] } = { responses: [], chat: [] };
   const client: LlmClient = {
-    responses: { create: async (p: any) => { calls.responses.push(p); return { output_text: opts.outputText ?? "{}" }; } },
-    chat: { completions: { create: async (p: any) => { calls.chat.push(p); return { choices: [{ message: { content: opts.chatContent ?? "{}" } }] }; } } },
+    responses: { create: async (p: any) => { calls.responses.push(p); return { output_text: text }; } },
+    chat: { completions: { create: async (p: any) => { calls.chat.push(p); return { choices: [{ message: { content: text } }] }; } } },
   };
   return { client, calls };
 }
@@ -95,8 +97,8 @@ test("extractMemories: parses candidates + relationships from injected client", 
   assert.equal(result.memories.length, 1);
   assert.equal(result.memories[0].content, "Alice lives in Leeds");
   assert.equal(result.relationships[0].nature, "close friends");
-  assert.equal(calls.responses[0].model, "m");
-  assert.match(calls.responses[0].input, /Author ID: u1/);
+  assert.equal(calls.chat[0].model, "m");
+  assert.match(calls.chat[0].messages[0].content, /Author ID: u1/);
 });
 
 test("extractMemories: empty model output yields empty arrays, not a crash", async () => {
@@ -220,8 +222,8 @@ test("reply: parses {text, end_conversation} via strict json_schema on the plain
   const b = new Brain("k", "m", undefined, client);
   const r = await b.reply(msg("ok cool thanks that's all"), [], []);
   assert.deepEqual(r, { text: "later then", endConversation: true });
-  assert.equal(calls.responses[0].text.format.type, "json_schema");
-  assert.deepEqual(calls.responses[0].text.format.schema.required, ["text", "end_conversation"]);
+  assert.equal(calls.chat[0].response_format.json_schema.name, "reply");
+  assert.deepEqual(calls.chat[0].response_format.json_schema.schema.required, ["text", "end_conversation"]);
 });
 
 test("reply: unparseable structured output goes silent rather than leaking internals", async () => {

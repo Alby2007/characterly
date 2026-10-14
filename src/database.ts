@@ -204,13 +204,6 @@ export class MemoryStore {
     this.settingsCache.delete(guildId);
   }
 
-  /** Per-server proactive opt-in — independent of memory/reply pause. */
-  async setProactive(guildId: string, enabled: boolean, defaultRetentionDays = 30): Promise<void> {
-    await this.ensureSettings(guildId, defaultRetentionDays);
-    await this.sql`UPDATE server_settings SET proactive_enabled = ${enabled ? 1 : 0} WHERE guild_id = ${guildId}`;
-    this.settingsCache.delete(guildId);
-  }
-
   /** Channels the bot treats as fully invisible — no archive, replies, or
    * member writes there, and server-build scans skip them. */
   async setIgnoredChannels(guildId: string, channelIds: string[], defaultRetentionDays = 30): Promise<void> {
@@ -328,21 +321,21 @@ export class MemoryStore {
   // key_enc is AES-256-GCM ciphertext (secrets.ts) — never log or return it to
   // Discord. key_hint (last-4) is the only plaintext remnant, for masked display.
 
-  async getGuildKey(guildId: string): Promise<{ keyEnc: Buffer; keyHint: string; baseUrl: string | null; validatedAt: string | null } | null> {
-    const rows = await this.sql<Array<{ key_enc: Buffer; key_hint: string; base_url: string | null; validated_at: Date | string | null }>>`
-      SELECT key_enc, key_hint, base_url, validated_at FROM guild_keys WHERE guild_id = ${guildId}
+  async getGuildKey(guildId: string): Promise<{ keyEnc: Buffer; keyHint: string; baseUrl: string | null; model: string | null; validatedAt: string | null } | null> {
+    const rows = await this.sql<Array<{ key_enc: Buffer; key_hint: string; base_url: string | null; model: string | null; validated_at: Date | string | null }>>`
+      SELECT key_enc, key_hint, base_url, model, validated_at FROM guild_keys WHERE guild_id = ${guildId}
     `;
     const r = rows[0];
-    return r ? { keyEnc: r.key_enc, keyHint: r.key_hint, baseUrl: r.base_url, validatedAt: r.validated_at ? ts(r.validated_at) : null } : null;
+    return r ? { keyEnc: r.key_enc, keyHint: r.key_hint, baseUrl: r.base_url, model: r.model, validatedAt: r.validated_at ? ts(r.validated_at) : null } : null;
   }
 
-  async upsertGuildKey(guildId: string, key: { keyEnc: Buffer; keyHint: string; baseUrl: string | null; validatedAt: string | null }): Promise<void> {
+  async upsertGuildKey(guildId: string, key: { keyEnc: Buffer; keyHint: string; baseUrl: string | null; model?: string | null; validatedAt: string | null }): Promise<void> {
     await this.sql`
-      INSERT INTO guild_keys (guild_id, key_enc, key_hint, base_url, validated_at)
-      VALUES (${guildId}, ${key.keyEnc}, ${key.keyHint}, ${key.baseUrl}, ${key.validatedAt})
+      INSERT INTO guild_keys (guild_id, key_enc, key_hint, base_url, model, validated_at)
+      VALUES (${guildId}, ${key.keyEnc}, ${key.keyHint}, ${key.baseUrl}, ${key.model ?? null}, ${key.validatedAt})
       ON CONFLICT (guild_id) DO UPDATE
       SET key_enc = ${key.keyEnc}, key_hint = ${key.keyHint}, base_url = ${key.baseUrl},
-          validated_at = ${key.validatedAt}, updated_at = now()
+          model = ${key.model ?? null}, validated_at = ${key.validatedAt}, updated_at = now()
     `;
   }
 
@@ -1926,12 +1919,18 @@ export class MemoryStore {
 
   /** Opt-out scrub: blank the verbatim text columns on every evidence row
    * citing this subject's memories — immediately, not at retention expiry.
-   * Metadata (type, effect, reason, observed_at) stays for the audit trail. */
+   * Metadata (type, effect, reason, observed_at) stays for the audit trail.
+   * Also covers evidence this subject AUTHORED: their verbatim words must
+   * come off other members' memories too, not just their own. */
   async scrubEvidenceFor(guildId: string, subjectId: string): Promise<number> {
     const result = await this.sql`
       UPDATE memory_evidence SET quote = '', message_content_snapshot = ''
       WHERE (quote <> '' OR message_content_snapshot <> '')
-      AND memory_id IN (SELECT id FROM memories WHERE guild_id = ${guildId} AND subject_id = ${subjectId})
+      AND memory_id IN (SELECT id FROM memories WHERE guild_id = ${guildId})
+      AND (
+        author_id = ${subjectId}
+        OR memory_id IN (SELECT id FROM memories WHERE guild_id = ${guildId} AND subject_id = ${subjectId})
+      )
     `;
     return result.count;
   }

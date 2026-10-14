@@ -17,12 +17,14 @@ import type { MessageEvent } from "./types.js";
 // ── Config ────────────────────────────────────────────────────────────────────
 const DISCORD_BATCH_SIZE = 100;     // Discord API max per fetch
 const LLM_BATCH_SIZE = 5;           // Messages per LLM call (batched extraction)
-// qwen3.8-27b gets 60 RPM on Groq free tier — 2x the rate limit of gpt-oss-20b.
-// Combined with 5-msg batching this gives ~10x effective throughput vs single-message calls.
-const BATCH_MODEL = config.ingestModel ?? "qwen/qwen3.8-27b";
+// No baked-in model fallback — the Brain's provider-detected model is the
+// default; operators wanting a specific ingest model set INGEST_MODEL
+// (e.g. qwen3.8-27b gets 60 RPM on Groq free tier — 2x gpt-oss-20b, and
+// combined with 5-msg batching that's ~10x throughput vs single calls).
+const BATCH_MODEL = config.ingestModel;
 const BATCH_DELAY_MS = 3000;        // Delay between batch LLM calls
 const EVENT_DELAY_MS = 3000;        // Pipeline LLM calls get the same pacing
-const TRIAGE_MODEL = config.triageModel ?? "qwen/qwen3.8-27b";
+const TRIAGE_MODEL = config.triageModel;
 const TRIAGE_BATCH_SIZE = 10;       // Messages per triage call
 const TRIAGE_DELAY_MS = 1500;       // Triage prompts are small — 40 RPM is safe
 

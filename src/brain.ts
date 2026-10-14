@@ -11,9 +11,9 @@ import { inc } from "./metrics.js";
 // internal lookup tools render people/pairs identically to the prompt sections.
 export { formatPairContext, formatReplyProfile };
 
-// Minimal client seam — anything exposing the two call shapes Brain uses
-// (responses.create + chat.completions.create) can drive it, which is what
-// makes extraction/verification/contest testable without a live API.
+// Minimal client seam — chat.completions.create drives every call; the
+// responses field stays on the interface because meteredClient wraps both
+// sides of an OpenAI client (and external code may still hold that shape).
 export interface LlmClient {
   responses: { create: (params: any) => Promise<any> };
   chat: { completions: { create: (params: any) => Promise<any> } };
@@ -72,6 +72,57 @@ export class Brain {
     this.client = client ?? new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
   }
 
+  // ── Structured JSON via Chat Completions ────────────────────────────────────
+  // BYOK keys can point at any OpenAI-compatible provider, and only OpenAI/
+  // Groq/xAI implement the Responses API — OpenRouter and most self-hosted
+  // servers (Ollama, vLLM, LM Studio) expose chat.completions only. Every
+  // structured call therefore goes through this seam: strict json_schema
+  // first, then a bare retry when the provider rejects response_format.
+  private looksLikeFormatRejection(err: unknown): boolean {
+    const status = (err as { status?: number }).status;
+    if (status === 400 || status === 404 || status === 415 || status === 422) return true;
+    return /response_format|json_schema|structured output|not supported/i.test((err as Error)?.message ?? "");
+  }
+
+  private async chatContent(opts: {
+    model?: string; prompt: string; maxTokens?: number; schemaName?: string; schema?: object;
+    temperature?: number; reasoningEffort?: "low";
+  }): Promise<string> {
+    const messages = [{ role: "user" as const, content: opts.prompt }];
+    const base = {
+      model: opts.model ?? this.model,
+      messages,
+      ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+      ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),
+      ...(opts.reasoningEffort ? { reasoning_effort: opts.reasoningEffort } : {}),
+    };
+    if (opts.schema) {
+      try {
+        const res = await this.client.chat.completions.create({
+          ...base,
+          response_format: { type: "json_schema", json_schema: { name: opts.schemaName ?? "result", strict: true, schema: opts.schema } },
+        } as never);
+        return res.choices[0]?.message?.content ?? "";
+      } catch (err) {
+        if (!this.looksLikeFormatRejection(err)) throw err;
+        // Provider can't do structured output — fall through to the bare call
+        // and let the prompt's schema description carry the contract.
+      }
+    }
+    const res = await this.client.chat.completions.create(base);
+    return res.choices[0]?.message?.content ?? "";
+  }
+
+  private async chatJson<T>(opts: {
+    model?: string; prompt: string; name: string; schema: object; maxTokens?: number;
+  }): Promise<T> {
+    const raw = await this.chatContent({ ...opts, schemaName: opts.name });
+    // Models that can't do response_format may still wrap JSON in prose or a
+    // fence — extract the outermost object before parsing.
+    const match = raw.match(/\{[\s\S]*\}/);
+    return JSON.parse(match ? match[0] : raw) as T;
+  }
+
   decide(event: MessageEvent, elapsedSinceLastSpokeMs: number, engaged: boolean, botShare: number, threshold = 0.7): Decision {
     const reasons: string[] = [];
     let score = 0.05;
@@ -112,11 +163,11 @@ export class Brain {
     // words — evidenceType must reflect that (observed/inferred, never stated),
     // and depicted people are not attributed without textual naming.
     const imgContext = imageContext ? `\n\n${imageContext}. This is your own observation of an attachment the author posted, not the author's words — prefer direct_observation or uncertain_inference over explicit_fact, and do not attribute depicted people to named individuals without textual naming.` : "";
-    const response = await this.client.responses.create({
-      model: this.model,
-      max_output_tokens: 2048, // extraction output is bounded — cap spend on injected verbosity
-      input: `Extract only durable, useful memories from this Discord message. Do not infer sensitive traits, diagnoses, private information, or insults. A single casual message rarely merits memory. Classify the language as evidenceType and its relation to the proposed memory as effect, but do not decide lifecycle transitions. Provide language interpretation only; confidence, importance, and explicitness will be calculated deterministically by the database.\n\nsubjectId rules: use the Author ID below when the memory is about the message author. If the memory is about a different person mentioned in the message, use their Discord user ID if it appears in the message as a mention (<@ID>). If the subject cannot be resolved to a Discord user ID, use "unknown". Never use descriptive labels or slugs.\nsubjectName: the subject's name exactly as written in the message (empty string if none).\n\nQuoted text: if the message's first-person text describes someone other than the author — e.g. "I am <other person's name>", a pasted bio or profile card, or clearly copied/generated text — do not attribute it to the author. Attribute it to the named person via subjectName, or skip it entirely if it reads as pasted content rather than a genuine statement.\n\nAlso emit relationship assertions when the message describes a durable interpersonal dynamic between two people (friendship, conflict, dating, rivalry). For each: subjectName (empty string = the message author), otherName, nature (e.g. "close friends", "antagonizes", "dating"), valence from -1 (hostile) to +1 (close), and a short reason.${vocabContext}\n\nAuthor ID: ${event.authorId}\nMessage: ${event.content}${replyContext}${noteContext}${imgContext}`,
-      text: { format: { type: "json_schema", name: "memory_candidates", strict: true, schema: {
+    const raw = await this.chatJson<{ memories?: MemoryCandidate[]; relationships?: ExtractionResult["relationships"] }>({
+      maxTokens: 2048, // extraction output is bounded — cap spend on injected verbosity
+      prompt: `Extract only durable, useful memories from this Discord message. Do not infer sensitive traits, diagnoses, private information, or insults. A single casual message rarely merits memory. Classify the language as evidenceType and its relation to the proposed memory as effect, but do not decide lifecycle transitions. Provide language interpretation only; confidence, importance, and explicitness will be calculated deterministically by the database.\n\nsubjectId rules: use the Author ID below when the memory is about the message author. If the memory is about a different person mentioned in the message, use their Discord user ID if it appears in the message as a mention (<@ID>). If the subject cannot be resolved to a Discord user ID, use "unknown". Never use descriptive labels or slugs.\nsubjectName: the subject's name exactly as written in the message (empty string if none).\n\nQuoted text: if the message's first-person text describes someone other than the author — e.g. "I am <other person's name>", a pasted bio or profile card, or clearly copied/generated text — do not attribute it to the author. Attribute it to the named person via subjectName, or skip it entirely if it reads as pasted content rather than a genuine statement.\n\nAlso emit relationship assertions when the message describes a durable interpersonal dynamic between two people (friendship, conflict, dating, rivalry). For each: subjectName (empty string = the message author), otherName, nature (e.g. "close friends", "antagonizes", "dating"), valence from -1 (hostile) to +1 (close), and a short reason.${vocabContext}\n\nAuthor ID: ${event.authorId}\nMessage: ${event.content}${replyContext}${noteContext}${imgContext}\n\nRespond with a JSON object: {"memories": [{"subjectId","subjectName","kind","content","reason","evidenceType","effect"}], "relationships": [{"subjectName","otherName","nature","valence","reason"}]}`,
+      name: "memory_candidates",
+      schema: {
         type: "object", properties: {
           memories: { type: "array", items: { type: "object", properties: {
             subjectId: { type: "string" }, subjectName: { type: "string" }, kind: { type: "string", enum: ["person_fact", "person_preference", "server_lore", "episode"] }, content: { type: "string" }, reason: { type: "string" }, evidenceType: { type: "string", enum: ["explicit_fact", "clear_preference", "direct_observation", "reported_by_other", "sarcasm_or_joke", "uncertain_inference", "correction"] }, effect: { type: "string", enum: ["support", "contradict", "correct", "context"] }
@@ -125,9 +176,8 @@ export class Brain {
             subjectName: { type: "string" }, otherName: { type: "string" }, nature: { type: "string" }, valence: { type: "number" }, reason: { type: "string" }
           }, required: ["subjectName", "otherName", "nature", "valence", "reason"], additionalProperties: false } }
         }, required: ["memories", "relationships"], additionalProperties: false
-      } } }
+      },
     });
-    const raw = JSON.parse(response.output_text) as { memories?: MemoryCandidate[]; relationships?: ExtractionResult["relationships"] };
     return { memories: raw.memories ?? [], relationships: raw.relationships ?? [] };
   }
 
@@ -173,15 +223,14 @@ export class Brain {
   }
 
   async correctMemory(authorId: string, statement: string, existing: Memory[]): Promise<{ replacement: MemoryCandidate; supersedes: number[] }> {
-    const response = await this.client.responses.create({
-      model: this.model,
-      input: `A Discord user is correcting what a bot remembers about them. Convert the correction into exactly one durable replacement memory. Select only existing memory IDs that are actually contradicted by the correction; return none if it merely adds information. Provide language interpretation only; confidence, importance, and explicitness will be calculated deterministically by the database.\n\nUser ID: ${authorId}\nCorrection: ${statement}\nExisting memories: ${existing.map(m => `#${m.id}: ${m.content}`).join("\n")}`,
-      text: { format: { type: "json_schema", name: "memory_correction", strict: true, schema: { type: "object", properties: {
+    return this.chatJson<{ replacement: MemoryCandidate; supersedes: number[] }>({
+      prompt: `A Discord user is correcting what a bot remembers about them. Convert the correction into exactly one durable replacement memory. Select only existing memory IDs that are actually contradicted by the correction; return none if it merely adds information. Provide language interpretation only; confidence, importance, and explicitness will be calculated deterministically by the database.\n\nUser ID: ${authorId}\nCorrection: ${statement}\nExisting memories: ${existing.map(m => `#${m.id}: ${m.content}`).join("\n")}\n\nRespond with a JSON object: {"replacement": {"subjectId","kind","content","reason"}, "supersedes": [memory IDs]}`,
+      name: "memory_correction",
+      schema: { type: "object", properties: {
         replacement: { type: "object", properties: { subjectId: { type: "string" }, kind: { type: "string", enum: ["person_fact", "person_preference", "server_lore", "episode"] }, content: { type: "string" }, reason: { type: "string" } }, required: ["subjectId", "kind", "content", "reason"], additionalProperties: false },
         supersedes: { type: "array", items: { type: "number" } }
-      }, required: ["replacement", "supersedes"], additionalProperties: false } } }
+      }, required: ["replacement", "supersedes"], additionalProperties: false },
     });
-    return JSON.parse(response.output_text) as { replacement: MemoryCandidate; supersedes: number[] };
   }
 
   /**
@@ -199,19 +248,18 @@ export class Brain {
       `Event #${e.id} — "${e.title}"\nSummary: ${e.summary}\nRecent messages:\n${e.recentMessages.map(m => `  ${m.authorName}: ${m.content}`).join("\n")}`
     ).join("\n\n");
 
-    const response = await this.client.responses.create({
-      model: this.model,
-      input: `You are deciding whether a Discord message continues one of the currently open event windows, starts a fresh event, references a past event without extending it, or bridges multiple events.\n\nNew message\nAuthor: ${event.authorName}\nContent: ${event.content}\n\nOpen event windows:\n${eventsText || "None"}\n\nRespond with your decision.`,
-      text: { format: { type: "json_schema", name: "continuity_decision", strict: true, schema: {
+    const raw = await this.chatJson<{ action: string; eventId: number; eventIds: number[]; reason: string }>({
+      prompt: `You are deciding whether a Discord message continues one of the currently open event windows, starts a fresh event, references a past event without extending it, or bridges multiple events.\n\nNew message\nAuthor: ${event.authorName}\nContent: ${event.content}\n\nOpen event windows:\n${eventsText || "None"}\n\nRespond with a JSON object: {"action": "attach"|"new"|"reference"|"bridge", "eventId": number, "eventIds": [number], "reason": string}`,
+      name: "continuity_decision",
+      schema: {
         type: "object", properties: {
           action: { type: "string", enum: ["attach", "new", "reference", "bridge"] },
           eventId: { type: "number" },
           eventIds: { type: "array", items: { type: "number" } },
           reason: { type: "string" }
         }, required: ["action", "eventId", "eventIds", "reason"], additionalProperties: false
-      } } }
+      },
     });
-    const raw = JSON.parse(response.output_text) as { action: string; eventId: number; eventIds: number[]; reason: string };
     if (raw.action === "attach" && raw.eventId > 0) return { action: "attach", eventId: raw.eventId };
     if (raw.action === "reference" && raw.eventId > 0) return { action: "reference", eventId: raw.eventId };
     if (raw.action === "bridge" && raw.eventIds?.length) return { action: "bridge", eventIds: raw.eventIds };
@@ -228,10 +276,14 @@ export class Brain {
     memoryCount: number;
   }): Promise<{ significance: number; tier: "low" | "medium" | "high"; tone: string; narrativeComplete: boolean; futureRelevant: boolean; title: string; summary: string }> {
     const messagesText = cluster.messages.map(m => `[${m.createdAt}] ${m.authorName}: ${m.content}`).join("\n");
-    const response = await this.client.responses.create({
-      model: this.model,
-      input: `Evaluate this Discord conversation cluster and decide how significant it is as a shared event.\n\nParticipants: ${cluster.participants.join(", ")}\nMemories generated: ${cluster.memoryCount}\n\nMessages:\n${messagesText}\n\nProvide your evaluation.`,
-      text: { format: { type: "json_schema", name: "event_classification", strict: true, schema: {
+    const raw = await this.chatJson<{
+      significance: number; tier: string; tone: string;
+      narrativeComplete: boolean | string; futureRelevant: boolean | string;
+      title: string; summary: string;
+    }>({
+      prompt: `Evaluate this Discord conversation cluster and decide how significant it is as a shared event.\n\nParticipants: ${cluster.participants.join(", ")}\nMemories generated: ${cluster.memoryCount}\n\nMessages:\n${messagesText}\n\nRespond with a JSON object: {"significance": number, "tier": "low"|"medium"|"high", "tone": string, "narrativeComplete": boolean, "futureRelevant": boolean, "title": string, "summary": string}`,
+      name: "event_classification",
+      schema: {
         type: "object", properties: {
           significance: { type: "number" },
           tier: { type: "string", enum: ["low", "medium", "high"] },
@@ -241,13 +293,8 @@ export class Brain {
           title: { type: "string" },
           summary: { type: "string" }
         }, required: ["significance", "tier", "tone", "narrativeComplete", "futureRelevant", "title", "summary"], additionalProperties: false
-      } } }
+      },
     });
-    const raw = JSON.parse(response.output_text) as {
-      significance: number; tier: string; tone: string;
-      narrativeComplete: boolean | string; futureRelevant: boolean | string;
-      title: string; summary: string;
-    };
     return {
       significance: raw.significance,
       tier: raw.tier as "low" | "medium" | "high",
@@ -266,9 +313,10 @@ export class Brain {
    */
   async extractMemoriesBatch(
     messages: Array<{ event: MessageEvent; replyToContent?: string; note?: string }>,
-    model: string,
+    model?: string,
     natureVocab?: string[]
   ): Promise<Map<string, ExtractionResult>> {
+    model ??= this.model;
     const vocabContext = natureVocab?.length
       ? ` For the nature field, prefer reusing one of these established labels when it fits: ${natureVocab.map(n => `"${n}"`).join(", ")}.`
       : "";
@@ -466,8 +514,9 @@ export class Brain {
    */
   async triageBatch(
     messages: Array<{ messageId: string; authorName: string; content: string }>,
-    model: string
+    model?: string
   ): Promise<Map<string, { durable: boolean; reason: string }>> {
+    model ??= this.model;
     const numbered = messages.map((m, i) =>
       `[${i}] ${m.authorName}: ${m.content.slice(0, 500)}`
     ).join("\n");
@@ -529,8 +578,9 @@ export class Brain {
       claim: string; sourceMessage: string;
       contextBefore?: Array<{ authorName: string; content: string }>;
     }>,
-    model: string
+    model?: string
   ): Promise<Map<number, { verdict: VerificationVerdict; reason: string }>> {
+    model ??= this.model;
     const numbered = items.map((m, i) => {
       const aka = m.authorNames?.length ? ` (aka: ${m.authorNames.join(", ")})` : "";
       const ctx = m.contextBefore?.length
@@ -596,8 +646,9 @@ export class Brain {
       nature: string; otherName: string; sourceMessage: string;
       contextBefore?: Array<{ authorName: string; content: string }>;
     }>,
-    model: string
+    model?: string
   ): Promise<Map<number, { verdict: "literal" | "joke" | "unclear" | "misattributed"; reason: string }>> {
+    model ??= this.model;
     if (!items.length) return new Map();
     const numbered = items.map((m, i) => {
       const aka = m.authorNames?.length ? ` (aka: ${m.authorNames.join(", ")})` : "";
@@ -649,8 +700,9 @@ export class Brain {
   async analyzePairWindow(
     aName: string, bName: string,
     exchanges: Array<{ authorName: string; content: string; createdAt: string }>,
-    model: string
+    model?: string
   ): Promise<{ confident: boolean; aToBNature: string; bToANature: string; valence: number; reason: string }> {
+    model ??= this.model;
     const lines = exchanges.map(e => `${e.authorName}: ${e.content.slice(0, 300)}`).join("\n");
     const response = await this.client.chat.completions.create({
       model,
@@ -693,8 +745,9 @@ export class Brain {
    */
   async dedupMemoriesBatch(
     members: Array<{ label: string; memories: Array<{ index: number; kind: string; status: string; content: string }> }>,
-    model: string
+    model?: string
   ): Promise<Array<{ indices: number[]; relation: "duplicate" | "contradicts"; reason: string }>> {
+    model ??= this.model;
     const sections = members.map(m =>
       `${m.label}:\n${m.memories.map(mm => `  [${mm.index}] (${mm.kind}, ${mm.status}) ${mm.content}`).join("\n")}`
     ).join("\n");
@@ -1089,14 +1142,20 @@ CONVERSATION CONTROL
       }
     }
 
-    const response = await this.client.responses.create({
+    // Plain structured reply — Chat Completions, not the Responses API, so
+    // BYOK providers without /responses (OpenRouter, most self-hosted
+    // servers) can still answer. A provider that rejects response_format
+    // falls back inside chatContent and parseReplyResult's salvage ladder
+    // decides what the raw text can yield.
+    const content = await this.chatContent({
       model: useModel,
+      prompt: `${persona}\n\n${situation}`,
       temperature: 0.9,
-      ...(lowReasoning ? { reasoning: { effort: "low" as const } } : {}),
-      text: { format: { type: "json_schema", name: "reply", strict: true, schema: REPLY_JSON_SCHEMA } },
-      input: `${persona}\n\n${situation}`
+      reasoningEffort: lowReasoning ? "low" : undefined,
+      schemaName: "reply",
+      schema: REPLY_JSON_SCHEMA,
     });
-    return parseReplyResult(response.output_text, true);
+    return parseReplyResult(content, true);
   }
 
   /**
@@ -1109,19 +1168,18 @@ CONVERSATION CONTROL
    * volunteering personal facts unprompted is off-limits.
    */
   async proposeGroundedAnswer(question: string, grounded: string[], minConfidence = 0.6, model?: string): Promise<{ answer: string; confidence: number } | null> {
-    const response = await this.client.responses.create({
-      model: model ?? this.model,
-      text: { format: { type: "json_schema", name: "grounded_answer", strict: true, schema: {
+    const r = await this.chatJson<{ answers: boolean; appropriate: boolean; answer: string; confidence: number }>({
+      model,
+      prompt: `A question was asked in a Discord server and nobody answered it. Below is grounded context from the server's own memory (server lore and events only — nothing personal about individual members).\n\nDecide:\n- answers: does the context actually answer the question? Tangentially related is not an answer.\n- appropriate: is it appropriate to volunteer this answer unprompted? Say no for rhetorical questions, inside jokes you can't verify, questions needing personal info about a member, or anything where guessing wrong would be worse than silence.\n- answer: if both are yes, a concise casual answer (one line, no preamble). Otherwise empty string.\n- confidence: 0..1 that the answer is correct and welcome.\n\nQuestion: ${question}\n\nGrounded context:\n${grounded.map((g, i) => `${i + 1}. ${g}`).join("\n")}\n\nRespond with a JSON object: {"answers": boolean, "appropriate": boolean, "answer": string, "confidence": number}`,
+      name: "grounded_answer",
+      schema: {
         type: "object", properties: {
           answers: { type: "boolean" },
           appropriate: { type: "boolean" },
           answer: { type: "string" },
           confidence: { type: "number" },
-        }, required: ["answers", "appropriate", "answer", "confidence"], additionalProperties: false }
-      } },
-      input: `A question was asked in a Discord server and nobody answered it. Below is grounded context from the server's own memory (server lore and events only — nothing personal about individual members).\n\nDecide:\n- answers: does the context actually answer the question? Tangentially related is not an answer.\n- appropriate: is it appropriate to volunteer this answer unprompted? Say no for rhetorical questions, inside jokes you can't verify, questions needing personal info about a member, or anything where guessing wrong would be worse than silence.\n- answer: if both are yes, a concise casual answer (one line, no preamble). Otherwise empty string.\n- confidence: 0..1 that the answer is correct and welcome.\n\nQuestion: ${question}\n\nGrounded context:\n${grounded.map((g, i) => `${i + 1}. ${g}`).join("\n")}`
+        }, required: ["answers", "appropriate", "answer", "confidence"], additionalProperties: false },
     });
-    const r = JSON.parse(response.output_text) as { answers: boolean; appropriate: boolean; answer: string; confidence: number };
     if (!r.answers || !r.appropriate || !r.answer.trim() || r.confidence < minConfidence) return null;
     return { answer: r.answer.trim().slice(0, 500), confidence: r.confidence };
   }

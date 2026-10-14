@@ -102,26 +102,26 @@ test("describeImage uses the override client when a second provider is passed", 
 });
 
 test("extractMemories carries the observation frame only when imageContext is passed", async () => {
-  const capture: { responses?: any } = {};
+  const capture: { chat?: any } = {};
   const brain = new Brain("k", "m", undefined, stubClient(capture));
   await brain.extractMemories(ev("look at this"), undefined, undefined,
     'Alice attached image — content observed by the bot: "a dog on a beach"');
-  const input: string = capture.responses.input;
+  const input: string = capture.chat.messages[0].content;
   assert.match(input, /content observed by the bot: "a dog on a beach"/);
   assert.match(input, /direct_observation or uncertain_inference/);
   assert.match(input, /not the author's words/);
 
-  const capture2: { responses?: any } = {};
+  const capture2: { chat?: any } = {};
   const brain2 = new Brain("k", "m", undefined, stubClient(capture2));
   await brain2.extractMemories(ev("plain text"));
-  assert.doesNotMatch(capture2.responses.input, /observed by the bot/);
+  assert.doesNotMatch(capture2.chat.messages[0].content, /observed by the bot/);
 });
 
 test("reply appends imageContext to the situation", async () => {
-  const capture: { responses?: any } = {};
+  const capture: { chat?: any } = {};
   const brain = new Brain("k", "m", undefined, stubClient(capture));
   await brain.reply(ev("wdyt of this"), [], [], [], [], "plain-model",
     false, "bot-1", undefined, undefined,
     'Alice attached image — content observed by the bot: "a dog on a beach"');
-  assert.match(capture.responses.input, /content observed by the bot: "a dog on a beach"/);
+  assert.match(capture.chat.messages[0].content, /content observed by the bot: "a dog on a beach"/);
 });

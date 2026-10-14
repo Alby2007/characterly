@@ -198,15 +198,14 @@ export async function sendCompanionSystemMessage(
   const candidate = channelOrGuild as {
     send?: (payload: unknown) => Promise<unknown>;
     systemChannel?: { send?: (payload: unknown) => Promise<unknown> };
-    channels?: { cache?: { find?: (fn: (c: any) => boolean) => { send?: (payload: unknown) => Promise<unknown> } | undefined } };
   };
+  // A channel is used directly; a bare Guild falls back to its system channel
+  // only — picking an arbitrary cached text channel could announce a companion
+  // in a private channel the owner can't see, which is worse than silence.
   if (typeof candidate.send === "function") {
     sendFn = candidate.send.bind(candidate);
   } else if (typeof candidate.systemChannel?.send === "function") {
     sendFn = candidate.systemChannel.send.bind(candidate.systemChannel);
-  } else if (typeof candidate.channels?.cache?.find === "function") {
-    const ch = candidate.channels.cache.find((c: any) => c?.type === ChannelType.GuildText && typeof c?.send === "function");
-    if (ch?.send) sendFn = ch.send.bind(ch);
   }
   if (!sendFn) return false;
 
@@ -215,8 +214,8 @@ export async function sendCompanionSystemMessage(
       .setTitle(`System · ${companion.name} left the chat`)
       .setDescription(`**${companion.name}** (${ownerName}'s companion) has stepped out of this server.`);
     if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
-    await sendFn({ embeds: [embed], allowedMentions: { parse: [] } }).catch(() => {});
-    return true;
+    try { await sendFn({ embeds: [embed], allowedMentions: { parse: [] } }); return true; }
+    catch { return false; }
   }
 
   const embed = new EmbedBuilder()
@@ -235,8 +234,8 @@ export async function sendCompanionSystemMessage(
       .setLabel("Awaken Your Own Companion")
       .setStyle(ButtonStyle.Primary),
   );
-  await sendFn({ embeds: [embed], components: [row], allowedMentions: { parse: [] } }).catch(() => {});
-  return true;
+  try { await sendFn({ embeds: [embed], components: [row], allowedMentions: { parse: [] } }); return true; }
+  catch { return false; }
 }
 
 export function findMutualGuilds(
@@ -303,9 +302,17 @@ export function buildUserApiKeyModal(customId: "user-key" | "setup-key" = "user-
     .setRequired(false)
     .setMaxLength(200)
     .setPlaceholder("Leave blank! Everything works automatically.");
+  const modelInput = new TextInputBuilder()
+    .setCustomId("model")
+    .setLabel("Model (blank = provider default)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false)
+    .setMaxLength(120)
+    .setPlaceholder("e.g. llama-3.3-70b — required for custom endpoints");
   modal.addComponents(
     new ActionRowBuilder<TextInputBuilder>().addComponents(keyInput),
     new ActionRowBuilder<TextInputBuilder>().addComponents(urlInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(modelInput),
   );
   return modal;
 }
@@ -472,7 +479,10 @@ export const commandDefinitions = [
     ] },
     { name: "avatar_url", description: "Public http(s) image URL when action is avatar", type: 3, required: false },
     { name: "user", description: "Member whose companion to inspect (card) or remove (kick)", type: 6, required: false }
-  ] }
+  ] },
+  // In a server this is the guild-scope key (admin only); in DMs it stores the
+  // user's personal key — the same modal backs both paths.
+  { name: "setup", description: "Connect an AI API key — server key for admins here, your personal key in DMs", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() }
 ];
 
 const confidence = (value: number | undefined) => {
@@ -494,7 +504,7 @@ const NO_KEY_MSG = "No AI key is configured yet — connect your personal API ke
 
 const SERVER_ONLY_COMMANDS = new Set([
   "memory-purge", "memory-pause", "memory-resume", "memory-settings",
-  "proactive", "status", "memory-triage", "server-build",
+  "status", "memory-triage", "server-build",
   "limits", "ignore-channel", "unignore-channel",
 ]);
 
@@ -865,13 +875,6 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     await store.setPaused(guildId, paused);
     return interaction.reply({ content: paused ? "Memory collection and bot replies are now paused for this server." : "Memory collection and bot replies are now enabled for this server.", ephemeral: true });
   }
-  if (interaction.commandName === "proactive") {
-    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can change proactive speaking.", ephemeral: true });
-    const enabled = interaction.options.getBoolean("enabled", true);
-    await store.setProactive(guildId, enabled);
-    const effective = enabled && config.proactiveEnabled;
-    return interaction.reply({ content: `Proactive speaking is now **${enabled ? "on" : "off"}** for this server.${enabled && !config.proactiveEnabled ? "\n\n⚠️ The global `PROACTIVE` env flag is off, so nothing will fire until that's enabled too." : effective ? " It will only answer unanswered questions it has grounded server lore for, at most a few times per day per channel." : ""}`, ephemeral: true });
-  }
   if (interaction.commandName === "status") {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can view bot status.", ephemeral: true });
     const { uptimeSec, counts } = metricsSnapshot();
@@ -1179,6 +1182,7 @@ export async function handleSetupModal(
 
   const key = interaction.fields.getTextInputValue("api-key").trim();
   const baseUrl = interaction.fields.getTextInputValue("base-url").trim() || null;
+  const modelInput = interaction.fields.getTextInputValue("model")?.trim() || null;
   await interaction.deferReply({ ephemeral: true });
   if (baseUrl && !isSafeUrl(baseUrl)) {
     return interaction.editReply("That base URL isn't allowed — it must be a public http(s) endpoint. Leave it blank to auto-detect your provider.");
@@ -1186,8 +1190,13 @@ export async function handleSetupModal(
   if (baseUrl && await resolvesToPrivateAddress(new URL(baseUrl).hostname)) {
     return interaction.editReply("That base URL isn't allowed — it resolves to a private or internal address. Leave it blank to auto-detect your provider.");
   }
+  // A custom endpoint without a model name can't be driven — the detected
+  // default almost certainly doesn't exist on their server.
+  if (baseUrl && !modelInput) {
+    return interaction.editReply("A custom Base URL needs a Model name too — the provider default won't exist on your server. Re-run and fill in Model (e.g. `llama-3.3-70b`).");
+  }
   try {
-    const detected = detectProviderFromKey(key, baseUrl, config.groqBaseUrl, config.model);
+    const detected = detectProviderFromKey(key, baseUrl, config.groqBaseUrl, config.model, modelInput);
     const result = await validate(key, detected.baseUrl, guardedLlmFetch);
     if (!result.ok && "status" in result) {
       return interaction.editReply("That key was rejected by the provider (auth failed) — nothing was stored. Check the key and try again.");
@@ -1196,6 +1205,7 @@ export async function handleSetupModal(
       keyEnc: encryptSecret(key),
       keyHint: maskKey(key),
       baseUrl,
+      model: modelInput,
       validatedAt: result.ok ? new Date().toISOString() : null,
     };
     await store.upsertGuildKey(targetScopeId, keyRecord);
@@ -1458,13 +1468,22 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
           ephemeral: true,
         });
       }
+      // Awakening is permanent — never materialize a default companion off a
+      // stale or forged button. The click must be backed by a real draft with
+      // at least a name the user has seen in the preview card.
+      if (!existing || !existing.name?.trim()) {
+        return interaction.reply({
+          content: "There's no companion draft to awaken — start with a quick-start vibe or the edit form first, then confirm the preview card.",
+          ephemeral: true,
+        });
+      }
       const activated = await store.activateCompanion(userId, ownerName, {
-        name: existing?.name?.trim() || "Echo",
-        voicePersona: existing?.voicePersona?.trim() || "Casual, sharp, observant, and grounded.",
-        coreTraits: existing?.coreTraits?.length ? existing.coreTraits : ["observant", "loyal", "witty"],
-        ownerDynamic: existing?.ownerDynamic?.trim() || "Close confidant and ride-or-die friend",
-        backstory: existing?.backstory ?? "",
-        avatarUrl: existing?.avatarUrl ?? null,
+        name: existing.name.trim(),
+        voicePersona: existing.voicePersona?.trim() || "Casual, sharp, observant, and grounded.",
+        coreTraits: existing.coreTraits?.length ? existing.coreTraits : ["observant", "loyal", "witty"],
+        ownerDynamic: existing.ownerDynamic?.trim() || "Close confidant and ride-or-die friend",
+        backstory: existing.backstory ?? "",
+        avatarUrl: existing.avatarUrl ?? null,
       });
       inc("companion.awakened");
       const payload = buildAwakenedCompanionPayload(
@@ -1549,8 +1568,18 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       if (!companion || companion.onboardingState !== "active") {
         return interaction.reply({ content: "Awaken your companion first before summoning.", ephemeral: true });
       }
+      // Buttons live in DMs and can be clicked long after they were rendered —
+      // re-check that the owner is actually a member of the target guild right
+      // now before summonCompanion auto-opts them in there.
+      const targetGuild = interaction.client.guilds.cache.get(targetGuildId);
+      if (!targetGuild) {
+        return interaction.reply({ content: "I can't see that server anymore.", ephemeral: true });
+      }
+      const member = await targetGuild.members.fetch(userId).catch(() => null);
+      if (!member) {
+        return interaction.reply({ content: `You've left **${targetGuild.name}** — rejoin it before summoning ${companion.name} there.`, ephemeral: true });
+      }
       await store.summonCompanion(targetGuildId, companion.id, userId, ownerName);
-      const targetGuild = (interaction.client?.guilds?.cache as Map<string, any> | undefined)?.get?.(targetGuildId);
       await sendCompanionSystemMessage(targetGuild, companion, ownerName, "joined");
       const guildName = targetGuild?.name ?? "the server";
       return interaction.reply({

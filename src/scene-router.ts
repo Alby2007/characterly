@@ -74,7 +74,10 @@ export function selectCompanionForTurn(
   // total companion traffic vs human traffic in the channel.
   convo.noteMessage(floorKey, fromCompanion, event.authorId);
 
-  // Hard cap on consecutive companion-to-companion turns — deterministic loop guard.
+  // Hard cap on consecutive companion-to-companion turns — deterministic loop
+  // guard. chainDepth counts c2c hops only (the human-triggered reply records
+  // 0), so MAX=2 permits human→A, A→B, B→A and blocks hop 3 — matching the
+  // documented "max consecutive companion-to-companion replies".
   if (fromCompanion && chainDepth >= opts.maxChainDepth) {
     inc("scene.chain_capped");
     return null;
@@ -180,7 +183,13 @@ export function selectCompanionForTurn(
       reasons.push("spoke recently");
     }
 
-    const floorShare = convo.bystanderVoices(floorKey) > 0 ? convo.botShare(floorKey) : 0;
+    // Floor voices are recorded on the shared channel key, but conversation
+    // participants enroll on this companion's key — a participant of THIS
+    // conversation is a floor speaker, not a bystander. Without the exclusion
+    // every engaged 1:1 counts its own human as floor traffic and the
+    // companion mutes itself mid-conversation.
+    const ownParticipants = engaged ? new Set(convo.participants(cKey)) : undefined;
+    const floorShare = convo.bystanderVoices(floorKey, ownParticipants) > 0 ? convo.botShare(floorKey) : 0;
     if (!isAddressed && engaged && floorShare >= 0.35) {
       score -= 0.25;
       reasons.push("holding the floor");

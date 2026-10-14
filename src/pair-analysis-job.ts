@@ -22,7 +22,7 @@ export interface PairAnalysisDeps {
   brainFor: (guildId: string) => Promise<Brain | null>;
   getAliases: (guildId: string) => Promise<AliasMap>;
   botId: string;
-  analysisModel: string;
+  analysisModel?: string;
 }
 
 export async function runPairAnalysisJob(

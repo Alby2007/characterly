@@ -175,7 +175,6 @@ test("admin commands refuse non-admin callers", async () => {
       ["status", {}],
       ["memory-triage", {}],
       ["memory-settings", {}],
-      ["proactive", { enabled: true }],
     ] as const) {
       const { interaction, replies } = stubCommand({ commandName, userId: "u-stranger", options });
       await handleMemoryCommand(interaction, store, brainFor);
@@ -193,21 +192,6 @@ test("/memory-pause flips both settings flags for admins only", async () => {
     const settings = await store.settings("g1");
     assert.equal(settings.memoryEnabled, 0);
     assert.equal(settings.replyEnabled, 0);
-  } finally { await sql.end(); }
-});
-
-test("/proactive persists the per-server flag, defaults off", async () => {
-  const sql = makeTestSql();
-  try {
-    const { store } = await makeStore(sql);
-    // Default must be OFF — proactive is opt-in per server, unlike replies.
-    assert.equal((await store.settings("g1")).proactiveEnabled, 0);
-    const { interaction } = stubCommand({ commandName: "proactive", userId: "u-admin", admin: true, options: { enabled: true } });
-    await handleMemoryCommand(interaction, store, brainFor);
-    assert.equal((await store.settings("g1")).proactiveEnabled, 1);
-    const { interaction: off } = stubCommand({ commandName: "proactive", userId: "u-admin", admin: true, options: { enabled: false } });
-    await handleMemoryCommand(off, store, brainFor);
-    assert.equal((await store.settings("g1")).proactiveEnabled, 0);
   } finally { await sql.end(); }
 });
 
@@ -482,7 +466,7 @@ test("/privacy status reflects the effective posture, not just memory_enabled", 
     const noKey = stubCommand({ commandName: "privacy", userId: "u-x" });
     await handleMemoryCommand(noKey.interaction, store, async () => null);
     const fields = JSON.stringify(noKey.replies[0].embeds);
-    assert.match(fields, /no LLM key configured/i);
+    assert.match(fields, /no active companion key/i);
     assert.doesNotMatch(fields, /Observing/);
 
     // Resumed WITH a key → the full observing message.
@@ -617,6 +601,6 @@ test("/status renders the LLM usage panel", async () => {
     assert.match(desc, /LLM usage/i);
     assert.match(desc, /500/);
     assert.match(desc, /queue/i);
-    assert.match(desc, /LLM key/i);
+    assert.match(desc, /companions/i);
   } finally { await sql.end(); }
 });

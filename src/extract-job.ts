@@ -38,8 +38,12 @@ export interface ExtractJobDeps {
   botId: string;
   visionModel?: string;
   visionClient?: LlmClient;
-  contestModel: string;
+  contestModel?: string;
   imageMaxBytes: number;
+  /** DM scopes have no server_settings cap of their own — vision calls made
+   * inside a dm:<id> job meter against this instead of the auto-created
+   * default, matching the live DM path's DM_LLM_DAILY_CAP. */
+  dmLlmDailyCap?: number;
   /** Alias/name lookups — index.ts serves these from its TTL cache; tests can
    * return a static map. */
   getAliases: (guildId: string) => Promise<AliasMap>;
@@ -93,7 +97,10 @@ export async function runExtractJob(payload: ExtractJobPayload, deps: ExtractJob
   let imageContext: string | undefined;
   if (images.length && deps.visionModel) {
     const vision = deps.visionClient
-      ? meteredClient(deps.visionClient, { guildId, store: deps.store, getCap: async () => (await deps.store.settings(guildId)).llmDailyCap })
+      ? meteredClient(deps.visionClient, { guildId, store: deps.store, getCap: async () =>
+          guildId.startsWith("dm:") && deps.dmLlmDailyCap !== undefined
+            ? deps.dmLlmDailyCap
+            : (await deps.store.settings(guildId)).llmDailyCap })
       : undefined;
     const descs = await Promise.all(images.map(async a => {
       try {

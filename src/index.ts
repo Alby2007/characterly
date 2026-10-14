@@ -4,6 +4,7 @@ import { config } from "./config.js";
 import { sql } from "./db.js";
 import { MemoryStore } from "./database.js";
 import { createBrainResolver, guardedLlmFetch } from "./brains.js";
+import type { Brain } from "./brain.js";
 import {
   buildApiKeyOnboardingPayload,
   buildAwakenedCompanionPayload,
@@ -28,7 +29,7 @@ import { enqueue, startWorker, FatalJobError, resumeGuildClaims } from "./jobs.j
 import { runPairAnalysisJob, type PairAnalysisPayload } from "./pair-analysis-job.js";
 import { buildPairContext, type ToolCtx } from "./lookup-tools.js";
 import { qualifyingImages, formatImageContext, IMAGE_MAX_PER_MESSAGE, type AttachmentMeta } from "./vision.js";
-import { withRetry } from "./retry.js";
+import { sleep, withRetry } from "./retry.js";
 import { inc } from "./metrics.js";
 import { logError, redactSecrets, registerSecret, validateLlmKey } from "./secrets.js";
 import { announceIfNeeded, handleGuildDelete } from "./guild-lifecycle.js";
@@ -237,7 +238,7 @@ async function applyRetention() {
         const batch = verifiable.slice(i, i + 10);
         const verdicts = await brain.verifyMemoriesBatch(
           batch.map(b => ({ memoryId: b.memoryId, authorName: b.authorName, authorNames: b.authorNames, claim: b.content, sourceMessage: b.sourceMessage, contextBefore: b.contextBefore })),
-          config.verifyModel ?? config.model
+          config.verifyModel
         );
         for (const b of batch) {
           const v = verdicts.get(b.memoryId);
@@ -265,7 +266,7 @@ async function applyRetention() {
         })));
         const verdicts = await brain.verifyRelationshipsBatch(
           items,
-          config.verifyModel ?? config.model
+          config.verifyModel
         );
         for (const b of batch) {
           const v = verdicts.get(b.observationId);
@@ -330,7 +331,7 @@ async function applyRetention() {
           label: m.label,
           memories: m.memories.map(mm => { const i = index++; idByIndex.set(i, mm.memoryId); return { index: i, kind: mm.kind, status: mm.status, content: mm.content }; }),
         }));
-        const groups = await brain.dedupMemoriesBatch(indexed, config.verifyModel ?? config.model);
+        const groups = await brain.dedupMemoriesBatch(indexed, config.verifyModel);
         const dupGroups = groups.filter(g => g.relation === "duplicate")
           .map(g => ({ ids: g.indices.map(i => idByIndex.get(i)).filter((x): x is number => x !== undefined), reason: g.reason }));
         const { merged, skipped } = await store.applyDedupGroups(guild.id, dupGroups);
@@ -421,7 +422,7 @@ async function sweepMissedSignals(windowMs: number) {
         try {
           const verdicts = await withRetry(() => brain.triageBatch(
             batch.map(b => ({ messageId: b.id, authorName: b.authorName, content: b.content })),
-            config.triageModel ?? config.model
+            config.triageModel
           ), 3);
           for (const item of batch) {
             const durable = verdicts.get(item.id)?.durable ?? false;
@@ -515,20 +516,25 @@ const LOOKUP_TTL_MS = 5 * 60_000;
 // BudgetExceeded on the reply path → one short notice per channel per UTC
 // day: silence on a direct request is rude, spam is worse. In-memory —
 // a restart re-noticing once is harmless.
+// Bounded once-per-day set — keys carry a date suffix so they never expire
+// naturally; cap at a few hundred channels and evict insertion-oldest.
+const NOTICE_CAP = 512;
+function noticeOnce(set: Set<string>, channelId: string): boolean {
+  const key = `${channelId}:${new Date().toISOString().slice(0, 10)}`;
+  if (set.has(key)) return false;
+  if (set.size >= NOTICE_CAP) set.delete(set.values().next().value!);
+  set.add(key);
+  return true;
+}
+
 const budgetNotices = new Set<string>();
 function budgetNoticeOnce(channelId: string): boolean {
-  const key = `${channelId}:${new Date().toISOString().slice(0, 10)}`;
-  if (budgetNotices.has(key)) return false;
-  budgetNotices.add(key);
-  return true;
+  return noticeOnce(budgetNotices, channelId);
 }
 
 const noCompanionNotices = new Set<string>();
 function noCompanionNoticeOnce(channelId: string): boolean {
-  const key = `${channelId}:${new Date().toISOString().slice(0, 10)}`;
-  if (noCompanionNotices.has(key)) return false;
-  noCompanionNotices.add(key);
-  return true;
+  return noticeOnce(noCompanionNotices, channelId);
 }
 
 async function guildLookups(guildId: string): Promise<{ map: AliasMap; names: Map<string, string> }> {
@@ -555,8 +561,9 @@ const extractDeps = {
   get botId() { return client.user!.id; },
   get visionModel() { return config.visionModel; },
   visionClient,
-  get contestModel() { return config.contestModel ?? config.model; },
+  get contestModel() { return config.contestModel; },
   get imageMaxBytes() { return config.imageMaxBytes; },
+  get dmLlmDailyCap() { return config.dmLlmDailyCap; },
   getAliases: (guildId: string) => guildLookups(guildId).then(e => e.map),
   invalidateLookups: (guildId: string) => { lookupCache.delete(guildId); },
 };
@@ -568,7 +575,7 @@ const pairAnalysisDeps = {
   brainFor,
   getAliases: (guildId: string) => guildLookups(guildId).then(e => e.map),
   get botId() { return client.user!.id; },
-  get analysisModel() { return config.verifyModel ?? config.model; },
+  get analysisModel() { return config.verifyModel; },
 };
 
 async function handleDmMessage(
@@ -872,8 +879,23 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   if (!message.content.trim() && !images.length) return;
   if (config.guildId && message.guild.id !== config.guildId) return;
 
-  // Check whether this guild message was sent by one of our own companion webhooks.
-  const inboundWebhook = message.author.bot ? await store.getWebhookMessage(message.id) : null;
+  // Check whether this guild message was sent by one of our own companion
+  // webhooks. Discord can dispatch the MessageCreate echo before the send
+  // path's recordWebhookMessage commits, so a webhook-authored message that
+  // misses the first lookup gets a short grace window — otherwise it's
+  // archived under the webhook's bot id and the send path's recordMessage
+  // (ON CONFLICT DO NOTHING) can never correct the attribution.
+  let inboundWebhook: Awaited<ReturnType<typeof store.getWebhookMessage>> = null;
+  if (message.author.bot) {
+    // message.webhookId is only set on webhook echoes; a real bot user gets
+    // one lookup, a webhook gets three tries over ~500ms to outrun the race.
+    const tries = message.webhookId ? 3 : 1;
+    for (let i = 0; i < tries; i++) {
+      inboundWebhook = await store.getWebhookMessage(message.id);
+      if (inboundWebhook) break;
+      if (i + 1 < tries) await sleep(250);
+    }
+  }
   const senderCompanion = inboundWebhook ? await store.getCompanionById(inboundWebhook.companionId) : null;
 
   const event: MessageEvent = {
@@ -912,13 +934,8 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       components: [row],
       allowedMentions: { parse: [], repliedUser: false },
     }).catch(() => {});
-    if (!guildCompanions.length) return;
   }
-  if (!guildCompanions.length) return;
 
-  // Server plumbing resolves a Brain from summoned companions' owners (or env fallback).
-  const brain = await brainFor(event.guildId);
-  if (!brain) return;
   // Resolve the reply target first so it can be persisted with the raw message.
   const replyToId = message.reference?.messageId ?? undefined;
   // Companion webhook messages are already archived at send time; other bots
@@ -954,7 +971,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   const meteredVision = visionClient
     ? meteredClient(visionClient, { guildId: event.guildId, store, getCap: async () => (await store.settings(event.guildId, config.rawMessageRetentionDays)).llmDailyCap })
     : undefined;
-  const describeImages = (list: Array<AttachmentMeta & { contentType: string }>, activeBrain = brain) =>
+  const describeImages = (list: Array<AttachmentMeta & { contentType: string }>, activeBrain: Brain) =>
     Promise.all(list.map(async a => {
       try {
         const d = await activeBrain.describeImage({ url: a.url, contextText: event.content, maxBytes: config.imageMaxBytes }, config.visionModel!, meteredVision);
@@ -966,7 +983,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       }
     })).then(list => list.filter((d): d is string => !!d));
   let imageDescs: Promise<string[]> | undefined;
-  const getImageDescriptions = (activeBrain = brain) => (imageDescs ??= describeImages(images, activeBrain));
+  const getImageDescriptions = (activeBrain: Brain) => (imageDescs ??= describeImages(images, activeBrain));
   // Extraction, contest detection, and the event pipeline all defer to the
   // 'extract' job — the live path keeps only recordMessage/decide/reply so a
   // busy guild can't stack unbounded concurrent LLM calls inside one handler.
@@ -977,6 +994,14 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       inc("jobs.enqueued");
     } catch (error) { inc("jobs.enqueue_error"); logError("Extraction enqueue failed", error); }
   }
+
+  // Replies need summoned companions AND a resolvable brain — but archiving
+  // and extraction above do not, so an enabled guild with zero companions
+  // still builds memory (and /privacy's "Observing" status stays honest).
+  if (!settings.replyEnabled || !guildCompanions.length) return;
+  // Server plumbing resolves a Brain from summoned companions' owners (or env fallback).
+  const brain = await brainFor(event.guildId);
+  if (!brain) return;
 
   const selection = selectCompanionForTurn(
     {
@@ -1000,7 +1025,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     },
   );
 
-  if (!settings.replyEnabled || !selection) {
+  if (!selection) {
     return;
   }
 

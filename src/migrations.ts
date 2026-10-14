@@ -613,6 +613,20 @@ const migrations: Migration[] = [
       await sql`DROP TABLE IF EXISTS companions`;
     },
   },
+  // ── v22: per-key model override ─────────────────────────────────────────────
+  // A stored BYOK key can pin its own model — required for custom base URLs
+  // (a self-hosted server won't serve the operator's default model) and useful
+  // for OpenRouter users who want a different model than the detected default.
+  {
+    version: 22,
+    name: "v22_guild_keys_model",
+    up: async (sql) => {
+      await addColumn(sql, "guild_keys", "model TEXT");
+    },
+    down: async (sql) => {
+      await sql`ALTER TABLE guild_keys DROP COLUMN IF EXISTS model`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

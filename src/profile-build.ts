@@ -74,7 +74,7 @@ export async function runProfileBuild(
       }
     }
     try {
-      const results = await withRetry(() => brain.extractMemoriesBatch(batch, config.ingestModel ?? config.model, natureVocab), 3);
+      const results = await withRetry(() => brain.extractMemoriesBatch(batch, config.ingestModel, natureVocab), 3);
       for (const item of batch) {
         const result = results.get(item.event.messageId) ?? { memories: [], relationships: [] };
         const persisted = await persistExtraction(result, item.event, { store, aliases: aliasMap, isConsented });
@@ -95,7 +95,7 @@ export async function runProfileBuild(
       const batch = verifiable.slice(i, i + VERIFY_BATCH);
       const verdicts = await withRetry(() => brain.verifyMemoriesBatch(
         batch.map(b => ({ memoryId: b.memoryId, authorName: b.authorName, authorNames: b.authorNames, claim: b.content, sourceMessage: b.sourceMessage, contextBefore: b.contextBefore })),
-        config.verifyModel ?? config.ingestModel ?? config.model
+        config.verifyModel ?? config.ingestModel
       ), 3);
       for (const b of batch) {
         const v = verdicts.get(b.memoryId) ?? { verdict: "unclear" as const, reason: "omitted" };
@@ -108,7 +108,7 @@ export async function runProfileBuild(
   try { await store.recomputeEdges(guildId); } catch (error) { logError("Profile-build edge recompute failed", error); }
 
   try {
-    await withRetry(() => profileStore.buildProfiles(guildId, brain, store, eventStore, config.profileModel ?? config.model, { onlyUserId: userId }), 3);
+    await withRetry(() => profileStore.buildProfiles(guildId, brain, store, eventStore, config.profileModel, { onlyUserId: userId }), 3);
   } catch (error) { logError("Profile-build profile pass failed", error); }
 
   return { scanned: rows.length, memories, relationships };
