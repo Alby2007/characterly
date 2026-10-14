@@ -45,17 +45,20 @@ export async function runPairAnalysisJob(
   const brain = await deps.brainFor(guildId);
   if (!brain) { inc("jobs.dropped_dormant"); return; } // went dormant — drop, no retry
   const aliases = await deps.getAliases(guildId);
-  const exchanges = await deps.store.pairExchanges(guildId, aId, bId, aliases);
+  // Ignored channels are invisible — including rows archived before the flag —
+  // so the exchange window must not read them either.
+  const { ignoredChannels } = await deps.store.settings(guildId);
+  const exchanges = await deps.store.pairExchanges(guildId, aId, bId, aliases, 40, ignoredChannels);
   if (exchanges.length < 5) { inc("pair_analysis.thin"); return; } // window dried up since enqueue
   const [aName, bName] = await Promise.all([
     deps.store.displayNameFor(guildId, aId), deps.store.displayNameFor(guildId, bId),
   ]);
   const analysis = await brain.analyzePairWindow(aName, bName, exchanges, deps.analysisModel);
-  // The newest exchange's message id doubles as provenance — it keeps the
-  // (subject, other, message) dedup key and the audit trail honest.
+  // The newest exchange's message id doubles as provenance (recordWindowObservation
+  // prefixes it so the extracted-observation dedup key can't collide).
   await deps.store.recordWindowObservation(
     guildId, aId, bId, exchanges[exchanges.length - 1].id,
-    analysis.nature, analysis.valence, analysis.reason, analysis.confident
+    analysis.aToBNature, analysis.bToANature, analysis.valence, analysis.reason, analysis.confident
   );
   inc(analysis.confident ? "pair_analysis.recorded" : "pair_analysis.unconfident");
 }

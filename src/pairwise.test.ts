@@ -2,6 +2,7 @@ import "dotenv/config";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { makeTestSql, makeStore } from "./test-helpers.js";
+import { enqueue } from "./jobs.js";
 import { formatPairContext, formatReplyProfile } from "./brain.js";
 import type { MessageEvent, PairContext } from "./types.js";
 
@@ -327,7 +328,7 @@ test("edge summary is the modal nature over the recent window, not the latest", 
   } finally { await sql.end(); }
 });
 
-test("edge trend marks warming and cooling against the all-time average", async () => {
+test("edge trend compares the recent window against the prior window", async () => {
   const sql = makeTestSql();
   try {
     const { store } = await makeStore(sql);
@@ -408,8 +409,8 @@ test("recordWindowObservation feeds edges without a verification pass", async ()
   try {
     const { store } = await makeStore(sql);
     await store.setMemberOptIn("g1", "u1", true);
-    // Confident window read → literal verdict, symmetric rows, feeds edges.
-    await store.recordWindowObservation("g1", "u1", "u2", "mw1", "collaborates", 0.6, "ship code together every week", true);
+    // Confident window read → literal verdict, directed rows, feeds edges.
+    await store.recordWindowObservation("g1", "u1", "u2", "mw1", "collaborates", "collaborates", 0.6, "ship code together every week", true);
     await store.recomputeEdges("g1");
     // Symmetric rows → u1 sees the pair from both directions.
     const edges = await store.relationshipsFor("g1", "u1");
@@ -422,7 +423,7 @@ test("recordWindowObservation feeds edges without a verification pass", async ()
     assert.equal(obs[0].source, "pair_window");
 
     // Unconfident run → unclear marker: no edge feed, but the throttle timestamp lands.
-    await store.recordWindowObservation("g1", "u3", "u4", "mw2", "", 0, "too thin to judge", false);
+    await store.recordWindowObservation("g1", "u3", "u4", "mw2", "", "", 0, "too thin to judge", false);
     assert.ok(await store.lastPairWindowAt("g1", "u3", "u4"));
     await store.recomputeEdges("g1");
     assert.equal((await store.relationshipsFor("g1", "u3")).length, 0);
@@ -445,6 +446,93 @@ test("pairExchanges returns only messages where one party addressed the other", 
     assert.equal(ex[0].authorName, "Alice");
     // e4 doesn't address u2; e5 isn't authored by a party.
     assert.ok(!ex.some(e => e.id === "e4" || e.id === "e5"));
+  } finally { await sql.end(); }
+});
+
+test("interactionPairs excludes other bots and ignored channels — allowBotIds keeps ASB", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const aliases = new Map<string, string>();
+    // Numeric ids — interactionPairs matches real <@snowflake> mention syntax.
+    const [u1, u2, musicbot, asb] = ["111111", "222222", "333333", "444444"];
+    // member↔member pair (6 hits), member→musicbot pings (6), musicbot→member
+    // (6), member↔ASB (6), and 6 member↔member hits in an ignored channel.
+    for (let i = 0; i < 6; i++) {
+      await store.recordMessage(msg(`<@${u2}> ping ${i}`, { messageId: `mm${i}`, authorId: u1 }));
+      await store.recordMessage(msg(`<@${musicbot}> play ${i}`, { messageId: `mb${i}`, authorId: u1 }));
+      await store.recordMessage(msg(`<@${u1}> now playing ${i}`, { messageId: `bm${i}`, authorId: musicbot, authorName: "MusicBot" }), undefined, false, true);
+      await store.recordMessage(msg(`<@${asb}> hey ${i}`, { messageId: `ab${i}`, authorId: u1 }));
+      await store.recordMessage(msg(`<@${u2}> secret ${i}`, { messageId: `ig${i}`, authorId: u1, channelId: "c-ignored" }));
+    }
+    // ASB's own reply is archived with author_is_bot — that's how the query
+    // knows 444444 is a bot (archive-derived, not a registry lookup).
+    await store.recordMessage(msg("asb spoke", { messageId: "asbmsg", authorId: asb, authorName: "ASB" }), undefined, false, true);
+    // No allowlist: ASB is a bot author → its pair is excluded like any other.
+    let pairs = await store.interactionPairs("g1", aliases);
+    assert.deepEqual(pairs.map(p => `${p.aId}|${p.bId}:${p.count}`), [`${u1}|${u2}:12`]);
+    // allowBotIds re-admits ASB — the member↔ASB dynamic is real signal.
+    pairs = await store.interactionPairs("g1", aliases, { allowBotIds: [asb] });
+    assert.ok(pairs.some(p => p.aId === u1 && p.bId === asb && p.count === 6));
+    assert.ok(!pairs.some(p => p.aId === musicbot || p.bId === musicbot));
+    // Ignored-channel rows don't count even though they were archived.
+    pairs = await store.interactionPairs("g1", aliases, { excludeChannels: ["c-ignored"] });
+    assert.equal(pairs.find(p => p.aId === u1 && p.bId === u2)?.count, 6);
+  } finally { await sql.end(); }
+});
+
+test("pairExchanges honors the ignored-channel boundary", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    for (let i = 0; i < 3; i++) {
+      await store.recordMessage(msg(`<@u2> open ${i}`, { messageId: `o${i}`, authorId: "u1" }));
+      await store.recordMessage(msg(`<@u2> hidden ${i}`, { messageId: `h${i}`, authorId: "u1", channelId: "c-ignored" }));
+    }
+    const ex = await store.pairExchanges("g1", "u1", "u2", new Map(), 40, ["c-ignored"]);
+    assert.equal(ex.length, 3);
+    assert.ok(ex.every(e => e.id.startsWith("o")));
+  } finally { await sql.end(); }
+});
+
+test("recordWindowObservation survives an extracted observation on the same message", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    // Extraction already claimed this (subject, other, message) key — the
+    // window row must still land or the pair re-analyzes forever.
+    await store.recordRelationship("g1", "u1", "u2", "mw1", "u1", "friends", 0.5, "extracted");
+    await store.recordWindowObservation("g1", "u1", "u2", "mw1", "collaborates", "collaborates", 0.6, "window", true);
+    const obs = await sql<Array<{ source: string }>>`SELECT source FROM relationship_observations WHERE guild_id = 'g1'`;
+    assert.equal(obs.filter(o => o.source === "pair_window").length, 2);
+  } finally { await sql.end(); }
+});
+
+test("hasPendingPairAnalysis sees queued jobs in either direction", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    assert.equal(await store.hasPendingPairAnalysis("g1", "u1", "u2"), false);
+    await enqueue(sql, "g1", "pair-analysis", { aId: "u1", bId: "u2" });
+    assert.equal(await store.hasPendingPairAnalysis("g1", "u1", "u2"), true);
+    assert.equal(await store.hasPendingPairAnalysis("g1", "u2", "u1"), true, "reversed order still matches");
+    assert.equal(await store.hasPendingPairAnalysis("g1", "u1", "u3"), false);
+    assert.equal(await store.hasPendingPairAnalysis("g2", "u1", "u2"), false, "guild-scoped");
+  } finally { await sql.end(); }
+});
+
+test("pair_window observations weigh like party-authored claims, not gossip", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    // Window read (w=2) vs one third-party claim (w=1): (0.9*2 - 0.9*1)/3 = 0.3.
+    // At w=1 for both the valence would be exactly 0.
+    await store.recordWindowObservation("g1", "u1", "u2", "pw1", "collaborates", "collaborates", 0.9, "window", true);
+    await store.recordRelationship("g1", "u1", "u2", "m1", "u9", "rivals", -0.9, "gossip");
+    await sql`UPDATE relationship_observations SET verdict = 'literal' WHERE guild_id = 'g1'`;
+    await store.recomputeEdges("g1");
+    const edge = (await store.relationshipsFor("g1", "u1")).find(e => e.subjectId === "u1");
+    assert.ok(edge?.valence != null && Math.abs(edge.valence - 0.3) < 1e-6, `valence was ${edge?.valence}`);
   } finally { await sql.end(); }
 });
 

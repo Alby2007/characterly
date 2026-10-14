@@ -16,7 +16,7 @@ function makeTestSql() {
 
 /** Drop all project tables so each test starts fresh. */
 async function resetSchema(sql: ReturnType<typeof postgres>) {
-  await sql`DROP TABLE IF EXISTS schema_migrations, profiles, profile_attributes, relationships, relationship_observations, members, event_memories, event_messages, event_participants, events, behavioral_patterns, memory_history, memory_evidence, server_settings, memories, messages CASCADE`;
+  await sql`DROP TABLE IF EXISTS schema_migrations, profiles, profile_attributes, relationships, relationship_observations, members, event_memories, event_messages, event_participants, events, behavioral_patterns, memory_history, memory_evidence, server_settings, memories, messages, guild_keys, unresolved_names, alias_candidates, jobs, guild_usage, webhook_messages, guild_companions, companions CASCADE`;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -453,5 +453,26 @@ test("migration v20 adds observation source and edge intelligence columns", asyn
       WHERE (table_name = 'relationship_observations' AND column_name = 'source')
          OR (table_name = 'relationships' AND column_name IN ('behavioral_count', 'party_count', 'trend', 'inferred'))`;
     assert.equal(gone.length, 0, "rollback should drop all v20 columns");
+  } finally { await sql.end(); }
+});
+
+test("migration v21 creates companions, guild_companions, and webhook_messages tables and rolls back cleanly", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any);
+
+    const tables = await sql<Array<{ table_name: string }>>`
+      SELECT table_name FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name IN ('companions', 'guild_companions', 'webhook_messages')
+    `;
+    assert.deepEqual(tables.map(t => t.table_name).sort(), ["companions", "guild_companions", "webhook_messages"]);
+
+    await runMigrations(sql as any, 20);
+    const gone = await sql<Array<{ table_name: string }>>`
+      SELECT table_name FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name IN ('companions', 'guild_companions', 'webhook_messages')
+    `;
+    assert.equal(gone.length, 0, "rollback should drop all v21 tables");
   } finally { await sql.end(); }
 });

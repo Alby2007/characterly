@@ -140,7 +140,10 @@ export class ProfileStore {
 
     // Interaction graph is guild-wide — compute once, slice per member.
     const aliasMap = await buildAliasMap(guildId, memoryStore);
-    const allPairs = await memoryStore.interactionPairs(guildId, aliasMap, opts?.excludeIds ?? []);
+    const allPairs = await memoryStore.interactionPairs(guildId, aliasMap, {
+      excludeIds: opts?.excludeIds ?? [],
+      excludeChannels: (await memoryStore.settings(guildId)).ignoredChannels,
+    });
 
     for (const member of await memoryStore.listMembers(guildId)) {
       if (opts?.onlyUserId && member.userId !== opts.onlyUserId) continue;

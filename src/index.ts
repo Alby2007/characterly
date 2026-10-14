@@ -1,10 +1,21 @@
-import { Client, Events, GatewayIntentBits, Partials, type Guild, type Message, type OmitPartialGroupDMChannel } from "discord.js";
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events, GatewayIntentBits, Partials, type Guild, type Message, type OmitPartialGroupDMChannel } from "discord.js";
 import OpenAI from "openai";
 import { config } from "./config.js";
 import { sql } from "./db.js";
 import { MemoryStore } from "./database.js";
 import { createBrainResolver, guardedLlmFetch } from "./brains.js";
-import { commandDefinitions, handleMemoryButton, handleMemoryCommand, handleSetupModal } from "./commands.js";
+import {
+  buildAwakenedCompanionPayload,
+  buildOnboardingDraftComponents,
+  buildOnboardingDraftEmbed,
+  buildOnboardingWelcomePayload,
+  commandDefinitions,
+  findMutualGuilds,
+  handleCompanionModal,
+  handleMemoryButton,
+  handleMemoryCommand,
+  handleSetupModal,
+} from "./commands.js";
 import { detectWakeWord, looksLikeSchemaLeak, questionKeywords, shouldInspectForMemory, toolCues } from "./perception.js";
 import { ConversationTracker } from "./conversation.js";
 import { evaluateSpeechTurn } from "./speech-gate.js";
@@ -25,7 +36,10 @@ import { announceIfNeeded, handleGuildDelete } from "./guild-lifecycle.js";
 import { isSafeUrl } from "./tools.js";
 import { BudgetExceeded, meteredClient } from "./budget.js";
 import { runExtractJob, type ExtractJobPayload } from "./extract-job.js";
-import type { MessageEvent, PairContext } from "./types.js";
+import { selectCompanionForTurn } from "./scene-router.js";
+import { sendAsCompanion } from "./webhooks.js";
+import { gatherOwnerSubtextForServer, gatherServerDigestForDm } from "./cross-context.js";
+import type { CompanionPersona, MessageEvent, PairContext } from "./types.js";
 
 // Register every credential before any code path can log it — redactSecrets
 // scrubs all registered values plus auth-header-shaped tokens out of logs.
@@ -45,7 +59,14 @@ for (const [name, url] of [["GROQ_BASE_URL", config.groqBaseUrl], ["VISION_BASE_
 }
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMessageReactions],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.DirectMessageReactions,
+  ],
   // Reactions on uncached messages arrive as partials — the listener resolves
   // them explicitly before interpreting.
   partials: [Partials.Message, Partials.Channel, Partials.Reaction, Partials.User],
@@ -63,7 +84,9 @@ const { brainFor, invalidate: invalidateBrain } = createBrainResolver({
   // getCap reads settings() (60s cache — fine for a daily bound).
   meter: (guildId, c) => meteredClient(c, {
     guildId, store,
-    getCap: async () => (await store.settings(guildId, config.rawMessageRetentionDays)).llmDailyCap,
+    getCap: async () => guildId.startsWith("dm:")
+      ? config.dmLlmDailyCap
+      : (await store.settings(guildId, config.rawMessageRetentionDays)).llmDailyCap,
   }),
 });
 // Vision can live on a different provider than the main key (e.g. Gemini's
@@ -213,7 +236,12 @@ async function applyRetention() {
       console.log(`Purged zombie rows for removed guild ${orphanId}`);
     }
   } catch (error) { inc("maintenance.error"); logError("Zombie-guild sweep failed", error); }
-  for (const guild of client.guilds.cache.values()) {
+  const dmScopes = await store.listActiveDmScopes().catch(() => [] as string[]);
+  const scopes: Array<{ id: string; name: string }> = [
+    ...[...client.guilds.cache.values()].map(g => ({ id: g.id, name: g.name })),
+    ...dmScopes.map(id => ({ id, name: id })),
+  ];
+  for (const guild of scopes) {
     // These three calls sit outside the feature-level try/catches below — a DB
     // blip here must skip the guild, not reject the whole interval callback.
     let retentionDays = config.rawMessageRetentionDays;
@@ -297,7 +325,12 @@ async function applyRetention() {
       // with no claims materialize as inferred edges. Computed once — the
       // pair-analysis enqueue below reuses the same list.
       const aliasMap = (await guildLookups(guild.id)).map;
-      guildInteractions = await store.interactionPairs(guild.id, aliasMap);
+      // Ignored channels are invisible to the interaction graph too, and other
+      // bots' rows don't form pairs — allowBotIds keeps the member↔ASB edge.
+      guildInteractions = await store.interactionPairs(guild.id, aliasMap, {
+        excludeChannels: (await store.settings(guild.id, config.rawMessageRetentionDays)).ignoredChannels,
+        allowBotIds: [client.user!.id],
+      });
       const edgeCount = await store.recomputeEdges(guild.id, guildInteractions);
       if (unverified.length) console.log(`Verified ${judged} relationship observations in ${guild.name}; recomputed ${edgeCount} edges`);
     } catch (error) { logError("Relationship verification failed", error); }
@@ -319,6 +352,9 @@ async function applyRetention() {
         const lastMs = last ? new Date(last).getTime() : 0;
         if (lastMs && Date.now() - lastMs < 7 * 86_400_000) continue;
         if (lastMs && new Date(p.lastAt).getTime() <= lastMs) continue;
+        // The throttle only sees written observations — a queued-but-unrun job
+        // is invisible to it, so check the queue before enqueueing a duplicate.
+        if (await store.hasPendingPairAnalysis(guild.id, p.aId, p.bId)) continue;
         await enqueue(sql, guild.id, "pair-analysis", { aId: p.aId, bId: p.bId });
         enqueued++;
       }
@@ -380,7 +416,12 @@ setInterval(() => sweepMissedSignals(SWEEP_WINDOW_MS), SWEEP_INTERVAL_MS).unref(
 // the mark so the next pass retries — crash-safe), and 'extracted' marks the
 // terminal state so empty results don't re-extract forever.
 async function sweepMissedSignals(windowMs: number) {
-  for (const guild of client.guilds.cache.values()) {
+  const dmScopes = await store.listActiveDmScopes().catch(() => [] as string[]);
+  const scopes: Array<{ id: string; name: string }> = [
+    ...[...client.guilds.cache.values()].map(g => ({ id: g.id, name: g.name })),
+    ...dmScopes.map(id => ({ id, name: id })),
+  ];
+  for (const guild of scopes) {
     try {
       const settings = await store.settings(guild.id, config.rawMessageRetentionDays);
       if (!settings.memoryEnabled) continue;
@@ -461,7 +502,10 @@ async function sweepMissedSignals(windowMs: number) {
 client.on(Events.InteractionCreate, async interaction => {
   try {
     if (interaction.isChatInputCommand()) await handleMemoryCommand(interaction, store, brainFor, eventStore, profileStore);
-    if (interaction.isModalSubmit()) await handleSetupModal(interaction, store, invalidateBrain);
+    if (interaction.isModalSubmit()) {
+      await handleSetupModal(interaction, store, invalidateBrain);
+      await handleCompanionModal(interaction, store, scopeId => lookupCache.delete(scopeId));
+    }
     if (interaction.isButton()) await handleMemoryButton(interaction, store, brainFor, eventStore);
   } catch (error) {
     inc("handler.interaction_error");
@@ -538,6 +582,14 @@ function budgetNoticeOnce(channelId: string): boolean {
   const key = `${channelId}:${new Date().toISOString().slice(0, 10)}`;
   if (budgetNotices.has(key)) return false;
   budgetNotices.add(key);
+  return true;
+}
+
+const noCompanionNotices = new Set<string>();
+function noCompanionNoticeOnce(channelId: string): boolean {
+  const key = `${channelId}:${new Date().toISOString().slice(0, 10)}`;
+  if (noCompanionNotices.has(key)) return false;
+  noCompanionNotices.add(key);
   return true;
 }
 
@@ -638,17 +690,307 @@ async function fireProactive(key: string, messageId: string): Promise<void> {
   await store.setTriageResults([{ id: sent.id, result: "noise" }]);
 }
 
+async function handleDmMessage(
+  message: OmitPartialGroupDMChannel<Message>,
+  images: Array<AttachmentMeta & { contentType: string }>,
+) {
+  if (message.author.bot) return;
+  const rawAvatarAttachment = [...message.attachments.values()].find(a =>
+    a.contentType?.startsWith("image/") && a.size <= config.imageMaxBytes,
+  );
+  if (!message.content.trim() && !images.length && !rawAvatarAttachment) return;
+
+  const userId = message.author.id;
+  const dmScope = `dm:${userId}`;
+  const authorName = message.author.globalName ?? message.author.username;
+  const brain = await brainFor(dmScope);
+  if (!brain) return;
+
+  const existing = await store.getCompanionByOwner(userId);
+  const replyToId = message.reference?.messageId ?? undefined;
+
+  // ── 1:1 DM Conversational Onboarding ───────────────────────────────────────
+  if (!existing || existing.onboardingState !== "active") {
+    if (!replyThrottle.consume(dmScope, userId)) { inc("reply.cooldown"); return; }
+    try {
+      await message.channel.sendTyping();
+      const recent = await store.recentContext(dmScope, message.channel.id, 12);
+      const transcript = recent.map(r => ({
+        authorName: r.authorName,
+        isBot: r.authorId === client.user!.id || r.authorId.startsWith("companion:"),
+        content: r.content,
+      }));
+      const event: MessageEvent = {
+        guildId: dmScope,
+        channelId: message.channel.id,
+        messageId: message.id,
+        authorId: userId,
+        authorName,
+        content: message.content || "(attached an image)",
+        createdAt: message.createdAt,
+        mentionsBot: true,
+      };
+      await store.recordMessage(event, replyToId, false, false);
+      await store.setTriageResults([{ id: event.messageId, result: "noise" }]);
+
+      const avatarUrl = rawAvatarAttachment?.url ?? existing?.avatarUrl ?? null;
+      const turn = await brain.runOnboardingTurn({
+        ownerName: authorName,
+        userMessage: message.content || "(sent an avatar image)",
+        transcript,
+        currentDraft: existing
+          ? {
+              name: existing.name,
+              voicePersona: existing.voicePersona,
+              coreTraits: existing.coreTraits,
+              ownerDynamic: existing.ownerDynamic,
+              backstory: existing.backstory,
+              avatarUrl,
+            }
+          : { avatarUrl },
+        turnCount: existing?.onboardingTurns ?? 0,
+        hasImageAttachment: Boolean(rawAvatarAttachment),
+        model: config.replyModel,
+      });
+
+      let companionName = turn.spec.name || existing?.name || client.user!.username;
+      let companionAuthorId = client.user!.id;
+      let replyExtras: { embeds?: any[]; components?: any[] } = {};
+      if (turn.complete) {
+        const activated = await store.activateCompanion(userId, authorName, {
+          ...turn.spec,
+          avatarUrl,
+        });
+        companionName = activated.name;
+        companionAuthorId = MemoryStore.companionSubjectId(activated.id);
+        lookupCache.delete(dmScope);
+        inc("companion.awakened");
+        replyExtras = buildAwakenedCompanionPayload(
+          activated,
+          authorName,
+          findMutualGuilds(client, userId),
+        );
+      } else {
+        const updatedDraft = await store.upsertCompanionOnboarding(
+          userId,
+          { ...turn.spec, avatarUrl },
+          true,
+        );
+        inc("companion.onboarding_turn");
+        const isBlankColdStart =
+          (existing?.onboardingTurns ?? 0) === 0 &&
+          !updatedDraft.name &&
+          !updatedDraft.voicePersona &&
+          !updatedDraft.ownerDynamic;
+        replyExtras = isBlankColdStart
+          ? buildOnboardingWelcomePayload(userId)
+          : {
+              embeds: [buildOnboardingDraftEmbed(updatedDraft, updatedDraft.onboardingTurns)],
+              components: [buildOnboardingDraftComponents(userId, updatedDraft)],
+            };
+      }
+
+      const sent = await message.reply({
+        content: turn.replyText,
+        ...replyExtras,
+        allowedMentions: { parse: [], repliedUser: false },
+      });
+      await store.recordMessage({
+        guildId: dmScope,
+        channelId: message.channel.id,
+        messageId: sent.id,
+        authorId: companionAuthorId,
+        authorName: companionName,
+        content: turn.replyText,
+        createdAt: sent.createdAt ?? new Date(),
+        mentionsBot: false,
+      }, message.id, false, true);
+      await store.setTriageResults([{ id: sent.id, result: "noise" }]);
+    } catch (error) {
+      if (error instanceof BudgetExceeded) {
+        inc("budget.reply_blocked");
+        replyThrottle.refund(dmScope, userId);
+        if (budgetNoticeOnce(message.channel.id)) {
+          await message.reply({ content: "We've hit today's DM message limit — it resets at midnight UTC.", allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+        }
+        return;
+      }
+      inc("llm.reply_error");
+      logError("DM onboarding turn failed", error);
+      replyThrottle.refund(dmScope, userId);
+    }
+    return;
+  }
+
+  // ── Active 1:1 DM Companion Chat ───────────────────────────────────────────
+  const companion = existing;
+  const compSubj = MemoryStore.companionSubjectId(companion.id);
+  const event: MessageEvent = {
+    guildId: dmScope,
+    channelId: message.channel.id,
+    messageId: message.id,
+    authorId: userId,
+    authorName,
+    content: message.content,
+    createdAt: message.createdAt,
+    mentionsBot: true,
+    imageAttachments: images.length ? images : undefined,
+  };
+
+  const settings = await store.settings(dmScope, config.rawMessageRetentionDays);
+  if (!settings.memoryEnabled && !settings.replyEnabled) return;
+  if (settings.memoryEnabled) {
+    await store.recordMessage(event, replyToId, true, false);
+  }
+
+  let replyToContent: string | undefined;
+  if (replyToId) {
+    const ref = await store.getMessage(dmScope, replyToId);
+    if (ref) replyToContent = `${ref.authorName}: ${ref.content}`;
+  }
+
+  if (settings.memoryEnabled && (shouldInspectForMemory(event) || images.length)) {
+    try {
+      await enqueue(sql, dmScope, "extract", { event, replyToId, replyToContent });
+      await store.setTriageResults([{ id: event.messageId, result: "queued" }]);
+      inc("jobs.enqueued");
+    } catch (error) { inc("jobs.enqueue_error"); logError("DM extraction enqueue failed", error); }
+  }
+
+  if (!settings.replyEnabled) return;
+  if (!replyThrottle.consume(dmScope, userId)) { inc("reply.cooldown"); return; }
+
+  try {
+    await message.channel.sendTyping();
+    const lookups = await guildLookups(dmScope);
+    const peopleIds = [userId, compSubj];
+    const profileRows = await profileStore.getProfiles(dmScope, peopleIds);
+    const attrMap = await store.attributesForSubjects(dmScope, profileRows.map(p => p.subjectId), { status: "active" });
+    const profiles = profileRows.map(p => ({
+      name: p.displayName,
+      summary: p.summary,
+      traits: p.facets.traits,
+      attributes: (attrMap.get(p.subjectId) ?? []).map(a => ({ field: a.field, value: a.value, confidence: a.confidence })),
+    }));
+    const pair = await buildPairContext(store, eventStore, dmScope, userId, compSubj);
+    const relationships = pair ? [pair] : [];
+    const context = (await store.recentContext(dmScope, message.channel.id))
+      .map(x => ({
+        ...x,
+        content: demangleMentions(x.content, lookups.names),
+        replyToSnippet: x.replyToSnippet ? demangleMentions(x.replyToSnippet, lookups.names) : undefined,
+      }));
+    const freshOwnerName = await store.displayNameFor(dmScope, userId);
+    const serverDigest = await gatherServerDigestForDm(
+      store,
+      eventStore,
+      userId,
+      companion,
+      gId => client.guilds.cache.get(gId)?.name,
+    );
+    const persona: CompanionPersona = {
+      companionId: companion.id,
+      name: companion.name,
+      ownerUserId: companion.ownerUserId,
+      ownerName: freshOwnerName,
+      voicePersona: companion.voicePersona,
+      coreTraits: companion.coreTraits,
+      ownerDynamic: companion.ownerDynamic,
+      backstory: companion.backstory,
+      serverDigest,
+    };
+
+    const meteredVision = visionClient
+      ? meteredClient(visionClient, { guildId: dmScope, store, getCap: async () => config.dmLlmDailyCap })
+      : undefined;
+    const imgDescs = images.length && config.visionModel
+      ? (await Promise.all(images.map(async a => {
+          try {
+            const d = await brain.describeImage({ url: a.url, contextText: event.content, maxBytes: config.imageMaxBytes }, config.visionModel!, meteredVision);
+            inc("vision.described");
+            return d.description;
+          } catch (error) {
+            if (error instanceof BudgetExceeded) throw error;
+            inc("vision.error"); return undefined;
+          }
+        }))).filter((d): d is string => !!d)
+      : [];
+    const imageContext = imgDescs.length ? formatImageContext(imgDescs, freshOwnerName) : undefined;
+
+    const toolCtx: ToolCtx = {
+      guildId: dmScope, store, eventStore, profileStore,
+      resolveName: n => lookups.map.get(n.trim().toLowerCase()),
+    };
+    const toolsOn = config.replyTools && toolCues(event.content);
+    const { text } = await brain.reply(
+      { ...event, authorName: freshOwnerName },
+      context,
+      await store.relevantMemories(dmScope, userId),
+      profiles,
+      relationships,
+      config.replyModel,
+      toolsOn,
+      compSubj,
+      { guildName: "Direct Message", ownerName: freshOwnerName, botName: companion.name, isDm: true, companion: persona },
+      toolCtx,
+      imageContext,
+    );
+    const clean = text ? scrubMentions(text, lookups.names) : "";
+    if (clean && looksLikeSchemaLeak(clean)) { inc("reply.schema_leak"); replyThrottle.refund(dmScope, userId); return; }
+    if (clean) {
+      const sent = await message.reply({ content: clean, allowedMentions: { parse: [], repliedUser: false } });
+      inc("reply.sent");
+      await store.recordMessage({
+        guildId: dmScope,
+        channelId: message.channel.id,
+        messageId: sent.id,
+        authorId: compSubj,
+        authorName: companion.name,
+        content: clean,
+        createdAt: sent.createdAt ?? new Date(),
+        mentionsBot: false,
+      }, event.messageId, false, true);
+      await store.setTriageResults([{ id: sent.id, result: "noise" }]);
+    } else {
+      inc("reply.empty");
+      replyThrottle.refund(dmScope, userId);
+    }
+  } catch (error) {
+    if (error instanceof BudgetExceeded) {
+      inc("budget.reply_blocked");
+      replyThrottle.refund(dmScope, userId);
+      if (budgetNoticeOnce(message.channel.id)) {
+        await message.reply({ content: "We've hit today's DM message limit — it resets at midnight UTC.", allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+      }
+      return;
+    }
+    inc("llm.reply_error");
+    logError("DM reply generation failed", error);
+    replyThrottle.refund(dmScope, userId);
+  }
+}
+
 async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   // Image attachments are gated before the empty-content early-out so an
   // image-only message still reaches extraction; VISION_MODEL unset = off.
   const images = config.visionModel
     ? qualifyingImages(message.attachments.values(), config.imageMaxBytes, IMAGE_MAX_PER_MESSAGE)
     : [];
-  if (!message.guild || (!message.content.trim() && !images.length)) return;
+  if (!message.guild) {
+    await handleDmMessage(message, images);
+    return;
+  }
+  if (!message.content.trim() && !images.length) return;
   if (config.guildId && message.guild.id !== config.guildId) return;
+
+  // Check whether this guild message was sent by one of our own companion webhooks.
+  const inboundWebhook = message.author.bot ? await store.getWebhookMessage(message.id) : null;
+  const senderCompanion = inboundWebhook ? await store.getCompanionById(inboundWebhook.companionId) : null;
+
   const event: MessageEvent = {
     guildId: message.guild.id, channelId: message.channel.id, messageId: message.id,
-    authorId: message.author.id, authorName: message.member?.displayName ?? message.author.username,
+    authorId: senderCompanion ? MemoryStore.companionSubjectId(senderCompanion.id) : message.author.id,
+    authorName: senderCompanion ? senderCompanion.name : (message.member?.displayName ?? message.author.username),
     content: message.content, createdAt: message.createdAt,
     // Wake words ("asb", the bot's username/display name, its server nick)
     // count as addressing the bot — same flag, same downstream behavior.
@@ -673,16 +1015,21 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   if (!brain) return;
   // Resolve the reply target first so it can be persisted with the raw message.
   const replyToId = message.reference?.messageId ?? undefined;
-  if (settings.memoryEnabled) await store.recordMessage(event, replyToId, !message.author.bot, message.author.bot);
-  // Bot chatter is archive-only context: it resolves references and appears in
-  // recentContext, but is never a memory source, never enters the event
-  // pipeline, and never triggers a reply — no bot→bot loops.
-  if (message.author.bot) {
-    if (settings.memoryEnabled) await store.setTriageResults([{ id: event.messageId, result: "noise" }]);
+  // Companion webhook messages are already archived at send time; other bots
+  // are archived as noise and never trigger replies.
+  if (message.author.bot && !senderCompanion) {
+    if (settings.memoryEnabled) {
+      await store.recordMessage(event, replyToId, false, true);
+      await store.setTriageResults([{ id: event.messageId, result: "noise" }]);
+    }
     return;
+  }
+  if (!senderCompanion && settings.memoryEnabled) {
+    await store.recordMessage(event, replyToId, true, false);
   }
   let replyToContent: string | undefined;
   let replyToAuthorId: string | undefined;
+  const repliedToWebhook = replyToId ? await store.getWebhookMessage(replyToId) : null;
   if (replyToId) {
     const ref = await store.getMessage(event.guildId, replyToId);
     if (ref) { replyToContent = `${ref.authorName}: ${ref.content}`; replyToAuthorId = ref.authorId; }
@@ -717,11 +1064,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   // Extraction, contest detection, and the event pipeline all defer to the
   // 'extract' job — the live path keeps only recordMessage/decide/reply so a
   // busy guild can't stack unbounded concurrent LLM calls inside one handler.
-  // 'queued' marks the row so the sweep (NULL/'durable'/'regex' only) can't
-  // double-extract; orphaned marks (job gone or dead-lettered) are repaired by
-  // the sweep's repairQueuedMarks pass — 'durable' re-enqueues, 'dead' is
-  // terminal but visible.
-  if (settings.memoryEnabled && (shouldInspectForMemory(event) || images.length)) {
+  if (!senderCompanion && settings.memoryEnabled && (shouldInspectForMemory(event) || images.length)) {
     try {
       await enqueue(sql, event.guildId, "extract", { event, replyToId, replyToContent });
       await store.setTriageResults([{ id: event.messageId, result: "queued" }]);
@@ -730,89 +1073,122 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   }
 
   const key = `${event.guildId}:${event.channelId}`;
-  // Any human follow-up means the room isn't silent — a pending stranded
-  // question is answered or abandoned, either way it's cancelled. A reply-edge
-  // to a sent proactive reply counts as engagement instead: it wasn't ignored,
-  // so it must not feed the ignored-streak backoff.
-  proactive.cancelPending(key);
-  if (replyToId) proactive.observeEngagement(replyToId);
-  // This human message counts toward share-of-voice before scoring — it
-  // dilutes the bot's floor share for the decide() below.
-  const verdict = evaluateSpeechTurn({
-    event, botId: client.user!.id,
-    // mentions.repliedUser is null when the sender suppresses the reply ping —
-    // use the resolved target's author instead so a ping-off reply to a human
-    // still reads as "aimed at a human", not as a bot-directed message.
-    repliedToOtherUser: replyToAuthorId !== undefined && replyToAuthorId !== client.user!.id,
-    mentionsOtherUsers: message.mentions.users.some(u => u.id !== client.user!.id),
-  }, convo, (e, ms, eng, share) => brain.decide(e, ms, eng, share, config.speakThreshold), { engagement: config.engagement });
-  const decision = verdict.decision;
-  const engaged = verdict.engaged;
-  if (!settings.replyEnabled || !decision.shouldSpeak) {
-    // The bot stayed silent on a question — arm the stranded-question timer.
-    // A question it already answered never reaches here, so it can't be
-    // answered twice. Everything re-checks at fire time; this is only the arm.
-    if (settings.replyEnabled && !decision.shouldSpeak
-      && config.proactiveEnabled && settings.proactiveEnabled
-      && event.content.trimEnd().endsWith("?")) {
+  if (!senderCompanion) {
+    proactive.cancelPending(key);
+    if (replyToId) proactive.observeEngagement(replyToId);
+  }
+
+  // Pure companion mode: only user-summoned companions speak in guild channels.
+  const guildCompanions = await store.listGuildCompanions(event.guildId);
+  if (!guildCompanions.length) {
+    if (!senderCompanion && settings.replyEnabled && event.mentionsBot && noCompanionNoticeOnce(event.channelId)) {
+      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId("onboard:start")
+          .setLabel("Awaken / Summon Companion")
+          .setStyle(ButtonStyle.Primary),
+      );
+      await message.reply({
+        content: "No companions have been summoned to this server yet! Click below (or send me a DM) to awaken your personal companion, then summon them here with `/companion action:summon`.",
+        components: [row],
+        allowedMentions: { parse: [], repliedUser: false },
+      }).catch(() => {});
+    }
+    return;
+  }
+
+  const selection = selectCompanionForTurn(
+    {
+      event,
+      companions: guildCompanions,
+      repliedToCompanionId: repliedToWebhook?.companionId,
+      repliedToHumanUserId:
+        replyToAuthorId && !replyToAuthorId.startsWith("companion:") && replyToAuthorId !== client.user!.id
+          ? replyToAuthorId
+          : undefined,
+      mentionedUserIds: [...message.mentions.users.keys()].filter(id => id !== client.user!.id),
+      senderCompanionId: senderCompanion?.id,
+      chainDepth: inboundWebhook?.chainDepth ?? 0,
+    },
+    convo,
+    {
+      speakThreshold: config.speakThreshold,
+      maxChainDepth: config.maxCompanionChainDepth,
+      engagement: config.engagement,
+      wakeWord: config.wakeWord,
+    },
+  );
+
+  if (!settings.replyEnabled || !selection) {
+    if (
+      !senderCompanion &&
+      settings.replyEnabled &&
+      !selection &&
+      config.proactiveEnabled &&
+      settings.proactiveEnabled &&
+      event.content.trimEnd().endsWith("?")
+    ) {
       proactive.arm(key, event.messageId);
     }
     return;
   }
-  // Per-user reply budget — spamming mentions or rapid follow-ups can't drain
-  // the guild's daily cap for everyone else. Silence, not a notice: a "slow
-  // down" reply spends the very budget it protects.
-  if (!replyThrottle.consume(event.guildId, event.authorId)) { inc("reply.cooldown"); return; }
+
+  const chosen = selection.companion;
+  const compSubj = MemoryStore.companionSubjectId(chosen.id);
+  const engaged = selection.engaged;
+  const throttleActor = senderCompanion ? compSubj : event.authorId;
+  if (!replyThrottle.consume(event.guildId, throttleActor)) { inc("reply.cooldown"); return; }
+
   try {
     await message.channel.sendTyping();
-    // Inject profile cards for the author, @-mentioned users, and name-referenced members.
     const lookups = await guildLookups(event.guildId);
     const peopleIds = new Set<string>([
       event.authorId,
+      chosen.ownerUserId,
+      compSubj,
       ...message.mentions.users.keys(),
       ...findMentionedUsers(event.content, lookups.map).slice(0, 3),
     ]);
     const profileRows = await profileStore.getProfiles(event.guildId, [...peopleIds]);
-    // Structured attributes (active only — the same boundary /profile uses)
-    // carry field labels + per-facet confidence, so the model can hedge weak
-    // facets instead of stating every trait with equal confidence.
     const attrMap = await store.attributesForSubjects(event.guildId, profileRows.map(p => p.subjectId), { status: "active" });
     const profiles = profileRows.map(p => ({
       name: p.displayName, summary: p.summary, traits: p.facets.traits,
       attributes: (attrMap.get(p.subjectId) ?? []).map(a => ({ field: a.field, value: a.value, confidence: a.confidence })),
     }));
-    // Pairwise relationship context — what the in-prompt people assert about
-    // each other, distinct from either's standalone profile. All unordered
-    // pairs among non-bot people, author-involved pairs first, capped so the
-    // prompt stays bounded. Pairs with zero signal drop out entirely.
+
     const pairIds = [...peopleIds].filter(id => id !== client.user!.id);
     const pairList: Array<[string, string]> = [];
     for (let i = 0; i < pairIds.length; i++)
       for (let j = i + 1; j < pairIds.length; j++) pairList.push([pairIds[i], pairIds[j]]);
-    // The bot's own dynamic with the author feeds persona modulation — but the
-    // bot is auto-opted-in, so the either-party consent gate inside
-    // pairwiseContext can't guard this pair. Author consent is required here.
-    const authorMember = await store.getMember(event.guildId, event.authorId);
-    if (authorMember?.optedIn && !authorMember.optedOut) {
-      pairList.push([event.authorId, client.user!.id]);
-    }
-    pairList.sort((x, y) => Number(y.includes(event.authorId)) - Number(x.includes(event.authorId)));
+    pairList.sort((x, y) =>
+      Number(y.includes(compSubj) || y.includes(event.authorId)) -
+      Number(x.includes(compSubj) || x.includes(event.authorId)),
+    );
     const relationships = (await Promise.all(pairList.slice(0, 6).map(([aId, bId]) =>
       buildPairContext(store, eventStore, event.guildId, aId, bId)
     ))).filter((x): x is PairContext => !!x);
-    // Model-facing text carries names, never raw <@id> markup — real mention
-    // tokens in stored content taught the model to greet users with fabricated
-    // snowflakes ("Hey <@1549171765056638>!").
+
     const context = (await store.recentContext(event.guildId, event.channelId))
       .map(x => ({ ...x, content: demangleMentions(x.content, lookups.names), replyToSnippet: x.replyToSnippet ? demangleMentions(x.replyToSnippet, lookups.names) : undefined }));
-    // Address the author by their freshest known name so a "call me X" learned
-    // moments ago takes effect immediately, not after the next profile build.
-    const authorName = await store.displayNameFor(event.guildId, event.authorId);
+    const authorName = senderCompanion
+      ? senderCompanion.name
+      : await store.displayNameFor(event.guildId, event.authorId);
     const ownerName = message.guild.ownerId ? await store.displayNameFor(event.guildId, message.guild.ownerId) : undefined;
-    // Images on this message — and on the message it replies to — are described
-    // once and handed to the reply model as observed content. The replied-to
-    // fetch is needed even when the row is archived: DB rows carry no
-    // attachment data by design, and the live fetch returns fresh signed URLs.
+    const companionOwnerName = await store.displayNameFor(event.guildId, chosen.ownerUserId);
+    const ownerSubtext = await gatherOwnerSubtextForServer(store, chosen.ownerUserId, chosen.id);
+
+    const persona: CompanionPersona = {
+      companionId: chosen.id,
+      name: chosen.name,
+      ownerUserId: chosen.ownerUserId,
+      ownerName: companionOwnerName,
+      voicePersona: chosen.voicePersona,
+      coreTraits: chosen.coreTraits,
+      ownerDynamic: chosen.ownerDynamic,
+      backstory: chosen.backstory,
+      ownerSubtext,
+    };
+
     const imgParts: string[] = [];
     if (images.length) imgParts.push(formatImageContext(await getImageDescriptions(), authorName));
     if (replyToId) {
@@ -822,62 +1198,57 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
         imgParts.push(formatImageContext(await describeImages(refImages), refMsg.member?.displayName ?? refMsg.author.username));
     }
     const imageContext = imgParts.filter(Boolean).join("\n") || undefined;
-    // Lookup tools get the guild's handles + name resolution — the model can
-    // fetch people/pairs/memories/events beyond the pre-fetched window above.
+
     const toolCtx: ToolCtx = {
       guildId: event.guildId, store, eventStore, profileStore,
       resolveName: n => lookups.map.get(n.trim().toLowerCase()),
     };
-    // Direct mentions arm the full toolkit (they're nearly every reply at the
-    // default threshold); engaged in-conversation messages get the same — an
-    // in-thread "what do you know about X" deserves tools. Stray unsolicited
-    // replies still need a toolCues signal.
-    const toolsOn = config.replyTools && (toolCues(event.content) || event.mentionsBot || engaged);
-    const { text, endConversation } = await brain.reply({ ...event, authorName }, context, await store.relevantMemories(event.guildId, event.authorId), profiles, relationships, config.replyModel, toolsOn, client.user!.id, { guildName: message.guild.name, ownerName, botName: message.guild.members.me?.displayName ?? client.user!.username }, toolCtx, imageContext);
+    const toolsOn = config.replyTools && (toolCues(event.content) || selection.isAddressed || engaged);
+    const { text, endConversation } = await brain.reply(
+      { ...event, authorName },
+      context,
+      await store.relevantMemories(event.guildId, event.authorId),
+      profiles,
+      relationships,
+      config.replyModel,
+      toolsOn,
+      compSubj,
+      { guildName: message.guild.name, ownerName, botName: chosen.name, companion: persona },
+      toolCtx,
+      imageContext,
+    );
     const clean = text ? scrubMentions(text, lookups.names) : "";
-    // Hard send-boundary guard: model internals (schema fields, think blocks)
-    // must never reach the channel no matter which reply path produced them.
-    // Silence over leak — the parser's salvage ladder should catch these
-    // first, so anything reaching here is a shape the ladder missed.
-    if (clean && looksLikeSchemaLeak(clean)) { inc("reply.schema_leak"); replyThrottle.refund(event.guildId, event.authorId); return; }
+    if (clean && looksLikeSchemaLeak(clean)) { inc("reply.schema_leak"); replyThrottle.refund(event.guildId, throttleActor); return; }
     if (clean) {
-      const sent = await message.reply({ content: clean, allowedMentions: { parse: [], repliedUser: false } });
-      convo.noteReply(key); inc("reply.sent");
-      if (engaged && !event.mentionsBot) inc("reply.engaged");
-      // Archive the bot's own line so the transcript carries its voice and
-      // member→bot reply edges resolve — otherwise reply_to_id dangles.
+      const sent = await sendAsCompanion(message, chosen, clean, client.user!.id);
+      convo.noteReply(selection.convoKey);
+      convo.noteReply(selection.floorKey);
+      inc("reply.sent");
+      if (engaged && !selection.isAddressed) inc("reply.engaged");
+      await store.recordWebhookMessage(sent.id, event.guildId, event.channelId, chosen.id, selection.nextChainDepth);
       await store.recordMessage({
         guildId: event.guildId, channelId: event.channelId, messageId: sent.id,
-        authorId: client.user!.id, authorName: message.guild.members.me?.displayName ?? client.user!.username,
-        content: clean, createdAt: sent.createdAt ?? new Date(), mentionsBot: false,
+        authorId: compSubj, authorName: chosen.name,
+        content: clean, createdAt: sent.createdAt, mentionsBot: false,
       }, event.messageId, false, true);
-      // Same rule as inbound bot chatter: archive for transcript fidelity,
-      // never a memory source — keep it out of the sweep's extraction set.
       await store.setTriageResults([{ id: sent.id, result: "noise" }]);
     } else {
-      // Decide said speak but nothing sendable came back — the member sees
-      // silence on an addressed message. Refund so the failure doesn't eat
-      // their burst, and count it: without this the drop is invisible.
-      inc("reply.empty"); replyThrottle.refund(event.guildId, event.authorId);
+      inc("reply.empty"); replyThrottle.refund(event.guildId, throttleActor);
     }
-    // The model's read that this human is done — thanks/bye/wrap-up, or the
-    // exchange is clearly complete. Outside the `clean` block so an empty
-    // sign-off still exits. REPLY_EXIT=0 disables this; regex dismissal is
-    // unaffected either way.
-    if (config.replyExit && endConversation && convo.leave(key, event.authorId)) {
+    if (config.replyExit && endConversation && convo.leave(selection.convoKey, event.authorId)) {
       inc("convo.leave.model");
     }
   } catch (error) {
     if (error instanceof BudgetExceeded) {
       inc("budget.reply_blocked");
-      replyThrottle.refund(event.guildId, event.authorId);
+      replyThrottle.refund(event.guildId, throttleActor);
       if (budgetNoticeOnce(event.channelId)) {
         await message.reply({ content: "I've hit this server's daily LLM limit, so I can't respond right now — it resets at midnight UTC. An admin can raise it with `/limits`.", allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
       }
       return;
     }
     inc("llm.reply_error"); logError("Reply generation failed", error);
-    replyThrottle.refund(event.guildId, event.authorId);
+    replyThrottle.refund(event.guildId, throttleActor);
   }
 }
 

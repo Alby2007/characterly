@@ -15,7 +15,7 @@ function msg(content: string, overrides: Partial<MessageEvent> = {}): MessageEve
   };
 }
 
-function deps(store: any, analysis: { confident: boolean; nature: string; valence: number; reason: string }, brain: Brain | null = null): PairAnalysisDeps {
+function deps(store: any, analysis: { confident: boolean; aToBNature: string; bToANature: string; valence: number; reason: string }, brain: Brain | null = null): PairAnalysisDeps {
   const stub = brain ?? ({
     analyzePairWindow: async () => analysis,
   } as unknown as Brain);
@@ -35,7 +35,7 @@ async function seedExchanges(store: any, n = 6) {
   }
 }
 
-test("confident analysis writes a symmetric literal observation pair", async () => {
+test("confident analysis writes a directed literal observation pair", async () => {
   const sql = makeTestSql();
   try {
     const { store } = await makeStore(sql);
@@ -44,17 +44,21 @@ test("confident analysis writes a symmetric literal observation pair", async () 
     await seedExchanges(store);
 
     await runPairAnalysisJob("g1", { aId: "u1", bId: "u2" },
-      deps(store, { confident: true, nature: "collaborates", valence: 0.7, reason: "builds together" }));
+      deps(store, { confident: true, aToBNature: "mentors", bToANature: "learns from", valence: 0.7, reason: "builds together" }));
 
-    const obs = await sql<Array<{ subject_id: string; other_id: string; verdict: string; source: string; author_id: string | null }>>`
-      SELECT subject_id, other_id, verdict, source, author_id FROM relationship_observations WHERE guild_id = 'g1' ORDER BY subject_id`;
+    const obs = await sql<Array<{ subject_id: string; other_id: string; nature: string; verdict: string; source: string; author_id: string | null }>>`
+      SELECT subject_id, other_id, nature, verdict, source, author_id FROM relationship_observations WHERE guild_id = 'g1' ORDER BY subject_id`;
     assert.equal(obs.length, 2); // both directions
     assert.ok(obs.every(o => o.verdict === "literal" && o.source === "pair_window" && o.author_id === null));
+    // Directional labels must not mirror — "A mentors B" is not "B mentors A".
+    assert.equal(obs.find(o => o.subject_id === "u1")?.nature, "mentors");
+    assert.equal(obs.find(o => o.subject_id === "u2")?.nature, "learns from");
     // Feeds edges on the next recompute — no separate verification pass needed.
     await store.recomputeEdges("g1");
     const edges = await store.relationshipsFor("g1", "u1");
-    assert.equal(edges.length, 2); // symmetric window rows → both directions
-    assert.equal(edges.find(e => e.subjectId === "u1")?.summary, "collaborates");
+    assert.equal(edges.length, 2); // symmetric rows → both directions
+    assert.equal(edges.find(e => e.subjectId === "u1")?.summary, "mentors");
+    assert.equal(edges.find(e => e.subjectId === "u2")?.summary, "learns from");
   } finally { await sql.end(); }
 });
 
@@ -67,7 +71,7 @@ test("unconfident analysis writes only an unclear marker — no edge feed", asyn
     await seedExchanges(store);
 
     await runPairAnalysisJob("g1", { aId: "u1", bId: "u2" },
-      deps(store, { confident: false, nature: "", valence: 0, reason: "too thin" }));
+      deps(store, { confident: false, aToBNature: "", bToANature: "", valence: 0, reason: "too thin" }));
 
     const obs = await sql<Array<{ verdict: string }>>`SELECT verdict FROM relationship_observations WHERE guild_id = 'g1'`;
     assert.ok(obs.every(o => o.verdict === "unclear"));
@@ -88,7 +92,7 @@ test("both-party consent is required — one non-consenting side drops the job",
     await seedExchanges(store);
 
     await runPairAnalysisJob("g1", { aId: "u1", bId: "u2" },
-      deps(store, { confident: true, nature: "friends", valence: 0.5, reason: "x" }));
+      deps(store, { confident: true, aToBNature: "friends", bToANature: "friends", valence: 0.5, reason: "x" }));
 
     const obs = await sql`SELECT 1 FROM relationship_observations WHERE guild_id = 'g1'`;
     assert.equal(obs.length, 0);
@@ -103,11 +107,11 @@ test("thin window and dormant guild both drop without writing", async () => {
     await store.setMemberOptIn("g1", "u2", true);
     // No exchanges seeded → under the 5-message floor.
     await runPairAnalysisJob("g1", { aId: "u1", bId: "u2" },
-      deps(store, { confident: true, nature: "friends", valence: 0.5, reason: "x" }));
+      deps(store, { confident: true, aToBNature: "friends", bToANature: "friends", valence: 0.5, reason: "x" }));
     // Dormant (brainFor null) → dropped too.
     await seedExchanges(store);
     await runPairAnalysisJob("g1", { aId: "u1", bId: "u2" },
-      { ...deps(store, { confident: true, nature: "friends", valence: 0.5, reason: "x" }), brainFor: async () => null });
+      { ...deps(store, { confident: true, aToBNature: "friends", bToANature: "friends", valence: 0.5, reason: "x" }), brainFor: async () => null });
 
     const obs = await sql`SELECT 1 FROM relationship_observations WHERE guild_id = 'g1'`;
     assert.equal(obs.length, 0);
@@ -118,8 +122,8 @@ test("malformed payload drops without touching the store", async () => {
   const sql = makeTestSql();
   try {
     const { store } = await makeStore(sql);
-    await runPairAnalysisJob("g1", { aId: "u1" }, deps(store, { confident: true, nature: "x", valence: 0, reason: "x" }));
-    await runPairAnalysisJob("g1", { aId: "u1", bId: "u1" }, deps(store, { confident: true, nature: "x", valence: 0, reason: "x" }));
+    await runPairAnalysisJob("g1", { aId: "u1" }, deps(store, { confident: true, aToBNature: "x", bToANature: "x", valence: 0, reason: "x" }));
+    await runPairAnalysisJob("g1", { aId: "u1", bId: "u1" }, deps(store, { confident: true, aToBNature: "x", bToANature: "x", valence: 0, reason: "x" }));
     const obs = await sql`SELECT 1 FROM relationship_observations WHERE guild_id = 'g1'`;
     assert.equal(obs.length, 0);
   } finally { await sql.end(); }

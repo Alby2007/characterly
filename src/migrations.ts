@@ -557,6 +557,62 @@ const migrations: Migration[] = [
       await sql`ALTER TABLE relationships DROP COLUMN IF EXISTS inferred`;
     },
   },
+  // ── v21: personal companions, server summons & webhook message attribution ──
+  // Users create and bond with a personal companion in 1:1 DMs (`companions`),
+  // summon it into friend servers (`guild_companions`), and server replies post
+  // via channel webhooks attributed back to the speaking companion
+  // (`webhook_messages`) with bounded bot-to-bot `chain_depth`.
+  {
+    version: 21,
+    name: "v21_companions_and_webhooks",
+    up: async (sql) => {
+      await sql`
+        CREATE TABLE IF NOT EXISTS companions (
+          id               BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          owner_user_id    TEXT NOT NULL UNIQUE,
+          name             TEXT NOT NULL DEFAULT '',
+          avatar_url       TEXT,
+          voice_persona    TEXT NOT NULL DEFAULT '',
+          core_traits      TEXT[] NOT NULL DEFAULT '{}',
+          owner_dynamic    TEXT NOT NULL DEFAULT '',
+          backstory        TEXT NOT NULL DEFAULT '',
+          onboarding_state TEXT NOT NULL DEFAULT 'onboarding',
+          onboarding_turns INTEGER NOT NULL DEFAULT 0,
+          created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+      await sql`
+        CREATE TABLE IF NOT EXISTS guild_companions (
+          guild_id     TEXT NOT NULL,
+          companion_id BIGINT NOT NULL REFERENCES companions(id) ON DELETE CASCADE,
+          summoned_by  TEXT NOT NULL,
+          active       SMALLINT NOT NULL DEFAULT 1,
+          summoned_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (guild_id, companion_id)
+        )
+      `;
+      await sql`CREATE INDEX IF NOT EXISTS guild_companions_lookup ON guild_companions(guild_id, active)`;
+      await sql`
+        CREATE TABLE IF NOT EXISTS webhook_messages (
+          message_id   TEXT PRIMARY KEY,
+          guild_id     TEXT NOT NULL,
+          channel_id   TEXT NOT NULL,
+          companion_id BIGINT NOT NULL REFERENCES companions(id) ON DELETE CASCADE,
+          chain_depth  INTEGER NOT NULL DEFAULT 0,
+          created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+      await sql`CREATE INDEX IF NOT EXISTS webhook_messages_guild ON webhook_messages(guild_id, created_at DESC)`;
+    },
+    down: async (sql) => {
+      await sql`DROP INDEX IF EXISTS webhook_messages_guild`;
+      await sql`DROP TABLE IF EXISTS webhook_messages`;
+      await sql`DROP INDEX IF EXISTS guild_companions_lookup`;
+      await sql`DROP TABLE IF EXISTS guild_companions`;
+      await sql`DROP TABLE IF EXISTS companions`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

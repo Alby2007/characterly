@@ -154,9 +154,9 @@ test("verifyRelationshipsBatch: misattributed maps through instead of collapsing
   assert.match(calls.chat[0].response_format.json_schema.schema.properties.results.items.properties.verdict.enum.join(","), /misattributed/);
 });
 
-test("analyzePairWindow parses a confident read and clamps valence", async () => {
+test("analyzePairWindow parses a confident directional read and clamps valence", async () => {
   const { client, calls } = stubClient({
-    chatContent: JSON.stringify({ confident: true, nature: "collaborates", valence: 1.4, reason: "ship together weekly" }),
+    chatContent: JSON.stringify({ confident: true, a_to_b_nature: "mentors", b_to_a_nature: "learns from", valence: 1.4, reason: "ship together weekly" }),
   });
   const b = new Brain("k", "m", undefined, client);
   const out = await b.analyzePairWindow("Alice", "Bob", [
@@ -164,18 +164,24 @@ test("analyzePairWindow parses a confident read and clamps valence", async () =>
     { authorName: "Bob", content: "alice merged it", createdAt: "2026-09-01T01:00:00Z" },
   ], "verify-model");
   assert.equal(out.confident, true);
-  assert.equal(out.nature, "collaborates");
+  assert.equal(out.aToBNature, "mentors");
+  assert.equal(out.bToANature, "learns from");
   assert.equal(out.valence, 1); // clamped to [-1, 1]
   assert.match(calls.chat[0].messages[0].content, /Alice and Bob addressed each other/);
+  // An empty side inherits the other's label — symmetric is the honest default.
+  const c2 = stubClient({ chatContent: JSON.stringify({ confident: true, a_to_b_nature: "close friends", b_to_a_nature: "", valence: 0.8, reason: "x" }) });
+  const out2 = await new Brain("k", "m", undefined, c2.client).analyzePairWindow("A", "B", [], "m");
+  assert.equal(out2.confident, true);
+  assert.equal(out2.bToANature, "close friends");
 });
 
 test("analyzePairWindow unconfident or malformed output stays unconfident", async () => {
-  const { client } = stubClient({ chatContent: JSON.stringify({ confident: false, nature: "", valence: 0, reason: "thin" }) });
+  const { client } = stubClient({ chatContent: JSON.stringify({ confident: false, a_to_b_nature: "", b_to_a_nature: "", valence: 0, reason: "thin" }) });
   const b = new Brain("k", "m", undefined, client);
   const out = await b.analyzePairWindow("Alice", "Bob", [], "verify-model");
   assert.equal(out.confident, false);
   // confident=true with no nature is still unconfident — a label-less "edge" is noise
-  const c2 = stubClient({ chatContent: JSON.stringify({ confident: true, nature: "", valence: 0.5, reason: "x" }) });
+  const c2 = stubClient({ chatContent: JSON.stringify({ confident: true, a_to_b_nature: "", b_to_a_nature: "", valence: 0.5, reason: "x" }) });
   const out2 = await new Brain("k", "m", undefined, c2.client).analyzePairWindow("A", "B", [], "m");
   assert.equal(out2.confident, false);
 });

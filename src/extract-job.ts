@@ -114,10 +114,11 @@ export async function runExtractJob(payload: ExtractJobPayload, deps: ExtractJob
   const { memories: candidates, relationships } = await withRetry(() => brain.extractMemories(event, replyToContent, note, imageContext, natureVocab), 3);
   const aliases = (candidates.length || relationships.length) ? await deps.getAliases(guildId) : new Map<string, string>();
   // Opt-in consent — identical rule to the sweep/ingest paths: derived person
-  // data persists only for consenting members; the bot counts as consented.
+  // data persists only for consenting members; the bot and summoned/active
+  // companions (subject_id 'companion:<id>') count as consented.
   const consentCache = new Map<string, boolean>();
   const isConsented = async (userId: string) => {
-    if (userId === "unknown" || userId === "server" || userId === botId) return true;
+    if (userId === "unknown" || userId === "server" || userId === botId || userId.startsWith("companion:")) return true;
     const cached = consentCache.get(userId);
     if (cached !== undefined) return cached;
     const m = await store.getMember(guildId, userId);

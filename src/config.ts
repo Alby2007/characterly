@@ -47,6 +47,10 @@ const env = z.object({
   KEY_ENCRYPTION_SECRET: z.string().optional(),
   // Hosted mode: 1 disables the env-key fallback so keyless guilds stay dormant.
   REQUIRE_GUILD_KEYS: z.string().optional(),
+  // Per-user daily LLM call cap for 1:1 DMs (dm:<userId> scope, always uses operator envKey).
+  DM_LLM_DAILY_CAP: z.coerce.number().int().min(0).max(100_000).default(250),
+  // Maximum consecutive companion-to-companion replies per human message in a server channel.
+  MAX_COMPANION_CHAIN_DEPTH: z.coerce.number().int().min(0).max(5).default(2),
 }).parse(process.env);
 
 export const config = {
@@ -104,4 +108,6 @@ export const config = {
   // hosted-mode flag that turns off the env-key fallback for keyless guilds.
   keyEncryptionSecret: env.KEY_ENCRYPTION_SECRET,
   requireGuildKeys: env.REQUIRE_GUILD_KEYS === "1",
+  dmLlmDailyCap: env.DM_LLM_DAILY_CAP,
+  maxCompanionChainDepth: env.MAX_COMPANION_CHAIN_DEPTH,
 };

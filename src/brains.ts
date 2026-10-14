@@ -61,6 +61,17 @@ export function createBrainResolver(opts: {
     const wrap = (c: LlmClient): LlmClient => opts.meter ? opts.meter(guildId, c) : c;
 
     let brain: Brain | null = null;
+    // 1:1 DM scopes (dm:<userId>) always run on the operator's env key with a
+    // per-user daily budget in guild_usage — no guild_keys lookup or BYOK gate.
+    if (guildId.startsWith("dm:")) {
+      if (opts.envKey) {
+        brain = new Brain(opts.envKey, opts.envModel, opts.envBaseUrl,
+          wrap(new OpenAI({ apiKey: opts.envKey, ...(opts.envBaseUrl ? { baseURL: opts.envBaseUrl } : {}) })));
+      }
+      cache.set(guildId, brain);
+      return brain;
+    }
+
     const row = await opts.getKey(guildId);
     if (row) {
       try {

@@ -323,7 +323,7 @@ test("opt-out erases pair_window observations and inferred edges too", async () 
     await store.setMemberOptIn("g1", "u3", true);
     // A system-asserted window observation (author NULL) + an inferred edge —
     // both are rows in the same tables, so the same delete paths must catch them.
-    await store.recordWindowObservation("g1", "u1", "u2", "mw1", "collaborates", 0.6, "window read", true);
+    await store.recordWindowObservation("g1", "u1", "u2", "mw1", "collaborates", "collaborates", 0.6, "window read", true);
     await store.recomputeEdges("g1", [{ aId: "u3", bId: "u4", count: 12 }]);
     assert.equal((await store.relationshipsFor("g1", "u1"))[0].summary, "collaborates");
     assert.equal((await store.relationshipsFor("g1", "u3"))[0].inferred, true);

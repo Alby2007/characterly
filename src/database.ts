@@ -1,4 +1,4 @@
-import type { AttributeStatus, EvidenceEffect, EvidenceType, Member, MemoryCandidate, MemoryStatus, MessageEvent, ProfileAttribute, RelationshipEdge, VerificationVerdict } from "./types.js";
+import type { AttributeStatus, Companion, CompanionSpec, EvidenceEffect, EvidenceType, GuildCompanion, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, VerificationVerdict, WebhookMessageRecord } from "./types.js";
 import { sql as defaultSql, type Sql } from "./db.js";
 import { runMigrations } from "./migrations.js";
 import { findMentionedUsers } from "./entity-resolution.js";
@@ -160,6 +160,14 @@ export class MemoryStore {
   // ── Settings ───────────────────────────────────────────────────────────────
 
   private async ensureSettings(guildId: string, retentionDays = 30): Promise<void> {
+    if (guildId.startsWith("dm:")) {
+      await this.sql`
+        INSERT INTO server_settings (guild_id, memory_enabled, reply_enabled, raw_retention_days)
+        VALUES (${guildId}, 1, 1, ${retentionDays})
+        ON CONFLICT (guild_id) DO NOTHING
+      `;
+      return;
+    }
     await this.sql`
       INSERT INTO server_settings (guild_id, raw_retention_days) VALUES (${guildId}, ${retentionDays})
       ON CONFLICT (guild_id) DO NOTHING
@@ -377,6 +385,8 @@ export class MemoryStore {
       await tx`DELETE FROM unresolved_names WHERE guild_id = ${guildId}`;
       await tx`DELETE FROM members WHERE guild_id = ${guildId}`;
       await tx`DELETE FROM messages WHERE guild_id = ${guildId}`;
+      await tx`DELETE FROM webhook_messages WHERE guild_id = ${guildId}`;
+      await tx`DELETE FROM guild_companions WHERE guild_id = ${guildId}`;
       await tx`DELETE FROM guild_keys WHERE guild_id = ${guildId}`;
       // Queued jobs and usage counters are guild-scoped too — a kicked guild
       // leaves nothing behind, including pending work.
@@ -393,17 +403,18 @@ export class MemoryStore {
    * or an extract job claimed before the purge that lands memories, events,
    * relationship observations, or attributes afterward. Caller is
    * responsible for passing a populated cache — an empty set is treated as
-   * "cache not ready" and returns nothing. */
+   * "cache not ready" and returns nothing. Excludes `dm:` scopes since 1:1 DMs
+   * are not Discord guilds in `client.guilds.cache`. */
   async guildsNotIn(guildIds: string[]): Promise<string[]> {
     if (!guildIds.length) return [];
     const rows = await this.sql<{ guild_id: string }[]>`
-      SELECT guild_id FROM server_settings WHERE NOT (guild_id = ANY(${guildIds}))
-      UNION SELECT guild_id FROM members WHERE NOT (guild_id = ANY(${guildIds}))
-      UNION SELECT guild_id FROM memories WHERE NOT (guild_id = ANY(${guildIds}))
-      UNION SELECT guild_id FROM events WHERE NOT (guild_id = ANY(${guildIds}))
-      UNION SELECT guild_id FROM relationship_observations WHERE NOT (guild_id = ANY(${guildIds}))
-      UNION SELECT guild_id FROM profile_attributes WHERE NOT (guild_id = ANY(${guildIds}))
-      UNION SELECT guild_id FROM jobs WHERE NOT (guild_id = ANY(${guildIds}))`;
+      SELECT guild_id FROM server_settings WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
+      UNION SELECT guild_id FROM members WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
+      UNION SELECT guild_id FROM memories WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
+      UNION SELECT guild_id FROM events WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
+      UNION SELECT guild_id FROM relationship_observations WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
+      UNION SELECT guild_id FROM profile_attributes WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
+      UNION SELECT guild_id FROM jobs WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'`;
     return rows.map(r => r.guild_id);
   }
 
@@ -887,30 +898,40 @@ export class MemoryStore {
   // this measures frequency of contact, not claimed dynamics. reply_to_id is
   // unpopulated in the archive, so mentions are the signal we have.
 
-  /** Undirected pairs keyed (min,max) — mention and name-ref both count once per message per pair. */
+  /** Undirected pairs keyed (min,max) — mention and name-ref both count once
+   * per message per pair. excludeChannels honors the ignored-channel boundary
+   * (ignored = invisible, including rows archived before the flag — same rule
+   * as the sweep). Bot-authored rows are archive context, not partners: a
+   * bot's mentions must not mint member↔bot edges, so ids observed posting as
+   * bots are excluded on BOTH sides — allowBotIds re-admits ASB itself, whose
+   * member dynamic is real signal. */
   async interactionPairs(
     guildId: string,
     aliasMap: Map<string, string>,
-    excludeIds: string[] = []
+    opts: { excludeIds?: string[]; excludeChannels?: string[]; allowBotIds?: string[] } = {}
   ): Promise<Array<{ aId: string; bId: string; count: number; firstAt: string; lastAt: string }>> {
     // Bounded to 90 days — the interaction graph is a recency signal anyway,
     // and this is the one query that reads the entire archive otherwise.
-    const rows = await this.sql<Array<{ author_id: string; content: string; created_at: Date | string }>>`
-      SELECT author_id, content, created_at FROM messages
+    const channels = opts.excludeChannels ?? [];
+    const rows = await this.sql<Array<{ author_id: string; author_is_bot: boolean; content: string; created_at: Date | string }>>`
+      SELECT author_id, author_is_bot, content, created_at FROM messages
       WHERE guild_id = ${guildId} AND length(content) > 0
         AND created_at > NOW() - interval '90 days'
+        AND (${channels.length} = 0 OR channel_id <> ALL(${channels}::text[]))
       ORDER BY created_at
     `;
-    const skip = new Set(excludeIds);
+    const skip = new Set(opts.excludeIds ?? []);
+    const allow = new Set(opts.allowBotIds ?? []);
+    const botIds = new Set(rows.filter(r => r.author_is_bot && !allow.has(r.author_id)).map(r => r.author_id));
     const pairs = new Map<string, { aId: string; bId: string; count: number; firstAt: string; lastAt: string }>();
     for (const r of rows) {
-      if (skip.has(r.author_id)) continue;
+      if (skip.has(r.author_id) || botIds.has(r.author_id)) continue;
       const targets = new Set<string>();
       for (const m of r.content.matchAll(/<@!?(\d{5,25})>/g)) targets.add(m[1]);
       for (const id of findMentionedUsers(r.content, aliasMap)) targets.add(id);
       targets.delete(r.author_id);
       for (const t of targets) {
-        if (skip.has(t)) continue;
+        if (skip.has(t) || botIds.has(t)) continue;
         const [a, b] = r.author_id < t ? [r.author_id, t] : [t, r.author_id];
         const key = `${a}|${b}`;
         const at = ts(r.created_at);
@@ -1000,10 +1021,13 @@ export class MemoryStore {
    * unverified, unclear, misattributed, and joke rows never form or feed an
    * edge (pair_window rows arrive pre-verdicted, so they flow through here
    * like any literal). Aggregation: valence is the *weighted* average of the
-   * five most recent observations — a claim authored by an edge party weighs
-   * double a third party's, so a pair's own words outweigh gossip. summary is
-   * the modal nature over the same window (latest-nature flip-flops under
-   * contradiction); trend compares recent-vs-alltime weighted valence.
+   * five most recent observations — a claim authored by an edge party or a
+   * verified pair_window read weighs double a third party's, so a pair's own
+   * words and the holistic analysis outweigh gossip. summary is the modal
+   * nature over the same window (latest-nature flip-flops under
+   * contradiction); trend compares the recent-5 window against the PRIOR
+   * window — an all-time baseline includes the recent rows themselves, which
+   * damps the delta and makes n<=5 mathematically incapable of trending.
    *
    * `interactions` is the deterministic 90d interaction graph (from
    * interactionPairs): stamped onto claimed edges as behavioral_count, and
@@ -1021,21 +1045,22 @@ export class MemoryStore {
         INSERT INTO relationships (guild_id, subject_id, other_id, summary, valence, observation_count, party_count, trend, behavioral_count, inferred, last_observed_at, updated_at)
         SELECT guild_id, subject_id, other_id,
                COALESCE(summary, ''), recent_val, n, party_n,
-               CASE WHEN n >= 3 AND recent_val - all_val >= 0.2 THEN 'warming'
-                    WHEN n >= 3 AND recent_val - all_val <= -0.2 THEN 'cooling' END,
+               CASE WHEN prior_n >= 1 AND recent_val - prior_val >= 0.2 THEN 'warming'
+                    WHEN prior_n >= 1 AND recent_val - prior_val <= -0.2 THEN 'cooling' END,
                0, 0, last_at, NOW()
         FROM (
           SELECT guild_id, subject_id, other_id,
                  MODE() WITHIN GROUP (ORDER BY nature) FILTER (WHERE rn <= 5) AS summary,
                  SUM(valence * w) FILTER (WHERE rn <= 5 AND valence IS NOT NULL)
                    / NULLIF(SUM(w) FILTER (WHERE rn <= 5 AND valence IS NOT NULL), 0) AS recent_val,
-                 SUM(valence * w) FILTER (WHERE valence IS NOT NULL)
-                   / NULLIF(SUM(w) FILTER (WHERE valence IS NOT NULL), 0) AS all_val,
+                 SUM(valence * w) FILTER (WHERE rn > 5 AND valence IS NOT NULL)
+                   / NULLIF(SUM(w) FILTER (WHERE rn > 5 AND valence IS NOT NULL), 0) AS prior_val,
+                 COUNT(*) FILTER (WHERE rn > 5 AND valence IS NOT NULL)::int AS prior_n,
                  COUNT(*)::int AS n,
                  COUNT(*) FILTER (WHERE author_id IN (subject_id, other_id))::int AS party_n,
                  MAX(created_at) AS last_at
           FROM (
-            SELECT *, CASE WHEN author_id IN (subject_id, other_id) THEN 2 ELSE 1 END AS w,
+            SELECT *, CASE WHEN author_id IN (subject_id, other_id) OR source = 'pair_window' THEN 2 ELSE 1 END AS w,
                    ROW_NUMBER() OVER (PARTITION BY guild_id, subject_id, other_id ORDER BY created_at DESC) rn
             FROM relationship_observations
             WHERE guild_id = ${guildId} AND verdict = 'literal'
@@ -1098,12 +1123,13 @@ export class MemoryStore {
    * oldest-first for prompt readability. */
   async pairExchanges(
     guildId: string, aId: string, bId: string,
-    aliasMap: Map<string, string>, limit = 40
+    aliasMap: Map<string, string>, limit = 40, excludeChannels: string[] = []
   ): Promise<Array<{ id: string; authorId: string; authorName: string; content: string; createdAt: string }>> {
     const rows = await this.sql<Array<{ id: string; author_id: string; author_name: string; content: string; created_at: Date | string }>>`
       SELECT id, author_id, author_name, content, created_at FROM messages
       WHERE guild_id = ${guildId} AND author_id IN (${aId}, ${bId})
         AND length(content) > 0 AND created_at > NOW() - interval '90 days'
+        AND (${excludeChannels.length} = 0 OR channel_id <> ALL(${excludeChannels}::text[]))
       ORDER BY created_at DESC LIMIT 500
     `;
     const exchanges: Array<{ id: string; authorId: string; authorName: string; content: string; createdAt: string }> = [];
@@ -1128,23 +1154,45 @@ export class MemoryStore {
     return rows[0]?.last_at ? ts(rows[0].last_at) : null;
   }
 
-  /** Persist a pair-window analysis as a symmetric observation pair. The
+  /** Persist a pair-window analysis as a directed observation pair. The
    * analysis IS the verification — confident reads land verdict='literal'
    * (edges feed immediately), unconfident runs land 'unclear' markers (no
    * edge feed, auto-pruned at 90d, and the row's timestamp throttles
    * re-analysis via lastPairWindowAt). author_id stays NULL: the system is
-   * the assertor — opt-out deletion matches on edge parties regardless. */
+   * the assertor — opt-out deletion matches on edge parties regardless.
+   * Natures are directional — "A mentors B" must not materialize "B mentors
+   * A" — so each direction carries its own label. The "pw:" provenance
+   * prefix keeps the audit trail while sidestepping the
+   * (subject, other, message) dedup key: an extracted observation citing the
+   * same exchange message must not swallow the window row (both directions
+   * swallowed = no marker, and the pair re-analyzes every pass). */
   async recordWindowObservation(
     guildId: string, aId: string, bId: string, messageId: string,
-    nature: string, valence: number | null, reason: string, confident: boolean
+    aToBNature: string, bToANature: string,
+    valence: number | null, reason: string, confident: boolean
   ): Promise<void> {
     const verdict = confident ? "literal" : "unclear";
+    const prov = `pw:${messageId}`;
     await this.sql`
       INSERT INTO relationship_observations (guild_id, subject_id, other_id, message_id, author_id, nature, valence, reason, verdict, source)
-      VALUES (${guildId}, ${aId}, ${bId}, ${messageId}, NULL, ${nature}, ${valence}, ${reason}, ${verdict}, 'pair_window'),
-             (${guildId}, ${bId}, ${aId}, ${messageId}, NULL, ${nature}, ${valence}, ${reason}, ${verdict}, 'pair_window')
+      VALUES (${guildId}, ${aId}, ${bId}, ${prov}, NULL, ${aToBNature}, ${valence}, ${reason}, ${verdict}, 'pair_window'),
+             (${guildId}, ${bId}, ${aId}, ${prov}, NULL, ${bToANature}, ${valence}, ${reason}, ${verdict}, 'pair_window')
       ON CONFLICT (subject_id, other_id, message_id) DO NOTHING
     `;
+  }
+
+  /** True when a pair-analysis job for this pair is already queued or
+   * in-flight — the 7d throttle only sees written observations, so an un-run
+   * job would otherwise enqueue a duplicate on the next pass. */
+  async hasPendingPairAnalysis(guildId: string, aId: string, bId: string): Promise<boolean> {
+    const rows = await this.sql<Array<{ exists: boolean }>>`
+      SELECT EXISTS(
+        SELECT 1 FROM jobs WHERE guild_id = ${guildId} AND type = 'pair-analysis'
+          AND ((payload->>'aId' = ${aId} AND payload->>'bId' = ${bId})
+            OR (payload->>'aId' = ${bId} AND payload->>'bId' = ${aId}))
+      ) AS exists
+    `;
+    return rows[0]?.exists === true;
   }
 
   /** Established nature labels for the extraction prompt — reuse keeps the
@@ -1840,6 +1888,7 @@ export class MemoryStore {
     `;
     const names = await this.sql`DELETE FROM unresolved_names WHERE guild_id = ${guildId} AND created_at < ${cutoff}`;
     const aliases = await this.sql`DELETE FROM alias_candidates WHERE guild_id = ${guildId} AND created_at < ${cutoff}`;
+    await this.sql`DELETE FROM webhook_messages WHERE guild_id = ${guildId} AND created_at < ${cutoff}`;
     await this.sql`DELETE FROM event_participants WHERE event_id IN (${staleEvents})`;
     await this.sql`DELETE FROM event_messages WHERE event_id IN (${staleEvents})`;
     await this.sql`DELETE FROM event_memories WHERE event_id IN (${staleEvents})`;
@@ -2069,5 +2118,268 @@ export class MemoryStore {
   /** Guild-wide contested attributes — the admin triage surface. */
   async contestedAttributes(guildId: string, limit = 10): Promise<ProfileAttribute[]> {
     return listContestedAttributes(this.sql, guildId, limit);
+  }
+
+  // ── Personal Companions & Webhook Attribution (v21) ────────────────────────
+
+  static companionSubjectId(companionId: number): string {
+    return `companion:${companionId}`;
+  }
+
+  private rowToCompanion(r: {
+    id: number | string; owner_user_id: string; name: string; avatar_url: string | null;
+    voice_persona: string; core_traits: string[] | null; owner_dynamic: string;
+    backstory: string; onboarding_state: string; onboarding_turns: number;
+    created_at: Date | string; updated_at: Date | string;
+  }): Companion {
+    return {
+      id: Number(r.id),
+      ownerUserId: r.owner_user_id,
+      name: r.name,
+      avatarUrl: r.avatar_url,
+      voicePersona: r.voice_persona,
+      coreTraits: r.core_traits ?? [],
+      ownerDynamic: r.owner_dynamic,
+      backstory: r.backstory,
+      onboardingState: (r.onboarding_state === "active" ? "active" : "onboarding") as OnboardingState,
+      onboardingTurns: Number(r.onboarding_turns),
+      createdAt: ts(r.created_at),
+      updatedAt: ts(r.updated_at),
+    };
+  }
+
+  async getCompanionByOwner(ownerUserId: string): Promise<Companion | null> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM companions WHERE owner_user_id = ${ownerUserId}
+    `;
+    return rows[0] ? this.rowToCompanion(rows[0]) : null;
+  }
+
+  async getCompanionById(id: number): Promise<Companion | null> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM companions WHERE id = ${id}
+    `;
+    return rows[0] ? this.rowToCompanion(rows[0]) : null;
+  }
+
+  /** Advance or create an onboarding companion draft for a user in 1:1 DMs.
+   *  Once a companion is 'active', its persona is permanently locked — this
+   *  method is a no-op and returns the locked companion. */
+  async upsertCompanionOnboarding(
+    ownerUserId: string,
+    spec: Partial<CompanionSpec>,
+    incrementTurn = true,
+  ): Promise<Companion> {
+    const existing = await this.getCompanionByOwner(ownerUserId);
+    if (existing?.onboardingState === "active") return existing;
+    const incTurn = incrementTurn ? 1 : 0;
+    const rows = await this.sql<Array<any>>`
+      INSERT INTO companions (owner_user_id, name, avatar_url, voice_persona, core_traits, owner_dynamic, backstory, onboarding_state, onboarding_turns, created_at, updated_at)
+      VALUES (
+        ${ownerUserId},
+        ${spec.name?.trim() ?? ""},
+        ${spec.avatarUrl ?? null},
+        ${spec.voicePersona?.trim() ?? ""},
+        ${spec.coreTraits ?? []},
+        ${spec.ownerDynamic?.trim() ?? ""},
+        ${spec.backstory?.trim() ?? ""},
+        'onboarding',
+        ${incTurn},
+        NOW(), NOW()
+      )
+      ON CONFLICT (owner_user_id) DO UPDATE SET
+        name             = CASE WHEN ${spec.name?.trim() ?? ""} <> '' THEN ${spec.name?.trim() ?? ""} ELSE companions.name END,
+        avatar_url       = COALESCE(${spec.avatarUrl ?? null}, companions.avatar_url),
+        voice_persona    = CASE WHEN ${spec.voicePersona?.trim() ?? ""} <> '' THEN ${spec.voicePersona?.trim() ?? ""} ELSE companions.voice_persona END,
+        core_traits      = CASE WHEN cardinality(${spec.coreTraits ?? []}::text[]) > 0 THEN ${spec.coreTraits ?? []} ELSE companions.core_traits END,
+        owner_dynamic    = CASE WHEN ${spec.ownerDynamic?.trim() ?? ""} <> '' THEN ${spec.ownerDynamic?.trim() ?? ""} ELSE companions.owner_dynamic END,
+        backstory        = CASE WHEN ${spec.backstory?.trim() ?? ""} <> '' THEN ${spec.backstory?.trim() ?? ""} ELSE companions.backstory END,
+        onboarding_turns = companions.onboarding_turns + ${incTurn},
+        updated_at       = NOW()
+      WHERE companions.onboarding_state <> 'active'
+      RETURNING *
+    `;
+    return rows[0] ? this.rowToCompanion(rows[0]) : (await this.getCompanionByOwner(ownerUserId))!;
+  }
+
+  /** Graduate a user's companion from onboarding to active, seed the DM scope's
+   * consented member rows (owner + companion:<id>), and record the initial
+   * owner ↔ companion relationship edges.
+   * Each account gets ONE permanent companion — if the user's companion is
+   * already 'active', it is permanently locked and returned unchanged. */
+  async activateCompanion(
+    ownerUserId: string,
+    ownerDisplayName: string,
+    spec: CompanionSpec,
+  ): Promise<Companion> {
+    const existing = await this.getCompanionByOwner(ownerUserId);
+    if (existing?.onboardingState === "active") return existing;
+    const dmScope = `dm:${ownerUserId}`;
+    await this.ensureSettings(dmScope);
+    const rows = await this.sql<Array<any>>`
+      INSERT INTO companions (owner_user_id, name, avatar_url, voice_persona, core_traits, owner_dynamic, backstory, onboarding_state, onboarding_turns, created_at, updated_at)
+      VALUES (
+        ${ownerUserId},
+        ${spec.name.trim() || "Companion"},
+        ${spec.avatarUrl ?? null},
+        ${spec.voicePersona.trim()},
+        ${spec.coreTraits},
+        ${spec.ownerDynamic.trim()},
+        ${spec.backstory.trim()},
+        'active',
+        1,
+        NOW(), NOW()
+      )
+      ON CONFLICT (owner_user_id) DO UPDATE SET
+        name             = CASE WHEN ${spec.name.trim()} <> '' THEN ${spec.name.trim()} ELSE companions.name END,
+        avatar_url       = COALESCE(${spec.avatarUrl ?? null}, companions.avatar_url),
+        voice_persona    = CASE WHEN ${spec.voicePersona.trim()} <> '' THEN ${spec.voicePersona.trim()} ELSE companions.voice_persona END,
+        core_traits      = CASE WHEN cardinality(${spec.coreTraits}::text[]) > 0 THEN ${spec.coreTraits} ELSE companions.core_traits END,
+        owner_dynamic    = CASE WHEN ${spec.ownerDynamic.trim()} <> '' THEN ${spec.ownerDynamic.trim()} ELSE companions.owner_dynamic END,
+        backstory        = CASE WHEN ${spec.backstory.trim()} <> '' THEN ${spec.backstory.trim()} ELSE companions.backstory END,
+        onboarding_state = 'active',
+        updated_at       = NOW()
+      WHERE companions.onboarding_state <> 'active'
+      RETURNING *
+    `;
+    const companion = rows[0] ? this.rowToCompanion(rows[0]) : (await this.getCompanionByOwner(ownerUserId))!;
+    const compSubj = MemoryStore.companionSubjectId(companion.id);
+    const now = new Date();
+    await this.upsertMember(dmScope, ownerUserId, ownerDisplayName, now, false);
+    await this.setMemberOptIn(dmScope, ownerUserId, true);
+    await this.upsertMember(dmScope, compSubj, companion.name, now, false);
+    await this.setMemberOptIn(dmScope, compSubj, true);
+
+    if (companion.ownerDynamic) {
+      await this.sql`
+        INSERT INTO relationship_observations (guild_id, subject_id, other_id, message_id, author_id, nature, valence, reason, verdict, source)
+        VALUES
+          (${dmScope}, ${ownerUserId}, ${compSubj}, ${`onboard:${companion.id}`}, ${ownerUserId}, ${companion.ownerDynamic}, 0.8, 'Established during companion awakening', 'literal', 'message'),
+          (${dmScope}, ${compSubj}, ${ownerUserId}, ${`onboard:${companion.id}`}, ${compSubj}, ${companion.ownerDynamic}, 0.8, 'Established during companion awakening', 'literal', 'message')
+        ON CONFLICT (subject_id, other_id, message_id) DO NOTHING
+      `;
+      await this.recomputeEdges(dmScope);
+    }
+    return companion;
+  }
+
+  async updateCompanionAvatar(ownerUserId: string, avatarUrl: string | null): Promise<Companion | null> {
+    const rows = await this.sql<Array<any>>`
+      UPDATE companions SET avatar_url = ${avatarUrl}, updated_at = NOW()
+      WHERE owner_user_id = ${ownerUserId}
+      RETURNING *
+    `;
+    return rows[0] ? this.rowToCompanion(rows[0]) : null;
+  }
+
+  /** Summon a companion into a guild: links guild_companions, registers
+   * companion:<id> as a consented guild member so entity resolution & edges
+   * work immediately, and opts in the owner in that guild. */
+  async summonCompanion(
+    guildId: string,
+    companionId: number,
+    ownerUserId: string,
+    ownerDisplayName?: string,
+  ): Promise<void> {
+    const companion = await this.getCompanionById(companionId);
+    if (!companion || companion.onboardingState !== "active") return;
+    await this.sql`
+      INSERT INTO guild_companions (guild_id, companion_id, summoned_by, active, summoned_at)
+      VALUES (${guildId}, ${companionId}, ${ownerUserId}, 1, NOW())
+      ON CONFLICT (guild_id, companion_id) DO UPDATE SET active = 1, summoned_at = NOW()
+    `;
+    const now = new Date();
+    const compSubj = MemoryStore.companionSubjectId(companionId);
+    await this.upsertMember(guildId, compSubj, companion.name, now, false);
+    await this.setMemberOptIn(guildId, compSubj, true);
+    if (ownerDisplayName) {
+      await this.upsertMember(guildId, ownerUserId, ownerDisplayName, now, false);
+    }
+    const ownerMember = await this.getMember(guildId, ownerUserId);
+    if (!ownerMember?.optedOut) {
+      await this.setMemberOptIn(guildId, ownerUserId, true);
+    }
+    if (companion.ownerDynamic) {
+      await this.sql`
+        INSERT INTO relationship_observations (guild_id, subject_id, other_id, message_id, author_id, nature, valence, reason, verdict, source)
+        VALUES
+          (${guildId}, ${ownerUserId}, ${compSubj}, ${`summon:${guildId}:${companionId}`}, ${ownerUserId}, ${companion.ownerDynamic}, 0.8, ${`${companion.name} is ${ownerDisplayName ?? "their owner"}'s companion (${companion.ownerDynamic})`}, 'literal', 'message'),
+          (${guildId}, ${compSubj}, ${ownerUserId}, ${`summon:${guildId}:${companionId}`}, ${compSubj}, ${companion.ownerDynamic}, 0.8, ${`${companion.name} is ${ownerDisplayName ?? "their owner"}'s companion (${companion.ownerDynamic})`}, 'literal', 'message')
+        ON CONFLICT (subject_id, other_id, message_id) DO NOTHING
+      `;
+    }
+  }
+
+  async dismissCompanion(guildId: string, companionId: number): Promise<boolean> {
+    const result = await this.sql`
+      UPDATE guild_companions SET active = 0
+      WHERE guild_id = ${guildId} AND companion_id = ${companionId} AND active = 1
+    `;
+    return result.count > 0;
+  }
+
+  async listGuildCompanions(guildId: string): Promise<GuildCompanion[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT c.*, gc.guild_id, gc.summoned_by, gc.active, gc.summoned_at
+      FROM guild_companions gc
+      JOIN companions c ON c.id = gc.companion_id
+      WHERE gc.guild_id = ${guildId} AND gc.active = 1 AND c.onboarding_state = 'active'
+      ORDER BY gc.summoned_at ASC
+    `;
+    return rows.map(r => ({
+      ...this.rowToCompanion(r),
+      guildId: r.guild_id,
+      summonedBy: r.summoned_by,
+      active: Number(r.active) === 1,
+      summonedAt: ts(r.summoned_at),
+    }));
+  }
+
+  async listCompanionGuilds(companionId: number): Promise<string[]> {
+    const rows = await this.sql<Array<{ guild_id: string }>>`
+      SELECT guild_id FROM guild_companions WHERE companion_id = ${companionId} AND active = 1 ORDER BY summoned_at DESC
+    `;
+    return rows.map(r => r.guild_id);
+  }
+
+  async listActiveDmScopes(): Promise<string[]> {
+    const rows = await this.sql<Array<{ owner_user_id: string }>>`
+      SELECT owner_user_id FROM companions WHERE onboarding_state = 'active'
+    `;
+    return rows.map(r => `dm:${r.owner_user_id}`);
+  }
+
+  async recordWebhookMessage(
+    messageId: string,
+    guildId: string,
+    channelId: string,
+    companionId: number,
+    chainDepth = 0,
+  ): Promise<void> {
+    await this.sql`
+      INSERT INTO webhook_messages (message_id, guild_id, channel_id, companion_id, chain_depth)
+      VALUES (${messageId}, ${guildId}, ${channelId}, ${companionId}, ${chainDepth})
+      ON CONFLICT (message_id) DO NOTHING
+    `;
+  }
+
+  async getWebhookMessage(messageId: string): Promise<WebhookMessageRecord | null> {
+    const rows = await this.sql<Array<{
+      message_id: string; guild_id: string; channel_id: string; companion_id: number | string;
+      chain_depth: number; created_at: Date | string;
+    }>>`
+      SELECT message_id, guild_id, channel_id, companion_id, chain_depth, created_at
+      FROM webhook_messages WHERE message_id = ${messageId}
+    `;
+    if (!rows[0]) return null;
+    const r = rows[0];
+    return {
+      messageId: r.message_id,
+      guildId: r.guild_id,
+      channelId: r.channel_id,
+      companionId: Number(r.companion_id),
+      chainDepth: Number(r.chain_depth),
+      createdAt: ts(r.created_at),
+    };
   }
 }

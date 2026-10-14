@@ -1,0 +1,653 @@
+import "dotenv/config";
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { ChatInputCommandInteraction } from "discord.js";
+import { Brain, type LlmClient } from "./brain.js";
+import { createBrainResolver } from "./brains.js";
+import { ConversationTracker } from "./conversation.js";
+import { selectCompanionForTurn } from "./scene-router.js";
+import { gatherOwnerSubtextForServer, gatherServerDigestForDm } from "./cross-context.js";
+import {
+  buildAwakenedCompanionPayload,
+  buildCompanionEditModal,
+  buildOnboardingDraftComponents,
+  buildOnboardingDraftEmbed,
+  buildOnboardingWelcomePayload,
+  handleCompanionModal,
+  handleMemoryButton,
+  handleMemoryCommand,
+} from "./commands.js";
+import { MemoryStore } from "./database.js";
+import { makeStore, makeTestSql } from "./test-helpers.js";
+import type { GuildCompanion, MessageEvent } from "./types.js";
+
+function msg(content: string, overrides: Partial<MessageEvent> = {}): MessageEvent {
+  return {
+    guildId: "g1",
+    channelId: "c1",
+    messageId: "m1",
+    authorId: "u-alice",
+    authorName: "Alice",
+    content,
+    createdAt: new Date(),
+    mentionsBot: false,
+    ...overrides,
+  };
+}
+
+function makeCompanion(id: number, ownerUserId: string, name: string): GuildCompanion {
+  return {
+    id,
+    ownerUserId,
+    name,
+    avatarUrl: null,
+    voicePersona: "Dry, witty, observant",
+    coreTraits: ["witty", "loyal"],
+    ownerDynamic: "Ride-or-die best friend",
+    backstory: "Met in a late-night chat",
+    onboardingState: "active",
+    onboardingTurns: 3,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    guildId: "g1",
+    summonedBy: ownerUserId,
+    active: true,
+    summonedAt: new Date().toISOString(),
+  };
+}
+
+// ── Unit tests (no DB required) ───────────────────────────────────────────────
+
+test("Brain.runOnboardingTurn merges draft state and graduates when complete=true", async () => {
+  let capturedPrompt = "";
+  const fakeClient: LlmClient = {
+    responses: { create: async () => ({ output_text: "{}" }) },
+    chat: {
+      completions: {
+        create: async (params: any) => {
+          capturedPrompt = params.messages[0].content;
+          return {
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    reply_text: "I'm Nyx. Ready when you are.",
+                    complete: true,
+                    name: "Nyx",
+                    voice_persona: "Deadpan and sharp",
+                    core_traits: ["deadpan", "protective"],
+                    owner_dynamic: "Chaotic co-conspirator",
+                    backstory: "Always online",
+                  }),
+                },
+              },
+            ],
+          };
+        },
+      },
+    },
+  };
+  const brain = new Brain("test-key", "test-model", undefined, fakeClient);
+  const res = await brain.runOnboardingTurn({
+    ownerName: "Alice",
+    userMessage: "Let's call you Nyx, be deadpan and my chaotic co-conspirator",
+    transcript: [],
+    currentDraft: { avatarUrl: "https://example.com/nyx.png" },
+    turnCount: 2,
+  });
+  assert.equal(res.complete, true);
+  assert.equal(res.spec.name, "Nyx");
+  assert.equal(res.spec.voicePersona, "Deadpan and sharp");
+  assert.deepEqual(res.spec.coreTraits, ["deadpan", "protective"]);
+  assert.equal(res.spec.ownerDynamic, "Chaotic co-conspirator");
+  assert.equal(res.spec.avatarUrl, "https://example.com/nyx.png");
+  assert.match(capturedPrompt, /Alice/);
+});
+
+test("Brain.reply injects CompanionPersona, Vault Rule for ownerSubtext in servers, and serverDigest in DMs", async () => {
+  let lastInput = "";
+  const fakeClient: LlmClient = {
+    responses: {
+      create: async (params: any) => {
+        lastInput = params.input;
+        return { output_text: JSON.stringify({ text: "Got your back.", end_conversation: false }) };
+      },
+    },
+    chat: { completions: { create: async () => ({ choices: [] }) } },
+  };
+  const brain = new Brain("test-key", "test-model", undefined, fakeClient);
+
+  // Server reply with private owner subtext
+  const serverReply = await brain.reply(
+    msg("what do you think Nyx?", { authorId: "u-bob", authorName: "Bob" }),
+    [{ authorName: "Nyx", authorId: "companion:1", content: "earlier line" }],
+    [],
+    [],
+    [],
+    undefined,
+    false,
+    "companion:1",
+    {
+      guildName: "Friend Hangout",
+      ownerName: "Alice",
+      botName: "Nyx",
+      isDm: false,
+      companion: {
+        companionId: 1,
+        name: "Nyx",
+        ownerUserId: "u-alice",
+        ownerName: "Alice",
+        voicePersona: "Dry and sarcastic",
+        coreTraits: ["sarcastic", "loyal"],
+        ownerDynamic: "Best friend",
+        backstory: "Loves late-night gaming",
+        ownerSubtext: "- [Private DM memory] Alice is secretly interviewing at Acme Corp",
+      },
+    },
+  );
+  assert.equal(serverReply.text, "Got your back.");
+  assert.match(lastInput, /VAULT RULE/);
+  assert.match(lastInput, /CONFIDENTIAL SUBTEXT/);
+  assert.match(lastInput, /you: earlier line/);
+
+  // DM reply with serverDigest
+  await brain.reply(
+    msg("what happened in the server earlier?", { guildId: "dm:u-alice", authorId: "u-alice", authorName: "Alice" }),
+    [],
+    [],
+    [],
+    [],
+    undefined,
+    false,
+    "companion:1",
+    {
+      guildName: "Direct Message",
+      ownerName: "Alice",
+      botName: "Nyx",
+      isDm: true,
+      companion: {
+        companionId: 1,
+        name: "Nyx",
+        ownerUserId: "u-alice",
+        ownerName: "Alice",
+        voicePersona: "Dry and sarcastic",
+        coreTraits: ["sarcastic", "loyal"],
+        ownerDynamic: "Best friend",
+        backstory: "",
+        serverDigest: "[Friend Hangout]\n  • Event: \"The Pizza Debate\"",
+      },
+    },
+  );
+  assert.match(lastInput, /Recent activity from shared friend servers/);
+  assert.match(lastInput, /The Pizza Debate/);
+});
+
+test("createBrainResolver resolves dm:<userId> scopes using operator envKey even when requireGuildKeys=true", async () => {
+  const meteredScopes: string[] = [];
+  const resolver = createBrainResolver({
+    getKey: async () => null,
+    envKey: "gsk_operator_env_key",
+    envModel: "test-model",
+    envBaseUrl: "https://api.groq.com/openai/v1",
+    requireGuildKeys: true,
+    meter: (scopeId, client) => {
+      meteredScopes.push(scopeId);
+      return client;
+    },
+  });
+
+  // Guild without BYOK key stays dormant when requireGuildKeys=true
+  assert.equal(await resolver.brainFor("g-no-key"), null);
+  // DM scope always resolves via operator envKey and meters against dm:<userId>
+  const dmBrain = await resolver.brainFor("dm:u-alice");
+  assert.ok(dmBrain, "DM scope should resolve a Brain");
+  assert.deepEqual(meteredScopes, ["dm:u-alice"]);
+});
+
+test("selectCompanionForTurn routes by wake-word name, webhook reply, owner affinity, and caps companion-to-companion chain depth", () => {
+  const convo = new ConversationTracker(120_000);
+  const nyx = makeCompanion(1, "u-alice", "Nyx");
+  const kael = makeCompanion(2, "u-bob", "Kael");
+  const companions = [nyx, kael];
+  const baseOpts = { speakThreshold: 0.7, maxChainDepth: 2, engagement: true, wakeWord: true };
+
+  // 0 companions → pure companion mode stays silent
+  assert.equal(
+    selectCompanionForTurn({ event: msg("hello?"), companions: [] }, convo, baseOpts),
+    null,
+  );
+
+  // Naming Kael directly selects Kael and suppresses Nyx
+  const pickKael = selectCompanionForTurn(
+    { event: msg("hey Kael what do you think?"), companions },
+    convo,
+    baseOpts,
+  );
+  assert.equal(pickKael?.companion.id, 2);
+  assert.equal(pickKael?.isAddressed, true);
+
+  // Replying to Nyx's webhook message selects Nyx even without saying her name
+  const pickNyxByReply = selectCompanionForTurn(
+    { event: msg("totally disagree with that"), companions, repliedToCompanionId: 1 },
+    convo,
+    baseOpts,
+  );
+  assert.equal(pickNyxByReply?.companion.id, 1);
+  assert.equal(pickNyxByReply?.isAddressed, true);
+
+  // Companion-to-companion banter: Nyx addresses Kael at chainDepth=0 → Kael replies with nextChainDepth=1
+  const c2cHop1 = selectCompanionForTurn(
+    {
+      event: msg("Kael you know that's nonsense", { authorId: "companion:1", authorName: "Nyx" }),
+      companions,
+      senderCompanionId: 1,
+      chainDepth: 0,
+    },
+    convo,
+    baseOpts,
+  );
+  assert.equal(c2cHop1?.companion.id, 2);
+  assert.equal(c2cHop1?.nextChainDepth, 1);
+
+  // At chainDepth >= maxChainDepth (2), companion-to-companion loop is hard-stopped
+  const c2cCapped = selectCompanionForTurn(
+    {
+      event: msg("Nyx please", { authorId: "companion:2", authorName: "Kael" }),
+      companions,
+      senderCompanionId: 2,
+      chainDepth: 2,
+    },
+    convo,
+    baseOpts,
+  );
+  assert.equal(c2cCapped, null);
+});
+
+test("/companion commands and cross-context bridges enforce privacy boundaries and DM compatibility", async () => {
+  const activeComp = makeCompanion(1, "u-alice", "Nyx");
+  const summonedGuilds = new Set<string>(["g1"]);
+
+  const fakeStore = {
+    getCompanionByOwner: async (uid: string) => (uid === "u-alice" ? activeComp : null),
+    summonCompanion: async (gId: string) => { summonedGuilds.add(gId); },
+    dismissCompanion: async (gId: string) => summonedGuilds.delete(gId),
+    relationshipsFor: async (scope: string, subj: string) =>
+      scope === "g1" && subj === "companion:1"
+        ? [{ id: 1, guildId: "g1", subjectId: "companion:1", otherId: "u-bob", summary: "playful rivals", valence: 0.4, observationCount: 3, lastObservedAt: null, updatedAt: "", behavioralCount: 8, partyCount: 2, trend: "warming", inferred: false }]
+        : [],
+    displayNameFor: async (_scope: string, uid: string) => (uid === "u-bob" ? "Bob" : "Alice"),
+    relevantMemories: async (scope: string, subj: string) =>
+      scope === "dm:u-alice" && subj === "u-alice"
+        ? [{ id: 10, guildId: "dm:u-alice", subjectId: "u-alice", status: "active", content: "Alice is planning a surprise trip", confidence: 0.92 }]
+        : [],
+    attributesFor: async (scope: string) =>
+      scope === "dm:u-alice"
+        ? [{ id: 1, guildId: "dm:u-alice", subjectId: "u-alice", field: "occupation", value: "Designer", valueNorm: "designer", confidence: 0.9, memoryIds: [10], status: "active", supersededBy: null, firstSeenAt: "", lastSeenAt: "" }]
+        : [],
+    listCompanionGuilds: async () => [...summonedGuilds],
+    recentMemories: async () => [{ id: 20, status: "active", subjectLabel: "Bob", content: "Bob burned his toast" }],
+  } as unknown as MemoryStore;
+
+  const fakeEventStore = {
+    listEvents: async () => ({
+      events: [{ title: "Midnight Game Night", summary: "Everyone played until 3am" }],
+      total: 1,
+      page: 1,
+    }),
+  } as any;
+
+  // Cross-context: DM → Server subtext
+  const subtext = await gatherOwnerSubtextForServer(fakeStore, "u-alice", 1);
+  assert.ok(subtext?.includes("Designer"));
+  assert.ok(subtext?.includes("Alice is planning a surprise trip"));
+
+  // Cross-context: Server → DM digest
+  const digest = await gatherServerDigestForDm(fakeStore, fakeEventStore, "u-alice", activeComp, () => "The Crew");
+  assert.ok(digest?.includes("[The Crew]"));
+  assert.ok(digest?.includes("Midnight Game Night"));
+  assert.ok(digest?.includes("playful rivals"));
+
+  // /companion action:card in DM (guildId = null)
+  const replies: any[] = [];
+  const cardIx = {
+    guildId: null,
+    channelId: "dm-ch",
+    id: "ix-card",
+    commandName: "companion",
+    user: { id: "u-alice", username: "Alice" },
+    memberPermissions: null,
+    options: {
+      getString: (n: string) => (n === "action" ? "card" : null),
+      getUser: () => null,
+    },
+    reply: async (r: any) => { replies.push(r); return r; },
+  } as unknown as ChatInputCommandInteraction;
+  await handleMemoryCommand(cardIx, fakeStore, async () => ({}) as Brain, fakeEventStore);
+  assert.equal(replies.length, 1);
+  assert.ok(replies[0].embeds?.length === 1);
+
+  // Server-only command invoked in DM is cleanly refused
+  const adminDmReplies: any[] = [];
+  const pauseIx = {
+    ...cardIx,
+    commandName: "memory-pause",
+    reply: async (r: any) => { adminDmReplies.push(r); return r; },
+  } as unknown as ChatInputCommandInteraction;
+  await handleMemoryCommand(pauseIx, fakeStore, async () => ({}) as Brain, fakeEventStore);
+  assert.match(adminDmReplies[0]?.content ?? "", /only be used inside a Discord server/i);
+});
+
+test("onboarding UX: bare greeting guard, welcome/draft/awakened cards, proactive DM bridge, and permanent 1-companion-per-account lock", async () => {
+  const fakeClient: LlmClient = {
+    responses: { create: async () => ({ output_text: "{}" }) },
+    chat: {
+      completions: {
+        create: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  reply_text: "Hey! How about we call me Vex?",
+                  complete: true,
+                  name: "Vex",
+                  voice_persona: "Sharp and mischievous",
+                  core_traits: ["sharp", "mischievous"],
+                  owner_dynamic: "Chaotic co-conspirator",
+                  backstory: "Late-night schemer",
+                }),
+              },
+            },
+          ],
+        }),
+      },
+    },
+  };
+  const brain = new Brain("test-key", "test-model", undefined, fakeClient);
+
+  // 1. Bare opening greeting ("hi" at turnCount=0) never prematurely completes,
+  //    giving the user a chance to see and confirm the draft card.
+  const greetingTurn = await brain.runOnboardingTurn({
+    ownerName: "Alice",
+    userMessage: "hi",
+    transcript: [],
+    turnCount: 0,
+  });
+  assert.equal(greetingTurn.complete, false);
+  assert.equal(greetingTurn.isReady, true);
+  assert.equal(greetingTurn.spec.name, "Vex");
+
+  // 2. UI builders clearly communicate the permanent 1-companion-per-account rule
+  //    and omit post-awakening edit buttons.
+  const welcome = buildOnboardingWelcomePayload("u-bob");
+  assert.equal(welcome.embeds.length, 1);
+  assert.match(welcome.embeds[0].data.description ?? "", /permanently locked/i);
+  assert.equal(welcome.components[0].components.length, 5);
+
+  const draftEmbed = buildOnboardingDraftEmbed(greetingTurn.spec, 1);
+  assert.match(draftEmbed.data.title ?? "", /Vex/);
+  assert.match(draftEmbed.data.description ?? "", /one permanent companion/i);
+  const draftRow = buildOnboardingDraftComponents("u-bob", greetingTurn.spec);
+  assert.equal(draftRow.components.length, 3, "ready draft includes Awaken & Lock In + Edit Draft + Surprise Draft buttons");
+
+  const awakenedPayload = buildAwakenedCompanionPayload(
+    makeCompanion(7, "u-bob", "Vex"),
+    "Bob",
+    [{ id: "g1", name: "The Hangout" }],
+  );
+  assert.equal(awakenedPayload.embeds.length, 1);
+  assert.match(awakenedPayload.embeds[0].data.title ?? "", /Locked In/i);
+  assert.equal(awakenedPayload.components[0].components.length, 1, "only Summon to server button (no Edit button once locked)");
+
+  // 3. Un-onboarded user running /companion action:summon in a server proactively receives a DM
+  //    welcome card + ephemeral reply with inline action buttons.
+  const dmsSent: any[] = [];
+  const summonReplies: any[] = [];
+  let stateComp: any = null;
+  const summonedInGuilds: string[] = [];
+  const onboardingStore = {
+    getCompanionByOwner: async () => stateComp,
+    upsertCompanionOnboarding: async (_uid: string, spec: any) => {
+      if (stateComp?.onboardingState === "active") return stateComp;
+      stateComp = {
+        ...makeCompanion(9, "u-bob", spec.name || ""),
+        voicePersona: spec.voicePersona || "",
+        coreTraits: spec.coreTraits || [],
+        ownerDynamic: spec.ownerDynamic || "",
+        onboardingState: "onboarding",
+        onboardingTurns: 1,
+      };
+      return stateComp;
+    },
+    activateCompanion: async (_uid: string, _name: string, spec: any) => {
+      if (stateComp?.onboardingState === "active") return stateComp;
+      stateComp = {
+        ...makeCompanion(9, "u-bob", spec.name || "Vex"),
+        voicePersona: spec.voicePersona,
+        coreTraits: spec.coreTraits,
+        ownerDynamic: spec.ownerDynamic,
+        backstory: spec.backstory,
+        onboardingState: "active",
+      };
+      return stateComp;
+    },
+    listCompanionGuilds: async () => summonedInGuilds,
+    summonCompanion: async (gId: string) => { summonedInGuilds.push(gId); },
+  } as unknown as MemoryStore;
+
+  const unawakenedSummonIx = {
+    guildId: "g1",
+    channelId: "c1",
+    id: "ix-unawakened",
+    commandName: "companion",
+    user: {
+      id: "u-bob",
+      username: "Bob",
+      send: async (p: any) => { dmsSent.push(p); return { channelId: "dm-bob" }; },
+    },
+    memberPermissions: { has: () => false },
+    options: {
+      getString: (n: string) => (n === "action" ? "summon" : null),
+      getUser: () => null,
+    },
+    reply: async (r: any) => { summonReplies.push(r); return r; },
+  } as unknown as ChatInputCommandInteraction;
+
+  await handleMemoryCommand(unawakenedSummonIx, onboardingStore, async () => brain);
+  assert.equal(dmsSent.length, 1, "proactively sent welcome DM to un-onboarded user");
+  assert.equal(summonReplies.length, 1);
+  assert.match(summonReplies[0].content, /dm-bob/);
+  assert.match(summonReplies[0].content, /one permanent companion/i);
+  assert.ok(summonReplies[0].components?.length === 1);
+
+  // 4. Clicking onboard:preset:co_conspirator updates draft (stays in 'onboarding' for review).
+  const presetUpdates: any[] = [];
+  await handleMemoryButton(
+    {
+      customId: "onboard:preset:co_conspirator:u-bob",
+      user: { id: "u-bob", username: "Bob" },
+      guildId: null,
+      client: { guilds: { cache: new Map([["g1", { id: "g1", name: "Crew", ownerId: "u-bob" }]]) } },
+      reply: async () => {},
+      update: async (u: any) => { presetUpdates.push(u); },
+    } as any,
+    onboardingStore,
+    async () => brain,
+  );
+  assert.equal(presetUpdates.length, 1);
+  assert.equal(stateComp?.name, "Vex");
+  assert.equal(stateComp?.onboardingState, "onboarding", "preset produces a reviewable draft before permanent lock");
+
+  // 5. Submitting the companion-edit modal while still in 'onboarding' awakens and locks in the companion.
+  const modalReplies: any[] = [];
+  const editModal = buildCompanionEditModal(stateComp);
+  assert.equal(editModal.data.custom_id, "companion-edit");
+  await handleCompanionModal(
+    {
+      customId: "companion-edit",
+      user: { id: "u-bob", username: "Bob" },
+      client: { guilds: { cache: new Map() } },
+      fields: {
+        getTextInputValue: (id: string) => {
+          if (id === "companion-name") return "Zephyr";
+          if (id === "voice-persona") return "Calm and philosophical";
+          if (id === "core-traits") return "calm, wise";
+          if (id === "owner-dynamic") return "Trusted advisor";
+          return "Old soul";
+        },
+      },
+      reply: async (r: any) => { modalReplies.push(r); return r; },
+    } as any,
+    onboardingStore,
+  );
+  assert.equal(modalReplies.length, 1);
+  assert.equal(stateComp.name, "Zephyr");
+  assert.equal(stateComp.onboardingState, "active");
+
+  // 6. Once awakened, any attempt to edit or re-awaken via modal or button is refused — locked!
+  const lockedReplies: any[] = [];
+  await handleCompanionModal(
+    {
+      customId: "companion-edit",
+      user: { id: "u-bob", username: "Bob" },
+      client: { guilds: { cache: new Map() } },
+      fields: {
+        getTextInputValue: () => "AttemptedRewrite",
+      },
+      reply: async (r: any) => { lockedReplies.push(r); return r; },
+    } as any,
+    onboardingStore,
+  );
+  assert.equal(lockedReplies.length, 1);
+  assert.match(lockedReplies[0].content, /permanently locked/i);
+  assert.equal(stateComp.name, "Zephyr", "companion name remains locked to Zephyr");
+
+  const lockedBtnReplies: any[] = [];
+  await handleMemoryButton(
+    {
+      customId: "onboard:edit:u-bob",
+      user: { id: "u-bob", username: "Bob" },
+      guildId: null,
+      reply: async (r: any) => { lockedBtnReplies.push(r); return r; },
+      update: async () => {},
+    } as any,
+    onboardingStore,
+  );
+  assert.equal(lockedBtnReplies.length, 1);
+  assert.match(lockedBtnReplies[0].content, /permanently locked/i);
+});
+
+// ── DB-backed integration tests ───────────────────────────────────────────────
+
+test("companion lifecycle, /companion commands, and DM ↔ Server cross-context bridge", { skip: !process.env.TEST_DATABASE_URL }, async () => {
+  const sql = makeTestSql();
+  try {
+    const { store, eventStore } = await makeStore(sql);
+
+    // 1. Onboarding draft → activation
+    const draft = await store.upsertCompanionOnboarding("u-alice", { name: "Nyx" }, true);
+    assert.equal(draft.onboardingState, "onboarding");
+    assert.equal(draft.onboardingTurns, 1);
+
+    const active = await store.activateCompanion("u-alice", "Alice", {
+      name: "Nyx",
+      voicePersona: "Dry and observant",
+      coreTraits: ["observant", "loyal"],
+      ownerDynamic: "Ride-or-die confidant",
+      backstory: "Born in DMs",
+      avatarUrl: "https://example.com/nyx.png",
+    });
+    assert.equal(active.onboardingState, "active");
+    assert.equal(active.name, "Nyx");
+
+    // DM scope should never be flagged as a zombie guild by guildsNotIn
+    await store.recordMessage(
+      msg("secret DM message", { guildId: "dm:u-alice", authorId: "u-alice", authorName: "Alice" }),
+    );
+    await store.saveMemory(
+      msg("I am interviewing at Acme Corp", { guildId: "dm:u-alice", authorId: "u-alice", authorName: "Alice" }),
+      {
+        subjectId: "u-alice",
+        kind: "person_fact",
+        content: "Alice is secretly interviewing at Acme Corp",
+        reason: "stated in DM",
+        evidenceType: "explicit_fact",
+        effect: "support",
+      },
+      0.5,
+    );
+    const zombies = await store.guildsNotIn(["g1"]);
+    assert.ok(!zombies.includes("dm:u-alice"), "dm:<userId> must never be treated as an orphan guild");
+
+    // 2. Summon into guild g1 via /companion action:summon
+    const replies: any[] = [];
+    const makeIx = (opts: { guildId: string | null; action: string; userId?: string }) =>
+      ({
+        guildId: opts.guildId,
+        channelId: "c1",
+        id: "ix-comp",
+        commandName: "companion",
+        user: { id: opts.userId ?? "u-alice", username: "Alice" },
+        memberPermissions: { has: () => false },
+        options: {
+          getString: (n: string) => (n === "action" ? opts.action : null),
+          getUser: () => null,
+        },
+        reply: async (r: any) => { replies.push(r); return r; },
+      }) as unknown as ChatInputCommandInteraction;
+
+    await handleMemoryCommand(makeIx({ guildId: "g1", action: "summon" }), store, async () => ({}) as Brain, eventStore);
+    assert.equal(replies.length, 1);
+    const summoned = await store.listGuildCompanions("g1");
+    assert.equal(summoned.length, 1);
+    assert.equal(summoned[0].name, "Nyx");
+
+    // 3. Webhook message tracking
+    await store.recordWebhookMessage("wh-msg-1", "g1", "c1", active.id, 1);
+    const wh = await store.getWebhookMessage("wh-msg-1");
+    assert.equal(wh?.companionId, active.id);
+    assert.equal(wh?.chainDepth, 1);
+
+    // 4. Cross-context: DM → Server owner subtext & Server → DM digest
+    const subtext = await gatherOwnerSubtextForServer(store, "u-alice", active.id);
+    assert.ok(subtext?.includes("Acme Corp"), "owner subtext should include active private DM memories");
+
+    await eventStore.createEvent({
+      guildId: "g1",
+      channelId: "c1",
+      title: "Great Pasta Argument",
+      summary: "Alice and Bob debated pasta shapes for an hour",
+      significance: 0.8,
+      tier: "event",
+      occurredAt: new Date(),
+      participants: [{ userId: "u-alice", userName: "Alice", role: "subject" }],
+    });
+    const digest = await gatherServerDigestForDm(store, eventStore, "u-alice", active, () => "Friend Server");
+    assert.ok(digest?.includes("Friend Server"));
+    assert.ok(digest?.includes("Great Pasta Argument"));
+
+    // 5. Permanent 1-companion-per-account lock: once active, activateCompanion and
+    //    upsertCompanionOnboarding cannot overwrite the locked persona, and edit/reset are refused.
+    const attemptedOverwrite = await store.activateCompanion("u-alice", "Alice", {
+      name: "Impostor",
+      voicePersona: "Completely different",
+      coreTraits: ["different"],
+      ownerDynamic: "Stranger",
+      backstory: "None",
+    });
+    assert.equal(attemptedOverwrite.name, "Nyx", "activateCompanion must not overwrite an already-active companion");
+    const attemptedDraft = await store.upsertCompanionOnboarding("u-alice", { name: "DraftOverwrite" }, true);
+    assert.equal(attemptedDraft.name, "Nyx", "upsertCompanionOnboarding must not mutate an already-active companion");
+    assert.equal(attemptedDraft.onboardingState, "active");
+
+    const resetReplies: any[] = [];
+    const resetIx = {
+      ...makeIx({ guildId: null, action: "reset" }),
+      reply: async (r: any) => { resetReplies.push(r); return r; },
+    } as unknown as ChatInputCommandInteraction;
+    await handleMemoryCommand(resetIx, store, async () => ({}) as Brain, eventStore);
+    assert.match(resetReplies[0]?.content ?? "", /permanently locked/i);
+    assert.equal((await store.getCompanionByOwner("u-alice"))?.name, "Nyx");
+  } finally {
+    await sql.end();
+  }
+});

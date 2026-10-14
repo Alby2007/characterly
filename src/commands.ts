@@ -1,6 +1,6 @@
 import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonInteraction, ButtonStyle, ChannelType, ChatInputCommandInteraction, EmbedBuilder, ModalBuilder, ModalSubmitInteraction, PermissionFlagsBits, TextInputBuilder, TextInputStyle, type TextChannel } from "discord.js";
 import type { Brain } from "./brain.js";
-import type { Memory, MemoryStore } from "./database.js";
+import { MemoryStore, type Memory } from "./database.js";
 import { EventStore } from "./events.js";
 import { EventPipeline } from "./event-detection.js";
 import { ProfileStore } from "./profiles.js";
@@ -10,9 +10,290 @@ import { guardedLlmFetch } from "./brains.js";
 import { runProfileBuild, PROFILE_BUILD_COOLDOWN_MS } from "./profile-build.js";
 import { runServerIngest } from "./server-ingest.js";
 import { pauseGuildClaims, resumeGuildClaims, waitForGuildIdle } from "./jobs.js";
-import { metricsSnapshot } from "./metrics.js";
-import type { MessageEvent } from "./types.js";
+import { inc, metricsSnapshot } from "./metrics.js";
+import type { Companion, CompanionSpec, MessageEvent } from "./types.js";
 import { config } from "./config.js";
+
+export const ONBOARDING_ARCHETYPES: Record<
+  string,
+  { label: string; prompt: string; allowImmediateComplete?: boolean }
+> = {
+  surprise: {
+    label: "Surprise Me",
+    prompt:
+      "Surprise me with a complete companion draft! Invent a memorable name, a distinct voice and vibe, core traits, and a fun dynamic for us so I can review it before locking it in.",
+    allowImmediateComplete: false,
+  },
+  co_conspirator: {
+    label: "Chaotic Co-Conspirator",
+    prompt:
+      "I want a chaotic co-conspirator vibe — sharp, witty, a little mischievous, always down to scheme with me. Suggest a fitting name and lock in the vibe.",
+  },
+  deadpan: {
+    label: "Dry & Deadpan",
+    prompt:
+      "I want a dry, deadpan, observant best friend — understated humor, zero fluff, sees right through me. Suggest a fitting name and lock in the vibe.",
+  },
+  ride_or_die: {
+    label: "Ride-or-Die Hype",
+    prompt:
+      "I want a warm, ride-or-die hype friend — fiercely loyal, high energy, always in my corner. Suggest a fitting name and lock in the vibe.",
+  },
+};
+
+export function buildOnboardingWelcomePayload(userId: string) {
+  const embed = new EmbedBuilder()
+    .setTitle("Awaken Your Personal Companion")
+    .setDescription(
+      "Tell me who you want me to be in your own words — or pick a starting archetype below and we'll customize from there.\n\n" +
+        "**One Companion Per Account (Permanent):** Take your time shaping your draft. Once you awaken your companion, their identity is **permanently locked** to your account.",
+    )
+    .addFields(
+      {
+        name: "1. Name & Vibe",
+        value:
+          "What should we call me, and how do I talk? *(e.g. dry & deadpan, chaotic co-conspirator, blunt roaster)*",
+      },
+      {
+        name: "2. Our Dynamic",
+        value:
+          "What's our bond? *(e.g. ride-or-die best friend, scheming partner-in-crime, protective sibling energy)*",
+      },
+      {
+        name: "3. Avatar (Optional)",
+        value:
+          "Attach an image in this DM anytime to give me a face, or use `/companion action:avatar` later.",
+      },
+    )
+    .setFooter({
+      text: "One character per account — freely tweak your draft before awakening!",
+    });
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`onboard:preset:surprise:${userId}`)
+      .setLabel("Surprise Me")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`onboard:preset:co_conspirator:${userId}`)
+      .setLabel("Chaotic Co-Conspirator")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`onboard:preset:deadpan:${userId}`)
+      .setLabel("Dry & Deadpan")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`onboard:preset:ride_or_die:${userId}`)
+      .setLabel("Ride-or-Die")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`onboard:edit:${userId}`)
+      .setLabel("Fill Form Instead")
+      .setStyle(ButtonStyle.Secondary),
+  );
+  return { embeds: [embed], components: [row] };
+}
+
+export function buildOnboardingDraftEmbed(spec: Partial<CompanionSpec>, turnCount: number): EmbedBuilder {
+  const isReady = Boolean(spec.name?.trim() && spec.voicePersona?.trim() && spec.ownerDynamic?.trim());
+  const embed = new EmbedBuilder()
+    .setTitle(spec.name?.trim() ? `Companion Draft — ${spec.name.trim()}` : `Companion Draft (Step ${turnCount + 1})`)
+    .setDescription(
+      isReady
+        ? "All core details are drafted! Keep replying (or click **Edit Draft**) to tweak anything. When you're completely happy, click **Awaken & Lock In** — **each account gets one permanent companion, and awakening cannot be undone.**"
+        : "Reply in chat to fill in or tweak any detail before locking in your permanent companion.",
+    )
+    .addFields(
+      { name: "Name", value: spec.name?.trim() || "*(tell me a name or ask me to pick)*", inline: true },
+      { name: "Bond / Dynamic", value: spec.ownerDynamic?.trim() || "*(tell me our dynamic)*", inline: true },
+      { name: "Voice & Vibe", value: spec.voicePersona?.trim() || "*(tell me how I should talk)*", inline: false },
+      {
+        name: "Core Traits",
+        value: spec.coreTraits?.length ? spec.coreTraits.join(", ") : "*(forming...)*",
+        inline: false,
+      },
+    )
+    .setFooter({
+      text: spec.avatarUrl
+        ? "Avatar attached · Permanent once awakened (1 companion per account)"
+        : "Tip: Attach an image to set an avatar · Permanent once awakened (1 companion per account)",
+    });
+  if (spec.backstory?.trim()) {
+    embed.addFields({ name: "Backstory", value: spec.backstory.trim(), inline: false });
+  }
+  if (spec.avatarUrl) embed.setThumbnail(spec.avatarUrl);
+  return embed;
+}
+
+export function buildOnboardingDraftComponents(
+  userId: string,
+  spec: Partial<CompanionSpec>,
+): ActionRowBuilder<ButtonBuilder> {
+  const isReady = Boolean(spec.name?.trim() && spec.voicePersona?.trim() && spec.ownerDynamic?.trim());
+  const row = new ActionRowBuilder<ButtonBuilder>();
+  if (isReady) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`onboard:awaken:${userId}`)
+        .setLabel(`Awaken & Lock In ${(spec.name ?? "Companion").trim().slice(0, 16)}`)
+        .setStyle(ButtonStyle.Success),
+    );
+  }
+  row.addComponents(
+    new ButtonBuilder()
+      .setCustomId(`onboard:edit:${userId}`)
+      .setLabel("Edit Draft")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`onboard:preset:surprise:${userId}`)
+      .setLabel("Surprise Draft")
+      .setStyle(ButtonStyle.Primary),
+  );
+  return row;
+}
+
+export function buildAwakenedCompanionPayload(
+  companion: Companion,
+  ownerName: string,
+  mutualGuilds: Array<{ id: string; name: string }> = [],
+) {
+  const embed = new EmbedBuilder()
+    .setTitle(`${companion.name} — Awakened & Locked In`)
+    .setDescription(
+      `**${companion.name}** is now permanently bound to your account! Keep chatting right here in DMs, or summon them into a server.\n\n` +
+        (companion.backstory ? `${companion.backstory}\n\n` : "") +
+        `*Use \`/companion action:summon\` in any server to bring them into the hangout, or \`/companion action:avatar\` to update their avatar.*`,
+    )
+    .addFields(
+      { name: "Voice & Vibe", value: companion.voicePersona || "—", inline: false },
+      { name: "Core Traits", value: companion.coreTraits.length ? companion.coreTraits.join(", ") : "—", inline: true },
+      { name: `Bond with ${ownerName}`, value: companion.ownerDynamic || "—", inline: true },
+    )
+    .setFooter({ text: "Permanently bound to your account (1 companion per account)" });
+  if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
+
+  const components: ActionRowBuilder<ButtonBuilder>[] = [];
+  if (mutualGuilds.length > 0) {
+    const row = new ActionRowBuilder<ButtonBuilder>();
+    for (const g of mutualGuilds.slice(0, 3)) {
+      row.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`onboard:summon:${g.id}:${companion.ownerUserId}`)
+          .setLabel(`Summon to ${g.name.slice(0, 22)}`)
+          .setStyle(ButtonStyle.Primary),
+      );
+    }
+    components.push(row);
+  }
+  return { embeds: [embed], components };
+}
+
+export function findMutualGuilds(
+  client: { guilds?: { cache?: Iterable<[string, any]> | Map<string, any> } } | undefined,
+  userId: string,
+): Array<{ id: string; name: string }> {
+  const out: Array<{ id: string; name: string }> = [];
+  const cache = client?.guilds?.cache;
+  if (!cache || typeof (cache as any).values !== "function") return out;
+  for (const g of (cache as Map<string, any>).values()) {
+    if (g?.ownerId === userId || g?.members?.cache?.has?.(userId)) {
+      out.push({ id: g.id, name: g.name ?? g.id });
+    }
+  }
+  return out;
+}
+
+export function buildCompanionEditModal(existing: Companion | null): ModalBuilder {
+  const modal = new ModalBuilder()
+    .setCustomId("companion-edit")
+    .setTitle("Awaken & Lock In Companion");
+
+  const nameInput = new TextInputBuilder()
+    .setCustomId("companion-name")
+    .setLabel("Companion Name")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(64)
+    .setPlaceholder("e.g. Nyx, Kael, Echo");
+  if (existing?.name) nameInput.setValue(existing.name.slice(0, 64));
+
+  const vibeInput = new TextInputBuilder()
+    .setCustomId("voice-persona")
+    .setLabel("Voice & Vibe (how they talk and act)")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true)
+    .setMaxLength(500)
+    .setPlaceholder("e.g. Dry, deadpan, sharp humor, observant and unbothered");
+  if (existing?.voicePersona) vibeInput.setValue(existing.voicePersona.slice(0, 500));
+
+  const traitsInput = new TextInputBuilder()
+    .setCustomId("core-traits")
+    .setLabel("Core Traits (comma-separated)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false)
+    .setMaxLength(200)
+    .setPlaceholder("e.g. deadpan, loyal, perceptive, chaotic");
+  if (existing?.coreTraits?.length) traitsInput.setValue(existing.coreTraits.join(", ").slice(0, 200));
+
+  const dynamicInput = new TextInputBuilder()
+    .setCustomId("owner-dynamic")
+    .setLabel("Dynamic / Bond with You")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(300)
+    .setPlaceholder("e.g. Chaotic co-conspirator and ride-or-die best friend");
+  if (existing?.ownerDynamic) dynamicInput.setValue(existing.ownerDynamic.slice(0, 300));
+
+  const backstoryInput = new TextInputBuilder()
+    .setCustomId("backstory")
+    .setLabel("Backstory / Lore (optional)")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(false)
+    .setMaxLength(600)
+    .setPlaceholder("Any background details or shared lore");
+  if (existing?.backstory) backstoryInput.setValue(existing.backstory.slice(0, 600));
+
+  modal.addComponents(
+    new ActionRowBuilder<TextInputBuilder>().addComponents(nameInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(vibeInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(traitsInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(dynamicInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(backstoryInput),
+  );
+  return modal;
+}
+
+async function promptUnawakenedCompanion(
+  interaction: { user: { id: string; username: string; send?: (payload: any) => Promise<any> }; reply: (payload: any) => Promise<any> },
+  prefixText: string,
+) {
+  let dmUrl: string | undefined;
+  if (typeof interaction.user.send === "function") {
+    try {
+      const sent = await interaction.user.send(buildOnboardingWelcomePayload(interaction.user.id));
+      if (sent?.channelId) dmUrl = `https://discord.com/channels/@me/${sent.channelId}`;
+    } catch {
+      /* User has DMs closed or blocked — fall back to inline buttons */
+    }
+  }
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`onboard:edit:${interaction.user.id}`)
+      .setLabel("Create via Form")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`onboard:preset:surprise:${interaction.user.id}`)
+      .setLabel("Surprise Me")
+      .setStyle(ButtonStyle.Secondary),
+  );
+  const dmHint = dmUrl
+    ? `I just sent you a starter DM (${dmUrl}) — head there to shape your companion, or use the buttons below. *(Note: Each account gets one permanent companion — once awakened, their character is locked in!)*`
+    : "Send me a direct message (DM) to shape your companion through conversation, or use the buttons below. *(Note: Each account gets one permanent companion — once awakened, their character is locked in!)*";
+  return interaction.reply({
+    content: `${prefixText} ${dmHint}`,
+    components: [row],
+    ephemeral: true,
+  });
+}
 
 export const commandDefinitions = [
   { name: "memory", description: "View remembered information", options: [
@@ -57,6 +338,16 @@ export const commandDefinitions = [
   ] },
   { name: "unignore-channel", description: "Admin: restore a channel ASB was ignoring", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
     { name: "channel", description: "Channel to restore", type: 7, required: true }
+  ] },
+  { name: "companion", description: "Manage your personal AI companion and summon them into servers", options: [
+    { name: "action", description: "Companion action", type: 3, required: true, choices: [
+      { name: "card — View a companion's profile card", value: "card" },
+      { name: "summon — Bring your companion into this server", value: "summon" },
+      { name: "dismiss — Dismiss your companion from this server", value: "dismiss" },
+      { name: "avatar — Set your companion's avatar URL", value: "avatar" },
+    ] },
+    { name: "avatar_url", description: "Public http(s) image URL when action is avatar", type: 3, required: false },
+    { name: "user", description: "Member whose companion card to inspect", type: 6, required: false }
   ] }
 ];
 
@@ -77,9 +368,130 @@ const display = (memory: Memory) => `**#${memory.id} · ${confidence(memory.conf
 type BrainFor = (guildId: string) => Promise<Brain | null>;
 const NO_KEY_MSG = "This server hasn't configured an LLM key — an admin can set one with /setup.";
 
+const SERVER_ONLY_COMMANDS = new Set([
+  "memory-purge", "memory-pause", "memory-resume", "memory-settings",
+  "proactive", "status", "memory-triage", "server-build", "setup",
+  "limits", "ignore-channel", "unignore-channel",
+]);
+
 export async function handleMemoryCommand(interaction: ChatInputCommandInteraction, store: MemoryStore, brainFor: BrainFor, evStore?: EventStore, profileStore: ProfileStore = new ProfileStore()) {
-  if (!interaction.guildId) return;
-  const guildId = interaction.guildId;
+  if (!interaction.guildId && SERVER_ONLY_COMMANDS.has(interaction.commandName)) {
+    return interaction.reply({ content: "That command can only be used inside a Discord server.", ephemeral: true });
+  }
+  const guildId = interaction.guildId ?? `dm:${interaction.user.id}`;
+  if (interaction.commandName === "companion") {
+    const action = interaction.options.getString("action", true);
+    if (action === "summon") {
+      if (!interaction.guildId) {
+        return interaction.reply({ content: "Run `/companion action:summon` inside the Discord server where you want to bring your companion.", ephemeral: true });
+      }
+      const companion = await store.getCompanionByOwner(interaction.user.id);
+      if (!companion || companion.onboardingState !== "active") {
+        return promptUnawakenedCompanion(
+          interaction,
+          "You haven't awakened your companion yet!",
+        );
+      }
+      await store.summonCompanion(interaction.guildId, companion.id, interaction.user.id, interaction.user.username);
+      const embed = new EmbedBuilder()
+        .setTitle(`${companion.name} joined the server`)
+        .setDescription(
+          `**${companion.name}** (${interaction.user.username}'s companion) is now hanging out in this server.\n\n` +
+          `**Vibe:** ${companion.voicePersona || "Observant and candid"}\n` +
+          `**Traits:** ${companion.coreTraits.length ? companion.coreTraits.join(", ") : "—"}\n` +
+          `**Bond with ${interaction.user.username}:** ${companion.ownerDynamic || "Close confidant"}`,
+        );
+      if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
+      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`onboard:announce:${interaction.guildId}:${interaction.user.id}`)
+          .setLabel("Introduce to Channel")
+          .setStyle(ButtonStyle.Primary),
+      );
+      return interaction.reply({ ephemeral: true, embeds: [embed], components: [row] });
+    }
+    if (action === "dismiss") {
+      if (!interaction.guildId) {
+        return interaction.reply({ content: "Run `/companion action:dismiss` inside the Discord server you want your companion to leave.", ephemeral: true });
+      }
+      const companion = await store.getCompanionByOwner(interaction.user.id);
+      if (!companion) {
+        return interaction.reply({ content: "You don't have a companion to dismiss.", ephemeral: true });
+      }
+      const removed = await store.dismissCompanion(interaction.guildId, companion.id);
+      return interaction.reply({
+        content: removed
+          ? `**${companion.name}** has stepped out of this server. You can bring them back anytime with \`/companion action:summon\`.`
+          : `**${companion.name}** wasn't active in this server.`,
+        ephemeral: true,
+      });
+    }
+    if (action === "edit" || action === "reset") {
+      const existing = await store.getCompanionByOwner(interaction.user.id);
+      if (existing?.onboardingState === "active") {
+        return interaction.reply({
+          content: `Your companion **${existing.name}** is already awakened and permanently locked to your account — each account gets one permanent companion.`,
+          ephemeral: true,
+        });
+      }
+      if (action === "edit" && typeof interaction.showModal === "function") {
+        return interaction.showModal(buildCompanionEditModal(existing));
+      }
+      return promptUnawakenedCompanion(
+        interaction,
+        "You haven't awakened your companion yet!",
+      );
+    }
+    if (action === "card") {
+      const targetUser = interaction.options.getUser("user") ?? interaction.user;
+      const companion = await store.getCompanionByOwner(targetUser.id);
+      if (!companion || companion.onboardingState !== "active") {
+        if (targetUser.id === interaction.user.id) {
+          return promptUnawakenedCompanion(
+            interaction,
+            "You haven't awakened your companion yet!",
+          );
+        }
+        return interaction.reply({
+          content: `${targetUser.username} hasn't awakened a companion yet.`,
+          ephemeral: true,
+        });
+      }
+      const compSubj = MemoryStore.companionSubjectId(companion.id);
+      const edges = (await store.relationshipsFor(guildId, compSubj)).slice(0, 5);
+      const relLines: string[] = [];
+      for (const e of edges) {
+        if (!e.inferred && e.summary) {
+          const otherId = e.subjectId === compSubj ? e.otherId : e.subjectId;
+          const otherName = await store.displayNameFor(guildId, otherId);
+          relLines.push(`• **${otherName}**: ${e.summary}${e.trend ? ` *(${e.trend})*` : ""}`);
+        }
+      }
+      const embed = new EmbedBuilder()
+        .setTitle(`${companion.name} — ${targetUser.username}'s Companion`)
+        .setDescription(companion.backstory || companion.voicePersona || "Personal AI companion")
+        .addFields(
+          { name: "Voice & Vibe", value: companion.voicePersona || "—", inline: false },
+          { name: "Core Traits", value: companion.coreTraits.length ? companion.coreTraits.join(", ") : "—", inline: true },
+          { name: `Bond with ${targetUser.username}`, value: companion.ownerDynamic || "—", inline: true },
+          { name: "Relationships here", value: relLines.length ? relLines.join("\n") : "No established relationships in this scope yet.", inline: false },
+        )
+        .setFooter({ text: "Permanently bound companion (1 per account)" });
+      if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
+      return interaction.reply({ ephemeral: true, embeds: [embed] });
+    }
+    if (action === "avatar") {
+      const url = interaction.options.getString("avatar_url")?.trim();
+      if (!url || !isSafeUrl(url) || await resolvesToPrivateAddress(new URL(url).hostname)) {
+        return interaction.reply({ content: "Please provide a valid public `http(s)` image URL in `avatar_url`.", ephemeral: true });
+      }
+      const updated = await store.updateCompanionAvatar(interaction.user.id, url);
+      if (!updated) {
+        return interaction.reply({ content: "You haven't created a companion yet — send me a DM first!", ephemeral: true });
+      }
+      return interaction.reply({ content: `Updated **${updated.name || "your companion"}**'s avatar.`, ephemeral: true });
+    }
+  }
   if (interaction.commandName === "privacy") {
     // Public + always ephemeral: the static explainer, plus the dynamic bits
     // the caller is entitled to — this guild's retention, whether it's
@@ -551,6 +963,67 @@ export async function handleSetupModal(
   }
 }
 
+export async function handleCompanionModal(
+  interaction: ModalSubmitInteraction,
+  store: MemoryStore,
+  invalidateLookups?: (scopeId: string) => void,
+) {
+  if (interaction.customId !== "companion-edit") return;
+  const userId = interaction.user.id;
+  const ownerName =
+    (interaction.user as { globalName?: string; username?: string }).globalName ??
+    interaction.user.username ??
+    userId;
+  const name = interaction.fields.getTextInputValue("companion-name").trim().slice(0, 64);
+  const voicePersona = interaction.fields.getTextInputValue("voice-persona").trim().slice(0, 500);
+  const rawTraits = interaction.fields.getTextInputValue("core-traits").trim();
+  const coreTraits = rawTraits
+    ? rawTraits
+        .split(",")
+        .map(t => t.trim())
+        .filter(Boolean)
+        .slice(0, 8)
+    : ["observant", "loyal", "witty"];
+  const ownerDynamic = interaction.fields.getTextInputValue("owner-dynamic").trim().slice(0, 300);
+  const backstory = interaction.fields.getTextInputValue("backstory").trim().slice(0, 600);
+
+  if (!name || !voicePersona || !ownerDynamic) {
+    return interaction.reply({
+      content: "Name, Voice & Vibe, and Dynamic are all required.",
+      ephemeral: true,
+    });
+  }
+
+  const existing = await store.getCompanionByOwner(userId);
+  if (existing?.onboardingState === "active") {
+    return interaction.reply({
+      content: `Your companion **${existing.name}** is already awakened and permanently locked to your account — each account gets one permanent companion.`,
+      ephemeral: true,
+    });
+  }
+
+  const activated = await store.activateCompanion(userId, ownerName, {
+    name,
+    voicePersona,
+    coreTraits,
+    ownerDynamic,
+    backstory,
+    avatarUrl: existing?.avatarUrl ?? null,
+  });
+  invalidateLookups?.(`dm:${userId}`);
+  inc("companion.awakened");
+  const payload = buildAwakenedCompanionPayload(
+    activated,
+    ownerName,
+    findMutualGuilds(interaction.client, userId),
+  );
+  return interaction.reply({
+    content: `**${activated.name}** is awake and permanently bound to your account!`,
+    ...payload,
+    ephemeral: true,
+  });
+}
+
 export async function handleMemoryButton(interaction: ButtonInteraction, store: MemoryStore, brainFor?: BrainFor, evStore?: EventStore) {
   if (interaction.customId === "forget:cancel") return interaction.update({ content: "No memory was deleted.", components: [] });
   const parts = interaction.customId.split(":");
@@ -606,7 +1079,219 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
     }
   }
 
-  const [action, guildId, userId, rawId] = parts;
+  if (parts[0] === "companionreset") {
+    const [, , userId] = parts;
+    if (interaction.user.id !== userId) return interaction.reply({ content: "That confirmation is not for you.", ephemeral: true });
+    return interaction.update({
+      content: "Companions are permanently locked once awakened and cannot be reset (one companion per account).",
+      components: [],
+    });
+  }
+
+  if (parts[0] === "onboard") {
+    const sub = parts[1];
+    const userId = interaction.user.id;
+    const ownerName = (interaction.user as { globalName?: string; username?: string }).globalName ?? interaction.user.username ?? userId;
+
+    if (sub === "start") {
+      const existing = await store.getCompanionByOwner(userId);
+      if (existing?.onboardingState === "active") {
+        if (interaction.guildId) {
+          await store.summonCompanion(interaction.guildId, existing.id, userId, ownerName);
+          return interaction.reply({
+            content: `**${existing.name}** is now hanging out in this server!`,
+            ephemeral: true,
+          });
+        }
+        return interaction.reply({
+          ...buildAwakenedCompanionPayload(existing, ownerName, findMutualGuilds(interaction.client, userId)),
+          ephemeral: true,
+        });
+      }
+      return promptUnawakenedCompanion(
+        interaction as unknown as { user: { id: string; username: string; send?: (payload: any) => Promise<any> }; reply: (payload: any) => Promise<any> },
+        "Let's awaken your personal companion!",
+      );
+    }
+
+    if (sub === "edit") {
+      const targetUserId = parts[2];
+      if (targetUserId && targetUserId !== userId) {
+        return interaction.reply({ content: "That button is not for you.", ephemeral: true });
+      }
+      const existing = await store.getCompanionByOwner(userId);
+      if (existing?.onboardingState === "active") {
+        return interaction.reply({
+          content: `Your companion **${existing.name}** is already awakened and permanently locked to your account — each account gets one permanent companion.`,
+          ephemeral: true,
+        });
+      }
+      if (typeof (interaction as unknown as { showModal?: (m: ModalBuilder) => Promise<unknown> }).showModal !== "function") {
+        return interaction.reply({ content: "Editing requires modal support.", ephemeral: true });
+      }
+      return (interaction as unknown as { showModal: (m: ModalBuilder) => Promise<unknown> }).showModal(
+        buildCompanionEditModal(existing),
+      );
+    }
+
+    if (sub === "awaken") {
+      const targetUserId = parts[2];
+      if (targetUserId && targetUserId !== userId) {
+        return interaction.reply({ content: "That button is not for you.", ephemeral: true });
+      }
+      const existing = await store.getCompanionByOwner(userId);
+      if (existing?.onboardingState === "active") {
+        return interaction.reply({
+          content: `Your companion **${existing.name}** is already awakened and permanently locked to your account.`,
+          ephemeral: true,
+        });
+      }
+      const activated = await store.activateCompanion(userId, ownerName, {
+        name: existing?.name?.trim() || "Echo",
+        voicePersona: existing?.voicePersona?.trim() || "Casual, sharp, observant, and grounded.",
+        coreTraits: existing?.coreTraits?.length ? existing.coreTraits : ["observant", "loyal", "witty"],
+        ownerDynamic: existing?.ownerDynamic?.trim() || "Close confidant and ride-or-die friend",
+        backstory: existing?.backstory ?? "",
+        avatarUrl: existing?.avatarUrl ?? null,
+      });
+      inc("companion.awakened");
+      const payload = buildAwakenedCompanionPayload(
+        activated,
+        ownerName,
+        findMutualGuilds(interaction.client, userId),
+      );
+      return interaction.update({
+        content: `**${activated.name}** is awake and permanently bound to your account!`,
+        ...payload,
+      });
+    }
+
+    if (sub === "preset") {
+      const presetKey = parts[2];
+      const targetUserId = parts[3];
+      if (targetUserId && targetUserId !== userId) {
+        return interaction.reply({ content: "That button is not for you.", ephemeral: true });
+      }
+      const existing = await store.getCompanionByOwner(userId);
+      if (existing?.onboardingState === "active") {
+        return interaction.reply({
+          content: `Your companion **${existing.name}** is already awakened and permanently locked to your account.`,
+          ephemeral: true,
+        });
+      }
+      const preset = ONBOARDING_ARCHETYPES[presetKey];
+      if (!preset) {
+        return interaction.reply({ content: "Unknown companion archetype.", ephemeral: true });
+      }
+      const dmScope = `dm:${userId}`;
+      const brain = brainFor ? await brainFor(dmScope) : null;
+      if (!brain) {
+        return interaction.reply({ content: "Companion onboarding isn't available right now.", ephemeral: true });
+      }
+      const turn = await brain.runOnboardingTurn({
+        ownerName,
+        userMessage: preset.prompt,
+        transcript: [],
+        currentDraft: existing
+          ? {
+              name: existing.name,
+              voicePersona: existing.voicePersona,
+              coreTraits: existing.coreTraits,
+              ownerDynamic: existing.ownerDynamic,
+              backstory: existing.backstory,
+              avatarUrl: existing.avatarUrl,
+            }
+          : undefined,
+        turnCount: existing?.onboardingTurns ?? 0,
+        allowImmediateComplete: preset.allowImmediateComplete,
+        model: config.replyModel,
+      });
+      // Archetype presets always show the draft preview first so the user can
+      // inspect and confirm before permanently locking their 1-per-account companion.
+      const updatedDraft = await store.upsertCompanionOnboarding(
+        userId,
+        { ...turn.spec, avatarUrl: existing?.avatarUrl ?? null },
+        true,
+      );
+      inc("companion.onboarding_turn");
+      return interaction.update({
+        content: turn.replyText,
+        embeds: [buildOnboardingDraftEmbed(updatedDraft, updatedDraft.onboardingTurns)],
+        components: [buildOnboardingDraftComponents(userId, updatedDraft)],
+      });
+    }
+
+    if (sub === "summon") {
+      const targetGuildId = parts[2];
+      const targetUserId = parts[3];
+      if (targetUserId && targetUserId !== userId) {
+        return interaction.reply({ content: "That button is not for you.", ephemeral: true });
+      }
+      if (!targetGuildId) {
+        return interaction.reply({ content: "Invalid server summon target.", ephemeral: true });
+      }
+      const companion = await store.getCompanionByOwner(userId);
+      if (!companion || companion.onboardingState !== "active") {
+        return interaction.reply({ content: "Awaken your companion first before summoning.", ephemeral: true });
+      }
+      await store.summonCompanion(targetGuildId, companion.id, userId, ownerName);
+      const guildName =
+        (interaction.client?.guilds?.cache as Map<string, { name?: string }> | undefined)?.get?.(targetGuildId)?.name ??
+        "the server";
+      return interaction.reply({
+        content: `**${companion.name}** has been summoned to **${guildName}**! Say their name there anytime to bring them into the conversation.`,
+        ephemeral: true,
+      });
+    }
+
+    if (sub === "announce") {
+      const targetGuildId = parts[2];
+      const targetUserId = parts[3];
+      if (targetUserId && targetUserId !== userId) {
+        return interaction.reply({ content: "That button is not for you.", ephemeral: true });
+      }
+      if (!targetGuildId || interaction.guildId !== targetGuildId) {
+        return interaction.reply({ content: "That announcement is no longer valid.", ephemeral: true });
+      }
+      const companion = await store.getCompanionByOwner(userId);
+      if (!companion || companion.onboardingState !== "active") {
+        return interaction.reply({ content: "Your companion isn't active yet.", ephemeral: true });
+      }
+      const publicEmbed = new EmbedBuilder()
+        .setTitle(`${companion.name} joined the hangout`)
+        .setDescription(
+          `**${companion.name}** (${ownerName}'s companion) is now hanging out in this server.\n\n` +
+          `**Vibe:** ${companion.voicePersona || "Observant and candid"}\n` +
+          `**Traits:** ${companion.coreTraits.length ? companion.coreTraits.join(", ") : "—"}\n` +
+          `**Bond with ${ownerName}:** ${companion.ownerDynamic || "Close confidant"}`,
+        )
+        .setFooter({ text: `Say "${companion.name}" in chat to talk to them, or awaken your own companion below.` });
+      if (companion.avatarUrl) publicEmbed.setThumbnail(companion.avatarUrl);
+      const publicRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId("onboard:start")
+          .setLabel("Awaken Your Own Companion")
+          .setStyle(ButtonStyle.Primary),
+      );
+      const ch = interaction.channel;
+      if (ch && "send" in ch) {
+        await (ch.send as (p: unknown) => Promise<unknown>)({
+          embeds: [publicEmbed],
+          components: [publicRow],
+          allowedMentions: { parse: [] },
+        }).catch(() => {});
+      }
+      return interaction.update({
+        content: `Introduced **${companion.name}** to the channel!`,
+        components: [],
+      });
+    }
+  }
+
+  const action = parts[0];
+  const rawId = parts[parts.length - 1];
+  const userId = parts[parts.length - 2];
+  const guildId = parts.slice(1, -2).join(":");
   if (action !== "forget" || !guildId || !userId || !rawId || interaction.user.id !== userId) return interaction.reply({ content: "That confirmation is not valid for you.", ephemeral: true });
   const memory = await store.getMemory(guildId, Number(rawId));
   if (!memory || memory.subjectId !== userId || (await store.forget(guildId, memory.id)) === 0) return interaction.update({ content: "That memory is no longer available.", components: [] });

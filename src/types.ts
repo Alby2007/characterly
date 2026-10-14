@@ -268,3 +268,69 @@ export type PairContext = {
   claimsAboutB: string[];   // things A asserted about B
   sharedEvents: string[];   // "Title (Sep 2026)"
 };
+
+// ── Personal Companions (v21) ─────────────────────────────────────────────────
+
+export type OnboardingState = "onboarding" | "active";
+
+export type Companion = {
+  id: number;
+  ownerUserId: string;
+  name: string;
+  avatarUrl: string | null;
+  voicePersona: string;
+  coreTraits: string[];
+  ownerDynamic: string;
+  backstory: string;
+  onboardingState: OnboardingState;
+  onboardingTurns: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CompanionSpec = {
+  name: string;
+  voicePersona: string;
+  coreTraits: string[];
+  ownerDynamic: string;
+  backstory: string;
+  avatarUrl?: string | null;
+};
+
+export type OnboardingTurnResult = {
+  replyText: string;
+  complete: boolean;
+  isReady?: boolean;
+  spec: CompanionSpec;
+};
+
+export type CompanionPersona = {
+  companionId: number;
+  name: string;
+  ownerUserId: string;
+  ownerName?: string;
+  voicePersona: string;
+  coreTraits: string[];
+  ownerDynamic: string;
+  backstory: string;
+  /** Private DM bond context injected only as subtext when speaking in a server. */
+  ownerSubtext?: string;
+  /** Recent server activity digest injected when speaking in 1:1 DMs with the owner. */
+  serverDigest?: string;
+};
+
+export type GuildCompanion = Companion & {
+  guildId: string;
+  summonedBy: string;
+  active: boolean;
+  summonedAt: string;
+};
+
+export type WebhookMessageRecord = {
+  messageId: string;
+  guildId: string;
+  channelId: string;
+  companionId: number;
+  chainDepth: number;
+  createdAt: string;
+};
