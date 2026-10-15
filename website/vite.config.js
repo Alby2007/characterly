@@ -12,6 +12,7 @@ export default defineConfig({
         main: fileURLToPath(new URL("./index.html", import.meta.url)),
         account: fileURLToPath(new URL("./account.html", import.meta.url)),
         dashboard: fileURLToPath(new URL("./dashboard.html", import.meta.url)),
+        notFound: fileURLToPath(new URL("./404.html", import.meta.url)),
       },
     },
   },

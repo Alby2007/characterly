@@ -266,7 +266,9 @@ characterly/
 │   ├── index.html            # Landing page
 │   ├── account.html          # Sign in / sign up / magic link / recovery
 │   ├── dashboard.html        # Profile, Discord link card, password, account deletion
-│   ├── src/                  # auth.js, dashboard.js, account.js, config.js, supabase.js, main.js, styles.css
+│   ├── 404.html              # Not-found page (Worker 404-page handling)
+│   ├── public/               # favicon.svg, mark.svg (brand mark), seal.svg (wax seal)
+│   ├── src/                  # base.js (shared entry), main.js, account.js, dashboard.js, auth.js, config.js, supabase.js, styles.css
 │   ├── cloudflare.config.ts  # characterly-website Worker (static assets)
 │   └── vite.config.js        # Multi-page inputs + @cloudflare/vite-plugin
 ├── .github/workflows/
