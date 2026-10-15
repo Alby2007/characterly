@@ -18,4 +18,4 @@ export const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_996kFzgS7sTm4u2FQmOTBw_F
 
 // Flip to true once the Discord provider is enabled in Supabase Auth
 // (client id + secret from the Discord developer portal).
-export const DISCORD_OAUTH_ENABLED = false;
+export const DISCORD_OAUTH_ENABLED = true;
