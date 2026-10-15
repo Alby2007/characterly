@@ -1,4 +1,5 @@
 import "./base.js";
+import { supabase } from "./supabase.js";
 import { DISCORD_OAUTH_ENABLED } from "./config.js";
 import {
   requireAuth, getProfile, updateDisplayName,
