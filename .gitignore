@@ -8,3 +8,6 @@ docs/handoff.md
 *.tmp.*
 keys/
 *.pub
+
+# website build output
+website/dist/

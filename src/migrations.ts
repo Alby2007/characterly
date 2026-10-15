@@ -732,6 +732,135 @@ const migrations: Migration[] = [
       await sql`DROP TABLE IF EXISTS companion_journal`;
     },
   },
+  // ── v26: web accounts — the "real life user" half ───────────────────────────
+  // Account profiles for Supabase Auth users (named web_profiles — `profiles`
+  // is already the subject-profile table). Same project as the bot so the future
+  // linking step is a row update, not a federation problem. Conditional on the
+  // auth schema so plain Postgres (CI, local Docker) skips it — same pattern as
+  // v23. Everything inside is idempotent so an MCP pre-apply + bot restart
+  // can't double-fire.
+  {
+    version: 26,
+    name: "v26_web_profiles",
+    up: async (sql) => {
+      await sql`
+        DO $web$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+            EXECUTE 'CREATE SCHEMA IF NOT EXISTS internal';
+
+            EXECUTE $ddl$
+              CREATE TABLE IF NOT EXISTS public.web_profiles (
+                id                 uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+                display_name       text NOT NULL DEFAULT '',
+                discord_user_id    text UNIQUE,
+                stripe_customer_id text UNIQUE,
+                created_at         timestamptz NOT NULL DEFAULT now(),
+                updated_at         timestamptz NOT NULL DEFAULT now()
+              )
+            $ddl$;
+
+            EXECUTE 'ALTER TABLE public.web_profiles ENABLE ROW LEVEL SECURITY';
+
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT SELECT, INSERT, UPDATE ON public.web_profiles TO authenticated';
+            END IF;
+
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION internal.handle_new_user()
+              RETURNS trigger
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              BEGIN
+                INSERT INTO public.web_profiles (id, display_name)
+                VALUES (new.id, coalesce(new.raw_user_meta_data->>'display_name', ''))
+                ON CONFLICT (id) DO NOTHING;
+                RETURN new;
+              END
+              $body$
+            $fn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION internal.handle_new_user() FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION internal.handle_new_user() FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION internal.handle_new_user() FROM authenticated';
+            END IF;
+
+            EXECUTE 'DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users';
+            EXECUTE $trg$
+              CREATE TRIGGER on_auth_user_created
+              AFTER INSERT ON auth.users
+              FOR EACH ROW EXECUTE FUNCTION internal.handle_new_user()
+            $trg$;
+
+            EXECUTE 'DROP POLICY IF EXISTS web_profiles_select_own ON public.web_profiles';
+            EXECUTE 'DROP POLICY IF EXISTS web_profiles_insert_own ON public.web_profiles';
+            EXECUTE 'DROP POLICY IF EXISTS web_profiles_update_own ON public.web_profiles';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE $p1$
+                CREATE POLICY web_profiles_select_own ON public.web_profiles
+                FOR SELECT TO authenticated
+                USING ((select auth.uid()) = id)
+              $p1$;
+              EXECUTE $p2$
+                CREATE POLICY web_profiles_insert_own ON public.web_profiles
+                FOR INSERT TO authenticated
+                WITH CHECK ((select auth.uid()) = id)
+              $p2$;
+              EXECUTE $p3$
+                CREATE POLICY web_profiles_update_own ON public.web_profiles
+                FOR UPDATE TO authenticated
+                USING ((select auth.uid()) = id)
+                WITH CHECK ((select auth.uid()) = id)
+              $p3$;
+            END IF;
+
+            EXECUTE $dfn$
+              CREATE OR REPLACE FUNCTION public.delete_own_account()
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE uid uuid := auth.uid();
+              BEGIN
+                IF uid IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                DELETE FROM auth.users WHERE id = uid;
+              END
+              $body$
+            $dfn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.delete_own_account() FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.delete_own_account() FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.delete_own_account() TO authenticated';
+            END IF;
+          END IF;
+        END $web$
+      `;
+    },
+    down: async (sql) => {
+      await sql`
+        DO $unweb$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+            EXECUTE 'DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users';
+          END IF;
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'internal') THEN
+            EXECUTE 'DROP FUNCTION IF EXISTS internal.handle_new_user()';
+          END IF;
+        END $unweb$
+      `;
+      await sql`DROP FUNCTION IF EXISTS public.delete_own_account()`;
+      await sql`DROP TABLE IF EXISTS public.web_profiles`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

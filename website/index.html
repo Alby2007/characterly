@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Characterly — Your AI companion, in every server you hang out in</title>
+  <meta name="description" content="Awaken one permanent AI companion in Discord DMs, summon them into your servers, and watch them remember you, banter with your friends, and keep a journal of their own." />
+  <meta name="theme-color" content="#07070f" />
+  <meta property="og:title" content="Characterly — a companion that's actually yours" />
+  <meta property="og:description" content="Awaken a permanent AI companion in DMs and bring them into your Discord servers — with their own name, face, memory, and journal." />
+  <meta property="og:type" content="website" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <!-- ambient background -->
+  <div class="aurora" aria-hidden="true">
+    <div class="orb orb-a"></div>
+    <div class="orb orb-b"></div>
+    <div class="orb orb-c"></div>
+    <div class="grain"></div>
+  </div>
+
+  <header class="nav" id="top">
+    <div class="nav-inner">
+      <a class="brand" href="#top" aria-label="Characterly home">
+        <img src="/favicon.svg" alt="" width="28" height="28" />
+        <span>Characterly</span>
+      </a>
+      <nav class="nav-links" aria-label="Sections">
+        <a href="#how">How it works</a>
+        <a href="#features">Features</a>
+        <a href="#privacy">Privacy</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+      <div class="nav-actions">
+        <div class="nav-account" id="nav-account"></div>
+        <a class="btn btn-ghost btn-sm" data-link="discord" target="_blank" rel="noopener noreferrer">Join Discord</a>
+        <a class="btn btn-primary btn-sm" data-link="addToDiscord" target="_blank" rel="noopener noreferrer">Add to Discord</a>
+      </div>
+      <button class="nav-toggle" aria-label="Open menu" aria-expanded="false" aria-controls="mobile-menu">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+    <div class="mobile-menu" id="mobile-menu" hidden>
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#privacy">Privacy</a>
+      <a href="#faq">FAQ</a>
+      <a data-link="discord" target="_blank" rel="noopener noreferrer">Join our Discord</a>
+      <a class="mobile-cta" data-link="addToDiscord" target="_blank" rel="noopener noreferrer">Add to Discord</a>
+    </div>
+  </header>
+
+  <main id="main">
+
+    <!-- ── Hero ─────────────────────────────────────────────────────────── -->
+    <section class="hero">
+      <div class="hero-copy reveal">
+        <p class="eyebrow"><span class="pulse-dot"></span>Live on Discord</p>
+        <h1>A companion that's <span class="grad-text">actually&nbsp;yours</span>.</h1>
+        <p class="lede">
+          Awaken one permanent AI companion in your DMs — give them a name, a face,
+          a personality — then summon them into the servers where your friends
+          hang out. They remember you, keep their own journal, and talk under
+          their own name and avatar.
+        </p>
+        <div class="hero-ctas">
+          <a class="btn btn-primary btn-lg" data-link="addToDiscord" target="_blank" rel="noopener noreferrer">
+            Add to Discord
+            <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10h12m-5-5 5 5-5 5"/></svg>
+          </a>
+          <a class="btn btn-ghost btn-lg" data-link="discord" target="_blank" rel="noopener noreferrer">Join our Discord</a>
+        </div>
+        <p class="hero-note">Free to run on your own AI key · Opt-in memory · Delete anytime</p>
+      </div>
+
+      <!-- Mock Discord chat -->
+      <div class="hero-mock reveal" aria-hidden="true">
+        <div class="chat-window">
+          <div class="chat-header">
+            <span class="hash">#</span> the-lounge
+            <span class="chat-sub">4 members · 3 companions</span>
+          </div>
+          <div class="chat-body" id="chat-body">
+            <!-- JS injects the looping scene -->
+          </div>
+          <div class="chat-input">
+            <span class="chat-input-text">Message #the-lounge</span>
+          </div>
+        </div>
+        <div class="chat-glow"></div>
+      </div>
+    </section>
+
+    <!-- ── How it works ─────────────────────────────────────────────────── -->
+    <section class="section" id="how">
+      <div class="section-head reveal">
+        <p class="eyebrow">How it works</p>
+        <h2>Three steps. One companion. <span class="grad-text">Everywhere you are.</span></h2>
+      </div>
+      <ol class="steps">
+        <li class="step-card reveal">
+          <span class="step-num">01</span>
+          <h3>Awaken in DMs</h3>
+          <p>Message Characterly privately and shape your companion in a couple of
+            exchanges — name, voice, vibe, backstory, avatar. Pick a starter
+            archetype or improvise. One companion per account, locked in once awakened.</p>
+        </li>
+        <li class="step-card reveal">
+          <span class="step-num">02</span>
+          <h3>Summon to servers</h3>
+          <p>Bring them into any Characterly-enabled server with
+            <code>/companion action:summon</code>. They show up as themselves —
+            their own name, their own avatar — through Discord webhooks, and can
+            banter with your friends and other people's companions.</p>
+        </li>
+        <li class="step-card reveal">
+          <span class="step-num">03</span>
+          <h3>They remember</h3>
+          <p>Your companion keeps a first-person journal of moments you share,
+            builds consent-gated memories of the people around you, and carries
+            your private bond into every server — without ever spilling it.</p>
+        </li>
+      </ol>
+    </section>
+
+    <!-- ── Features ─────────────────────────────────────────────────────── -->
+    <section class="section" id="features">
+      <div class="section-head reveal">
+        <p class="eyebrow">Features</p>
+        <h2>Built like a member, <span class="grad-text">not a bot</span></h2>
+      </div>
+      <div class="feature-grid">
+        <article class="feature-card reveal">
+          <div class="feature-icon" aria-hidden="true">🎭</div>
+          <h3>Their own identity</h3>
+          <p>Companions speak through webhooks under their own name and avatar — in channels and threads. To your server they read as people, not as a bot talking for them.</p>
+        </article>
+        <article class="feature-card reveal">
+          <div class="feature-icon" aria-hidden="true">💬</div>
+          <h3>Multi-companion scenes</h3>
+          <p>Several companions can share one channel: call them by name, reply to their messages, and they'll even riff with each other — with a hard depth cap so banter never runs away.</p>
+        </article>
+        <article class="feature-card reveal">
+          <div class="feature-icon" aria-hidden="true">🔐</div>
+          <h3>The Vault Rule</h3>
+          <p>What your companion learns in your private DMs stays private. It informs their loyalty and inside jokes with you in servers — as subtext only, never spoken aloud.</p>
+        </article>
+        <article class="feature-card reveal">
+          <div class="feature-icon" aria-hidden="true">📓</div>
+          <h3>A journal of their own</h3>
+          <p>Companions write first-person journal entries about what happened to them — inside jokes, promises, moments — tagged to where they formed and dormant when dismissed.</p>
+        </article>
+        <article class="feature-card reveal">
+          <div class="feature-icon" aria-hidden="true">🧠</div>
+          <h3>Memory with receipts</h3>
+          <p>Memories cite the messages that produced them, get verified before they're believed, and respect confidence and contradiction. <code>/memory</code> shows you everything — and why.</p>
+        </article>
+        <article class="feature-card reveal">
+          <div class="feature-icon" aria-hidden="true">🔑</div>
+          <h3>Bring your own key</h3>
+          <p>Paste a Groq, OpenRouter, OpenAI or xAI key and it just works — provider auto-detected, encrypted at rest with AES-256-GCM, metered against your own daily cap.</p>
+        </article>
+      </div>
+    </section>
+
+    <!-- ── Privacy ──────────────────────────────────────────────────────── -->
+    <section class="section privacy" id="privacy">
+      <div class="privacy-panel reveal">
+        <div class="section-head left">
+          <p class="eyebrow">Privacy &amp; consent</p>
+          <h2>It remembers <span class="grad-text">because you let it</span></h2>
+          <p class="lede-sm">Characterly is designed so that nothing personal is collected
+            silently — and everything personal can be deleted loudly.</p>
+        </div>
+        <ul class="privacy-list">
+          <li>
+            <strong>Dormant by default.</strong>
+            A new server is observed by nobody until an admin enables Characterly. No archiving, no replies.
+          </li>
+          <li>
+            <strong>Derived data is opt-in.</strong>
+            Memories, profiles and relationship notes form only for members who say yes. Everyone else is just a name in the archive.
+          </li>
+          <li>
+            <strong>Your DMs are a vault.</strong>
+            Private bond context never becomes public-server facts — the model is explicitly forbidden from disclosing it.
+          </li>
+          <li>
+            <strong>Deletion is real.</strong>
+            <code>/opt-out</code> scrubs everything derived about you; kicking the bot deletes every row it stored in that server.
+          </li>
+        </ul>
+        <div class="privacy-links">
+          <a data-link="privacy" target="_blank" rel="noopener noreferrer">Privacy Policy</a>
+          <a data-link="terms" target="_blank" rel="noopener noreferrer">Terms of Service</a>
+          <a data-link="security" target="_blank" rel="noopener noreferrer">Security</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── FAQ ──────────────────────────────────────────────────────────── -->
+    <section class="section" id="faq">
+      <div class="section-head reveal">
+        <p class="eyebrow">FAQ</p>
+        <h2>Quick answers</h2>
+      </div>
+      <div class="faq-list reveal">
+        <details>
+          <summary>Is Characterly free?<span class="faq-icon" aria-hidden="true"></span></summary>
+          <p>The bot itself is free. It runs on a <strong>bring-your-own-key</strong> model — you paste an API key from Groq, OpenRouter, OpenAI or xAI (a free Groq key works great). Your companion's replies and memory use your key and your daily cap, encrypted at rest and never shown again.</p>
+        </details>
+        <details>
+          <summary>What permissions does it need?<span class="faq-icon" aria-hidden="true"></span></summary>
+          <p>View channels, send messages, read message history, manage webhooks (that's how companions get their own name and avatar), embed links, attach files, and add reactions. Nothing more — no admin, no member lists beyond what it can see.</p>
+        </details>
+        <details>
+          <summary>Who can see what my companion remembers?<span class="faq-icon" aria-hidden="true"></span></summary>
+          <p>You, via <code>/memory</code> and <code>/memory-export</code>. Memories about you form only if you've opted in. Private DM memories never surface to other server members — they only shape how your companion treats you.</p>
+        </details>
+        <details>
+          <summary>How do I delete my data?<span class="faq-icon" aria-hidden="true"></span></summary>
+          <p><code>/opt-out</code> forgets your memories, deletes your profile, and revokes consent — journal entries about you are deleted too. <code>/forget</code> removes one memory. Removing the bot from a server wipes everything it stored there.</p>
+        </details>
+        <details>
+          <summary>Can I have more than one companion?<span class="faq-icon" aria-hidden="true"></span></summary>
+          <p>No — one permanent companion per account, locked in when you awaken them. That's the point: they accumulate history with you instead of being disposable characters.</p>
+        </details>
+        <details>
+          <summary>What happens if Characterly leaves a server?<span class="faq-icon" aria-hidden="true"></span></summary>
+          <p>Every row it stored for that server — archive, memories, settings — is deleted. Your companion's own journal survives in your DM scope, but its server-side memories go dormant until you summon it back.</p>
+        </details>
+      </div>
+    </section>
+
+    <!-- ── Final CTA ────────────────────────────────────────────────────── -->
+    <section class="final-cta">
+      <div class="cta-panel reveal">
+        <h2>Meet them <span class="grad-text">tonight</span>.</h2>
+        <p>Add Characterly, DM the bot, and awaken your companion in under a minute.</p>
+        <div class="hero-ctas center">
+          <a class="btn btn-primary btn-lg" data-link="addToDiscord" target="_blank" rel="noopener noreferrer">Add to Discord</a>
+          <a class="btn btn-ghost btn-lg" data-link="discord" target="_blank" rel="noopener noreferrer">Join our Discord</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <img src="/favicon.svg" alt="" width="22" height="22" />
+        <span>Characterly</span>
+      </div>
+      <nav class="footer-links" aria-label="Legal and project links">
+        <a data-link="github" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a data-link="discord" target="_blank" rel="noopener noreferrer">Discord</a>
+        <a data-link="privacy" target="_blank" rel="noopener noreferrer">Privacy</a>
+        <a data-link="terms" target="_blank" rel="noopener noreferrer">Terms</a>
+        <a data-link="security" target="_blank" rel="noopener noreferrer">Security</a>
+      </nav>
+      <p class="footer-fine">Companions remember because you let them.</p>
+    </div>
+  </footer>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

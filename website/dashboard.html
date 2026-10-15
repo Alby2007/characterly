@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Account — Characterly</title>
+  <meta name="description" content="Your Characterly account." />
+  <meta name="theme-color" content="#07070f" />
+  <meta name="robots" content="noindex" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="aurora" aria-hidden="true">
+    <div class="orb orb-a"></div>
+    <div class="orb orb-b"></div>
+    <div class="orb orb-c"></div>
+    <div class="grain"></div>
+  </div>
+
+  <header class="nav">
+    <div class="nav-inner">
+      <a class="brand" href="/" aria-label="Characterly home">
+        <img src="/favicon.svg" alt="" width="28" height="28" />
+        <span>Characterly</span>
+      </a>
+      <nav class="nav-links" aria-label="Sections">
+        <a href="/#how">How it works</a>
+        <a href="/#features">Features</a>
+        <a href="/#privacy">Privacy</a>
+        <a href="/#faq">FAQ</a>
+      </nav>
+      <div class="nav-actions">
+        <button class="btn btn-ghost btn-sm" id="nav-signout" type="button">Sign out</button>
+        <a class="btn btn-primary btn-sm" data-link="addToDiscord" target="_blank" rel="noopener noreferrer">Add to Discord</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main" class="dash-main">
+    <div class="dash-head reveal in">
+      <p class="eyebrow"><span class="pulse-dot"></span>Account</p>
+      <h1>Hey, <span class="grad-text" id="dash-name">there</span>.</h1>
+      <p class="lede-sm">This is your Characterly account — the real-life half of the project.</p>
+    </div>
+
+    <div class="dash-grid">
+      <!-- Profile -->
+      <section class="dash-card" aria-labelledby="profile-h">
+        <div class="dash-card-head">
+          <h2 id="profile-h">Profile</h2>
+        </div>
+        <div class="profile-row">
+          <div class="avatar-xl" id="profile-avatar">?</div>
+          <div>
+            <div class="profile-email" id="profile-email">…</div>
+            <div class="profile-since" id="profile-since"></div>
+          </div>
+        </div>
+        <form id="form-name" class="inline-form" novalidate>
+          <label class="field grow">
+            <span>Display name</span>
+            <input class="input" type="text" name="display_name" maxlength="48" id="input-name" />
+          </label>
+          <button class="btn btn-ghost btn-sm" type="submit">Save</button>
+        </form>
+        <div class="form-error" id="profile-error" role="alert" hidden></div>
+      </section>
+
+      <!-- Discord link -->
+      <section class="dash-card" aria-labelledby="discord-h">
+        <div class="dash-card-head">
+          <h2 id="discord-h">Discord</h2>
+          <span class="badge badge-soon" id="discord-badge">Not linked</span>
+        </div>
+        <p class="dash-desc">Link your Discord account so your companion, billing and perks know who you are.</p>
+        <div id="discord-linked" hidden>
+          <div class="linked-row">
+            <div class="avatar-xl small" id="discord-avatar">D</div>
+            <div>
+              <div id="discord-name" class="profile-email"></div>
+              <div class="profile-since">Linked via Discord sign-in</div>
+            </div>
+          </div>
+        </div>
+        <button class="btn btn-ghost" id="btn-link-discord" type="button" hidden>Link Discord account</button>
+        <p class="dash-note" id="discord-note">Discord sign-in isn't enabled yet — linking will light up when it is.</p>
+      </section>
+
+      <!-- Billing -->
+      <section class="dash-card" aria-labelledby="billing-h">
+        <div class="dash-card-head">
+          <h2 id="billing-h">Billing</h2>
+          <span class="badge badge-soon">Coming soon</span>
+        </div>
+        <p class="dash-desc">Managed subscriptions and payments land here next — powered by Stripe, attached to this account.</p>
+        <button class="btn btn-ghost" type="button" disabled>Manage billing</button>
+      </section>
+
+      <!-- Security -->
+      <section class="dash-card" aria-labelledby="security-h">
+        <div class="dash-card-head">
+          <h2 id="security-h">Security</h2>
+        </div>
+        <form id="form-password" novalidate>
+          <label class="field">
+            <span>New password</span>
+            <input class="input" type="password" name="password" autocomplete="new-password" minlength="8" />
+          </label>
+          <label class="field">
+            <span>Confirm new password</span>
+            <input class="input" type="password" name="confirm" autocomplete="new-password" minlength="8" />
+          </label>
+          <button class="btn btn-ghost" type="submit">Change password</button>
+        </form>
+        <div class="form-error" id="security-msg" role="alert" hidden></div>
+      </section>
+
+      <!-- Danger zone -->
+      <section class="dash-card danger" aria-labelledby="danger-h">
+        <div class="dash-card-head">
+          <h2 id="danger-h">Danger zone</h2>
+        </div>
+        <p class="dash-desc">Deletes your web account permanently. Your Discord-side data isn't touched by this (handle that with <code>/opt-out</code> in Discord).</p>
+        <button class="btn btn-danger" id="btn-delete" type="button">Delete account</button>
+      </section>
+    </div>
+  </main>
+
+  <!-- Delete confirmation modal -->
+  <div class="modal-overlay" id="delete-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="del-h">
+      <h2 id="del-h">Delete your account?</h2>
+      <p>This is permanent. Type <strong>DELETE</strong> to confirm.</p>
+      <input class="input" type="text" id="delete-confirm" autocomplete="off" placeholder="DELETE" />
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="delete-cancel" type="button">Cancel</button>
+        <button class="btn btn-danger" id="delete-do" type="button" disabled>Delete forever</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/dashboard.js"></script>
+</body>
+</html>
