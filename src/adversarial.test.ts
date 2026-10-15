@@ -152,3 +152,36 @@ test("maintain() bulk promotion respects the evidence-type gate", async () => {
     assert.equal(after.filter((m: { content: string }) => m.content === "Tom loves losing at FIFA").length, 0, "sarcasm must not be bulk-promoted by maintain()");
   } finally { await sql.end(); }
 });
+
+test("a single 'correction'-typed extraction cannot promote on first sight", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    // correction evidence starts at 0.80 — already above the 0.7 gate — so
+    // without a corroboration requirement one extraction would skip the
+    // candidate ladder and nightly verification entirely.
+    const first = await store.saveMemory(source("corr-1", "nah actually I love rain"), memory("Tom loves rain", { evidenceType: "correction", effect: "support" }));
+    assert.equal(first.status, "candidate", "a lone high-confidence sighting must stay a candidate");
+    // A second, independent sighting is corroboration — now it can promote.
+    const second = await store.saveMemory(source("corr-2", "for real, I love rain"), memory("Tom loves rain", { evidenceType: "correction", effect: "support" }));
+    assert.equal(second.status, "active", "corroborated correction-typed evidence may promote");
+  } finally { await sql.end(); }
+});
+
+test("'unknown'-subject memories are inert — no promote via insert gate or maintain()", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    // 'unknown' is consent-exempt at persist so lore flows, but unresolved-name
+    // claims must stay candidates until the name is claimed — otherwise an
+    // unverifiable attribution surfaces as fact.
+    const claim = memory("Pete is tall", { subjectId: "unknown", subjectName: "Pete", evidenceType: "correction", effect: "support" });
+    for (let i = 0; i < 10; i++) await store.saveMemory(source(`unk-${i}`, `Pete is tall ${i}`), claim);
+    const saved = await store.listMemories("adversarial", "unknown", { status: "candidate" });
+    assert.ok(saved.memories.length > 0, "unknown-subject memories persist as candidates");
+    assert.equal(saved.memories[0].status, "candidate");
+    assert.equal((await store.maintain("adversarial")).promoted, 0, "maintain() must not promote 'unknown' subjects");
+    const actives = await store.allActiveMemories("adversarial", "unknown");
+    assert.equal(actives.length, 0, "an unknown subject can never reach active");
+  } finally { await sql.end(); }
+});

@@ -604,3 +604,28 @@ test("/status renders the LLM usage panel", async () => {
     assert.match(desc, /companions/i);
   } finally { await sql.end(); }
 });
+
+test("/opt-out deletes consolidated behavioral patterns", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    await store.setMemberOptIn("g1", "u-user", true);
+    // Three active episodes consolidate into a behavioral pattern — derived
+    // person data that must die with the rest on opt-out, or it resurfaces
+    // into the rebuilt profile on re-opt-in.
+    for (let i = 0; i < 3; i++) {
+      const mem = await store.saveMemory(msg(`did activity ${i}`), {
+        subjectId: "u-user", kind: "episode", content: `User did activity ${i}`,
+        reason: "observed", evidenceType: "explicit_fact", effect: "support",
+      });
+      await store.confirm("g1", mem.id);
+    }
+    assert.equal(await store.consolidateEpisodes("g1", "u-user"), 1);
+    assert.equal((await store.patterns("g1", "u-user")).length, 1);
+
+    const { interaction } = stubCommand({ commandName: "opt-out", userId: "u-user" });
+    await handleMemoryCommand(interaction, store, brainFor, evStore, new ProfileStore(sql as never));
+    assert.equal((await store.patterns("g1", "u-user")).length, 0, "opt-out must delete derived patterns");
+    assert.equal((await store.listMemories("g1", "u-user", {})).memories.filter(m => m.status !== "forgotten").length, 0);
+  } finally { await sql.end(); }
+});

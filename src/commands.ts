@@ -1127,6 +1127,10 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     await store.forgetJournalAbout(guildId, userId);
     await store.forgetJournalAbout(`dm:${userId}`, userId);
     await store.deleteAttributesFor(guildId, userId);
+    // Consolidated behavioral patterns are derived person data too — without
+    // this a pattern built from now-forgotten episodes would resurface on
+    // re-opt-in.
+    await store.deletePatternsFor(guildId, userId);
     // Verbatim evidence (quotes, message snapshots) is scrubbed now, not at
     // retention expiry — opt-out shouldn't wait days to stop holding the words.
     await store.scrubEvidenceFor(guildId, userId);

@@ -97,7 +97,9 @@ export async function gatherServerDigestForDm(
       }
     }
 
-    for (const m of recentMems.filter(x => x.status === "active").slice(0, 3)) {
+    // Unknown-subject claims are pre-resolution data — inert until claimed —
+    // so the digest must not surface one even if it reached 'active'.
+    for (const m of recentMems.filter(x => x.status === "active" && x.subjectId !== "unknown").slice(0, 3)) {
       items.push(`Server note (${m.subjectLabel}): ${m.content}`);
     }
 

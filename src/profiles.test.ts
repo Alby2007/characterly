@@ -1031,3 +1031,66 @@ test("attributesForSubjects batches by subject and honors the status filter", as
     assert.equal((await store.attributesForSubjects("g1", [])).size, 0);
   } finally { await sql.end(); }
 });
+
+test("profile-build rescans 'extracted' messages that produced no evidence", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    // A member who opts in AFTER their history was triaged must be able to
+    // rescan it — an 'extracted' mark whose extraction yielded no evidence
+    // (consent-dropped or empty) is still scannable; 'extracted' rows that DID
+    // produce evidence stay excluded so builds don't re-bill covered work.
+    await store.recordMessage(msg("fresh chatter", { messageId: "pb-1", authorId: "u1", authorName: "Alice" }));
+    await store.recordMessage(msg("i work as a chef", { messageId: "pb-2", authorId: "u1", authorName: "Alice" }));
+    await store.recordMessage(msg("extracted with evidence", { messageId: "pb-3", authorId: "u1", authorName: "Alice" }));
+    await store.setTriageResults([{ id: "pb-2", result: "extracted" }, { id: "pb-3", result: "extracted" }]);
+    // pb-3's extraction persisted a memory citing it — evidence exists.
+    const { id: msgId } = { id: "pb-3" };
+    await store.saveMemory(msg("extracted with evidence", { messageId: msgId, authorId: "u1" }),
+      { subjectId: "u1", kind: "person_fact", content: "evidence-bearing", reason: "t", evidenceType: "explicit_fact", effect: "support" });
+
+    const scan = async () =>
+      (await store.messagesAboutSubject("g1", "u1", ["Alice"], new Date(Date.now() - 86_400_000))).map(m => m.id).sort();
+    assert.deepEqual(await scan(), ["pb-1", "pb-2"], "unmarked + evidenceless-extracted rows are scannable; evidence-bearing ones are not");
+  } finally { await sql.end(); }
+});
+
+test("re-citing a superseded attribute value merges provenance without reviving it", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    // Distinct contents — near-identical strings would trigram-fold into one
+    // memory and the two citations would share a single row.
+    const m1 = await activeFact(store, "timezone is GMT");
+    const m2 = await activeFact(store, "currently on eastern time");
+    await applyProposals(sql, "g1", "u1", [{ field: "timezone", value: "GMT", memoryIds: [m1.id] }]);
+    await applyProposals(sql, "g1", "u1", [{ field: "timezone", value: "EST", memoryIds: [m2.id] }]);
+
+    let attrs = await listAttributes(sql, "g1", "u1");
+    const gmt = attrs.find(a => a.valueNorm === "gmt")!;
+    const est = attrs.find(a => a.valueNorm === "est")!;
+    assert.equal(gmt.status, "superseded");
+    assert.equal(gmt.supersededBy, est.id);
+    assert.equal(est.status, "active");
+
+    // A stale live memory re-cites the old value — provenance merges but the
+    // row must stay superseded while EST is live, and it must NOT dethrone EST.
+    const m3 = await activeFact(store, "someone later mentioned her clock again");
+    await applyProposals(sql, "g1", "u1", [{ field: "timezone", value: "GMT", memoryIds: [m3.id] }]);
+    attrs = await listAttributes(sql, "g1", "u1");
+    const gmt2 = attrs.find(a => a.valueNorm === "gmt")!;
+    const est2 = attrs.find(a => a.valueNorm === "est")!;
+    assert.equal(gmt2.status, "superseded", "a superseded row must not revive while its successor is live");
+    assert.deepEqual(gmt2.memoryIds.slice().sort(), [m1.id, m3.id].sort(), "re-citation still merges provenance");
+    assert.equal(est2.status, "active", "the live successor must not be dethroned by a dead row");
+    assert.equal(est2.supersededBy, null);
+
+    // Once the successor dies (its provenance forgotten), re-citation revives
+    // the older value — the dead-successor gate opens.
+    await store.forgetAllFor("g1", "u1"); // wipes memory rows → both rows lose provenance
+    const m4 = await activeFact(store, "she brought up her schedule once more");
+    await applyProposals(sql, "g1", "u1", [{ field: "timezone", value: "GMT", memoryIds: [m4.id] }]);
+    attrs = await listAttributes(sql, "g1", "u1");
+    assert.equal(attrs.find(a => a.valueNorm === "gmt")!.status, "active", "revival is legal once the successor is dead");
+  } finally { await sql.end(); }
+});

@@ -400,3 +400,23 @@ test("maintainEvents drains the whole candidate backlog and honors the re-score 
     assert.equal(openRow!.classifications, 0, "open candidates are never classified");
   } finally { await sql.end(); }
 });
+
+test("pipeline: reprocessing an already-attached message cannot mint a duplicate event", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store, eventStore } = await makeStore(sql);
+    const pipeline = new EventPipeline();
+    const brain = stubBrain("new");
+    const m = msg("m-retry", "I love Arsenal");
+    const saved = await store.saveMemory(m, mem("Alice likes Arsenal"));
+    await pipeline.process(m, [saved.id], eventStore, store, brain);
+    // A retried extract job reaches the pipeline with the same message after
+    // persistence already ran — the second pass must be a no-op.
+    await pipeline.process(m, [saved.id], eventStore, store, brain);
+    const open = await eventStore.openEvents(guild, channel);
+    assert.equal(open.length, 1, "a retried job must not mint a second candidate event");
+    assert.deepEqual(open[0].messageIds, ["m-retry"]);
+    const attached = await eventStore.eventForMessage(guild, "m-retry");
+    assert.equal(attached, open[0].id);
+  } finally { await sql.end(); }
+});

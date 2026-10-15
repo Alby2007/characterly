@@ -10,8 +10,8 @@ export type MessageEvent = {
   // (a companion name said in text — see detectWakeWord).
   mentionsBot: boolean;
   // Transient: populated live from Discord attachments, consumed in-flight by
-  // describeImage, never persisted — recordMessage writes explicit columns and
-  // no attachment column exists to receive these.
+  // describeImage — the attachment refs are never persisted, but the resulting
+  // description caches on messages.image_context for reuse across passes.
   imageAttachments?: Array<{ url: string; contentType: string; size: number; name?: string }>;
 };
 

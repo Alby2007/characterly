@@ -1694,6 +1694,21 @@ const migrations: Migration[] = [
       `;
     },
   },
+
+  // ── v33: cached image descriptions on the archive row ──────────────────────
+  // Vision describes are operator spend billed per call — the extract job and
+  // every reply to the same image message used to each pay for a pass. The
+  // formatted context string caches on the message row; first writer wins.
+  {
+    version: 33,
+    name: "v33_message_image_context",
+    up: async (sql) => {
+      await addColumn(sql, "messages", "image_context TEXT");
+    },
+    down: async (sql) => {
+      await sql`ALTER TABLE messages DROP COLUMN IF EXISTS image_context`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

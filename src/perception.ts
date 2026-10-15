@@ -187,3 +187,20 @@ export function questionKeywords(content: string, max = 5): string[] {
 export function looksLikeSchemaLeak(text: string): boolean {
   return /\bend_conversation\b|<\/?\s*think\s*>|"text"\s*:\s*"/.test(text);
 }
+
+// Vault leak guard: the DM→guild bridge injects the owner's private subtext
+// into a server reply prompt. The persona is instructed never to disclose it,
+// but a prompt rule is not a boundary — if the model echoes a subtext line
+// verbatim, the reply must not send. Compares normalised text; only spans
+// ≥24 chars are evidence — short generic phrases can legitimately recur in
+// server talk.
+export function containsPrivateSubtext(reply: string, subtext?: string): boolean {
+  if (!subtext) return false;
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const replyNorm = norm(reply);
+  for (const line of subtext.split("\n")) {
+    const content = norm(line.replace(/^-\s*\[[^\]]*\]\s*/, ""));
+    if (content.length >= 24 && replyNorm.includes(content)) return true;
+  }
+  return false;
+}

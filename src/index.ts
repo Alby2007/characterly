@@ -18,7 +18,7 @@ import {
   handleMemoryCommand,
   handleSetupModal,
 } from "./commands.js";
-import { looksLikeSchemaLeak, shouldInspectForMemory, toolCues } from "./perception.js";
+import { containsPrivateSubtext, looksLikeSchemaLeak, shouldInspectForMemory, toolCues } from "./perception.js";
 import { ConversationTracker } from "./conversation.js";
 import { ReplyThrottle } from "./reply-throttle.js";
 import { EventStore } from "./events.js";
@@ -953,19 +953,25 @@ async function handleDmMessage(
     const meteredVision = visionClient
       ? meteredClient(meteredClient(visionClient, { guildId: dmScope, store, getCap: async () => config.dmLlmDailyCap }), { guildId: "hosted:global", store, getCap: async () => config.hostedDailyLlmCap })
       : undefined;
-    const imgDescs = images.length && config.visionModel
-      ? (await Promise.all(images.map(async a => {
-          try {
-            const d = await brain.describeImage({ url: a.url, contextText: event.content, maxBytes: config.imageMaxBytes }, config.visionModel!, meteredVision);
-            inc("vision.described");
-            return d.description;
-          } catch (error) {
-            if (error instanceof BudgetExceeded) throw error;
-            inc("vision.error"); return undefined;
-          }
-        }))).filter((d): d is string => !!d)
-      : [];
-    const imageContext = imgDescs.length ? formatImageContext(imgDescs, freshOwnerName) : undefined;
+    // Vision descriptions cache on the archive row — whichever pass (extract
+    // job or reply) describes the attachments first is reused by every other.
+    let imageContext = images.length && config.visionModel
+      ? (await store.getMessage(dmScope, event.messageId))?.imageContext ?? undefined
+      : undefined;
+    if (!imageContext && images.length && config.visionModel) {
+      const imgDescs = (await Promise.all(images.map(async a => {
+        try {
+          const d = await brain.describeImage({ url: a.url, contextText: event.content, maxBytes: config.imageMaxBytes }, config.visionModel!, meteredVision);
+          inc("vision.described");
+          return d.description;
+        } catch (error) {
+          if (error instanceof BudgetExceeded) throw error;
+          inc("vision.error"); return undefined;
+        }
+      }))).filter((d): d is string => !!d);
+      imageContext = imgDescs.length ? formatImageContext(imgDescs, freshOwnerName) : undefined;
+      if (imageContext) await store.setImageContext(dmScope, event.messageId, imageContext).catch(() => {});
+    }
 
     const toolCtx: ToolCtx = {
       guildId: dmScope, store, eventStore, profileStore,
@@ -1165,8 +1171,21 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
         inc("vision.error"); logError("Image describe failed", error); return undefined;
       }
     })).then(list => list.filter((d): d is string => !!d));
-  let imageDescs: Promise<string[]> | undefined;
-  const getImageDescriptions = (activeBrain: Brain) => (imageDescs ??= describeImages(images, activeBrain));
+  // Vision output caches on the archive row (messages.image_context) — the
+  // extract job and every later reply reuse the first describe pass instead of
+  // re-billing for the same attachments.
+  const imageContextFor = async (list: Array<AttachmentMeta & { contentType: string }>, authorName: string, activeBrain: Brain, sourceMessageId?: string): Promise<string> => {
+    if (!list.length) return "";
+    const cached = sourceMessageId
+      ? (await store.getMessage(event.guildId, sourceMessageId))?.imageContext
+      : undefined;
+    if (cached) return cached;
+    const descs = await describeImages(list, activeBrain);
+    if (!descs.length) return "";
+    const formatted = formatImageContext(descs, authorName);
+    if (sourceMessageId && formatted) await store.setImageContext(event.guildId, sourceMessageId, formatted).catch(() => {});
+    return formatted;
+  };
   // Resolve the scope brain BEFORE the throttle check — hostedScopes only
   // populates on resolution, so checking isHostedScope before brainFor would
   // read a cold cache as non-hosted and skip the free-tier throttle.
@@ -1350,12 +1369,12 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     };
 
     const imgParts: string[] = [];
-    if (images.length) imgParts.push(formatImageContext(await getImageDescriptions(companionBrain), authorName));
+    if (images.length) imgParts.push(await imageContextFor(images, authorName, companionBrain, event.messageId));
     if (replyToId) {
       const refMsg = await message.channel.messages.fetch(replyToId).catch(() => undefined);
       const refImages = refMsg ? qualifyingImages(refMsg.attachments.values(), config.imageMaxBytes, IMAGE_MAX_PER_MESSAGE) : [];
       if (refImages.length && refMsg)
-        imgParts.push(formatImageContext(await describeImages(refImages, companionBrain), refMsg.member?.displayName ?? refMsg.author.username));
+        imgParts.push(await imageContextFor(refImages, refMsg.member?.displayName ?? refMsg.author.username, companionBrain, replyToId));
     }
     const imageContext = imgParts.filter(Boolean).join("\n") || undefined;
 
@@ -1379,8 +1398,13 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       imageContext,
     );
     const clean = text ? scrubMentions(text, lookups.names) : "";
-    if (clean && looksLikeSchemaLeak(clean)) {
-      inc("reply.schema_leak"); replyThrottle.refund(event.guildId, throttleActor);
+    // Send-boundary guards: model internals must never reach a channel, and a
+    // verbatim echo of the owner's private DM subtext means the vault rule
+    // failed — suppress the send rather than disclose across contexts.
+    const leak = clean && looksLikeSchemaLeak(clean) ? "reply.schema_leak"
+      : clean && containsPrivateSubtext(clean, ownerSubtext) ? "reply.vault_leak" : null;
+    if (leak) {
+      inc(leak); replyThrottle.refund(event.guildId, throttleActor);
       if (chargedGuild) refundTurn(payerId, 1, "guild_turn_refund");
       return;
     }

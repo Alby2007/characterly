@@ -127,6 +127,15 @@ export class EventPipeline {
     brain: Brain,
     replyToMessageId?: string
   ): Promise<boolean> {
+    // Idempotency: a retried extract job reaches here after persistence already
+    // ran. A message already attached to an event must not spawn a second
+    // candidate window — just link any newly-saved memory ids and stop.
+    const existingEventId = await eventStore.eventForMessage(message.guildId, message.messageId);
+    if (existingEventId != null) {
+      for (const id of savedMemoryIds) await eventStore.attachMemory(message.guildId, existingEventId, id, "generated");
+      return false;
+    }
+
     const openEvents = await eventStore.openEvents(message.guildId, message.channelId);
     const { decision, llmCalled } = await this.decideContinuity(message, openEvents, memoryStore, brain, replyToMessageId);
 

@@ -74,7 +74,8 @@ Raw Discord message archive. Purged on a rolling retention window.
 | `author_name` | TEXT | Display name at time of message |
 | `content` | TEXT | Full message text |
 | `created_at` | TEXT | ISO-8601 timestamp |
-| `triage_result` | TEXT \| NULL | Durability/extraction state (v6): `'regex'` passed the regex gate, `'durable'` flagged by LLM triage, `'noise'` rejected, `'queued'` has a live extract job (v17), `'dead'` its only job dead-lettered (terminal for the sweep, still reachable by `/profile-build`), `'extracted'` extraction ran (terminal — never re-selected, even with zero evidence rows). NULL = not yet triaged |
+| `triage_result` | TEXT \| NULL | Durability/extraction state (v6): `'regex'` passed the regex gate, `'durable'` flagged by LLM triage, `'noise'` rejected, `'queued'` has a live extract job (v17), `'dead'` its only job dead-lettered (terminal for the sweep, still reachable by `/profile-build`), `'extracted'` extraction ran (terminal for the sweep — a retried job resumes at contest/pipeline without re-extracting, and `/profile-build` may rescan an `'extracted'` row that produced no evidence rows). NULL = not yet triaged |
+| `image_context` | TEXT \| NULL | Cached vision description for the message's image attachments (v33) — the extract job and reply paths share the first describe pass instead of re-billing |
 | `reply_to_id` | TEXT \| NULL | Discord ID of the message this one replies to (v7) |
 | `author_is_bot` | BOOLEAN | `true` when the author was another bot (v18) — archive-only context: the sweep never triages/extracts these rows, a queued extract job drops them, and they're excluded from profiles and the interaction graph |
 
@@ -126,9 +127,9 @@ One row per curated fact, preference, episode, or piece of server lore. The core
 
 | Status | Meaning |
 |--------|---------|
-| `candidate` | New memory below confidence or promotion threshold; never used in replies |
+| `candidate` | New memory below confidence or promotion threshold; never used in replies. Promotion requires corroboration — `confirmation_count ≥ 2` supporting evidence rows of a promotable type push confidence past the threshold; a single sighting can never activate, and `unknown` subjects are inert until claimed |
 | `active` | Confirmed and surfaced in replies |
-| `contested` | Contradicting evidence received; confidence frozen; `net_score` drives resolution |
+| `contested` | Contradicting evidence received; confidence frozen; `net_score` drives resolution. A standoff with no new signal in 30 days settles by its standing sign — support-leaning returns to `candidate`, contradiction-leaning to `quarantined` |
 | `quarantined` | Old candidate (>7 days) or old low-confidence active (>90 days, confidence <0.75) |
 | `superseded` | Replaced by a correction **or** merged as a duplicate; linked to the surviving row via `superseded_by` |
 | `forgotten` | Manually forgotten via `/forget`; never used in replies |
@@ -169,7 +170,7 @@ Append-only audit trail of every lifecycle transition.
 |--------|------|-------|
 | `id` | INTEGER PK | Auto-increment |
 | `memory_id` | INTEGER | FK → `memories.id` |
-| `action` | TEXT | e.g. `support`, `promote`, `contradict`, `conflict_resolved`, `superseded`, `correction_activated`, `dedup_matched`, `dedup_near_miss`, `dedup_merged`, `dedup_contradiction` |
+| `action` | TEXT | e.g. `support`, `promote`, `contradict`, `correction_evidence`, `conflict_resolved`, `conflict_unresolved`, `conflict_demoted`, `subject_confirmed`, `superseded`, `correction_activated`, `dedup_matched`, `dedup_near_miss`, `dedup_merged`, `dedup_contradiction`, `attr_near_miss` |
 | `previous_confidence` | REAL | Confidence before the action |
 | `new_confidence` | REAL | Confidence after the action |
 | `previous_status` | TEXT | Status before the action |
@@ -629,3 +630,4 @@ Version tracking for the migration system.
 | 30 | `v30_account_credits_hardening` | Revokes `authenticated INSERT` on `web_profiles` (trigger is the only row creator) + backfills missing profiles from `auth.users`; `claim_link_code` locks the code row `FOR UPDATE` and normalizes dashless input; `credit_ledger` policy uses `(select auth.uid())` |
 | 31 | `v31_stripe_packs` | `web_profiles` gains `stripe_customer_id`/`stripe_subscription_id` (unique partial index on customer); `credit_ledger` gains `'purchase'` kind + `stripe_ref` (unique partial — webhook idempotency); `grant_pack` rpc (service_role only — atomic pack credit under the account row lock) |
 | 32 | `v32_stripe_webhook_hardening` | `grant_pack` gains a positive-amount guard; `account_id_for_email` rpc (service_role only) resolves checkout emails → `web_profiles.id` for bare payment links |
+| 33 | `v33_message_image_context` | `messages.image_context` — cached vision description shared by the extract job and reply paths |

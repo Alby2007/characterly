@@ -23,7 +23,10 @@ export function calculateInitialConfidence(evidenceType: EvidenceType): number {
  * Uses a deterministic formula that doesn't depend on LLM output.
  * 
  * Support: Increases confidence using a bounded formula that approaches 0.95
- * Contradict: Halves confidence to reduce belief strength
+ * Contradict: Halves confidence — note the evidence pipeline never applies
+ *   this directly: a contradict effect freezes confidence and marks the memory
+ *   contested instead (net_score arbitrates). This branch exists for direct
+ *   callers/tests that model the raw effect.
  * Correct: No confidence change (handled by supersession logic)
  * Context: No confidence change
  */

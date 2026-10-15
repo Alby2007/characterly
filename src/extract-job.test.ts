@@ -219,3 +219,42 @@ test("deleted, edited, and bot-authored messages are re-read at execution time",
     assert.equal(extractCalls, 1, "bot-authored rows never reach extraction");
   } finally { await sql.end(); }
 });
+
+test("a retried job on an 'extracted' message resumes the tail without re-extracting", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store, eventStore } = await makeStore(sql);
+    await store.settings("g7");
+    await store.setMemberOptIn("g7", "u1", true);
+    const event = { guildId: "g7", channelId: "c1", messageId: "m-resume", authorId: "u1", authorName: "Alice", content: "I love hiking", createdAt: new Date(), mentionsBot: false };
+    await store.recordMessage(event as MessageEvent, undefined, true);
+
+    let extractCalls = 0;
+    const pipelineIds: number[][] = [];
+    const brain: Partial<Brain> = {
+      extractMemories: async () => {
+        extractCalls++;
+        return {
+          memories: [{ subjectId: "u1", subjectName: "Alice", kind: "person_preference", content: "loves hiking", reason: "stated", evidenceType: "explicit_fact", effect: "support" }],
+          relationships: [],
+        };
+      },
+    };
+    const deps: ExtractJobDeps = {
+      ...stubDeps(store, eventStore, brain),
+      pipeline: { process: async (_e: MessageEvent, ids: number[]) => { pipelineIds.push(ids); return false; } } as any,
+    };
+    await runExtractJob(payloadFor(event), deps);
+    assert.equal(extractCalls, 1);
+    assert.equal(pipelineIds.length, 1);
+    assert.equal(pipelineIds[0].length, 1, "the persisted memory id reaches the pipeline");
+
+    // Retry — a mid-tail BudgetExceeded or transient failure lands here with
+    // persistence already applied. Extraction must not re-bill; the tail
+    // stages still run so contest/pipeline can complete.
+    await runExtractJob(payloadFor(event), deps);
+    assert.equal(extractCalls, 1, "a rerun must not re-bill extraction");
+    assert.equal(pipelineIds.length, 2, "the pipeline still runs on resume");
+    assert.deepEqual(pipelineIds[1], pipelineIds[0], "saved ids recover from evidence");
+  } finally { await sql.end(); }
+});

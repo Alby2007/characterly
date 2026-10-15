@@ -90,8 +90,8 @@ In Discord servers, Characterly acts as the shared host ("plumbing"):
 - **Webhook Disguise (`sendAsCompanion` in `src/webhooks.ts`):**
   - Replies in server channels are sent through a cached Discord channel webhook (`Characterly Companions`) disguised with the speaking companion's `name` and `avatarUrl` (supporting both text channels and threads), and recorded in `webhook_messages` with `companion_id` and `chain_depth`. If `ManageWebhooks` permission is missing, it falls back gracefully to a `**[CompanionName]**` prefixed reply.
 - **Cross-Context Consciousness (`src/cross-context.ts`):**
-  - **DM → Server (`gatherOwnerSubtextForServer`):** Pulls active memories and attributes from `dm:<ownerUserId>` and injects them into the companion's server reply prompt under the **VAULT RULE** — used strictly for subtext, loyalty, and inside jokes with the owner, never disclosed to other server members.
-  - **Server → DM (`gatherServerDigestForDm`):** Summarizes recent events, relationship edges (`companion:<id>` and owner dynamics), and active memories from the servers where the companion is summoned so the companion can gossip and debrief with its owner in 1:1 DMs.
+  - **DM → Server (`gatherOwnerSubtextForServer`):** Pulls active memories and attributes from `dm:<ownerUserId>` and injects them into the companion's server reply prompt under the **VAULT RULE** — used strictly for subtext, loyalty, and inside jokes with the owner, never disclosed to other server members. The prompt rule is backed by a send-boundary check: `containsPrivateSubtext` (`src/perception.ts`) suppresses a server reply that echoes a vault line verbatim (≥24 chars normalized) and refunds the turn, alongside the schema-leak guard.
+  - **Server → DM (`gatherServerDigestForDm`):** Summarizes recent events, relationship edges (`companion:<id>` and owner dynamics), and active memories from the servers where the companion is summoned so the companion can gossip and debrief with its owner in 1:1 DMs. `unknown`-subject claims are excluded even if active — unresolved names are inert until claimed.
 
 ## Companion journal — first-person episodic memory (v25)
 

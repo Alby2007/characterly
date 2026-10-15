@@ -307,7 +307,12 @@ test("/companion commands and cross-context bridges enforce privacy boundaries a
         : [],
     journalFor: async () => [],
     listCompanionGuilds: async () => [...summonedGuilds],
-    recentMemories: async () => [{ id: 20, status: "active", subjectLabel: "Bob", content: "Bob burned his toast" }],
+    recentMemories: async () => [
+      { id: 20, status: "active", subjectId: "u-bob", subjectLabel: "Bob", content: "Bob burned his toast" },
+      // Unresolved-name claims are inert until claimed — even an 'active' one
+      // must never cross into the owner's DM digest.
+      { id: 21, status: "active", subjectId: "unknown", subjectLabel: "Pete", content: "Pete cheats at cards" },
+    ],
   } as unknown as MemoryStore;
 
   const fakeEventStore = {
@@ -328,6 +333,8 @@ test("/companion commands and cross-context bridges enforce privacy boundaries a
   assert.ok(digest?.includes("[The Crew]"));
   assert.ok(digest?.includes("Midnight Game Night"));
   assert.ok(digest?.includes("playful rivals"));
+  assert.ok(digest?.includes("Bob burned his toast"));
+  assert.ok(!digest?.includes("Pete cheats"), "unknown-subject claims must not reach the digest");
 
   // /companion action:card in DM (guildId = null)
   const replies: any[] = [];
@@ -762,16 +769,24 @@ test("companion lifecycle, /companion commands, and DM ↔ Server cross-context 
     await store.recordMessage(
       msg("secret DM message", { guildId: "dm:u-alice", authorId: "u-alice", authorName: "Alice" }),
     );
+    // Promotion requires corroboration — two independent sightings cross the
+    // gate; a single save stays a candidate now.
+    const dmMem = {
+      subjectId: "u-alice",
+      kind: "person_fact" as const,
+      content: "Alice is secretly interviewing at Acme Corp",
+      reason: "stated in DM",
+      evidenceType: "explicit_fact" as const,
+      effect: "support" as const,
+    };
     await store.saveMemory(
       msg("I am interviewing at Acme Corp", { guildId: "dm:u-alice", authorId: "u-alice", authorName: "Alice" }),
-      {
-        subjectId: "u-alice",
-        kind: "person_fact",
-        content: "Alice is secretly interviewing at Acme Corp",
-        reason: "stated in DM",
-        evidenceType: "explicit_fact",
-        effect: "support",
-      },
+      dmMem,
+      0.5,
+    );
+    await store.saveMemory(
+      msg("the Acme Corp interview is next week", { guildId: "dm:u-alice", authorId: "u-alice", authorName: "Alice", messageId: "m2" }),
+      dmMem,
       0.5,
     );
     const zombies = await store.guildsNotIn(["g1"]);

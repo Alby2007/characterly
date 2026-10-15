@@ -174,3 +174,22 @@ test("looksLikeSchemaLeak leaves ordinary human and bot speech alone", () => {
   assert.equal(looksLikeSchemaLeak("end the conversation whenever"), false);   // spaced words aren't the field
   assert.equal(looksLikeSchemaLeak("lol nice one"), false);
 });
+
+// ── containsPrivateSubtext: the vault-leak send guard ─────────────────────────
+
+test("containsPrivateSubtext catches a verbatim echo of private DM subtext", async () => {
+  const { containsPrivateSubtext } = await import("./perception.js");
+  const subtext = [
+    "Owner facets from private DMs: timezone: GMT; occupation: Designer",
+    "- [Private DM memory] Alice is planning a surprise trip to Lisbon next month",
+    "- [Your private DM memory] we stayed up all night talking about her dad",
+  ].join("\n");
+
+  assert.equal(containsPrivateSubtext("alice is planning a surprise trip to lisbon next month btw", subtext), true);
+  assert.equal(containsPrivateSubtext("haha anyway — we stayed up all night talking about her dad, wild", subtext), true);
+  // Short facet fragments and generic lines are not evidence of disclosure.
+  assert.equal(containsPrivateSubtext("sounds fun, what time works for you?", subtext), false);
+  assert.equal(containsPrivateSubtext("surprise trip? nice", subtext), false);
+  assert.equal(containsPrivateSubtext("anything", undefined), false);
+  assert.equal(containsPrivateSubtext("anything", ""), false);
+});

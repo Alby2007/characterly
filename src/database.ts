@@ -890,12 +890,12 @@ export class MemoryStore {
 
   // ── Interaction graph ──────────────────────────────────────────────────────
   // Deterministic "who addresses whom" topology from the raw archive — <@ID>
-  // mentions plus written name-references. Distinct from LLM-asserted edges:
-  // this measures frequency of contact, not claimed dynamics. reply_to_id is
-  // unpopulated in the archive, so mentions are the signal we have.
+  // mentions, written name-references, and reply targets. Distinct from
+  // LLM-asserted edges: this measures frequency of contact, not claimed
+  // dynamics.
 
-  /** Undirected pairs keyed (min,max) — mention and name-ref both count once
-   * per message per pair. excludeChannels honors the ignored-channel boundary
+  /** Undirected pairs keyed (min,max) — mention, name-ref, and reply each count
+   * once per message per pair. excludeChannels honors the ignored-channel boundary
    * (ignored = invisible, including rows archived before the flag — same rule
    * as the sweep). Bot-authored rows are archive context, not partners: a
    * bot's mentions must not mint member↔bot edges, so ids observed posting as
@@ -909,12 +909,14 @@ export class MemoryStore {
     // Bounded to 90 days — the interaction graph is a recency signal anyway,
     // and this is the one query that reads the entire archive otherwise.
     const channels = opts.excludeChannels ?? [];
-    const rows = await this.sql<Array<{ author_id: string; author_is_bot: boolean; content: string; created_at: Date | string }>>`
-      SELECT author_id, author_is_bot, content, created_at FROM messages
-      WHERE guild_id = ${guildId} AND length(content) > 0
-        AND created_at > NOW() - interval '90 days'
-        AND (${channels.length} = 0 OR channel_id <> ALL(${channels}::text[]))
-      ORDER BY created_at, id
+    const rows = await this.sql<Array<{ author_id: string; author_is_bot: boolean; content: string; created_at: Date | string; reply_author_id: string | null }>>`
+      SELECT m.author_id, m.author_is_bot, m.content, m.created_at, ref.author_id AS reply_author_id
+      FROM messages m
+      LEFT JOIN messages ref ON ref.id = m.reply_to_id AND ref.guild_id = m.guild_id
+      WHERE m.guild_id = ${guildId} AND length(m.content) > 0
+        AND m.created_at > NOW() - interval '90 days'
+        AND (${channels.length} = 0 OR m.channel_id <> ALL(${channels}::text[]))
+      ORDER BY m.created_at, m.id
     `;
     const skip = new Set(opts.excludeIds ?? []);
     const allow = new Set(opts.allowBotIds ?? []);
@@ -925,6 +927,9 @@ export class MemoryStore {
       const targets = new Set<string>();
       for (const m of r.content.matchAll(/<@!?(\d{5,25})>/g)) targets.add(m[1]);
       for (const id of findMentionedUsers(r.content, aliasMap)) targets.add(id);
+      // Replying to someone is addressing them — a close pair that replies
+      // rather than name-drops still counts.
+      if (r.reply_author_id) targets.add(r.reply_author_id);
       targets.delete(r.author_id);
       for (const t of targets) {
         if (skip.has(t) || botIds.has(t)) continue;
@@ -1202,11 +1207,27 @@ export class MemoryStore {
     return rows.map(r => r.nature);
   }
 
-  async getMessage(guildId: string, messageId: string): Promise<{ id: string; guildId: string; channelId: string; authorId: string; authorName: string; content: string; createdAt: string; authorIsBot: boolean } | undefined> {
-    const rows = await this.sql<Array<MessageRow & { author_is_bot: boolean }>>`SELECT id, guild_id, channel_id, author_id, author_name, content, created_at, author_is_bot FROM messages WHERE guild_id = ${guildId} AND id = ${messageId}`;
+  async getMessage(guildId: string, messageId: string): Promise<{ id: string; guildId: string; channelId: string; authorId: string; authorName: string; content: string; createdAt: string; authorIsBot: boolean; triageResult: string | null; imageContext: string | null } | undefined> {
+    const rows = await this.sql<Array<MessageRow & { author_is_bot: boolean; triage_result: string | null; image_context: string | null }>>`SELECT id, guild_id, channel_id, author_id, author_name, content, created_at, author_is_bot, triage_result, image_context FROM messages WHERE guild_id = ${guildId} AND id = ${messageId}`;
     if (!rows[0]) return undefined;
     const r = rows[0];
-    return { id: r.id, guildId: r.guild_id, channelId: r.channel_id, authorId: r.author_id, authorName: r.author_name, content: r.content, createdAt: ts(r.created_at), authorIsBot: r.author_is_bot };
+    return { id: r.id, guildId: r.guild_id, channelId: r.channel_id, authorId: r.author_id, authorName: r.author_name, content: r.content, createdAt: ts(r.created_at), authorIsBot: r.author_is_bot, triageResult: r.triage_result, imageContext: r.image_context };
+  }
+
+  /** Cache the formatted vision description for a message's attachments —
+   * first writer wins; the extract job and every later reply share one
+   * describe pass instead of re-billing vision per read. */
+  async setImageContext(guildId: string, messageId: string, context: string): Promise<void> {
+    await this.sql`UPDATE messages SET image_context = ${context} WHERE guild_id = ${guildId} AND id = ${messageId} AND image_context IS NULL`;
+  }
+
+  /** Memory ids whose evidence cites this message — lets a retried extract
+   * job recover what was persisted without re-running the extraction LLM. */
+  async memoryIdsForMessage(messageId: string): Promise<number[]> {
+    const rows = await this.sql<Array<{ memory_id: number | string }>>`
+      SELECT DISTINCT memory_id FROM memory_evidence WHERE message_id = ${messageId}
+    `;
+    return rows.map(r => Number(r.memory_id));
   }
 
   async hasEvidence(messageId: string): Promise<boolean> {
@@ -1235,7 +1256,13 @@ export class MemoryStore {
       LEFT JOIN messages ref ON ref.id = m.reply_to_id AND ref.guild_id = m.guild_id
       WHERE m.guild_id = ${guildId} AND m.created_at > ${since.toISOString()}
         AND m.content <> ''
-        AND (m.triage_result IS NULL OR m.triage_result <> 'extracted')
+        -- 'extracted' rows that yielded evidence already contributed their
+        -- consented candidates; 'extracted' rows with NO evidence are exactly
+        -- the consent-dropped (or empty-extraction) set a later opt-in must
+        -- be able to rescan. Evidence insert is idempotent, so reprocessing
+        -- is safe.
+        AND (m.triage_result IS NULL OR m.triage_result <> 'extracted'
+             OR NOT EXISTS (SELECT 1 FROM memory_evidence e WHERE e.message_id = m.id))
         AND (
           m.author_id = ${userId}
           OR m.content ILIKE ANY(${patterns})
@@ -1452,7 +1479,13 @@ export class MemoryStore {
 
     // Only high-quality evidence types may promote a candidate to active. Sarcasm, rumour, and
     // uncertain inferences are explicitly excluded regardless of how high confidence grows.
-    if (status === "candidate" && effect === "support" && confidence >= candidateThreshold && PROMOTABLE_EVIDENCE_TYPES.includes(evidenceType)) {
+    // confirmations >= 2 means promotion always represents corroboration — a single sighting
+    // can never activate a memory (a 'correction'-typed extraction starts at 0.80 and would
+    // otherwise promote on first sight, skipping nightly verification entirely).
+    // 'unknown' subjects are inert until claimed: they can never promote.
+    if (status === "candidate" && effect === "support" && confidence >= candidateThreshold
+        && confirmations >= 2 && saved.subjectId !== "unknown"
+        && PROMOTABLE_EVIDENCE_TYPES.includes(evidenceType)) {
       status = "active";
       action = "promote";
     }
@@ -1797,7 +1830,9 @@ export class MemoryStore {
     const contradictionScore = ev.filter(item => item.effect === "contradict").reduce((sum, item) => sum + weight(item.messageTimestamp), 0);
     const netScore = supportScore - contradictionScore;
     const newest = [...ev].sort((a, b) => b.messageTimestamp.localeCompare(a.messageTimestamp))[0];
-    // Always persist the current net_score so the DB reflects the latest resolution signal.
+    // Always persist the current net_score so the DB reflects the latest resolution signal
+    // (and so the unresolved path can diff against it to suppress repeat logging).
+    const previousNetScore = memory.netScore;
     await this.sql`UPDATE memories SET net_score = ${netScore} WHERE guild_id = ${guildId} AND id = ${memoryId}`;
     if (memory.confidence >= 0.70 && netScore >= 0.50 && newest?.effect !== "contradict") {
       // Resolution: support won, but the promotion gate still applies — a
@@ -1805,26 +1840,56 @@ export class MemoryStore {
       // uncertain inference) resolves to candidate, not active. Otherwise a
       // weak-evidence candidate could launder itself into an active fact via
       // contradict → contested → resolve. Candidates reap via stale-quarantine.
-      const promotable = PROMOTABLE_EVIDENCE_TYPES.includes(memory.primaryEvidenceType as EvidenceType);
+      // 'unknown' subjects are inert until claimed — never resolve to active.
+      const promotable = PROMOTABLE_EVIDENCE_TYPES.includes(memory.primaryEvidenceType as EvidenceType) && memory.subjectId !== "unknown";
       const target: MemoryStatus = promotable ? "active" : "candidate";
       await this.sql`UPDATE memories SET status = ${target}, frozen_confidence = NULL, net_score = NULL, updated_at = NOW() WHERE guild_id = ${guildId} AND id = ${memoryId}`;
       await recomputeForMemories(this.sql, guildId, [memoryId]);
       await this.logHistory(memoryId, "conflict_resolved", memory.confidence, memory.confidence, "contested", target, null, { supportScore, contradictionScore, netScore, promotable });
       return { resolved: true, netScore };
     }
-    await this.logHistory(memoryId, "conflict_unresolved", memory.confidence, memory.confidence, "contested", "contested", null, { supportScore, contradictionScore, netScore });
+    // Contested is a dispute state, not a terminal one — confidence is frozen
+    // at entry, so a sub-threshold contested row could never meet the resolve
+    // gate and would be re-litigated by every nightly pass forever. A live
+    // dispute stays contested (new evidence or the subject's own word can
+    // still settle it), but a standoff with no new signal in 30 days settles
+    // by the standing sign: support-leaning returns to candidate (the ordinary
+    // ladder / stale-quarantine decides from there), contradiction-leaning
+    // quarantines.
+    const lastSignalAt = newest ? new Date(newest.messageTimestamp).getTime() : 0;
+    const staleContest = now.getTime() - lastSignalAt > 30 * 86_400_000;
+    const demote: MemoryStatus | null = staleContest ? (netScore >= 0 ? "candidate" : "quarantined") : null;
+    if (demote) {
+      await this.sql`UPDATE memories SET status = ${demote}, frozen_confidence = NULL, net_score = NULL, updated_at = NOW() WHERE guild_id = ${guildId} AND id = ${memoryId}`;
+      await recomputeForMemories(this.sql, guildId, [memoryId]);
+      await this.logHistory(memoryId, "conflict_demoted", memory.confidence, memory.confidence, "contested", demote, null, { supportScore, contradictionScore, netScore, staleContest });
+      return { resolved: true, netScore };
+    }
+    // A live dispute stays contested — but log only when the score actually
+    // moved, so nightly rescans of an unchanged standoff don't spam
+    // memory_history. Time-decayed weights drift in the last decimals between
+    // calls, so the comparison needs an epsilon; a real new vote moves the
+    // score by ~1.
+    if (previousNetScore == null || Math.abs(previousNetScore - netScore) >= 0.01) {
+      await this.logHistory(memoryId, "conflict_unresolved", memory.confidence, memory.confidence, "contested", "contested", null, { supportScore, contradictionScore, netScore });
+    }
     return { resolved: false, netScore };
   }
 
-  /** The subject of a contested memory affirms it themselves — decisive: resolves
-   * to active regardless of net_score, since the person described is the authority
-   * on their own facts. Only called when ordinary resolution can't settle it. */
+  /** The subject of a contested memory affirms it themselves — decisive on the
+   * dispute regardless of net_score, since the person described is the authority
+   * on their own facts. But the evidence-type floor still applies: a row whose
+   * primary evidence could never promote resolves to candidate, where nightly
+   * verification and stale-quarantine judge it — a joke the subject confirms
+   * does not become a fact. */
   async subjectConfirm(guildId: string, memoryId: number): Promise<void> {
     const memory = await this.getMemory(guildId, memoryId);
     if (!memory || memory.status !== "contested") return;
-    await this.sql`UPDATE memories SET status = 'active', frozen_confidence = NULL, net_score = NULL, updated_at = NOW() WHERE guild_id = ${guildId} AND id = ${memoryId}`;
+    const promotable = PROMOTABLE_EVIDENCE_TYPES.includes(memory.primaryEvidenceType as EvidenceType) && memory.subjectId !== "unknown";
+    const target: MemoryStatus = promotable ? "active" : "candidate";
+    await this.sql`UPDATE memories SET status = ${target}, frozen_confidence = NULL, net_score = NULL, updated_at = NOW() WHERE guild_id = ${guildId} AND id = ${memoryId}`;
     await recomputeForMemories(this.sql, guildId, [memoryId]);
-    await this.logHistory(memoryId, "subject_confirmed", memory.confidence, memory.confidence, "contested", "active", null, {});
+    await this.logHistory(memoryId, "subject_confirmed", memory.confidence, memory.confidence, "contested", target, null, { promotable });
   }
 
   // ── Context helpers ────────────────────────────────────────────────────────
@@ -1946,6 +2011,14 @@ export class MemoryStore {
     return result.count;
   }
 
+  /** Hard-delete a subject's consolidated behavioral patterns — derived person
+   * data like attributes, so opt-out removes them outright. Without this a
+   * pattern built from now-forgotten episodes would resurface on re-opt-in. */
+  async deletePatternsFor(guildId: string, subjectId: string): Promise<number> {
+    const result = await this.sql`DELETE FROM behavioral_patterns WHERE guild_id = ${guildId} AND subject_id = ${subjectId}`;
+    return result.count;
+  }
+
   // Admin triage view: the last N memories written for the guild across all
   // subjects, with the best display label we have (member name > extracted
   // subject name > raw id).
@@ -2045,6 +2118,11 @@ export class MemoryStore {
       UPDATE memories SET status = 'active' WHERE guild_id = ${guildId} AND status = 'candidate'
       AND mentions >= 2 AND confidence >= ${candidateThreshold}
       AND primary_evidence_type IN ('explicit_fact', 'clear_preference', 'correction')
+      -- 'unknown' subjects are inert until claimed and non-consenting members
+      -- must never promote (mirrors the relevantMemories read gate). Opt-out
+      -- forgets a member's memories outright, so this mostly guards stale rows.
+      AND (subject_id = 'server'
+           OR subject_id IN (SELECT user_id FROM members WHERE guild_id = ${guildId} AND opted_in = 1 AND opted_out = 0))
       RETURNING id
     `;
     const quarantinedCandidatesRows = await this.sql<Array<{ id: number }>>`

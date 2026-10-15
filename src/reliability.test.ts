@@ -318,3 +318,76 @@ test("maintain() reports patternsFound when episodes consolidate", async () => {
     assert.equal(result.patternsFound, 1);
   } finally { await sql.end(); }
 });
+
+test("subjectConfirm routes non-promotable evidence back to candidate", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    // A sarcasm-typed memory contested then affirmed by the subject must not
+    // bypass the evidence-type gate — 'active' is only reachable via
+    // promotable evidence (same rule resolveContested enforces).
+    const sarc = { subjectId: "user", kind: "person_fact" as const, content: "User is secretly a millionaire", importance: .5, reason: "joked", evidenceType: "sarcasm_or_joke" as const, effect: "support" as const };
+    const m = await store.saveMemory({ ...event("yeah I'm totally rich lol"), messageId: "sarc-1" }, sarc);
+    await store.saveMemory({ ...event("no you're not"), messageId: "sarc-2" }, { ...sarc, effect: "contradict" as const });
+    assert.equal((await store.getMemory("guild", m.id))!.status, "contested");
+    await store.subjectConfirm("guild", m.id);
+    assert.equal((await store.getMemory("guild", m.id))!.status, "candidate", "subject authority cannot launder sarcasm into fact");
+    const history = await store.history("guild", m.id);
+    assert.ok(history.some(h => h.action === "subject_confirmed"));
+    assert.ok(!history.some(h => h.action === "status_confirmed"));
+  } finally { await sql.end(); }
+});
+
+test("a stale contested standoff settles — fresh disputes still wait for the subject", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const staleDay = new Date(Date.now() - 40 * 86_400_000);
+    const fact = { subjectId: "user", kind: "person_fact" as const, importance: .5, reason: "said so", evidenceType: "explicit_fact" as const, effect: "support" as const };
+
+    // Stale support-leaning contest: can't resolve to active (frozen conf <
+    // 0.7) but the dispute is old — return to the verification pool.
+    const tea = { ...fact, content: "User likes tea" };
+    const m1 = await store.saveMemory({ ...event("I like tea"), messageId: "tea-1", createdAt: staleDay }, tea);
+    await store.saveMemory({ ...event("I like tea again"), messageId: "tea-2", createdAt: staleDay }, tea);
+    await store.saveMemory({ ...event("you don't like tea"), messageId: "tea-3", createdAt: staleDay }, { ...tea, effect: "contradict" as const });
+    assert.equal((await store.getMemory("guild", m1.id))!.status, "contested");
+    const r1 = await store.resolveContested("guild", m1.id, new Date());
+    assert.equal(r1.resolved, true);
+    assert.equal((await store.getMemory("guild", m1.id))!.status, "candidate");
+
+    // Stale contradiction-leaning contest — the claim lost and nobody spoke
+    // for it in a month; quarantine it rather than re-litigating forever.
+    const coffee = { ...fact, content: "User likes coffee" };
+    const m2 = await store.saveMemory({ ...event("I like coffee"), messageId: "coffee-1", createdAt: staleDay }, coffee);
+    await store.saveMemory({ ...event("nah you don't"), messageId: "coffee-2", createdAt: staleDay }, { ...coffee, effect: "contradict" as const });
+    await store.saveMemory({ ...event("seriously, no"), messageId: "coffee-3", createdAt: staleDay }, { ...coffee, effect: "contradict" as const });
+    const r2 = await store.resolveContested("guild", m2.id, new Date());
+    assert.equal(r2.resolved, true);
+    assert.equal((await store.getMemory("guild", m2.id))!.status, "quarantined");
+
+    // A fresh identical dispute stays contested — the subject may still weigh in.
+    const juice = { ...fact, content: "User likes juice" };
+    const m3 = await store.saveMemory({ ...event("I like juice"), messageId: "juice-1" }, juice);
+    await store.saveMemory({ ...event("nah you don't"), messageId: "juice-2" }, { ...juice, effect: "contradict" as const });
+    const r3 = await store.resolveContested("guild", m3.id, new Date());
+    assert.equal(r3.resolved, false);
+    assert.equal((await store.getMemory("guild", m3.id))!.status, "contested");
+  } finally { await sql.end(); }
+});
+
+test("an unchanged contested re-scan does not spam memory_history", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const cand = { subjectId: "user", kind: "person_fact" as const, content: "User supports Arsenal", importance: .5, reason: "x", evidenceType: "explicit_fact" as const, effect: "support" as const };
+    const m = await store.saveMemory({ ...event("I support Arsenal"), messageId: "afc-1" }, cand);
+    await store.saveMemory({ ...event("no you don't"), messageId: "afc-2" }, { ...cand, effect: "contradict" as const });
+    // netScore 0 — stays contested; nightly maintain() re-scans it.
+    await store.resolveContested("guild", m.id);
+    await store.resolveContested("guild", m.id);
+    await store.resolveContested("guild", m.id);
+    const unresolved = (await store.history("guild", m.id)).filter(h => h.action === "conflict_unresolved");
+    assert.equal(unresolved.length, 1, "only the first inconclusive pass logs — unchanged repeats are silent");
+  } finally { await sql.end(); }
+});

@@ -140,6 +140,17 @@ function rowToAttribute(r: AttributeRow): ProfileAttribute {
 
 // ── Status/confidence recompute ───────────────────────────────────────────────
 
+/** Is the row that superseded `successorId`'s row still a live value? A
+ * superseded row may only revive once its successor is itself dead —
+ * otherwise a stale live memory re-citing the old value would ping-pong a
+ * singular field on every rebuild. */
+async function successorIsLive(sql: Sql, guildId: string, successorId: number): Promise<boolean> {
+  const rows = await sql<Array<{ status: string }>>`
+    SELECT status FROM profile_attributes WHERE guild_id = ${guildId} AND id = ${successorId}
+  `;
+  return !!rows[0] && (rows[0].status === "active" || rows[0].status === "contested");
+}
+
 /** Recompute one row's status + confidence from its live cited memories. */
 async function recomputeRow(sql: Sql, rowId: number, memoryIds: number[], supersededBy: number | null): Promise<void> {
   const mems = memoryIds.length
@@ -192,8 +203,11 @@ async function applyProposalsTx(
     if (ids.length === 0) continue;
 
     let targetId: number;
+    // The winning row's own supersession pointer — steps 4–5 dethrone sibling
+    // rows in its favour, which a still-superseded target must never do.
+    let targetSupersededBy: number | null = null;
 
-    // 1. Exact match on the unique key — any status (re-citation revives).
+    // 1. Exact match on the unique key — any status.
     const exact = await sql<AttributeRow[]>`
       SELECT * FROM profile_attributes
       WHERE guild_id = ${guildId} AND subject_id = ${subjectId}
@@ -204,11 +218,19 @@ async function applyProposalsTx(
       const row = exact[0];
       targetId = Number(row.id);
       const merged = [...new Set([...row.memory_ids.map(Number), ...ids])];
+      // Re-citation merges provenance but does NOT revive a superseded row
+      // while its successor is still live — revival happens only once the
+      // row that replaced it is itself dead.
+      targetSupersededBy = row.superseded_by == null ? null : Number(row.superseded_by);
+      if (targetSupersededBy != null && !(await successorIsLive(sql, guildId, targetSupersededBy))) {
+        targetSupersededBy = null;
+      }
       const wasDead = row.superseded_by != null || row.status !== "active";
-      const changed = merged.length !== row.memory_ids.length || row.superseded_by != null;
+      const changed = merged.length !== row.memory_ids.length
+        || targetSupersededBy !== (row.superseded_by == null ? null : Number(row.superseded_by));
       if (changed) {
-        await recomputeRow(sql, targetId, merged, null);
-        if (wasDead) revived++;
+        await recomputeRow(sql, targetId, merged, targetSupersededBy);
+        if (wasDead && targetSupersededBy == null) revived++;
       }
       // No change → no write. Continuity requires this to be a no-op.
     } else {
@@ -227,9 +249,15 @@ async function applyProposalsTx(
         targetId = Number(near.id);
         const rows = await sql<AttributeRow[]>`SELECT * FROM profile_attributes WHERE id = ${targetId}`;
         const merged = [...new Set([...rows[0].memory_ids.map(Number), ...ids])];
-        await recomputeRow(sql, targetId, merged, null);
+        // Same revival rule as the exact-match path — a superseded fold target
+        // stays superseded while its successor is live.
+        targetSupersededBy = rows[0].superseded_by == null ? null : Number(rows[0].superseded_by);
+        if (targetSupersededBy != null && !(await successorIsLive(sql, guildId, targetSupersededBy))) {
+          targetSupersededBy = null;
+        }
+        await recomputeRow(sql, targetId, merged, targetSupersededBy);
         folded++;
-        if (rows[0].status !== "active" || rows[0].superseded_by != null) revived++;
+        if ((rows[0].status !== "active" || rows[0].superseded_by != null) && targetSupersededBy == null) revived++;
       } else {
         if (near && near.sim >= TRIGRAM_NEAR_MISS_THRESHOLD && ids[0]) {
           // Threshold-tuning audit, same idea as dedup_near_miss.
@@ -258,8 +286,10 @@ async function applyProposalsTx(
     }
 
     // 4. Explicit replacement (multi-valued fields): the LLM says this label
-    // supersedes an existing one — mark it via superseded_by.
-    if (proposal.replaces) {
+    // supersedes an existing one — mark it via superseded_by. A still-superseded
+    // target cannot supersede anything — a dead value must not dethrone the
+    // live one it lost to.
+    if (proposal.replaces && targetSupersededBy == null) {
       const repNorm = normalizeValue(proposal.replaces);
       const rep = await sql`
         UPDATE profile_attributes
@@ -271,8 +301,9 @@ async function applyProposalsTx(
     }
 
     // 5. Singular fields hold one live value — every other live row in the
-    // field is superseded by the row that just landed.
-    if (SINGULAR_FIELDS.has(proposal.field)) {
+    // field is superseded by the row that just landed (and only when that
+    // row is actually live).
+    if (SINGULAR_FIELDS.has(proposal.field) && targetSupersededBy == null) {
       const sup = await sql`
         UPDATE profile_attributes
         SET superseded_by = ${targetId}, status = 'superseded', last_seen_at = NOW()
@@ -296,11 +327,14 @@ async function applyProposalsTx(
  */
 export async function recomputeForMemories(sql: Sql, guildId: string, memoryIds: number[]): Promise<void> {
   if (memoryIds.length === 0) return;
+  // BIGINT ids arrive from RETURNING as BigInt/string — normalise before
+  // membership checks or callers like forgetAllFor silently skip every row.
+  const idSet = new Set(memoryIds.map(Number));
   const rows = await sql<AttributeRow[]>`
     SELECT * FROM profile_attributes WHERE guild_id = ${guildId} AND memory_ids && ${memoryIds}
   `;
   for (const row of rows) {
-    const cited = row.memory_ids.map(Number).filter(id => memoryIds.includes(id));
+    const cited = row.memory_ids.map(Number).filter(id => idSet.has(id));
     if (!cited.length) continue;
     const statuses = await sql<Array<{ id: number | string; status: string }>>`
       SELECT id, status FROM memories WHERE id = ANY(${cited})

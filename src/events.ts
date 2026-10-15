@@ -172,6 +172,20 @@ export class EventStore {
     return Promise.all(rows.map(r => this.hydrate(r)));
   }
 
+  /** The event a message already belongs to, if any — the pipeline's
+   * idempotency guard: a retried job must not mint a second candidate
+   * window for a message it already clustered. Scoped to the guild like
+   * every other read. */
+  async eventForMessage(guildId: string, messageId: string): Promise<number | null> {
+    const rows = await this.sql<Array<{ event_id: number | string }>>`
+      SELECT em.event_id FROM event_messages em
+      JOIN events e ON e.id = em.event_id AND e.guild_id = ${guildId}
+      WHERE em.message_id = ${messageId}
+      LIMIT 1
+    `;
+    return rows[0] ? Number(rows[0].event_id) : null;
+  }
+
   // ── Writes ─────────────────────────────────────────────────────────────────
 
   async createEvent(candidate: Omit<EventCandidate, "messageIds" | "memoryIds">): Promise<StoredEvent> {
