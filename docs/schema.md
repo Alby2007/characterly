@@ -604,7 +604,7 @@ The marketplace's publishable persona (v34): a creator's awakened companion proj
 | `avatar_url` | TEXT NULL | |
 | `forum_thread_id` | TEXT NULL | The bot-created forum post (its embed card owns the Add/Report buttons) |
 | `version` | INTEGER | Increments on every upsert; each version is snapshotted in `companion_persona_versions` |
-| `status` | TEXT | `'active'` → `'flagged'` (auto at report threshold) or `'delisted'` (unpublish/mod) — non-active statuses block new adoptions |
+| `status` | TEXT | `'active'` → `'flagged'` (auto at report threshold — a moderation hold: creators can't delist/relist/republish it away) → `'delisted'` (unpublish/mod; clones keep working) or `'banned'` (mod kill switch — clones freeze everywhere via the `adopted_from_listing_id` join). Non-active statuses block new adoptions |
 | `report_count` / `add_count` | INTEGER | Denormalized counters |
 | `created_at` / `updated_at` | TIMESTAMPTZ | |
 
@@ -655,7 +655,40 @@ Moderation foundation (v34): one row per (listing, reporter) so reports dedupe n
 | `id` | BIGINT PK | |
 | `listing_id` | BIGINT | FK → `companion_listings.id ON DELETE CASCADE` (indexed) |
 | `reporter_user_id` | TEXT | Composite unique with `listing_id` — a user reports once |
-| `reason` | TEXT | Optional free text (v1 reports have no modal) |
+| `category` | TEXT | Report category from the picker (v36): `minor`/`sexual`/`harmful`/`hate`/`spam`/`theft`/`other` — indexed with `created_at` for the daily report cap |
+| `reason` | TEXT | Optional free text |
+| `created_at` | TIMESTAMPTZ | |
+
+**RLS:** enabled, zero policies.
+
+---
+
+### `marketplace_bans`
+
+Creator publish-bans (v36), keyed by Discord user id so the self-host lane (no web accounts) can use them too. A ban publish-locks the creator and `banCreator` marks all their live listings `banned` — which freezes their adopted clones via the roster/DM/guild joins.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `discord_user_id` | TEXT PK | |
+| `reason` | TEXT | Mod-supplied reason |
+| `banned_by` | TEXT | Acting moderator's Discord id |
+| `created_at` | TIMESTAMPTZ | |
+
+**RLS:** enabled, zero policies.
+
+---
+
+### `moderation_events`
+
+Audit log for marketplace moderation actions (v36) — one row per mod-button action or creator ban. `listing_id` is `ON DELETE SET NULL` so the audit trail survives a hard-deleted listing.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT PK | |
+| `listing_id` | BIGINT NULL | FK → `companion_listings.id` (indexed) |
+| `actor_user_id` | TEXT | Acting moderator's Discord id |
+| `action` | TEXT | `unflag` / `delist` / `ban` / `ban_creator` |
+| `note` | TEXT | Optional note/reason |
 | `created_at` | TIMESTAMPTZ | |
 
 **RLS:** enabled, zero policies.
@@ -712,3 +745,4 @@ Version tracking for the migration system.
 | 33 | `v33_message_image_context` | `messages.image_context` — cached vision description shared by the extract job and reply paths |
 | 34 | `v34_companion_marketplace` | Companion marketplace: `companions.kind`/`adopted_from_listing_id`/`listing_version`, partial unique index `companions_one_awakened` replaces the blanket owner uniqueness, `companion_listings`/`companion_persona_versions`/`companion_adoptions`/`listing_reports` tables, `user_bot_settings.active_dm_companion_id` |
 | 35 | `v35_listing_source_nullable` | `companion_listings.source_companion_id` drops `NOT NULL` — freehand creator-authored listings (`/companion action:create`) have no awakened source |
+| 36 | `v36_moderation_surface` | `listing_reports.category`, `marketplace_bans`, `moderation_events`, and the per-day rate-limit indexes (`reporter_user_id`/`creator_user_id`/`user_id` + timestamps) |

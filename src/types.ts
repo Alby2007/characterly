@@ -318,7 +318,7 @@ export type CompanionListing = {
   avatarUrl: string | null;
   forumThreadId: string | null;
   version: number;
-  status: "active" | "flagged" | "delisted";
+  status: "active" | "flagged" | "delisted" | "banned";
   reportCount: number;
   addCount: number;
   createdAt: string;

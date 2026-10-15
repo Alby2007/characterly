@@ -563,3 +563,125 @@ test("parallel creates can't both beat the listing cap", async () => {
   assert.equal([r1, r2].filter(r => !r.ok && r.reason === "cap").length, 1);
   assert.equal(await store.activeListingCount("u-pc"), 1);
 });
+
+test("reportListing stores the category; dailyReportCount counts today's rows", async () => {
+  const { store } = await freshStore();
+  const creator = await awakenedCompanion(store, "u-rc", "Rep");
+  const listing = await makeListing(store, "u-rc", creator.id, "Rep");
+
+  const n = await store.reportListing(listing.id, "u-rep1", "hate");
+  assert.equal(n, 1);
+  const row = await sql<Array<{ category: string }>>`SELECT category FROM listing_reports WHERE listing_id = ${listing.id}`;
+  assert.equal(row[0].category, "hate");
+  assert.equal(await store.dailyReportCount("u-rep1"), 1);
+  // Backdating drops it out of the window.
+  await sql`UPDATE listing_reports SET created_at = NOW() - INTERVAL '2 days' WHERE reporter_user_id = 'u-rep1'`;
+  assert.equal(await store.dailyReportCount("u-rep1"), 0);
+});
+
+test("banned listings freeze clones everywhere — roster, DM resolution, guilds; adopters keep memories", async () => {
+  const { store } = await freshStore();
+  const creator = await awakenedCompanion(store, "u-ban", "Baddie");
+  const listing = await makeListing(store, "u-ban", creator.id, "Baddie");
+
+  const adopt = await store.adoptListing("u-ad-ban", listing.id, 5, COOLDOWN);
+  assert.equal(adopt.ok, true);
+  if (!adopt.ok) return;
+  await store.summonCompanion("g-ban", adopt.companion.id, "u-ad-ban", "ad");
+  await store.setActiveDmCompanion("u-ad-ban", adopt.companion.id);
+
+  // Baseline: clone is live everywhere.
+  assert.equal((await store.resolveDmCompanion("u-ad-ban"))?.id, adopt.companion.id);
+  assert.equal((await store.listCompanionsForUser("u-ad-ban")).length, 1);
+  assert.equal((await store.listGuildCompanions("g-ban")).length, 1);
+
+  const banned = await store.modAction(listing.id, "mod-1", "ban");
+  assert.equal(banned?.status, "banned");
+
+  // Clone is frozen: invisible in roster, DM resolution skips it (falls to
+  // awakened → null here), and guild presence stops.
+  assert.equal((await store.listCompanionsForUser("u-ad-ban")).length, 0);
+  assert.equal(await store.resolveDmCompanion("u-ad-ban"), null);
+  assert.equal((await store.listGuildCompanions("g-ban")).length, 0);
+
+  // New adoption refused; the row still exists for the audit trail.
+  const readd = await store.adoptListing("u-ad-ban2", listing.id, 5, COOLDOWN);
+  assert.equal(readd.ok, false);
+  assert.equal((await store.listingById(listing.id))!.status, "banned");
+
+  // Audit trail captured actor + action.
+  const events = await sql<Array<{ action: string; actor_user_id: string }>>`
+    SELECT action, actor_user_id FROM moderation_events WHERE listing_id = ${listing.id}
+  `;
+  assert.equal(events.length, 1);
+  assert.equal(events[0].action, "ban");
+  assert.equal(events[0].actor_user_id, "mod-1");
+});
+
+test("modAction: unflag clears a hold, delist keeps clones, ban is irreversible via creator paths", async () => {
+  const { store } = await freshStore();
+  const c = await awakenedCompanion(store, "u-mod", "M");
+  const listing = await makeListing(store, "u-mod", c.id, "M");
+
+  // unflag only acts on flagged rows.
+  assert.equal(await store.modAction(listing.id, "m1", "unflag"), null);
+  await store.flagListing(listing.id);
+  const cleared = await store.modAction(listing.id, "m1", "unflag");
+  assert.equal(cleared?.status, "active");
+
+  // mod delist can take a flagged listing down (creator delist cannot).
+  await store.flagListing(listing.id);
+  assert.equal(await store.delistListing(listing.id), false);
+  const dl = await store.modAction(listing.id, "m1", "delist");
+  assert.equal(dl?.status, "delisted");
+
+  // ban from delisted too; creator relist can't undo it.
+  const banned = await store.modAction(listing.id, "m1", "ban");
+  assert.equal(banned?.status, "banned");
+  const relist = await store.relistListing(listing.id, "u-mod", 5);
+  assert.equal(relist.ok, false);
+});
+
+test("banCreator publish-bans and freezes all their live listings", async () => {
+  const { store } = await freshStore();
+  const c = await awakenedCompanion(store, "u-bc", "Bad");
+  const l1 = await makeListing(store, "u-bc", c.id, "Bad");
+  const l2res = await store.createListing("u-bc", {
+    name: "Free", tagline: "t", voicePersona: "v", coreTraits: [],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+  }, 10);
+  assert.equal(l2res.ok, true);
+  if (!l2res.ok) return;
+
+  const adopt = await store.adoptListing("u-adbc", l1.id, 5, COOLDOWN);
+  assert.equal(adopt.ok, true);
+
+  const affected = await store.banCreator("u-bc", "mod-9", "spam network");
+  assert.equal(affected.length, 2);
+  assert.equal((await store.listingById(l1.id))!.status, "banned");
+  assert.equal((await store.listingById(l2res.listing.id))!.status, "banned");
+  // Clones frozen.
+  assert.equal((await store.listCompanionsForUser("u-adbc")).length, 0);
+  // Ban row exists.
+  const ban = await store.creatorBan("u-bc");
+  assert.equal(ban?.reason, "spam network");
+  // Re-ban idempotent — no dupes, no new events.
+  const again = await store.banCreator("u-bc", "mod-9", "still banned");
+  assert.equal(again.length, 0);
+});
+
+test("daily counters: publish + adopt windows", async () => {
+  const { store } = await freshStore();
+  const c = await awakenedCompanion(store, "u-dc", "D");
+  const listing = await makeListing(store, "u-dc", c.id, "D");
+  assert.equal(await store.dailyPublishCount("u-dc"), 1);
+
+  const adopt = await store.adoptListing("u-dca", listing.id, 5, COOLDOWN);
+  assert.equal(adopt.ok, true);
+  assert.equal(await store.dailyAdoptCount("u-dca"), 1);
+
+  await sql`UPDATE companion_adoptions SET adopted_at = NOW() - INTERVAL '2 days' WHERE user_id = 'u-dca'`;
+  await sql`UPDATE companion_listings SET created_at = NOW() - INTERVAL '2 days' WHERE id = ${listing.id}`;
+  assert.equal(await store.dailyAdoptCount("u-dca"), 0);
+  assert.equal(await store.dailyPublishCount("u-dc"), 0);
+});

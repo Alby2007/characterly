@@ -1,0 +1,138 @@
+# Marketplace Moderation
+
+The policy and enforcement surface for the companion marketplace. The
+audience this product courts — companion-platform refugees — skews young and
+emotionally invested, so moderation is a product feature, not a checkbox.
+
+Three surfaces exist, and they are moderated **differently**:
+
+1. **Listing content** — name, tagline, greeting, persona fields. Authored
+   text, reviewed at publish/edit time.
+2. **Generated output** — what adopted companions actually *say*. Unbounded
+   and prompt-injectable; screened at generation time.
+3. **Actors** — creators and reporters, via linked accounts, bans, and rate
+   limits.
+
+## Content policy
+
+### Listings (always SFW)
+
+Allowed: romance and companionship themes, dark/flawed characters,
+conflict-driven backstories, horror atmosphere.
+
+Prohibited in any listing field (name, tagline, greeting, voice, traits,
+dynamic, backstory, avatar):
+
+- **Minor-presenting sexual or romantic content** — hard line. No "aged-up"
+  framing, no "they're actually 1000 years old" on a child-coded persona.
+- **Explicit sexual content** — the marketplace is SFW (see "NSFW lane"
+  below).
+- **Hateful or dehumanizing personas** — personas built to demean protected
+  classes.
+- **Real-person likenesses** without consent — no "your ex", no celebrity
+  personas presented as real.
+- **Illegal instruction** — personas whose purpose is weapons, fraud,
+  malware, stalking, or similar guidance.
+- **Extremist praise or recruitment.**
+- **Self-harm promotion** — personas that encourage or romanticize it.
+
+### Generated output (adopted chats)
+
+Every reply an adopted companion generates is screened on **both lanes**
+(BYOK and hosted) — adopted personas are untrusted third-party content
+riding our pipeline regardless of whose key pays. The prohibited set is the
+same as listings plus **self-harm encouragement**. A flagged reply is
+replaced with a neutral in-character refusal; the hosting user's state is
+untouched and their private memories are never scanned.
+
+**Awakened companions are unscreened.** A user's own bonded companion is
+first-party, consented, private content — the same privacy posture as their
+memories.
+
+### Self-harm triage (all DMs)
+
+Deterministic phrase triage on every DM (awakened and adopted). On a hit the
+companion breaks character briefly to deliver a scripted crisis-resource
+response (988 US/CA, Samaritans 116 123 UK/IE, findahelpline.com
+international) and offers to stay. No LLM call, no charge, no throttle.
+False-positive cost is one supportive message — deliberately calibrated that
+way.
+
+## Enforcement model
+
+Statuses: `active` → `flagged` (report threshold hold) → `delisted` /
+`banned`.
+
+- **`flagged`** — moderation hold. New Adds blocked; clones keep chatting;
+  creator **cannot** delist or relist it (that would launder the flag);
+  republish saves edits but keeps the flag. Only a human review clears it.
+- **`delisted`** — soft removal. No new Adds; clones keep chatting. Creator
+  can relist (slot-checked). This is the creator's own "unpublish" state too.
+- **`banned`** — kill switch. No Adds, no relist, and **all clones freeze**:
+  they vanish from adopter rosters, stop answering DMs, and stop speaking in
+  guilds. Query-level (`companions` rows are never deleted), so a bad ban is
+  fully reversible.
+- **Creator ban** (`marketplace_bans`) — publish-ban + freeze: can't
+  publish/create again, all their listings → `banned`. They can still chat
+  and adopt personally.
+
+### Screening mechanics
+
+- **Publish/edit (fail-closed):** deterministic blocklist → LLM verdict via
+  `Brain.safetyVerdict` on the operator model. If the classifier is
+  configured but errors, the publish is refused and can be retried. When no
+  operator key exists (pure-BYOK self-host), the deterministic layer plus
+  the report pipeline carry the load — documented, not hidden.
+- **Replies (fail-open):** if the screen call errors, the reply sends and
+  `safety.screen_error` is incremented. Chats don't break on provider
+  hiccups; a spike in that metric is the ops tripwire.
+
+The blocklist is a cheap first line — it is necessarily incomplete. The
+classifier is the real screen, the report pipeline is the backstop.
+
+### Reports → review
+
+Forum-card **Report** opens a category picker (harmful / sexual / minor
+safety / hate / spam / stolen persona / other). Reports dedupe per
+`(listing, reporter)`; at `MARKETPLACE_REPORT_FLAG_THRESHOLD` the listing
+auto-flags. Every report pings `MARKETPLACE_MOD_CHANNEL_ID` with the
+category and action buttons — **Keep up** (unflag), **Delist**, **Ban
+listing**, **Ban creator** — gated to `MARKETPLACE_MOD_ROLE_IDS` (fallback:
+ManageGuild). Every mod action writes a `moderation_events` row with the
+actor, action, and note.
+
+### Rate limits (per UTC day, derived from table rows)
+
+- `MARKET_PUBLISH_DAILY_CAP` (5) — new listings created
+- `MARKET_REPORT_DAILY_CAP` (20) — report-bombing is a griefing vector
+- `MARKET_ADOPT_DAILY_CAP` (20) — adoption bot-farming inflates `add_count`
+
+## The NSFW lane (deferred)
+
+Deliberately not built yet. Its agreed shape when it happens:
+
+- `web_profiles.age_verified_at` via **Stripe Identity** (they hold the
+  documents; we store a boolean — privacy posture preserved)
+- A separate NSFW forum channel; Discord's channel age-restriction flag is
+  cosmetic — the flag check is the real gate
+- **BYOK-only generation** — hosted-lane providers' acceptable-use policies
+  prohibit explicit output; the NSFW lane monetizes as a Premium perk, not
+  per-turn
+- The output screen still runs: minor-coded, nonconsensual, and
+  real-person content refuse regardless of the adopter's verification
+
+Do not weaken the SFW boundary "temporarily" — every gap above exists
+because the interim is where the liability lives.
+
+## Operator runbook
+
+- **Emergency freeze (SQL):**
+  `UPDATE companion_listings SET status='banned' WHERE id=<n>;` — clones
+  freeze on the next roster/DM/guild read.
+- **Clear a flag:** `status='active'` (or `'delisted'` to keep it down).
+- **Ban a creator:**
+  `INSERT INTO marketplace_bans (discord_user_id, reason, banned_by) VALUES ('<id>','<why>','<mod>');`
+  then `UPDATE companion_listings SET status='banned' WHERE creator_user_id='<id>' AND status IN ('active','flagged');`
+- **Audit:** `moderation_events` records every mod-button action;
+  `companion_persona_versions` preserves what the persona said at each
+  version.

@@ -111,39 +111,52 @@ awakened companion. Clone `owner_user_id` = adopter, so `brainForUser`,
 popular character costs its creator nothing. Publishing/creating requires a
 linked account for accountability — adoption itself doesn't.
 
-## Moderation (foundations)
+## Moderation
 
-- **Report** button — `listing_reports` dedupes one report per (listing,
-  user). Each insert bumps `report_count`.
-- **Auto-flag** — at `MARKETPLACE_REPORT_FLAG_THRESHOLD` (3) the listing
-  becomes `flagged`: new Adds are refused, existing adopters unaffected. A
-  flag is a **moderation hold**: republish keeps it, and the creator can't
-  unpublish or relist a flagged listing at all — otherwise delist → revive
-  would launder the flag. Only a human review clears it
-  (`UPDATE companion_listings SET status='active' WHERE id=<n>;` — or
-  `status='delisted'` to keep it down).
-- **Mod channel** — `MARKETPLACE_MOD_CHANNEL_ID` gets a ping on every report.
-- **Unpublish** — `/companion action:unpublish` (picker when >1 listing) →
-  `delisted` + thread locked/archived. Only `active` listings delist;
-  flagged rows refuse (moderation hold). Delisted blocks Adds; adopters keep
-  their companions. Emergency SQL delist:
-  `UPDATE companion_listings SET status='delisted' WHERE id=<n>;`
-- **Relist** — `/companion action:relist` (picker when >1 delisted) → flips
-  `delisted → active` under the same atomic slot check as publish, then posts
-  a fresh forum card. Works for awakened-backed *and* freehand listings
-  (awakened-backed can also be revived by re-running `action:publish`).
-  Flagged listings can't reach this path — they can't become `delisted`.
+The full policy + enforcement spec lives in **[docs/moderation.md](moderation.md)**.
+The mechanics in one paragraph:
+
+- **Report** → a category picker (`market:reportcat`), stored per
+  (listing, reporter, category) in `listing_reports`. At
+  `MARKETPLACE_REPORT_FLAG_THRESHOLD` the listing becomes `flagged` — a
+  **moderation hold**: Adds blocked, creator can't delist/relist/republish
+  the flag away; only a mod action clears it. Daily report cap
+  (`MARKET_REPORT_DAILY_CAP`) blunts report-bombing.
+- **Publish screening (fail-closed)** — deterministic blocklist
+  (`checkListingFields`) then `Brain.safetyVerdict` on the operator model
+  (`safetyBrain()`); all three write paths (publish/create/edit) screen the
+  assembled persona.
+- **Reply screening (fail-open)** — adopted companions' replies (DM + guild,
+  BYOK + hosted) pass `safetyVerdict` before send; a flag swaps in
+  `SAFE_REFUSAL` and refunds the reply leg.
+- **Self-harm triage** — `isSelfHarmSignal` on every DM; hit → scripted
+  `CRISIS_RESPONSE`, no charge, no throttle.
+- **Statuses** — `active` → `flagged` → `delisted` / `banned`. `banned` is
+  the kill switch: clones freeze everywhere (roster, DM, guilds) via the
+  `adopted_from_listing_id → status` join. **Creator bans**
+  (`marketplace_bans`) ban all their listings + block future publishing.
+- **Mod UX** — every report ping in `MARKETPLACE_MOD_CHANNEL_ID` carries
+  **Keep up / Delist / Ban listing / Ban creator** buttons
+  (`market:mod:<action>:<id>`), gated to `MARKETPLACE_MOD_ROLE_IDS`
+  (fallback: ManageGuild). Actions land in `moderation_events`.
+- **Rate limits** — `MARKET_PUBLISH_DAILY_CAP` (5), `MARKET_REPORT_DAILY_CAP`
+  (20), `MARKET_ADOPT_DAILY_CAP` (20) — all per UTC day.
 
 ## Config reference
 
 | Env | Default | Meaning |
 |-----|---------|---------|
 | `MARKETPLACE_CHANNEL_ID` | unset → publishing disabled | Forum channel in the hub server |
-| `MARKETPLACE_MOD_CHANNEL_ID` | unset | Text channel pinged on reports |
+| `MARKETPLACE_MOD_CHANNEL_ID` | unset | Text channel pinged on reports (with mod action buttons) |
+| `MARKETPLACE_MOD_ROLE_IDS` | unset → ManageGuild | Comma-separated role ids allowed to act on report pings |
 | `FREE_ADOPTION_SLOTS` | 1 | Active adoptions per free account |
 | `FREE_LISTING_SLOTS` | 2 | Live listings per free account |
 | `ADOPTION_COOLDOWN_MS` | 43200000 (12h) | Re-adopt lockout after a drop |
 | `MARKETPLACE_REPORT_FLAG_THRESHOLD` | 3 | Reports that auto-flag a listing |
+| `MARKET_PUBLISH_DAILY_CAP` | 5 | New listings per creator per day |
+| `MARKET_REPORT_DAILY_CAP` | 20 | Reports per user per day |
+| `MARKET_ADOPT_DAILY_CAP` | 20 | Adoptions per user per day |
+| `SAFETY_MODEL` | `GROQ_MODEL` | Classifier model for listing/reply screens |
 
 Bot needs **Create Public Threads** (+ **Manage Threads** for clean archiving)
 in the forum channel.
@@ -162,7 +175,7 @@ in the forum channel.
   `MARKETPLACE_TAG_MAP` or a tag picklist for browsability.
 - Flagged listings keep their thread visible (Adds are blocked at the button);
   auto-archiving on flag is a small change if wanted.
-- Delisting is soft by design; hard removal of a listing's clone rows is a
-  moderation-phase decision.
-- Full moderation/NSFW/age policy is deliberately a later phase — reports,
-  flagging, and delisting are the foundations.
+- Delisting is soft by design; `banned` freezes clones but keeps the rows —
+  hard removal of a listing's clone rows remains a later decision.
+- The NSFW lane (verified-age, BYOK-only, separate forum) is deliberately
+  deferred — its agreed shape is in docs/moderation.md.

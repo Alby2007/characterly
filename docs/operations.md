@@ -120,9 +120,11 @@ Listings live in a **forum channel in the hub Discord server**. One-time setup:
 
 1. Create a forum channel in the hub server; grant the bot `Create Public Threads` (and `Manage Threads` if you want unpublish to archive threads).
 2. Set `MARKETPLACE_CHANNEL_ID=<forum channel id>` in the VM `.env` and restart — unset disables `/companion action:publish` and hides the surface.
-3. Optional: `MARKETPLACE_MOD_CHANNEL_ID=<text channel id>` — gets a ping on every listing report, and on auto-flag events.
+3. Optional: `MARKETPLACE_MOD_CHANNEL_ID=<text channel id>` — gets a ping on every listing report, with **Keep up / Delist / Ban listing / Ban creator** action buttons gated to `MARKETPLACE_MOD_ROLE_IDS` (ManageGuild members can always act).
 
-Related env (defaults are sane): `ADOPTION_COOLDOWN_MS=43200000` (12h re-adopt cooldown), `FREE_ADOPTION_SLOTS=1` (Premium is uncapped in code), `FREE_LISTING_SLOTS=2` (live listings per free account — Premium uncapped), `MARKETPLACE_REPORT_FLAG_THRESHOLD=3`.
+Related env (defaults are sane): `ADOPTION_COOLDOWN_MS=43200000` (12h re-adopt cooldown), `FREE_ADOPTION_SLOTS=1` (Premium is uncapped in code), `FREE_LISTING_SLOTS=2` (live listings per free account — Premium uncapped), `MARKETPLACE_REPORT_FLAG_THRESHOLD=3`, `MARKET_PUBLISH_DAILY_CAP=5` / `MARKET_REPORT_DAILY_CAP=20` / `MARKET_ADOPT_DAILY_CAP=20` (per-UTC-day rate limits), `SAFETY_MODEL` (defaults to `GROQ_MODEL` — the listing/reply classifier).
+
+Moderation policy + runbook (freeze SQL, unban, audit): `docs/moderation.md`.
 
 Moderation state is all in Postgres — `companion_listings.status` (`active`/`flagged`/`delisted`) and `listing_reports`. Delisting/unlisting is a status flip, so it can be done by SQL if the bot is down: `UPDATE companion_listings SET status='delisted' WHERE id=<listing>` blocks new Adds immediately. Existing adopters keep their companions either way.
 

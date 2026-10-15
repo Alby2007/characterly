@@ -2412,6 +2412,11 @@ export class MemoryStore {
       FROM guild_companions gc
       JOIN companions c ON c.id = gc.companion_id
       WHERE gc.guild_id = ${guildId} AND gc.active = 1 AND c.onboarding_state = 'active'
+        -- Clones of banned listings freeze everywhere — guilds included.
+        AND (c.adopted_from_listing_id IS NULL OR EXISTS (
+          SELECT 1 FROM companion_listings l
+          WHERE l.id = c.adopted_from_listing_id AND l.status <> 'banned'
+        ))
       ORDER BY gc.summoned_at ASC
     `;
     return rows.map(r => ({
@@ -2691,7 +2696,7 @@ export class MemoryStore {
   async listMyListings(creatorUserId: string): Promise<CompanionListing[]> {
     const rows = await this.sql<Array<any>>`
       SELECT * FROM companion_listings
-      WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted'
+      WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted' AND status <> 'banned'
       ORDER BY created_at ASC
     `;
     return rows.map(r => this.rowToListing(r));
@@ -2735,10 +2740,10 @@ export class MemoryStore {
     return result.count > 0;
   }
 
-  async reportListing(listingId: number, reporterUserId: string, reason = ""): Promise<number> {
+  async reportListing(listingId: number, reporterUserId: string, category = "other", reason = ""): Promise<number> {
     const inserted = await this.sql`
-      INSERT INTO listing_reports (listing_id, reporter_user_id, reason)
-      VALUES (${listingId}, ${reporterUserId}, ${reason})
+      INSERT INTO listing_reports (listing_id, reporter_user_id, category, reason)
+      VALUES (${listingId}, ${reporterUserId}, ${category}, ${reason})
       ON CONFLICT (listing_id, reporter_user_id) DO NOTHING
       RETURNING id
     `;
@@ -2756,6 +2761,90 @@ export class MemoryStore {
     return result.count > 0;
   }
 
+  /** A human moderation action on a listing — 'unflag' clears a hold back to
+   *  active, 'delist' takes it down (keeps clones), 'ban' is the kill switch
+   *  (freezes clones via the roster/DM/guild joins). Bypasses the creator
+   *  paths' status restrictions — mods can act on flagged rows. Every call
+   *  writes a moderation_events audit row. */
+  async modAction(
+    listingId: number,
+    actorUserId: string,
+    action: "unflag" | "delist" | "ban",
+    note = "",
+  ): Promise<CompanionListing | null> {
+    const target = action === "unflag" ? "active" : action === "delist" ? "delisted" : "banned";
+    const from = action === "unflag" ? ["flagged"] : action === "delist" ? ["active", "flagged"] : ["active", "flagged", "delisted"];
+    return this.sql.begin(async sql => {
+      const rows = await sql<Array<any>>`
+        UPDATE companion_listings SET status = ${target}, updated_at = NOW()
+        WHERE id = ${listingId} AND status = ANY(${from})
+        RETURNING *
+      `;
+      if (!rows[0]) return null;
+      await sql`
+        INSERT INTO moderation_events (listing_id, actor_user_id, action, note)
+        VALUES (${listingId}, ${actorUserId}, ${action}, ${note})
+      `;
+      return this.rowToListing(rows[0]);
+    }) as Promise<CompanionListing | null>;
+  }
+
+  /** Publish-ban a creator: record the ban and ban every live listing they
+   *  own (active + flagged — delisted is already down). Returns the affected
+   *  listings so callers can archive their forum threads. */
+  async banCreator(discordUserId: string, actorUserId: string, reason = ""): Promise<CompanionListing[]> {
+    return this.sql.begin(async sql => {
+      await sql`
+        INSERT INTO marketplace_bans (discord_user_id, reason, banned_by)
+        VALUES (${discordUserId}, ${reason}, ${actorUserId})
+        ON CONFLICT (discord_user_id) DO UPDATE SET reason = EXCLUDED.reason, banned_by = EXCLUDED.banned_by
+      `;
+      const listings = await sql<Array<any>>`
+        UPDATE companion_listings SET status = 'banned', updated_at = NOW()
+        WHERE creator_user_id = ${discordUserId} AND status IN ('active', 'flagged')
+        RETURNING *
+      `;
+      for (const l of listings) {
+        await sql`
+          INSERT INTO moderation_events (listing_id, actor_user_id, action, note)
+          VALUES (${l.id}, ${actorUserId}, 'ban_creator', ${reason})
+        `;
+      }
+      return listings.map(l => this.rowToListing(l));
+    }) as Promise<CompanionListing[]>;
+  }
+
+  async creatorBan(discordUserId: string): Promise<{ reason: string; createdAt: Date } | null> {
+    const rows = await this.sql<Array<{ reason: string; created_at: string }>>`
+      SELECT reason, created_at FROM marketplace_bans WHERE discord_user_id = ${discordUserId}
+    `;
+    return rows[0] ? { reason: rows[0].reason, createdAt: new Date(rows[0].created_at) } : null;
+  }
+
+  // Per-UTC-day action counts — the marketplace rate limits derive from
+  // existing rows rather than a dedicated rate table.
+  async dailyPublishCount(creatorUserId: string): Promise<number> {
+    const rows = await this.sql<[{ n: number | string }]>`
+      SELECT COUNT(*) AS n FROM companion_listings
+      WHERE creator_user_id = ${creatorUserId} AND created_at > NOW() - INTERVAL '1 day'
+    `;
+    return Number(rows[0].n);
+  }
+  async dailyReportCount(reporterUserId: string): Promise<number> {
+    const rows = await this.sql<[{ n: number | string }]>`
+      SELECT COUNT(*) AS n FROM listing_reports
+      WHERE reporter_user_id = ${reporterUserId} AND created_at > NOW() - INTERVAL '1 day'
+    `;
+    return Number(rows[0].n);
+  }
+  async dailyAdoptCount(userId: string): Promise<number> {
+    const rows = await this.sql<[{ n: number | string }]>`
+      SELECT COUNT(*) AS n FROM companion_adoptions
+      WHERE user_id = ${userId} AND adopted_at > NOW() - INTERVAL '1 day'
+    `;
+    return Number(rows[0].n);
+  }
+
   /** The user's full roster: awakened companion first, then active adoptions. */
   async listCompanionsForUser(userId: string): Promise<Companion[]> {
     const rows = await this.sql<Array<any>>`
@@ -2764,6 +2853,11 @@ export class MemoryStore {
         AND (c.kind = 'awakened' OR EXISTS (
           SELECT 1 FROM companion_adoptions a
           WHERE a.companion_id = c.id AND a.dropped_at IS NULL
+        ))
+        -- Clones of banned listings freeze everywhere — roster included.
+        AND (c.adopted_from_listing_id IS NULL OR EXISTS (
+          SELECT 1 FROM companion_listings l
+          WHERE l.id = c.adopted_from_listing_id AND l.status <> 'banned'
         ))
       ORDER BY (c.kind = 'awakened') DESC, c.created_at ASC
     `;
@@ -2781,6 +2875,11 @@ export class MemoryStore {
         AND (c.kind = 'awakened' OR EXISTS (
           SELECT 1 FROM companion_adoptions a
           WHERE a.companion_id = c.id AND a.dropped_at IS NULL
+        ))
+        -- Clones of banned listings freeze everywhere — DM answers included.
+        AND (c.adopted_from_listing_id IS NULL OR EXISTS (
+          SELECT 1 FROM companion_listings l
+          WHERE l.id = c.adopted_from_listing_id AND l.status <> 'banned'
         ))
     `;
     if (picked[0]) return this.rowToCompanion(picked[0]);

@@ -40,6 +40,7 @@ import { runExtractJob, type ExtractJobPayload } from "./extract-job.js";
 import { runJournalJob, type JournalJobPayload } from "./journal-job.js";
 import { selectCompanionForTurn } from "./scene-router.js";
 import { sendAsCompanion } from "./webhooks.js";
+import { isSelfHarmSignal, CRISIS_RESPONSE, SAFE_REFUSAL } from "./safety.js";
 import { gatherOwnerSubtextForServer, gatherServerDigestForDm } from "./cross-context.js";
 import type { CompanionPersona, MessageEvent, PairContext } from "./types.js";
 
@@ -887,6 +888,16 @@ async function handleDmMessage(
   }
 
   if (!settings.replyEnabled) return;
+
+  // Self-harm triage fires before any spend or throttle — the message is
+  // already recorded (extraction can still remember the disclosure), but the
+  // reply is a scripted crisis response, not a generation. No judgment call.
+  if (isSelfHarmSignal(message.content)) {
+    inc("safety.crisis");
+    await message.reply({ content: CRISIS_RESPONSE, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+    return;
+  }
+
   if (!replyThrottle.consume(dmScope, userId)) { inc("reply.cooldown"); return; }
 
   // Hosted lane bills the turn upfront: the human pays for their message +
@@ -1018,8 +1029,32 @@ async function handleDmMessage(
       if (chargedDm) refundTurn(userId, 1, "dm_turn_refund");
       return;
     }
-    if (clean) {
-      const sent = await message.reply({ content: clean, allowedMentions: { parse: [], repliedUser: false } });
+    // Adopted companions are third-party authored personas riding our
+    // pipeline — their replies get a safety screen on BOTH lanes (BYOK and
+    // hosted). Fail-open on screen error: a provider hiccup sends the reply
+    // and logs the gap; a flag swaps in a neutral refusal and refunds the
+    // reply leg — the bad persona is the marketplace's problem, not the
+    // adopter's charge.
+    let dmReplyText = clean;
+    if (dmReplyText && companion.kind === "adopted" && brain) {
+      try {
+        const verdict = await brain.safetyVerdict({
+          kind: "reply",
+          subject: `${companion.name} — ${companion.voicePersona}${companion.backstory ? ` (${companion.backstory.slice(0, 300)})` : ""}`,
+          replyText: dmReplyText,
+        });
+        if (verdict.verdict === "flag") {
+          inc("safety.reply_flagged");
+          dmReplyText = SAFE_REFUSAL;
+          if (chargedDm) { refundTurn(userId, 1, "dm_turn_refund"); chargedDm -= 1; }
+        }
+      } catch (error) {
+        inc("safety.screen_error");
+        logError("adopted reply safety screen failed", error);
+      }
+    }
+    if (dmReplyText) {
+      const sent = await message.reply({ content: dmReplyText, allowedMentions: { parse: [], repliedUser: false } });
       dmReplied = true;
       inc("reply.sent");
       await store.recordMessage({
@@ -1028,7 +1063,7 @@ async function handleDmMessage(
         messageId: sent.id,
         authorId: compSubj,
         authorName: companion.name,
-        content: clean,
+        content: dmReplyText,
         createdAt: sent.createdAt ?? new Date(),
         mentionsBot: false,
       }, event.messageId, false, true);
@@ -1426,8 +1461,29 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       if (chargedGuild) refundTurn(payerId, 1, "guild_turn_refund");
       return;
     }
-    if (clean) {
-      const sent = await sendAsCompanion(message, chosen, clean, client.user!.id);
+    // Same adopted-companion safety screen as the DM path — flag swaps in a
+    // neutral refusal (channel isn't ghosted) + refunds the reply leg; a
+    // screen error fails open with a metric, not a dead turn.
+    let guildReplyText = clean;
+    if (guildReplyText && chosen.kind === "adopted" && companionBrain) {
+      try {
+        const verdict = await companionBrain.safetyVerdict({
+          kind: "reply",
+          subject: `${chosen.name} — ${chosen.voicePersona}${chosen.backstory ? ` (${chosen.backstory.slice(0, 300)})` : ""}`,
+          replyText: guildReplyText,
+        });
+        if (verdict.verdict === "flag") {
+          inc("safety.reply_flagged");
+          guildReplyText = SAFE_REFUSAL;
+          if (chargedGuild) { refundTurn(payerId, 1, "guild_turn_refund"); chargedGuild -= 1; }
+        }
+      } catch (error) {
+        inc("safety.screen_error");
+        logError("guild adopted reply safety screen failed", error);
+      }
+    }
+    if (guildReplyText) {
+      const sent = await sendAsCompanion(message, chosen, guildReplyText, client.user!.id);
       if (!sent) {
         replyThrottle.refund(event.guildId, throttleActor);
         if (chargedGuild) refundTurn(payerId, 1, "guild_turn_refund");
@@ -1442,7 +1498,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       await store.recordMessage({
         guildId: event.guildId, channelId: event.channelId, messageId: sent.id,
         authorId: compSubj, authorName: chosen.name,
-        content: clean, createdAt: sent.createdAt, mentionsBot: false,
+        content: guildReplyText, createdAt: sent.createdAt, mentionsBot: false,
       }, event.messageId, false, true);
       await store.setTriageResults([{ id: sent.id, result: "noise" }]);
       // Same deferred journaling as the DM path — hourly cadence for

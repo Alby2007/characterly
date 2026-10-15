@@ -18,7 +18,8 @@ In servers, the **Characterly** bot is invisible plumbing and a system announcer
 - Anyone can click **Add** to adopt the character: they get their own companion — their own memories, their own relationship — that opens their DMs with the creator-written **greeting**, then can be summoned into servers. The awakened companion stays sacred and untouched (1 per account); adoptions are separate and replaceable.
 - **Slots:** free accounts hold 1 active adoption and can publish **2 live listings**; Premium is unlimited on both. Creators can also author extra characters (`/companion action:create`) that aren't tied to their awakened companion. Dropping an adoption frees the slot but locks that character for **12 hours** before it can be re-adopted (your history with them is kept if you come back).
 - **Billing follows the chatter:** adopters pay for their own turns (their tokens or BYOK key) — a popular character never costs its creator a cent.
-- Listings are **live references**: creator persona edits propagate to every adopter, versioned for audit. Reports auto-flag listings for mod review; unpublishing or flagging blocks new Adds.
+- Listings are **live references**: creator persona edits propagate to every adopter, versioned for audit.
+- **Moderation** (`docs/moderation.md`): every publish/edit is screened (blocklist + model verdict, fail-closed); adopted companions' replies are safety-screened on both lanes (fail-open, flagged → neutral refusal + refund); reports are categorized and auto-flag at a threshold; mods get action buttons (unflag/delist/ban/ban-creator) in the report channel; `banned` listings freeze all adopted clones; self-harm phrasing in any DM gets a scripted crisis-resource response.
 
 ### 3. User-First Personal AI Keys (Auto-Detected Providers)
 - Each user connects their own API key (`dm:<userId>`) via the onboarding **Paste API Key** button or `/companion action:key`.

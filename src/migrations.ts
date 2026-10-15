@@ -1860,6 +1860,56 @@ const migrations: Migration[] = [
       await sql`ALTER TABLE companion_listings ALTER COLUMN source_companion_id SET NOT NULL`;
     },
   },
+  // v36 — moderation surface. Reports gain a category, creator bans live in
+  // marketplace_bans, and every mod action lands in moderation_events. Rate
+  // limits derive from existing tables — the (creator, created_at) /
+  // (reporter, created_at) / (user, adopted_at) indexes make them cheap.
+  {
+    version: 36,
+    name: "v36_moderation_surface",
+    up: async (sql) => {
+      await sql`ALTER TABLE listing_reports ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'other'`;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS marketplace_bans (
+          discord_user_id TEXT PRIMARY KEY,
+          reason          TEXT NOT NULL DEFAULT '',
+          banned_by       TEXT NOT NULL DEFAULT '',
+          created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+      await sql`ALTER TABLE marketplace_bans ENABLE ROW LEVEL SECURITY`;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS moderation_events (
+          id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          listing_id    BIGINT REFERENCES companion_listings(id) ON DELETE SET NULL,
+          actor_user_id TEXT NOT NULL,
+          action        TEXT NOT NULL,
+          note          TEXT NOT NULL DEFAULT '',
+          created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+      await sql`CREATE INDEX IF NOT EXISTS mod_events_listing ON moderation_events(listing_id)`;
+      await sql`ALTER TABLE moderation_events ENABLE ROW LEVEL SECURITY`;
+
+      // Per-day counts for publish/report/adopt rate limits.
+      await sql`CREATE INDEX IF NOT EXISTS listing_reports_reporter ON listing_reports(reporter_user_id, created_at)`;
+      await sql`CREATE INDEX IF NOT EXISTS listings_creator_created ON companion_listings(creator_user_id, created_at)`;
+      await sql`CREATE INDEX IF NOT EXISTS adoptions_user_adopted ON companion_adoptions(user_id, adopted_at)`;
+    },
+    down: async (sql) => {
+      // A creator-ban thaws on rollback: banned listings revert to flagged so
+      // they re-enter the human-review queue rather than silently reactivating.
+      await sql`UPDATE companion_listings SET status = 'flagged', updated_at = NOW() WHERE status = 'banned'`;
+      await sql`DROP INDEX IF EXISTS adoptions_user_adopted`;
+      await sql`DROP INDEX IF EXISTS listings_creator_created`;
+      await sql`DROP INDEX IF EXISTS listing_reports_reporter`;
+      await sql`DROP TABLE IF EXISTS moderation_events`;
+      await sql`DROP TABLE IF EXISTS marketplace_bans`;
+      await sql`ALTER TABLE listing_reports DROP COLUMN IF EXISTS category`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

@@ -13,6 +13,7 @@ import { pauseGuildClaims, resumeGuildClaims, waitForGuildIdle } from "./jobs.js
 import { inc, metricsSnapshot } from "./metrics.js";
 import type { Companion, CompanionListing, CompanionSpec, MessageEvent } from "./types.js";
 import { config } from "./config.js";
+import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
 
 export const ONBOARDING_ARCHETYPES: Record<
   string,
@@ -505,6 +506,68 @@ function listingCapFor(store: MemoryStore, account: { plan: string } | null): nu
 
 const LISTING_CAP_MSG = `You can run **${config.freeListingSlots} live listing${config.freeListingSlots === 1 ? "" : "s"}** on the free plan — \`/companion action:unpublish\` one first, or go Premium for unlimited: ${config.siteUrl}/dashboard#billing`;
 
+const BANNED_CREATOR_MSG = "Your marketplace access has been suspended — you can't publish new characters. If you think this is a mistake, contact a moderator.";
+
+/** Returns the refusal message if the user can't create a listing right now —
+ *  creator ban first, then the daily publish cap. Caller still runs the slot
+ *  check separately. */
+async function publishGateError(store: MemoryStore, userId: string): Promise<string | null> {
+  if (await store.creatorBan(userId).catch(() => null)) return BANNED_CREATOR_MSG;
+  const published = await store.dailyPublishCount(userId).catch(() => 0);
+  if (published >= config.marketPublishDailyCap) {
+    return `That's a lot of characters for one day — the limit is ${config.marketPublishDailyCap} new listing${config.marketPublishDailyCap === 1 ? "" : "s"} per day. Try again tomorrow.`;
+  }
+  return null;
+}
+
+/** Deterministic + model screens over authored listing fields. Fail-closed:
+ *  a configured-but-erroring classifier refuses the write (publish isn't
+ *  time-sensitive — retrying is the correct UX). */
+async function screenListingFields(fields: {
+  name: string; tagline: string; greeting: string; voicePersona: string;
+  coreTraits: string[]; ownerDynamic: string; backstory: string;
+}): Promise<string | null> {
+  const det = checkListingFields(fields);
+  if (!det.ok) {
+    inc("safety.listing_blocked");
+    return `That can't go on the marketplace — the **${det.field}** field trips the content policy (${det.category}).`;
+  }
+  const brain = safetyBrain();
+  if (!brain) return null; // no operator key — deterministic layer only
+  try {
+    const verdict = await brain.safetyVerdict({
+      kind: "listing",
+      subject:
+        `Name: ${fields.name}\nTagline: ${fields.tagline}\nGreeting: ${fields.greeting}\n` +
+        `Voice: ${fields.voicePersona}\nTraits: ${fields.coreTraits.join(", ")}\n` +
+        `Dynamic: ${fields.ownerDynamic}\nBackstory: ${fields.backstory}`,
+    });
+    if (verdict.verdict === "flag") {
+      inc("safety.listing_flagged");
+      return `That can't go on the marketplace — content screening flagged it${verdict.category ? ` (${verdict.category})` : ""}${verdict.reason ? `: ${verdict.reason}` : "."}`;
+    }
+  } catch (error) {
+    inc("safety.screen_error");
+    logError("listing safety screen failed", error);
+    return "Content screening isn't reachable right now — try again in a moment.";
+  }
+  return null;
+}
+
+/** Mod-action gate: a configured marketplace role id, or ManageGuild (server
+ *  admins can always act). Handles both GuildMember and raw API member shapes. */
+function isMarketplaceMod(interaction: ButtonInteraction): boolean {
+  const raw = (interaction.member as { roles?: unknown } | null)?.roles;
+  const hasRole = config.marketplaceModRoleIds.length > 0 && (
+    Array.isArray(raw)
+      ? raw.some(r => config.marketplaceModRoleIds.includes(r))
+      : typeof (raw as { cache?: { has(id: string): boolean } })?.cache?.has === "function" &&
+        config.marketplaceModRoleIds.some(id => (raw as { cache: { has(id: string): boolean } }).cache.has(id))
+  );
+  const hasPerm = (interaction.memberPermissions as { has?(f: bigint): boolean } | null)?.has?.(PermissionFlagsBits.ManageGuild) ?? false;
+  return hasPerm || hasRole;
+}
+
 /** Returns an error message if the user is at their live-listing cap, else
  *  null. Advisory UX check only — the store methods enforce the cap
  *  atomically at write time. */
@@ -617,6 +680,16 @@ export async function summonPickedCompanion(interaction: ChatInputCommandInterac
   // Mocks in tests may not implement isButton — treat absence as a command.
   const isButton = typeof (interaction as ButtonInteraction).isButton === "function" && (interaction as ButtonInteraction).isButton();
   if (companion.kind === "adopted") {
+    // A banned listing freezes its clones — roster queries already hide them,
+    // so this only trips on stale pickers or edge paths.
+    if (companion.adoptedFromListingId) {
+      const listing = await store.listingById(companion.adoptedFromListingId).catch(() => null);
+      if (listing?.status === "banned") {
+        const msg = `**${companion.name}** was removed from the marketplace by moderation.`;
+        if (isButton) return (interaction as ButtonInteraction).update({ content: msg, components: [] });
+        return interaction.reply({ content: msg, ephemeral: true });
+      }
+    }
     const adoption = await store.adoptionForCompanion(companion.id);
     if (adoption && !adoption.dmIntroducedAt) {
       const msg =
@@ -1136,6 +1209,8 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
           ephemeral: true,
         });
       }
+      const gateError = await publishGateError(store, interaction.user.id);
+      if (gateError) return interaction.reply({ content: gateError, ephemeral: true });
       if (typeof interaction.showModal !== "function") {
         return interaction.reply({ content: "Publishing requires modal support.", ephemeral: true });
       }
@@ -1159,6 +1234,8 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
           ephemeral: true,
         });
       }
+      const gateError = await publishGateError(store, interaction.user.id);
+      if (gateError) return interaction.reply({ content: gateError, ephemeral: true });
       const slotError = await listingSlotError(store, interaction.user.id, account);
       if (slotError) return interaction.reply({ content: slotError, ephemeral: true });
       if (typeof interaction.showModal !== "function") {
@@ -1196,6 +1273,9 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
           content: `Relisting requires a linked Characterly account — create one at ${config.siteUrl} and run \`/link\` first.`,
           ephemeral: true,
         });
+      }
+      if (await store.creatorBan(interaction.user.id).catch(() => null)) {
+        return interaction.reply({ content: BANNED_CREATOR_MSG, ephemeral: true });
       }
       const delisted = await store.listDelistedListings(interaction.user.id);
       if (!delisted.length) {
@@ -1770,6 +1850,8 @@ export async function handleCompanionModal(
     if (!channel || channel.type !== ChannelType.GuildForum) {
       return interaction.reply({ content: "The marketplace channel isn't reachable — tell a moderator to check MARKETPLACE_CHANNEL_ID.", ephemeral: true });
     }
+    const gateError = await publishGateError(store, userId);
+    if (gateError) return interaction.reply({ content: gateError, ephemeral: true });
     const slotError = await listingSlotError(store, userId, account);
     if (slotError) return interaction.reply({ content: slotError, ephemeral: true });
     const name = interaction.fields.getTextInputValue("listing-name").trim().slice(0, 64);
@@ -1780,6 +1862,11 @@ export async function handleCompanionModal(
     if (!name || !tagline || !greeting || !voicePersona) {
       return interaction.reply({ content: "Name, tagline, greeting, and voice are all required.", ephemeral: true });
     }
+    const screenError = await screenListingFields({
+      name, tagline, greeting, voicePersona,
+      coreTraits: [], ownerDynamic: "a companion who met you here", backstory,
+    });
+    if (screenError) return interaction.reply({ content: screenError, ephemeral: true });
     const res = await store.createListing(userId, {
       name, tagline, greeting, voicePersona,
       coreTraits: [], ownerDynamic: "a companion who met you here", backstory,
@@ -1829,6 +1916,8 @@ export async function handleCompanionModal(
     if (!tagline || !greeting) {
       return interaction.reply({ content: "Tagline and greeting are both required.", ephemeral: true });
     }
+    const gateError = await publishGateError(store, userId);
+    if (gateError) return interaction.reply({ content: gateError, ephemeral: true });
     const existing = await store.listingForCompanion(companion.id);
     // Only a republish of an already-live listing skips the slot check —
     // reviving a delisted one adds a live listing back.
@@ -1836,6 +1925,16 @@ export async function handleCompanionModal(
       const slotError = await listingSlotError(store, userId, account);
       if (slotError) return interaction.reply({ content: slotError, ephemeral: true });
     }
+    // Screen the assembled persona — inherited fields are the creator's own,
+    // but the listing is public content either way.
+    const screenError = await screenListingFields({
+      name, tagline, greeting,
+      voicePersona: existing?.voicePersona ?? companion.voicePersona,
+      coreTraits: existing?.coreTraits ?? companion.coreTraits,
+      ownerDynamic: existing?.ownerDynamic ?? companion.ownerDynamic,
+      backstory: existing?.backstory ?? companion.backstory,
+    });
+    if (screenError) return interaction.reply({ content: screenError, ephemeral: true });
     const res = await store.upsertListing(userId, companion.id, {
       name,
       tagline,
@@ -1850,12 +1949,14 @@ export async function handleCompanionModal(
       return interaction.reply({ content: LISTING_CAP_MSG, ephemeral: true });
     }
     const listing = res.listing;
-    // A flagged listing survives republish still flagged — save the edits but
-    // don't post a fresh card whose Add/Report buttons would refuse anyway.
-    if (listing.status === "flagged") {
+    // Flagged/banned listings survive republish with their status — save the
+    // edits but don't post a fresh card whose buttons would refuse anyway.
+    if (listing.status === "flagged" || listing.status === "banned") {
       return interaction.reply({
         ephemeral: true,
-        content: `Edits saved (v${listing.version}) — **${listing.name}** is still under review, so the marketplace post stays down until a moderator clears it.`,
+        content: listing.status === "banned"
+          ? `**${listing.name}** was removed by moderation and can't be republished.`
+          : `Edits saved (v${listing.version}) — **${listing.name}** is still under review, so the marketplace post stays down until a moderator clears it.`,
       });
     }
     if (existing?.forumThreadId) {
@@ -1897,6 +1998,13 @@ export async function handleCompanionModal(
     if (!name || !voicePersona || !ownerDynamic) {
       return interaction.reply({ content: "Name, Voice & Vibe, and Dynamic are all required.", ephemeral: true });
     }
+    // Edits get the same screen as publishes — the persona is public content
+    // and a flagged listing can't edit its way out of review.
+    const screenError = await screenListingFields({
+      name, tagline: listing.tagline, greeting: listing.greeting,
+      voicePersona, coreTraits, ownerDynamic, backstory,
+    });
+    if (screenError) return interaction.reply({ content: screenError, ephemeral: true });
     const updated = await store.updateListing(listing.id, userId, {
       name, tagline: listing.tagline, voicePersona, coreTraits, ownerDynamic,
       backstory, greeting: listing.greeting, avatarUrl: listing.avatarUrl,
@@ -1971,21 +2079,76 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
   if (interaction.customId === "forget:cancel") return interaction.update({ content: "No memory was deleted.", components: [] });
   const parts = interaction.customId.split(":");
 
-  // market:{add|report|talk|summon|dismiss|drop|unlist|relist|editmodal}:{id} — the companion
+  // market:{add|report|reportcat|talk|summon|dismiss|drop|unlist|relist|editmodal}:{id}
+  // market:mod:{unflag|delist|ban|bancreator}:{listingId} — the companion
   // marketplace. Add/Report live on public forum cards and stay put after the
   // click; talk/summon/dismiss/drop are picker buttons on the caller's own
   // ephemeral replies, so they replace the message. Ownership is always
   // re-derived from the roster — the button ID alone authorizes nothing.
   if (parts[0] === "market") {
     const sub = parts[1];
-    const id = Number(parts[2]);
     const userId = interaction.user.id;
+
+    // Moderator actions on a listing — role-gated, audit-logged.
+    if (sub === "mod") {
+      const action = parts[2];
+      const listingId = Number(parts[3]);
+      if (!Number.isFinite(listingId)) return interaction.reply({ content: "That button is no longer valid.", ephemeral: true });
+      if (!isMarketplaceMod(interaction)) {
+        return interaction.reply({ content: "Moderator role required.", ephemeral: true });
+      }
+      const listing = await store.listingById(listingId);
+      if (!listing) {
+        return interaction.update({ content: `Listing ${listingId} no longer exists.`, components: [] });
+      }
+      const archiveThread = async (threadId: string | null) => {
+        if (!threadId || !config.marketplaceChannelId) return;
+        const channel = await interaction.client.channels.fetch(config.marketplaceChannelId).catch(() => null);
+        const thread = channel && channel.type === ChannelType.GuildForum
+          ? await channel.threads.fetch(threadId).catch(() => null)
+          : null;
+        if (thread) await thread.setLocked(true).then(() => thread.setArchived(true)).catch(() => {});
+      };
+      if (action === "unflag" || action === "delist" || action === "ban") {
+        const updated = await store.modAction(listingId, userId, action);
+        if (!updated) {
+          return interaction.update({ content: `**${listing.name}** is already ${listing.status} — nothing to do.`, components: [] });
+        }
+        if (action !== "unflag") await archiveThread(listing.forumThreadId);
+        inc(`market.mod_${action}`);
+        return interaction.update({
+          content:
+            `${interaction.message.content}\n—\n` +
+            `**${action === "unflag" ? "Cleared the flag — listing stays up" : action === "delist" ? "Delisted (clones keep their companions)" : "Banned — clones frozen"}** by <@${userId}> · <t:${Math.floor(Date.now() / 1000)}:R>`,
+          components: [],
+        });
+      }
+      if (action === "bancreator") {
+        const banned = await store.banCreator(listing.creatorUserId, userId);
+        for (const l of banned) await archiveThread(l.forumThreadId);
+        inc("market.mod_bancreator");
+        return interaction.update({
+          content:
+            `${interaction.message.content}\n—\n` +
+            `**Creator <@${listing.creatorUserId}> banned** — ${banned.length} listing${banned.length === 1 ? "" : "s"} banned, clones frozen — by <@${userId}> · <t:${Math.floor(Date.now() / 1000)}:R>`,
+          components: [],
+        });
+      }
+      return interaction.reply({ content: "Unknown moderation action.", ephemeral: true });
+    }
+
+    const id = Number(parts[2]);
     if (!Number.isFinite(id)) return interaction.reply({ content: "That button is no longer valid.", ephemeral: true });
 
     if (sub === "add") {
       const listing = await store.listingById(id);
       if (!listing || listing.status !== "active") {
         return interaction.reply({ content: "That listing is no longer available.", ephemeral: true });
+      }
+      // Adoption farming inflates add_count for free — bound it.
+      const adopted = await store.dailyAdoptCount(userId).catch(() => 0);
+      if (adopted >= config.marketAdoptDailyCap) {
+        return interaction.reply({ content: `That's a lot of adoptions for one day — the limit is ${config.marketAdoptDailyCap}. Try again tomorrow.`, ephemeral: true });
       }
       const account = store.creditsSupported
         ? await store.accountForDiscordUser(userId).catch(() => null)
@@ -2042,21 +2205,63 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       if (listing.creatorUserId === userId) {
         return interaction.reply({ content: "This is your own listing — use `/companion action:unpublish` to take it down.", ephemeral: true });
       }
-      const count = await store.reportListing(id, userId);
+      // Two-step: pick a category first — categorized reports triage far
+      // better than a bare counter, and each row carries it for the queue.
+      const catRows = [0, 4].map(offset =>
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          ...REPORT_CATEGORIES.slice(offset, offset + 4).map(([cat, label]) =>
+            new ButtonBuilder()
+              .setCustomId(`market:reportcat:${id}:${cat}`)
+              .setLabel(label)
+              .setStyle(cat === "minor" ? ButtonStyle.Danger : ButtonStyle.Secondary),
+          ),
+        ),
+      );
+      return interaction.reply({
+        ephemeral: true,
+        content: `What's wrong with **${listing.name}**? Pick the closest reason:`,
+        components: catRows,
+      });
+    }
+
+    if (sub === "reportcat") {
+      const category = parts[3] ?? "other";
+      const listing = await store.listingById(id);
+      if (!listing || listing.status !== "active") {
+        return interaction.update({ content: "That listing is no longer available.", components: [] });
+      }
+      if (listing.creatorUserId === userId) {
+        return interaction.update({ content: "This is your own listing.", components: [] });
+      }
+      // Reports are the backstop — rate-limit them so they can't be a weapon.
+      const reported = await store.dailyReportCount(userId).catch(() => 0);
+      if (reported >= config.marketReportDailyCap) {
+        return interaction.update({ content: `You've filed ${config.marketReportDailyCap} reports today — that's the limit.`, components: [] });
+      }
+      const count = await store.reportListing(id, userId, category);
       if (count < 0) {
-        return interaction.reply({ content: "You've already reported this listing — the team has it.", ephemeral: true });
+        return interaction.update({ content: "You've already reported this listing — the team has it.", components: [] });
       }
       const flagged = count >= config.marketplaceReportFlagThreshold && listing.status === "active" && await store.flagListing(id);
       if (config.marketplaceModChannelId) {
+        const catLabel = REPORT_CATEGORIES.find(([c]) => c === category)?.[1] ?? category;
         const modChannel = await interaction.client.channels.fetch(config.marketplaceModChannelId).catch(() => null);
         if (modChannel?.isTextBased() && "send" in modChannel) {
-          await (modChannel as TextChannel).send(
-            `🚩 Listing report: **${listing.name}** (id ${listing.id}, creator <@${listing.creatorUserId}>) — ${count} report${count === 1 ? "" : "s"}${flagged ? " — **auto-flagged, new Adds blocked**" : ""}.`,
-          ).catch(() => {});
+          await (modChannel as TextChannel).send({
+            content:
+              `🚩 **${catLabel}** report on **${listing.name}** (id ${listing.id}, creator <@${listing.creatorUserId}>) — ` +
+              `${count} report${count === 1 ? "" : "s"} total${flagged ? " — **auto-flagged, new Adds blocked**" : ""}.`,
+            components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+              new ButtonBuilder().setCustomId(`market:mod:unflag:${id}`).setLabel("Keep up").setStyle(ButtonStyle.Success),
+              new ButtonBuilder().setCustomId(`market:mod:delist:${id}`).setLabel("Delist").setStyle(ButtonStyle.Secondary),
+              new ButtonBuilder().setCustomId(`market:mod:ban:${id}`).setLabel("Ban listing").setStyle(ButtonStyle.Danger),
+              new ButtonBuilder().setCustomId(`market:mod:bancreator:${id}`).setLabel("Ban creator").setStyle(ButtonStyle.Danger),
+            )],
+          }).catch(() => {});
         }
       }
       inc("market.reported");
-      return interaction.reply({ content: "Thanks — your report has been recorded and the listing flagged for review.", ephemeral: true });
+      return interaction.update({ content: `Thanks — your **${REPORT_CATEGORIES.find(([c]) => c === category)?.[1] ?? category}** report has been recorded${flagged ? " and the listing is now under review" : ""}.`, components: [] });
     }
 
     if (sub === "talk") {

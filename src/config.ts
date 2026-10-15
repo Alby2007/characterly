@@ -76,6 +76,15 @@ const env = z.object({
   FREE_ADOPTION_SLOTS: z.coerce.number().int().min(0).default(1),
   FREE_LISTING_SLOTS: z.coerce.number().int().min(0).default(2),
   MARKETPLACE_REPORT_FLAG_THRESHOLD: z.coerce.number().int().min(1).default(3),
+  // Moderation: mod action buttons are gated to these role ids (comma list);
+  // when unset, ManageGuild members can act. Daily caps are per UTC day.
+  MARKETPLACE_MOD_ROLE_IDS: z.string().optional(),
+  MARKET_PUBLISH_DAILY_CAP: z.coerce.number().int().min(1).default(5),
+  MARKET_REPORT_DAILY_CAP: z.coerce.number().int().min(1).default(20),
+  MARKET_ADOPT_DAILY_CAP: z.coerce.number().int().min(1).default(20),
+  // Safety classifier model — defaults to the hosted reply model; a small
+  // fast model is fine (the verdict schema is tiny).
+  SAFETY_MODEL: z.string().optional(),
 }).parse(process.env);
 
 export const config = {
@@ -150,4 +159,9 @@ export const config = {
   freeAdoptionSlots: env.FREE_ADOPTION_SLOTS,
   freeListingSlots: env.FREE_LISTING_SLOTS,
   marketplaceReportFlagThreshold: env.MARKETPLACE_REPORT_FLAG_THRESHOLD,
+  marketplaceModRoleIds: (env.MARKETPLACE_MOD_ROLE_IDS ?? "").split(",").map(s => s.trim()).filter(Boolean),
+  marketPublishDailyCap: env.MARKET_PUBLISH_DAILY_CAP,
+  marketReportDailyCap: env.MARKET_REPORT_DAILY_CAP,
+  marketAdoptDailyCap: env.MARKET_ADOPT_DAILY_CAP,
+  safetyModel: env.SAFETY_MODEL ?? env.GROQ_MODEL,
 };
