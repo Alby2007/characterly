@@ -14,9 +14,19 @@ function makeTestSql() {
   return postgres(url, { max: 3, onnotice: () => {} });
 }
 
-/** Drop all project tables so each test starts fresh. */
+/** Drop all public-schema tables so each test starts fresh. Dynamic so the
+ * list can't go stale as migrations add tables — leftover rows from other
+ * test files (e.g. marketplace listings) must not leak into rollback tests. */
 async function resetSchema(sql: ReturnType<typeof postgres>) {
-  await sql`DROP TABLE IF EXISTS schema_migrations, profiles, profile_attributes, relationships, relationship_observations, members, event_memories, event_messages, event_participants, events, behavioral_patterns, memory_history, memory_evidence, server_settings, memories, messages, guild_keys, unresolved_names, alias_candidates, jobs, guild_usage, webhook_messages, guild_companions, companions CASCADE`;
+  await sql`
+    DO $$
+    DECLARE r RECORD;
+    BEGIN
+      FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+        EXECUTE format('DROP TABLE IF EXISTS public.%I CASCADE', r.tablename);
+      END LOOP;
+    END $$
+  `;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

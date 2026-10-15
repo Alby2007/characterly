@@ -26,8 +26,11 @@ uniqueness survives via the partial index
 
 Gates, in order: `MARKETPLACE_CHANNEL_ID` set → caller owns an awakened
 `active` companion → linked web account (`/link` + site account — accountability
-for moderation) → listing-slot check (only for *new* listings; republishing is
-always allowed).
+for moderation) → listing-slot check. The check is advisory at the action and
+**atomic at submit**: `upsertListing` enforces the cap inside its transaction
+under a per-creator advisory lock, and it applies whenever the write adds a
+live listing — a new listing, or a delisted → active *revive*. Republishing an
+already-live listing is the only free path.
 
 Modal (`market_publish:<companionId>`): **display name**, **tagline** (card
 blurb), **greeting** (the character's first DM to an adopter). On first publish
@@ -40,10 +43,11 @@ name, voice, traits, bond, backstory).
 
 For characters not tied to your awakened bond (v35 — `source_companion_id` is
 nullable and stays NULL). Gates: marketplace configured → linked account → slot
-check. Modal: name, tagline, greeting, voice, optional backstory. Traits/dynamic
-start as defaults; the **Edit persona** button on the success reply fills them
-in. `create` does *not* require an awakened companion — a pure creator can join,
-link, and stock the shelf.
+check (same atomic enforcement as `publish`). Modal: name, tagline, greeting,
+voice, optional backstory. Traits/dynamic start as defaults; the **Edit
+persona** button on the success reply fills them in. `create` does *not*
+require an awakened companion — a pure creator can join, link, and stock the
+shelf.
 
 ### What the bot does with a publish (both paths)
 
@@ -66,8 +70,12 @@ link, and stock the shelf.
 
 Forum card → **Add** → `store.adoptListing` in one transaction:
 
-- **Slot check** — free: `FREE_ADOPTION_SLOTS` active adoption; Premium:
-  uncapped; self-host lane: uncapped (no billing to meter).
+- **Slot check** — free: `FREE_ADOPTION_SLOTS` active adoptions; Premium:
+  uncapped; self-host lane: uncapped (no billing to meter). Enforced
+  atomically inside the adoption transaction under a per-user advisory lock:
+  anything that leaves an adoption active counts — a fresh add *and* a
+  post-cooldown re-adoption. (Re-adopt is refused with `cap` when the slot is
+  held by another listing — drop first, or upgrade.)
 - **Cooldown check** — if the listing was dropped within
   `ADOPTION_COOLDOWN_MS` (12h), Add is refused with the unlock time.
 - **Clone** — a `kind='adopted'` companions row is inserted owned by the
@@ -109,12 +117,22 @@ linked account for accountability — adoption itself doesn't.
   user). Each insert bumps `report_count`.
 - **Auto-flag** — at `MARKETPLACE_REPORT_FLAG_THRESHOLD` (3) the listing
   becomes `flagged`: new Adds are refused, existing adopters unaffected. A
-  republish does **not** clear a flag (only delisted → active revives).
+  flag is a **moderation hold**: republish keeps it, and the creator can't
+  unpublish or relist a flagged listing at all — otherwise delist → revive
+  would launder the flag. Only a human review clears it
+  (`UPDATE companion_listings SET status='active' WHERE id=<n>;` — or
+  `status='delisted'` to keep it down).
 - **Mod channel** — `MARKETPLACE_MOD_CHANNEL_ID` gets a ping on every report.
 - **Unpublish** — `/companion action:unpublish` (picker when >1 listing) →
-  `delisted` + thread locked/archived. Delisted blocks Adds; adopters keep
+  `delisted` + thread locked/archived. Only `active` listings delist;
+  flagged rows refuse (moderation hold). Delisted blocks Adds; adopters keep
   their companions. Emergency SQL delist:
   `UPDATE companion_listings SET status='delisted' WHERE id=<n>;`
+- **Relist** — `/companion action:relist` (picker when >1 delisted) → flips
+  `delisted → active` under the same atomic slot check as publish, then posts
+  a fresh forum card. Works for awakened-backed *and* freehand listings
+  (awakened-backed can also be revived by re-running `action:publish`).
+  Flagged listings can't reach this path — they can't become `delisted`.
 
 ## Config reference
 
@@ -132,8 +150,14 @@ in the forum channel.
 
 ## Known rough edges / next-phase candidates
 
-- Republish posts a new thread rather than editing — a popular listing's
-  comments don't carry over.
+- Republish/relist posts a new thread rather than editing — a popular
+  listing's comments don't carry over. A *flagged* republish saves the edits
+  but skips the fresh thread entirely.
+- Roster pickers show at most 5 companions — accounts with more can't reach
+  the tail from the picker (command paths still work).
+- Deleting a listing *row* (only possible via SQL today) orphans its adopted
+  clone `companions` rows — `adopted_from_listing_id` deliberately has no FK
+  yet; hard removal of clones is a moderation-phase decision.
 - Forum tags aren't applied (Discord needs the forum's tag IDs) — add
   `MARKETPLACE_TAG_MAP` or a tag picklist for browsability.
 - Flagged listings keep their thread visible (Adds are blocked at the button);

@@ -1836,6 +1836,27 @@ const migrations: Migration[] = [
       await sql`ALTER TABLE companion_listings ALTER COLUMN source_companion_id DROP NOT NULL`;
     },
     down: async (sql) => {
+      // Rollback removes the freehand feature: every listing without an
+      // awakened source must go before NOT NULL can be restored. Adoptions,
+      // reports, and persona versions cascade via listing_id; the adopted
+      // clone companions rows have no FK on adopted_from_listing_id
+      // (deliberate), so they are deleted explicitly first.
+      await sql`
+        UPDATE user_bot_settings SET active_dm_companion_id = NULL
+        WHERE active_dm_companion_id IN (
+          SELECT id FROM companions
+          WHERE kind = 'adopted' AND adopted_from_listing_id IN (
+            SELECT id FROM companion_listings WHERE source_companion_id IS NULL
+          )
+        )
+      `;
+      await sql`
+        DELETE FROM companions
+        WHERE kind = 'adopted' AND adopted_from_listing_id IN (
+          SELECT id FROM companion_listings WHERE source_companion_id IS NULL
+        )
+      `;
+      await sql`DELETE FROM companion_listings WHERE source_companion_id IS NULL`;
       await sql`ALTER TABLE companion_listings ALTER COLUMN source_companion_id SET NOT NULL`;
     },
   },

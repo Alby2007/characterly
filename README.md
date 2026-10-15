@@ -86,7 +86,9 @@ All command replies are ephemeral (private to the invoker) unless noted; compani
 | `/companion action:status` | Check your personal API key status, active servers, and today's DM usage |
 | `/companion action:avatar` | Update your companion's avatar image URL |
 | `/companion action:publish` | List your awakened companion in the hub server's marketplace forum (requires a linked account) |
+| `/companion action:create` | Author a freehand marketplace character (not tied to your awakened companion) |
 | `/companion action:unpublish` | Remove your companion's marketplace listing |
+| `/companion action:relist` | Bring back an unpublished marketplace listing |
 | `/companion action:switch` | Choose which of your companions answers your DMs |
 | `/companion action:drop` | Drop an adopted companion (12h re-adopt cooldown) |
 | `/memory` | List your active memories (8/page; `page:`, `search:`, `memory_id:` to inspect provenance, `candidates:true` for unconfirmed, `server:true` for lore) |

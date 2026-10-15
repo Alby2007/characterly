@@ -2491,80 +2491,160 @@ export class MemoryStore {
 
   /** Create or version-bump a listing. Every write records a persona version
    *  and (on update) syncs the persona into every adopted clone — live
-   *  reference for adopters, audit trail for us. */
+   *  reference for adopters, audit trail for us. When `maxListings` is given,
+   *  adding a LIVE listing (new row or delisted→active revive) is checked
+   *  atomically against it — republishing an already-live listing is free. */
   async upsertListing(
     creatorUserId: string,
     sourceCompanionId: number,
     spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
-    forumThreadId?: string | null,
-  ): Promise<CompanionListing> {
+    opts: { forumThreadId?: string | null; maxListings?: number } = {},
+  ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "cap" }> {
     const persona = {
       name: spec.name, tagline: spec.tagline, voicePersona: spec.voicePersona,
       coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
       backstory: spec.backstory, greeting: spec.greeting, avatarUrl: spec.avatarUrl,
     };
-    const rows = await this.sql<Array<any>>`
-      INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, avatar_url, forum_thread_id, version, status, created_at, updated_at)
-      VALUES (
-        ${creatorUserId}, ${sourceCompanionId},
-        ${spec.name}, ${spec.tagline}, ${spec.voicePersona}, ${spec.coreTraits},
-        ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${spec.avatarUrl},
-        ${forumThreadId ?? null}, 1, 'active', NOW(), NOW()
-      )
-      ON CONFLICT (source_companion_id) DO UPDATE SET
-        name           = EXCLUDED.name,
-        tagline        = EXCLUDED.tagline,
-        voice_persona  = EXCLUDED.voice_persona,
-        core_traits    = EXCLUDED.core_traits,
-        owner_dynamic  = EXCLUDED.owner_dynamic,
-        backstory      = EXCLUDED.backstory,
-        greeting       = EXCLUDED.greeting,
-        avatar_url     = EXCLUDED.avatar_url,
-        forum_thread_id = COALESCE(EXCLUDED.forum_thread_id, companion_listings.forum_thread_id),
-        version        = companion_listings.version + 1,
-        -- Republishing revives a delisted listing but must NOT clear a
-        -- moderation flag — flagged stays flagged until a human reviews it.
-        status         = CASE WHEN companion_listings.status = 'delisted' THEN 'active' ELSE companion_listings.status END,
-        updated_at     = NOW()
-      RETURNING *
-    `;
-    const listing = this.rowToListing(rows[0]);
-    await this.sql`
-      INSERT INTO companion_persona_versions (listing_id, version, persona_json)
-      VALUES (${listing.id}, ${listing.version}, ${JSON.stringify(persona)})
-      ON CONFLICT (listing_id, version) DO NOTHING
-    `;
-    if (listing.version > 1) await this.propagateListingVersion(listing.id);
-    return listing;
+    const res = await this.sql.begin(async sql => {
+      // Serialize per-creator listing writes — the cap count and the insert
+      // must be atomic across parallel publishes/creates/relists.
+      if (opts.maxListings != null) {
+        await sql`SELECT pg_advisory_xact_lock(hashtext(${`listing:${creatorUserId}`}))`;
+        const existingRows = await sql<Array<{ status: string }>>`
+          SELECT status FROM companion_listings WHERE source_companion_id = ${sourceCompanionId}
+        `;
+        const existing = existingRows[0];
+        // The upsert adds a live listing only when there's no row yet or the
+        // row revives from 'delisted'; editing an active/flagged listing
+        // changes nothing the cap counts.
+        if (!existing || existing.status === "delisted") {
+          const countRows = await sql<[{ n: number | string }]>`
+            SELECT COUNT(*) AS n FROM companion_listings
+            WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted'
+          `;
+          if (Number(countRows[0].n) >= opts.maxListings) return { ok: false as const, reason: "cap" as const };
+        }
+      }
+      const rows = await sql<Array<any>>`
+        INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, avatar_url, forum_thread_id, version, status, created_at, updated_at)
+        VALUES (
+          ${creatorUserId}, ${sourceCompanionId},
+          ${spec.name}, ${spec.tagline}, ${spec.voicePersona}, ${spec.coreTraits},
+          ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${spec.avatarUrl},
+          ${opts.forumThreadId ?? null}, 1, 'active', NOW(), NOW()
+        )
+        ON CONFLICT (source_companion_id) DO UPDATE SET
+          name           = EXCLUDED.name,
+          tagline        = EXCLUDED.tagline,
+          voice_persona  = EXCLUDED.voice_persona,
+          core_traits    = EXCLUDED.core_traits,
+          owner_dynamic  = EXCLUDED.owner_dynamic,
+          backstory      = EXCLUDED.backstory,
+          greeting       = EXCLUDED.greeting,
+          avatar_url     = EXCLUDED.avatar_url,
+          forum_thread_id = COALESCE(EXCLUDED.forum_thread_id, companion_listings.forum_thread_id),
+          version        = companion_listings.version + 1,
+          -- Republishing revives a delisted listing but must NOT clear a
+          -- moderation flag — flagged stays flagged until a human reviews it.
+          status         = CASE WHEN companion_listings.status = 'delisted' THEN 'active' ELSE companion_listings.status END,
+          updated_at     = NOW()
+        RETURNING *
+      `;
+      const listing = this.rowToListing(rows[0]);
+      await sql`
+        INSERT INTO companion_persona_versions (listing_id, version, persona_json)
+        VALUES (${listing.id}, ${listing.version}, ${JSON.stringify(persona)})
+        ON CONFLICT (listing_id, version) DO NOTHING
+      `;
+      return { ok: true as const, listing };
+    });
+    if (res.ok && res.listing.version > 1) await this.propagateListingVersion(res.listing.id);
+    return res;
   }
 
   /** A freehand listing (v35): the persona lives entirely on the listing —
-   *  no awakened companion backs it. source_companion_id stays NULL. */
+   *  no awakened companion backs it. source_companion_id stays NULL. When
+   *  `maxListings` is given the cap check runs atomically in the same tx. */
   async createListing(
     creatorUserId: string,
     spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
-  ): Promise<CompanionListing> {
+    maxListings?: number,
+  ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "cap" }> {
+    return this.sql.begin(async sql => {
+      if (maxListings != null) {
+        await sql`SELECT pg_advisory_xact_lock(hashtext(${`listing:${creatorUserId}`}))`;
+        const countRows = await sql<[{ n: number | string }]>`
+          SELECT COUNT(*) AS n FROM companion_listings
+          WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted'
+        `;
+        if (Number(countRows[0].n) >= maxListings) return { ok: false as const, reason: "cap" as const };
+      }
+      const rows = await sql<Array<any>>`
+        INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, avatar_url, version, status, created_at, updated_at)
+        VALUES (
+          ${creatorUserId}, NULL,
+          ${spec.name}, ${spec.tagline}, ${spec.voicePersona}, ${spec.coreTraits},
+          ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${spec.avatarUrl},
+          1, 'active', NOW(), NOW()
+        )
+        RETURNING *
+      `;
+      const listing = this.rowToListing(rows[0]);
+      await sql`
+        INSERT INTO companion_persona_versions (listing_id, version, persona_json)
+        VALUES (${listing.id}, 1, ${JSON.stringify({
+          name: spec.name, tagline: spec.tagline, voicePersona: spec.voicePersona,
+          coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
+          backstory: spec.backstory, greeting: spec.greeting, avatarUrl: spec.avatarUrl,
+        })})
+        ON CONFLICT (listing_id, version) DO NOTHING
+      `;
+      return { ok: true as const, listing };
+    }) as Promise<any>;
+  }
+
+  /** Revive a delisted listing (creator-owned only). Refuses anything that
+   *  isn't 'delisted' — flagged rows can't reach this path because delist
+   *  holds them, so a relist can never launder a moderation flag. The
+   *  live-listing cap is enforced atomically: a revive adds a live listing
+   *  back. */
+  async relistListing(
+    listingId: number,
+    creatorUserId: string,
+    maxListings: number,
+  ): Promise<
+    | { ok: true; listing: CompanionListing }
+    | { ok: false; reason: "not_found" | "not_delisted" | "cap" }
+  > {
+    return this.sql.begin(async sql => {
+      await sql`SELECT pg_advisory_xact_lock(hashtext(${`listing:${creatorUserId}`}))`;
+      const rows = await sql<Array<any>>`
+        SELECT * FROM companion_listings WHERE id = ${listingId} AND creator_user_id = ${creatorUserId}
+        FOR UPDATE
+      `;
+      if (!rows[0]) return { ok: false as const, reason: "not_found" as const };
+      if (rows[0].status !== "delisted") return { ok: false as const, reason: "not_delisted" as const };
+      const countRows = await sql<[{ n: number | string }]>`
+        SELECT COUNT(*) AS n FROM companion_listings
+        WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted'
+      `;
+      if (Number(countRows[0].n) >= maxListings) return { ok: false as const, reason: "cap" as const };
+      const updated = await sql<Array<any>>`
+        UPDATE companion_listings SET status = 'active', updated_at = NOW()
+        WHERE id = ${listingId} RETURNING *
+      `;
+      return { ok: true as const, listing: this.rowToListing(updated[0]) };
+    }) as Promise<any>;
+  }
+
+  /** A creator's unpublished listings — the relist pool. */
+  async listDelistedListings(creatorUserId: string): Promise<CompanionListing[]> {
     const rows = await this.sql<Array<any>>`
-      INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, avatar_url, version, status, created_at, updated_at)
-      VALUES (
-        ${creatorUserId}, NULL,
-        ${spec.name}, ${spec.tagline}, ${spec.voicePersona}, ${spec.coreTraits},
-        ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${spec.avatarUrl},
-        1, 'active', NOW(), NOW()
-      )
-      RETURNING *
+      SELECT * FROM companion_listings
+      WHERE creator_user_id = ${creatorUserId} AND status = 'delisted'
+      ORDER BY updated_at DESC
     `;
-    const listing = this.rowToListing(rows[0]);
-    await this.sql`
-      INSERT INTO companion_persona_versions (listing_id, version, persona_json)
-      VALUES (${listing.id}, 1, ${JSON.stringify({
-        name: spec.name, tagline: spec.tagline, voicePersona: spec.voicePersona,
-        coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
-        backstory: spec.backstory, greeting: spec.greeting, avatarUrl: spec.avatarUrl,
-      })})
-      ON CONFLICT (listing_id, version) DO NOTHING
-    `;
-    return listing;
+    return rows.map(r => this.rowToListing(r));
   }
 
   /** Update any listing (awakened-backed or freehand) by id: bumps the
@@ -2644,9 +2724,13 @@ export class MemoryStore {
     `;
   }
 
+  /** active → delisted only. Flagged rows are a moderation hold: letting a
+   *  creator delist them would launder the flag, since republish/relist
+   *  revive 'delisted' → 'active'. A flag clears only on human review. */
   async delistListing(listingId: number): Promise<boolean> {
     const result = await this.sql`
-      UPDATE companion_listings SET status = 'delisted', updated_at = NOW() WHERE id = ${listingId}
+      UPDATE companion_listings SET status = 'delisted', updated_at = NOW()
+      WHERE id = ${listingId} AND status = 'active'
     `;
     return result.count > 0;
   }
@@ -2667,8 +2751,9 @@ export class MemoryStore {
     return Number(rows[0]?.report_count ?? 0);
   }
 
-  async flagListing(listingId: number): Promise<void> {
-    await this.sql`UPDATE companion_listings SET status = 'flagged', updated_at = NOW() WHERE id = ${listingId} AND status = 'active'`;
+  async flagListing(listingId: number): Promise<boolean> {
+    const result = await this.sql`UPDATE companion_listings SET status = 'flagged', updated_at = NOW() WHERE id = ${listingId} AND status = 'active'`;
+    return result.count > 0;
   }
 
   /** The user's full roster: awakened companion first, then active adoptions. */
@@ -2731,10 +2816,11 @@ export class MemoryStore {
     return rows[0] ? this.rowToAdoption(rows[0]) : null;
   }
 
-  /** Adopt a listing for a user inside one transaction. maxSlots applies only
-   *  to fresh adoptions — re-adopting a cooled-down listing and idempotent
-   *  re-clicks never count against it. Returns a discriminated result so the
-   *  caller can phrase the refusal. */
+  /** Adopt a listing for a user inside one transaction. maxSlots applies to
+   *  anything that leaves the user holding an active adoption — fresh adds
+   *  and post-cooldown re-adoptions alike; only an already-active re-click
+   *  is free. Returns a discriminated result so the caller can phrase the
+   *  refusal. */
   async adoptListing(
     userId: string,
     listingId: number,
@@ -2745,6 +2831,9 @@ export class MemoryStore {
     | { ok: false; reason: "not_found" | "delisted" | "own_listing" | "cap" | "cooldown"; cooldownUntil?: string }
   > {
     return this.sql.begin(async sql => {
+      // Serialize per-user adoption txs — without this, parallel Add clicks on
+      // different listings both pass the slot count check under READ COMMITTED.
+      await sql`SELECT pg_advisory_xact_lock(hashtext(${`adopt:${userId}`}))`;
       const listings = await sql<Array<any>>`
         SELECT * FROM companion_listings WHERE id = ${listingId} FOR UPDATE
       `;
@@ -2768,7 +2857,10 @@ export class MemoryStore {
         return { ok: false as const, reason: "cooldown" as const, cooldownUntil: ts(existing.cooldown_until) };
       }
 
-      if (!existing) {
+      // Both paths below end in an ACTIVE adoption — a re-adopt consumes a
+      // slot exactly like a fresh one (the early return above already
+      // filtered the free no-op click).
+      if (!existing || existing.dropped_at) {
         const countRows = await sql<[{ n: number | string }]>`
           SELECT COUNT(*) AS n FROM companion_adoptions WHERE user_id = ${userId} AND dropped_at IS NULL
         `;
@@ -2805,8 +2897,10 @@ export class MemoryStore {
           INSERT INTO companion_adoptions (user_id, listing_id, companion_id, adopted_at)
           VALUES (${userId}, ${listingId}, ${companionId}, NOW())
         `;
+        // Only a fresh adoption counts — re-adopts resume an existing
+        // relationship and must not inflate the listing's "adopted by" stat.
+        await sql`UPDATE companion_listings SET add_count = add_count + 1 WHERE id = ${listingId}`;
       }
-      await sql`UPDATE companion_listings SET add_count = add_count + 1 WHERE id = ${listingId}`;
       const adoption = this.rowToAdoption(
         (await sql<Array<any>>`SELECT * FROM companion_adoptions WHERE user_id = ${userId} AND listing_id = ${listingId}`)[0],
       );

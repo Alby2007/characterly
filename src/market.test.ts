@@ -25,8 +25,8 @@ async function awakenedCompanion(store: MemoryStore, userId: string, name = "Nyx
   });
 }
 
-function makeListing(store: MemoryStore, creatorId: string, sourceId: number, name = "Nyx") {
-  return store.upsertListing(creatorId, sourceId, {
+async function makeListing(store: MemoryStore, creatorId: string, sourceId: number, name = "Nyx") {
+  const res = await store.upsertListing(creatorId, sourceId, {
     name,
     tagline: "a very dry vampire",
     voicePersona: "dry, sharp",
@@ -36,6 +36,9 @@ function makeListing(store: MemoryStore, creatorId: string, sourceId: number, na
     greeting: "*looks up* …you again.",
     avatarUrl: null,
   });
+  assert.equal(res.ok, true);
+  if (!res.ok) throw new Error("makeListing failed");
+  return res.listing;
 }
 
 test("marketplace schema: kind column, partial awakened uniqueness, new tables", async () => {
@@ -78,7 +81,7 @@ test("publish → upsertListing versions and keeps persona versions", async () =
   assert.equal(v1.version, 1);
   assert.equal(v1.status, "active");
 
-  const v2 = await store.upsertListing("u-creator", companion.id, {
+  const res2 = await store.upsertListing("u-creator", companion.id, {
     name: "Nyx II",
     tagline: "drier than before",
     voicePersona: "drier",
@@ -88,6 +91,9 @@ test("publish → upsertListing versions and keeps persona versions", async () =
     greeting: "again?",
     avatarUrl: null,
   });
+  assert.equal(res2.ok, true);
+  if (!res2.ok) return;
+  const v2 = res2.listing;
   assert.equal(v2.id, v1.id);
   assert.equal(v2.version, 2);
   assert.equal(v2.tagline, "drier than before");
@@ -226,7 +232,7 @@ test("listing edits propagate persona to clones but not adopter-owned state", as
 
   await store.summonCompanion("g7", adopt.companion.id, "u-ad7", "ad7");
 
-  await store.upsertListing("u-c7", creator.id, {
+  const res = await store.upsertListing("u-c7", creator.id, {
     name: "New Name",
     tagline: "new tag",
     voicePersona: "new voice",
@@ -236,6 +242,7 @@ test("listing edits propagate persona to clones but not adopter-owned state", as
     greeting: "hi v2",
     avatarUrl: null,
   });
+  assert.equal(res.ok, true);
 
   const clone = await store.getCompanionById(adopt.companion.id);
   assert.equal(clone!.name, "New Name");
@@ -258,18 +265,60 @@ test("reports dedupe per user, count up, flag blocks new adds; delist blocks add
   assert.equal(await store.reportListing(listing.id, "u-r1"), -1); // dup
   assert.equal(await store.reportListing(listing.id, "u-r2"), 2);
 
-  await store.flagListing(listing.id);
+  assert.equal(await store.flagListing(listing.id), true);
   const blocked = await store.adoptListing("u-r3", listing.id, 1, COOLDOWN);
   assert.equal(blocked.ok, false);
   if (!blocked.ok) assert.equal(blocked.reason, "delisted");
 
-  await store.delistListing(listing.id);
-  assert.equal((await store.listingById(listing.id))!.status, "delisted");
+  // Delist holds a flagged row (see the moderation-hold test) — use a
+  // separate active listing for the delist-blocks-adds check.
+  const creator2 = await awakenedCompanion(store, "u-c9", "Plain");
+  const plain = await makeListing(store, "u-c9", creator2.id, "Plain");
+  assert.equal(await store.delistListing(plain.id), true);
+  assert.equal((await store.listingById(plain.id))!.status, "delisted");
+});
+
+test("a flagged listing is a moderation hold — delist/relist/republish can't launder it", async () => {
+  const { store } = await freshStore();
+  const creator = await awakenedCompanion(store, "u-flag", "Flagged");
+  const listing = await makeListing(store, "u-flag", creator.id, "Flagged");
+
+  assert.equal(await store.flagListing(listing.id), true);
+  // Re-flagging an already-flagged row is a no-op, not a flip.
+  assert.equal(await store.flagListing(listing.id), false);
+
+  // The creator cannot delist a flagged row — delisting would erase the
+  // flag, and relist/republish would then revive the listing as 'active'.
+  assert.equal(await store.delistListing(listing.id), false);
+  assert.equal((await store.listingById(listing.id))!.status, "flagged");
+
+  const relisted = await store.relistListing(listing.id, "u-flag", 10);
+  assert.equal(relisted.ok, false);
+  if (!relisted.ok) assert.equal(relisted.reason, "not_delisted");
+
+  // Republish saves the persona edits but keeps the flag — no fresh life.
+  const repub = await store.upsertListing("u-flag", creator.id, {
+    name: "Flagged v2", tagline: "t", voicePersona: "v", coreTraits: ["x"],
+    ownerDynamic: "d", backstory: "b", greeting: "g", avatarUrl: null,
+  }, { maxListings: 10 });
+  assert.equal(repub.ok, true);
+  const after = await store.listingById(listing.id);
+  assert.equal(after!.status, "flagged");
+  assert.equal(after!.name, "Flagged v2");
+
+  // flagListing can't flip a delisted row back to flagged either.
+  const creator2 = await awakenedCompanion(store, "u-flag2", "Plain");
+  const plain = await makeListing(store, "u-flag2", creator2.id, "Plain");
+  assert.equal(await store.delistListing(plain.id), true);
+  assert.equal(await store.flagListing(plain.id), false);
+  const gone = await store.adoptListing("u-anyone", plain.id, 1, COOLDOWN);
+  assert.equal(gone.ok, false);
+  if (!gone.ok) assert.equal(gone.reason, "delisted");
 });
 
 test("freehand listings: createListing works without an awakened source, adopts cleanly", async () => {
   const { store } = await freshStore();
-  const listing = await store.createListing("u-freehand", {
+  const res = await store.createListing("u-freehand", {
     name: "Standalone",
     tagline: "no awakened backing",
     voicePersona: "oddly polite",
@@ -279,6 +328,9 @@ test("freehand listings: createListing works without an awakened source, adopts 
     greeting: "hello, adopter.",
     avatarUrl: null,
   });
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  const listing = res.listing;
   assert.equal(listing.sourceCompanionId, null);
   assert.equal(listing.version, 1);
 
@@ -313,10 +365,13 @@ test("activeListingCount/listMyListings drive the publish cap; delist frees the 
 
 test("updateListing edits a freehand listing, bumps version, propagates to clones", async () => {
   const { store } = await freshStore();
-  const listing = await store.createListing("u-editor", {
+  const res = await store.createListing("u-editor", {
     name: "Before", tagline: "t", voicePersona: "v1", coreTraits: [],
     ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
   });
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  const listing = res.listing;
   const adopt = await store.adoptListing("u-ad-editor", listing.id, 1, COOLDOWN);
   assert.equal(adopt.ok, true);
   if (!adopt.ok) return;
@@ -349,8 +404,12 @@ test("republish revives a delisted listing but never clears a moderation flag", 
   const republished = await makeListing(store, "u-flagged", awakened.id, "Flaggy");
   assert.equal(republished.status, "flagged", "republish must not launder a flag");
 
-  await store.delistListing(listing.id);
-  const revived = await makeListing(store, "u-flagged", awakened.id, "Flaggy");
+  // A flagged row can't delist (moderation hold), so the revive half uses a
+  // second listing.
+  const awakened2 = await awakenedCompanion(store, "u-revive", "Rev");
+  const delisted = await makeListing(store, "u-revive", awakened2.id, "Rev");
+  assert.equal(await store.delistListing(delisted.id), true);
+  const revived = await makeListing(store, "u-revive", awakened2.id, "Rev");
   assert.equal(revived.status, "active", "republish revives a delisted listing");
 });
 
@@ -370,4 +429,137 @@ test("markDmIntroduced stamps the adoption; roster lists awakened then adopted",
 
   const roster = await store.listCompanionsForUser("u-i");
   assert.deepEqual(roster.map(c => c.id), [awakened.id, adopt.companion.id]);
+});
+
+test("re-adoption after cooldown still consumes the free slot cap", async () => {
+  const { store } = await freshStore();
+  const c1 = await awakenedCompanion(store, "u-cap1", "A");
+  const listingA = await makeListing(store, "u-cap1", c1.id, "A");
+  const c2 = await awakenedCompanion(store, "u-cap2", "B");
+  const listingB = await makeListing(store, "u-cap2", c2.id, "B");
+
+  // Free user (1 slot): adopt A, drop A, adopt B — all legal.
+  const first = await store.adoptListing("u-cycler", listingA.id, 1, COOLDOWN);
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  await store.dropAdoption("u-cycler", first.companion.id, COOLDOWN);
+  const second = await store.adoptListing("u-cycler", listingB.id, 1, COOLDOWN);
+  assert.equal(second.ok, true);
+  assert.equal(await store.activeAdoptionCount("u-cycler"), 1);
+
+  // Once A's cooldown expires, re-adopting it must respect the cap — the
+  // slot is already held by B.
+  await sql`UPDATE companion_adoptions SET cooldown_until = NOW() - INTERVAL '1 minute' WHERE user_id = 'u-cycler'`;
+  const reAdopt = await store.adoptListing("u-cycler", listingA.id, 1, COOLDOWN);
+  assert.equal(reAdopt.ok, false);
+  if (!reAdopt.ok) assert.equal(reAdopt.reason, "cap");
+  assert.equal(await store.activeAdoptionCount("u-cycler"), 1);
+
+  // Dropping B frees the slot — then re-adopting A works and reuses the clone.
+  if (second.ok) await store.dropAdoption("u-cycler", second.companion.id, COOLDOWN);
+  const freed = await store.adoptListing("u-cycler", listingA.id, 1, COOLDOWN);
+  assert.equal(freed.ok, true);
+  if (freed.ok) assert.equal(freed.companion.id, first.companion.id);
+});
+
+test("parallel adoptions on different listings can't both beat the cap", async () => {
+  const { store } = await freshStore();
+  const c1 = await awakenedCompanion(store, "u-par1", "A");
+  const listingA = await makeListing(store, "u-par1", c1.id, "A");
+  const c2 = await awakenedCompanion(store, "u-par2", "B");
+  const listingB = await makeListing(store, "u-par2", c2.id, "B");
+
+  // Two simultaneous Adds on different listings — the per-user advisory lock
+  // serializes them, so exactly one wins the single free slot.
+  const [r1, r2] = await Promise.all([
+    store.adoptListing("u-racer", listingA.id, 1, COOLDOWN),
+    store.adoptListing("u-racer", listingB.id, 1, COOLDOWN),
+  ]);
+  const oks = [r1, r2].filter(r => r.ok);
+  const caps = [r1, r2].filter(r => !r.ok && r.reason === "cap");
+  assert.equal(oks.length, 1);
+  assert.equal(caps.length, 1);
+  assert.equal(await store.activeAdoptionCount("u-racer"), 1);
+});
+
+test("add_count only counts fresh adoptions, not re-adopt cycles", async () => {
+  const { store } = await freshStore();
+  const creator = await awakenedCompanion(store, "u-cnt", "Pop");
+  const listing = await makeListing(store, "u-cnt", creator.id, "Pop");
+
+  const adopt = await store.adoptListing("u-cnt-a", listing.id, 5, COOLDOWN);
+  assert.equal(adopt.ok, true);
+  if (!adopt.ok) return;
+  await store.dropAdoption("u-cnt-a", adopt.companion.id, COOLDOWN);
+  await sql`UPDATE companion_adoptions SET cooldown_until = NOW() - INTERVAL '1 minute' WHERE user_id = 'u-cnt-a'`;
+  const reAdopt = await store.adoptListing("u-cnt-a", listing.id, 5, COOLDOWN);
+  assert.equal(reAdopt.ok, true);
+
+  assert.equal((await store.listingById(listing.id))!.addCount, 1);
+});
+
+test("listing cap: create/upsert/relist enforce it atomically inside the write", async () => {
+  const { store } = await freshStore();
+  const spec = (name: string) => ({
+    name, tagline: "t", voicePersona: "v", coreTraits: [] as string[],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+  });
+
+  // Two freehand creates fill the 2-slot cap; a third is refused.
+  const a = await store.createListing("u-lcap", spec("A"), 2);
+  const b = await store.createListing("u-lcap", spec("B"), 2);
+  assert.equal(a.ok, true);
+  assert.equal(b.ok, true);
+  const third = await store.createListing("u-lcap", spec("C"), 2);
+  assert.equal(third.ok, false);
+  if (!third.ok) assert.equal(third.reason, "cap");
+
+  // Awakened-backed publish also respects it — then delist frees a slot.
+  const awakened = await awakenedCompanion(store, "u-lcap", "Backed");
+  const blocked = await store.upsertListing("u-lcap", awakened.id, spec("Backed"), { maxListings: 2 });
+  assert.equal(blocked.ok, false);
+  if (!a.ok || !b.ok) return;
+  await store.delistListing(a.listing.id);
+  const backed = await store.upsertListing("u-lcap", awakened.id, spec("Backed"), { maxListings: 2 });
+  assert.equal(backed.ok, true);
+  if (!backed.ok) return;
+  assert.equal(backed.listing.status, "active");
+
+  // Delisting that backed listing + a fresh create re-fills the cap; the
+  // republish (revive) is now refused — it would push the live count to 3.
+  await store.delistListing(backed.listing.id);
+  const refill = await store.createListing("u-lcap", spec("D"), 2);
+  assert.equal(refill.ok, true);
+  const revive = await store.upsertListing("u-lcap", awakened.id, spec("Backed v2"), { maxListings: 2 });
+  assert.equal(revive.ok, false);
+  if (!revive.ok) assert.equal(revive.reason, "cap");
+
+  // But relisting works once a slot frees — and only from 'delisted'.
+  if (!refill.ok) return;
+  await store.delistListing(refill.listing.id);
+  const relisted = await store.relistListing(backed.listing.id, "u-lcap", 2);
+  assert.equal(relisted.ok, true);
+  if (relisted.ok) assert.equal(relisted.listing.status, "active");
+
+  const again = await store.relistListing(backed.listing.id, "u-lcap", 2);
+  assert.equal(again.ok, false);
+  if (!again.ok) assert.equal(again.reason, "not_delisted");
+  const foreign = await store.relistListing(backed.listing.id, "u-stranger", 2);
+  assert.equal(foreign.ok, false);
+  if (!foreign.ok) assert.equal(foreign.reason, "not_found");
+});
+
+test("parallel creates can't both beat the listing cap", async () => {
+  const { store } = await freshStore();
+  const spec = (name: string) => ({
+    name, tagline: "t", voicePersona: "v", coreTraits: [] as string[],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+  });
+  const [r1, r2] = await Promise.all([
+    store.createListing("u-pc", spec("A"), 1),
+    store.createListing("u-pc", spec("B"), 1),
+  ]);
+  assert.equal([r1, r2].filter(r => r.ok).length, 1);
+  assert.equal([r1, r2].filter(r => !r.ok && r.reason === "cap").length, 1);
+  assert.equal(await store.activeListingCount("u-pc"), 1);
 });
