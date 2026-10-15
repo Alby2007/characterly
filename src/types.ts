@@ -273,6 +273,8 @@ export type PairContext = {
 
 export type OnboardingState = "onboarding" | "active";
 
+export type CompanionKind = "awakened" | "adopted";
+
 export type Companion = {
   id: number;
   ownerUserId: string;
@@ -284,8 +286,52 @@ export type Companion = {
   backstory: string;
   onboardingState: OnboardingState;
   onboardingTurns: number;
+  /** 'awakened' = the one permanent companion per account (uniqueness enforced
+   *  by a partial index); 'adopted' = a marketplace clone owned by the adopter
+   *  and synced from its listing. */
+  kind: CompanionKind;
+  /** For adopted companions: the marketplace listing they were cloned from. */
+  adoptedFromListingId: number | null;
+  /** Persona version the adopted clone was last synced to. */
+  listingVersion: number;
   createdAt: string;
   updatedAt: string;
+};
+
+/** A marketplace listing — a publishable persona projected from a creator's
+ * awakened companion. Editable + versioned; adopters clone it into their own
+ * companions row, so creator edits propagate without ever mutating the
+ * creator's (permanently locked) awakened bond. */
+export type CompanionListing = {
+  id: number;
+  creatorUserId: string;
+  sourceCompanionId: number;
+  name: string;
+  tagline: string;
+  voicePersona: string;
+  coreTraits: string[];
+  ownerDynamic: string;
+  backstory: string;
+  greeting: string;
+  avatarUrl: string | null;
+  forumThreadId: string | null;
+  version: number;
+  status: "active" | "flagged" | "delisted";
+  reportCount: number;
+  addCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CompanionAdoption = {
+  id: number;
+  userId: string;
+  listingId: number;
+  companionId: number;
+  adoptedAt: string;
+  droppedAt: string | null;
+  cooldownUntil: string | null;
+  dmIntroducedAt: string | null;
 };
 
 export type CompanionSpec = {

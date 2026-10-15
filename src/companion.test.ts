@@ -52,6 +52,9 @@ function makeCompanion(id: number, ownerUserId: string, name: string): GuildComp
     backstory: "Met in a late-night chat",
     onboardingState: "active",
     onboardingTurns: 3,
+    kind: "awakened",
+    adoptedFromListingId: null,
+    listingVersion: 0,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     guildId: "g1",
@@ -287,6 +290,15 @@ test("/companion commands and cross-context bridges enforce privacy boundaries a
 
   const fakeStore = {
     getCompanionByOwner: async (uid: string) => (uid === "u-alice" ? activeComp : null),
+    listCompanionsForUser: async (uid: string) => (uid === "u-alice" ? [activeComp] : []),
+    resolveDmCompanion: async (uid: string) => (uid === "u-alice" ? activeComp : null),
+    adoptionForCompanion: async () => null,
+    listingForCompanion: async () => null,
+    listingById: async () => null,
+    setActiveDmCompanion: async () => {},
+    dropAdoption: async () => null,
+    creditsSupported: false,
+    accountForDiscordUser: async () => null,
     summonCompanion: async (gId: string) => { summonedGuilds.add(gId); },
     dismissCompanion: async (gId: string) => summonedGuilds.delete(gId),
     listGuildCompanions: async (gId: string) => (summonedGuilds.has(gId) ? [activeComp] : []),
@@ -575,6 +587,9 @@ test("onboarding UX: bare greeting guard, welcome/draft/awakened cards, proactiv
     },
     listCompanionGuilds: async () => summonedInGuilds,
     summonCompanion: async (gId: string) => { summonedInGuilds.push(gId); },
+    listCompanionsForUser: async () => (stateComp ? [stateComp] : []),
+    resolveDmCompanion: async () => stateComp,
+    adoptionForCompanion: async () => null,
   } as unknown as MemoryStore;
 
   const unawakenedSummonIx = {

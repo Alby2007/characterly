@@ -490,7 +490,8 @@ test("migration v29 creates user_bot_settings outside the auth gate and rolls ba
     `;
     assert.deepEqual(
       cols.map(c => c.column_name).sort(),
-      ["c2c_enabled", "discord_user_id", "low_credit_alerts", "updated_at"],
+      // v34 adds active_dm_companion_id on top of the v29 columns.
+      ["active_dm_companion_id", "c2c_enabled", "discord_user_id", "low_credit_alerts", "updated_at"],
     );
     const rls = await sql<Array<{ relrowsecurity: boolean }>>`
       SELECT relrowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace

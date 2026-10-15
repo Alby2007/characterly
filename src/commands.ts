@@ -11,7 +11,7 @@ import { runProfileBuild, PROFILE_BUILD_COOLDOWN_MS } from "./profile-build.js";
 import { runServerIngest } from "./server-ingest.js";
 import { pauseGuildClaims, resumeGuildClaims, waitForGuildIdle } from "./jobs.js";
 import { inc, metricsSnapshot } from "./metrics.js";
-import type { Companion, CompanionSpec, MessageEvent } from "./types.js";
+import type { Companion, CompanionListing, CompanionSpec, MessageEvent } from "./types.js";
 import { config } from "./config.js";
 
 export const ONBOARDING_ARCHETYPES: Record<
@@ -377,6 +377,169 @@ export function buildCompanionEditModal(existing: Companion | null): ModalBuilde
   return modal;
 }
 
+// ── Marketplace ──────────────────────────────────────────────────────────────
+
+export function buildPublishModal(companion: Companion, listing: CompanionListing | null): ModalBuilder {
+  const modal = new ModalBuilder()
+    .setCustomId(`market_publish:${companion.id}`)
+    .setTitle(listing ? "Update Marketplace Listing" : "Publish to Marketplace");
+
+  const nameInput = new TextInputBuilder()
+    .setCustomId("listing-name")
+    .setLabel("Display name")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(64)
+    .setValue((listing?.name || companion.name).slice(0, 64));
+  const taglineInput = new TextInputBuilder()
+    .setCustomId("listing-tagline")
+    .setLabel("Tagline (shown on the listing card)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(120)
+    .setPlaceholder("e.g. A vampire who remembers every reader");
+  if (listing?.tagline) taglineInput.setValue(listing.tagline.slice(0, 120));
+  const greetingInput = new TextInputBuilder()
+    .setCustomId("listing-greeting")
+    .setLabel("Greeting — first DM the character sends")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true)
+    .setMaxLength(1000)
+    .setPlaceholder("The character opens the conversation, in their voice");
+  if (listing?.greeting) greetingInput.setValue(listing.greeting.slice(0, 1000));
+
+  modal.addComponents(
+    new ActionRowBuilder<TextInputBuilder>().addComponents(nameInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(taglineInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(greetingInput),
+  );
+  return modal;
+}
+
+export function buildMarketPersonaModal(listing: CompanionListing): ModalBuilder {
+  const modal = new ModalBuilder()
+    .setCustomId(`market_edit:${listing.id}`)
+    .setTitle("Edit Listing Persona");
+  const nameInput = new TextInputBuilder()
+    .setCustomId("companion-name").setLabel("Name").setStyle(TextInputStyle.Short)
+    .setRequired(true).setMaxLength(64).setValue(listing.name.slice(0, 64));
+  const vibeInput = new TextInputBuilder()
+    .setCustomId("voice-persona").setLabel("Voice & Vibe").setStyle(TextInputStyle.Paragraph)
+    .setRequired(true).setMaxLength(500).setValue(listing.voicePersona.slice(0, 500));
+  const traitsInput = new TextInputBuilder()
+    .setCustomId("core-traits").setLabel("Core Traits (comma-separated)").setStyle(TextInputStyle.Short)
+    .setRequired(false).setMaxLength(200).setValue(listing.coreTraits.join(", ").slice(0, 200));
+  const dynamicInput = new TextInputBuilder()
+    .setCustomId("owner-dynamic").setLabel("Bond with adopter").setStyle(TextInputStyle.Short)
+    .setRequired(true).setMaxLength(300).setValue(listing.ownerDynamic.slice(0, 300));
+  const backstoryInput = new TextInputBuilder()
+    .setCustomId("backstory").setLabel("Backstory / Lore").setStyle(TextInputStyle.Paragraph)
+    .setRequired(false).setMaxLength(600).setValue(listing.backstory.slice(0, 600));
+  modal.addComponents(
+    new ActionRowBuilder<TextInputBuilder>().addComponents(nameInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(vibeInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(traitsInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(dynamicInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(backstoryInput),
+  );
+  return modal;
+}
+
+export function buildListingCard(listing: CompanionListing, creatorName: string): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setTitle(listing.name)
+    .setDescription(listing.tagline || "A companion up for adoption")
+    .addFields(
+      { name: "Voice & Vibe", value: listing.voicePersona || "—" },
+      { name: "Traits", value: listing.coreTraits.length ? listing.coreTraits.join(", ") : "—", inline: true },
+      { name: "Adopted by", value: `${listing.addCount} user${listing.addCount === 1 ? "" : "s"}`, inline: true },
+    )
+    .setFooter({ text: `by ${creatorName} · Characterly Marketplace · v${listing.version}` });
+  if (listing.avatarUrl) embed.setThumbnail(listing.avatarUrl);
+  return embed;
+}
+
+export function buildListingComponents(listingId: number): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(`market:add:${listingId}`).setLabel("Add to your companions").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`market:report:${listingId}`).setLabel("Report").setStyle(ButtonStyle.Secondary),
+  );
+}
+
+/** DM the adopted companion's greeting; returns whether it actually landed —
+ *  server summoning unlocks only on a successful send. */
+export async function sendAdoptionGreeting(user: { createDM(): Promise<{ send(o: object): Promise<unknown> }> }, companion: Companion, greeting: string): Promise<boolean> {
+  try {
+    const dm = await user.createDM();
+    const embed = new EmbedBuilder()
+      .setTitle(companion.name)
+      .setDescription(greeting || `*${companion.name} joins you.*`);
+    if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
+    await dm.send({ embeds: [embed] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function summonPickedCompanion(interaction: ChatInputCommandInteraction | ButtonInteraction, companion: Companion, store: MemoryStore) {
+  if (!interaction.guildId) {
+    return interaction.reply({ content: "That can only be done inside a Discord server.", ephemeral: true });
+  }
+  // Mocks in tests may not implement isButton — treat absence as a command.
+  const isButton = typeof (interaction as ButtonInteraction).isButton === "function" && (interaction as ButtonInteraction).isButton();
+  if (companion.kind === "adopted") {
+    const adoption = await store.adoptionForCompanion(companion.id);
+    if (adoption && !adoption.dmIntroducedAt) {
+      const msg =
+        `**${companion.name}** hasn't introduced themselves yet — open your DMs with me and they'll say hello. ` +
+        `After that first introduction you can summon them into servers.`;
+      if (isButton) return (interaction as ButtonInteraction).update({ content: msg, components: [] });
+      return interaction.reply({ content: msg, ephemeral: true });
+    }
+  }
+  await store.summonCompanion(interaction.guildId, companion.id, interaction.user.id, interaction.user.username);
+  await sendCompanionSystemMessage(
+    (interaction as { channel?: unknown }).channel ?? (interaction as { guild?: unknown }).guild,
+    companion,
+    interaction.user.username,
+    "joined",
+  );
+  const embed = new EmbedBuilder()
+    .setTitle(`${companion.name} joined the server`)
+    .setDescription(
+      `**${companion.name}** (${interaction.user.username}'s companion) is now hanging out in this server.\n\n` +
+      `**Vibe:** ${companion.voicePersona || "Observant and candid"}\n` +
+      `**Traits:** ${companion.coreTraits.length ? companion.coreTraits.join(", ") : "—"}\n` +
+      `**Bond with ${interaction.user.username}:** ${companion.ownerDynamic || "Close confidant"}`,
+    );
+  if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
+  if (isButton) return (interaction as ButtonInteraction).update({ content: "Summoned.", embeds: [embed], components: [] });
+  return interaction.reply({ ephemeral: true, embeds: [embed] });
+}
+
+export async function dismissPickedCompanion(interaction: ChatInputCommandInteraction | ButtonInteraction, companion: Companion, store: MemoryStore) {
+  if (!interaction.guildId) {
+    return interaction.reply({ content: "That can only be done inside a Discord server.", ephemeral: true });
+  }
+  const removed = await store.dismissCompanion(interaction.guildId, companion.id);
+  if (removed) {
+    await sendCompanionSystemMessage(
+      (interaction as { channel?: unknown }).channel ?? (interaction as { guild?: unknown }).guild,
+      companion,
+      interaction.user.username,
+      "left",
+    );
+  }
+  const content = removed
+    ? `**${companion.name}** has stepped out of this server. You can bring them back anytime with \`/companion action:summon\`.`
+    : `**${companion.name}** wasn't active in this server.`;
+  if (typeof (interaction as ButtonInteraction).isButton === "function" && (interaction as ButtonInteraction).isButton()) {
+    return (interaction as ButtonInteraction).update({ content, components: [] });
+  }
+  return interaction.reply({ content, ephemeral: true });
+}
+
 async function promptUnawakenedCompanion(
   interaction: { user: { id: string; username: string; send?: (payload: any) => Promise<any> }; reply: (payload: any) => Promise<any> },
   prefixText: string,
@@ -476,6 +639,10 @@ export const commandDefinitions = [
       { name: "key — Connect or update your personal AI API key", value: "key" },
       { name: "status — Check your personal API key, DM usage, and active servers", value: "status" },
       { name: "avatar — Set your companion's avatar URL", value: "avatar" },
+      { name: "publish — List your companion in the hub server's marketplace", value: "publish" },
+      { name: "unpublish — Remove your companion from the marketplace", value: "unpublish" },
+      { name: "switch — Choose which companion answers in your DMs", value: "switch" },
+      { name: "drop — Give up an adopted companion (12h re-adopt cooldown)", value: "drop" },
     ] },
     { name: "avatar_url", description: "Public http(s) image URL when action is avatar", type: 3, required: false },
     { name: "user", description: "Member whose companion to inspect (card) or remove (kick)", type: 6, required: false }
@@ -551,55 +718,51 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       if (!interaction.guildId) {
         return interaction.reply({ content: "Run `/companion action:summon` inside the Discord server where you want to bring your companion.", ephemeral: true });
       }
-      const companion = await store.getCompanionByOwner(interaction.user.id);
-      if (!companion || companion.onboardingState !== "active") {
+      const roster = await store.listCompanionsForUser(interaction.user.id);
+      const active = roster.filter(c => c.onboardingState === "active");
+      if (!active.length) {
         return promptUnawakenedCompanion(
           interaction,
           "You haven't awakened your companion yet!",
           brainFor,
         );
       }
-      await store.summonCompanion(interaction.guildId, companion.id, interaction.user.id, interaction.user.username);
-      await sendCompanionSystemMessage(
-        (interaction as { channel?: unknown; guild?: unknown }).channel ?? (interaction as { guild?: unknown }).guild,
-        companion,
-        interaction.user.username,
-        "joined",
+      if (active.length === 1) return summonPickedCompanion(interaction, active[0], store);
+      const buttons = active.slice(0, 5).map((c, i) =>
+        new ButtonBuilder()
+          .setCustomId(`market:summon:${c.id}`)
+          .setLabel(c.name || `Companion ${i + 1}`)
+          .setStyle(ButtonStyle.Primary),
       );
-      const embed = new EmbedBuilder()
-        .setTitle(`${companion.name} joined the server`)
-        .setDescription(
-          `**${companion.name}** (${interaction.user.username}'s companion) is now hanging out in this server.\n\n` +
-          `**Vibe:** ${companion.voicePersona || "Observant and candid"}\n` +
-          `**Traits:** ${companion.coreTraits.length ? companion.coreTraits.join(", ") : "—"}\n` +
-          `**Bond with ${interaction.user.username}:** ${companion.ownerDynamic || "Close confidant"}`,
-        );
-      if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
-      return interaction.reply({ ephemeral: true, embeds: [embed] });
+      return interaction.reply({
+        ephemeral: true,
+        content: "Which companion do you want to summon here?",
+        components: [new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons)],
+      });
     }
     if (action === "dismiss") {
       if (!interaction.guildId) {
         return interaction.reply({ content: "Run `/companion action:dismiss` inside the Discord server you want your companion to leave.", ephemeral: true });
       }
-      const companion = await store.getCompanionByOwner(interaction.user.id);
-      if (!companion) {
+      const roster = await store.listCompanionsForUser(interaction.user.id);
+      const active = roster.filter(c => c.onboardingState === "active");
+      if (!active.length) {
         return interaction.reply({ content: "You don't have a companion to dismiss.", ephemeral: true });
       }
-      const removed = await store.dismissCompanion(interaction.guildId, companion.id);
-      if (removed) {
-        await sendCompanionSystemMessage(
-          (interaction as { channel?: unknown; guild?: unknown }).channel ?? (interaction as { guild?: unknown }).guild,
-          companion,
-          interaction.user.username,
-          "left",
+      if (active.length > 1) {
+        const buttons = active.slice(0, 5).map((c, i) =>
+          new ButtonBuilder()
+            .setCustomId(`market:dismiss:${c.id}`)
+            .setLabel(c.name || `Companion ${i + 1}`)
+            .setStyle(ButtonStyle.Danger),
         );
+        return interaction.reply({
+          ephemeral: true,
+          content: "Which companion should step out of this server?",
+          components: [new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons)],
+        });
       }
-      return interaction.reply({
-        content: removed
-          ? `**${companion.name}** has stepped out of this server. You can bring them back anytime with \`/companion action:summon\`.`
-          : `**${companion.name}** wasn't active in this server.`,
-        ephemeral: true,
-      });
+      return dismissPickedCompanion(interaction, active[0], store);
     }
     if (action === "edit" || action === "reset") {
       const existing = await store.getCompanionByOwner(interaction.user.id);
@@ -654,6 +817,15 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
           { name: "Relationships here", value: relLines.length ? relLines.join("\n") : "No established relationships in this scope yet.", inline: false },
         )
         .setFooter({ text: "Permanently bound companion (1 per account)" });
+      const roster = await store.listCompanionsForUser(targetUser.id);
+      const adopted = roster.filter(c => c.kind === "adopted");
+      if (adopted.length) {
+        embed.addFields({
+          name: "Adopted companions",
+          value: adopted.map(c => `• **${c.name}**`).join("\n"),
+          inline: false,
+        });
+      }
       if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
       return interaction.reply({ ephemeral: true, embeds: [embed] });
     }
@@ -710,37 +882,44 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
           ephemeral: true,
         });
       }
-      const companion = await store.getCompanionByOwner(targetUser.id);
-      if (!companion) {
+      const roster = await store.listCompanionsForUser(targetUser.id);
+      if (!roster.length) {
         return interaction.reply({
           content: `${targetUser.username} doesn't have a companion.`,
           ephemeral: true,
         });
       }
-      const removed = await store.dismissCompanion(interaction.guildId, companion.id);
-      if (removed) {
-        await sendCompanionSystemMessage(
-          (interaction as { channel?: unknown; guild?: unknown }).channel ?? (interaction as { guild?: unknown }).guild,
-          companion,
-          targetUser.username,
-          "left",
-        );
+      const removedNames: string[] = [];
+      for (const companion of roster) {
+        const removed = await store.dismissCompanion(interaction.guildId, companion.id);
+        if (removed) {
+          removedNames.push(companion.name);
+          await sendCompanionSystemMessage(
+            (interaction as { channel?: unknown; guild?: unknown }).channel ?? (interaction as { guild?: unknown }).guild,
+            companion,
+            targetUser.username,
+            "left",
+          );
+        }
       }
       return interaction.reply({
-        content: removed
-          ? `Removed **${companion.name}** (${targetUser.username}'s companion) from this server.`
-          : `**${companion.name}** wasn't active in this server.`,
+        content: removedNames.length
+          ? `Removed ${removedNames.map(n => `**${n}**`).join(", ")} (${targetUser.username}'s companion${removedNames.length > 1 ? "s" : ""}) from this server.`
+          : `**${targetUser.username}**'s companions weren't active in this server.`,
         ephemeral: true,
       });
     }
     if (action === "status") {
       const dmScope = `dm:${interaction.user.id}`;
-      const [companion, keyRow, dmUsage, account] = await Promise.all([
+      const [companion, keyRow, dmUsage, account, dmResolved] = await Promise.all([
         store.getCompanionByOwner(interaction.user.id),
         typeof store.getGuildKey === "function" ? store.getGuildKey(dmScope) : Promise.resolve(null),
         typeof store.usageToday === "function" ? store.usageToday(dmScope) : Promise.resolve(0),
         store.creditsSupported ? store.accountForDiscordUser(interaction.user.id).catch(() => null) : Promise.resolve(null),
+        store.resolveDmCompanion(interaction.user.id).catch(() => null),
       ]);
+      const adoptedRoster = (await store.listCompanionsForUser(interaction.user.id)).filter(c => c.kind === "adopted");
+      const dmPointer = dmResolved;
       const guildIds =
         companion && typeof store.listCompanionGuilds === "function"
           ? await store.listCompanionGuilds(companion.id)
@@ -763,6 +942,13 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         .setTitle("Your Characterly Status")
         .addFields(
           { name: "Companion (1 per Account)", value: compStatus, inline: false },
+          {
+            name: "Adopted Companions",
+            value: adoptedRoster.length
+              ? adoptedRoster.map(c => `• **${c.name}**${c.id === dmPointer?.id ? " *(answering DMs)*" : ""}`).join("\n")
+              : `None — browse the marketplace${account?.plan === "premium" ? " (unlimited slots)" : ` (${config.freeAdoptionSlots} slot)`}`,
+            inline: false,
+          },
           { name: "Personal AI Key", value: keyStatus, inline: false },
           { name: "Active Servers", value: serversStatus, inline: true },
           {
@@ -804,6 +990,80 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         return interaction.reply({ content: "You haven't created a companion yet — send me a DM first!", ephemeral: true });
       }
       return interaction.reply({ content: `Updated **${updated.name || "your companion"}**'s avatar.`, ephemeral: true });
+    }
+    if (action === "publish") {
+      if (!config.marketplaceChannelId) {
+        return interaction.reply({ content: "The marketplace isn't configured yet — check back soon.", ephemeral: true });
+      }
+      const companion = await store.getCompanionByOwner(interaction.user.id);
+      if (!companion || companion.onboardingState !== "active") {
+        return promptUnawakenedCompanion(interaction, "You need an awakened companion before you can publish them.", brainFor);
+      }
+      const account = await store.accountForDiscordUser(interaction.user.id).catch(() => null);
+      if (!account) {
+        return interaction.reply({
+          content: `Publishing requires a linked Characterly account — create one at ${config.siteUrl} and run \`/link\` first.`,
+          ephemeral: true,
+        });
+      }
+      if (typeof interaction.showModal !== "function") {
+        return interaction.reply({ content: "Publishing requires modal support.", ephemeral: true });
+      }
+      const listing = await store.listingForCompanion(companion.id);
+      return interaction.showModal(buildPublishModal(companion, listing));
+    }
+    if (action === "unpublish") {
+      const companion = await store.getCompanionByOwner(interaction.user.id);
+      const listing = companion ? await store.listingForCompanion(companion.id) : null;
+      if (!listing) {
+        return interaction.reply({ content: "You don't have a published listing.", ephemeral: true });
+      }
+      await store.delistListing(listing.id);
+      if (listing.forumThreadId) {
+        const channel = await interaction.client.channels.fetch(config.marketplaceChannelId!).catch(() => null);
+        const thread = channel && channel.isTextBased() && "threads" in channel
+          ? await (channel as { threads: { fetch: (id: string) => Promise<{ setLocked(b: boolean): Promise<unknown>; setArchived(b: boolean): Promise<unknown> } | null> } }).threads.fetch(listing.forumThreadId).catch(() => null)
+          : null;
+        if (thread) await thread.setLocked(true).then(() => thread.setArchived(true)).catch(() => {});
+      }
+      return interaction.reply({ content: `**${listing.name}** has been removed from the marketplace.`, ephemeral: true });
+    }
+    if (action === "switch") {
+      const roster = await store.listCompanionsForUser(interaction.user.id);
+      const active = roster.filter(c => c.onboardingState === "active");
+      if (!active.length) {
+        return promptUnawakenedCompanion(interaction, "You haven't awakened your companion yet!", brainFor);
+      }
+      const current = await store.resolveDmCompanion(interaction.user.id);
+      const buttons = active.slice(0, 5).map((c, i) =>
+        new ButtonBuilder()
+          .setCustomId(`market:talk:${c.id}`)
+          .setLabel(c.name || `Companion ${i + 1}`)
+          .setStyle(c.id === current?.id ? ButtonStyle.Success : ButtonStyle.Primary),
+      );
+      return interaction.reply({
+        ephemeral: true,
+        content: "Who do you want answering your DMs? (green = current)",
+        components: [new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons)],
+      });
+    }
+    if (action === "drop") {
+      const roster = await store.listCompanionsForUser(interaction.user.id);
+      const adopted = roster.filter(c => c.kind === "adopted");
+      if (!adopted.length) {
+        return interaction.reply({ content: "You haven't adopted any companions — browse the marketplace to find one.", ephemeral: true });
+      }
+      const buttons = adopted.slice(0, 5).map((c, i) =>
+        new ButtonBuilder()
+          .setCustomId(`market:drop:${c.id}`)
+          .setLabel(c.name || `Companion ${i + 1}`)
+          .setStyle(ButtonStyle.Danger),
+      );
+      return interaction.reply({
+        ephemeral: true,
+        content: "Drop an adopted companion — you can't re-adopt the same one for 12 hours.",
+        components: [new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons)],
+      });
     }
   }
   if (interaction.commandName === "privacy") {
@@ -1297,6 +1557,98 @@ export async function handleCompanionModal(
   store: MemoryStore,
   invalidateLookups?: (scopeId: string) => void,
 ) {
+  // market_publish:<companionId> — create/republish the listing, then the bot
+  // posts the forum card itself so listings can't be faked.
+  if (interaction.customId.startsWith("market_publish:")) {
+    const companionId = Number(interaction.customId.slice("market_publish:".length));
+    const userId = interaction.user.id;
+    const companion = await store.getCompanionByOwner(userId);
+    if (!companion || companion.id !== companionId || companion.onboardingState !== "active") {
+      return interaction.reply({ content: "That companion isn't yours to publish.", ephemeral: true });
+    }
+    const account = await store.accountForDiscordUser(userId).catch(() => null);
+    if (!account) {
+      return interaction.reply({ content: `Publishing requires a linked account — create one at ${config.siteUrl} and run \`/link\`.`, ephemeral: true });
+    }
+    const channel = await interaction.client.channels.fetch(config.marketplaceChannelId!).catch(() => null);
+    if (!channel || channel.type !== ChannelType.GuildForum) {
+      return interaction.reply({ content: "The marketplace channel isn't reachable — tell a moderator to check MARKETPLACE_CHANNEL_ID.", ephemeral: true });
+    }
+    const name = interaction.fields.getTextInputValue("listing-name").trim().slice(0, 64) || companion.name;
+    const tagline = interaction.fields.getTextInputValue("listing-tagline").trim().slice(0, 120);
+    const greeting = interaction.fields.getTextInputValue("listing-greeting").trim().slice(0, 1000);
+    if (!tagline || !greeting) {
+      return interaction.reply({ content: "Tagline and greeting are both required.", ephemeral: true });
+    }
+    const existing = await store.listingForCompanion(companion.id);
+    const listing = await store.upsertListing(userId, companion.id, {
+      name,
+      tagline,
+      voicePersona: existing?.voicePersona ?? companion.voicePersona,
+      coreTraits: existing?.coreTraits ?? companion.coreTraits,
+      ownerDynamic: existing?.ownerDynamic ?? companion.ownerDynamic,
+      backstory: existing?.backstory ?? companion.backstory,
+      greeting,
+      avatarUrl: existing?.avatarUrl ?? companion.avatarUrl,
+    });
+    if (existing?.forumThreadId) {
+      const old = await channel.threads.fetch(existing.forumThreadId).catch(() => null);
+      if (old) await old.setLocked(true).then(() => old.setArchived(true)).catch(() => {});
+    }
+    const creatorName =
+      (interaction.user as { globalName?: string }).globalName ?? interaction.user.username ?? "a creator";
+    const thread = await channel.threads.create({
+      name: `${listing.name} — ${listing.tagline}`.slice(0, 100),
+      message: {
+        embeds: [buildListingCard(listing, creatorName)],
+        components: [buildListingComponents(listing.id)],
+      },
+    }).catch(() => null);
+    if (!thread) {
+      await store.delistListing(listing.id);
+      return interaction.reply({ content: "I couldn't create the forum post — check my permissions in the marketplace channel.", ephemeral: true });
+    }
+    await store.setListingThread(listing.id, thread.id);
+    inc("market.published");
+    const manageRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(`market:editmodal:${listing.id}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
+    );
+    return interaction.reply({
+      ephemeral: true,
+      content: `**${listing.name}** is live in <#${config.marketplaceChannelId}>! (v${listing.version}) — anyone can adopt them from the post.`,
+      components: [manageRow],
+    });
+  }
+
+  // market_edit:<listingId> — persona edit; bumps the version and propagates
+  // to every adopted clone (live reference, audit trail via persona versions).
+  if (interaction.customId.startsWith("market_edit:")) {
+    const listingId = Number(interaction.customId.slice("market_edit:".length));
+    const userId = interaction.user.id;
+    const listing = await store.listingById(listingId);
+    if (!listing || listing.creatorUserId !== userId) {
+      return interaction.reply({ content: "That's not your listing.", ephemeral: true });
+    }
+    const name = interaction.fields.getTextInputValue("companion-name").trim().slice(0, 64);
+    const voicePersona = interaction.fields.getTextInputValue("voice-persona").trim().slice(0, 500);
+    const rawTraits = interaction.fields.getTextInputValue("core-traits").trim();
+    const coreTraits = rawTraits ? rawTraits.split(",").map(t => t.trim()).filter(Boolean).slice(0, 8) : [];
+    const ownerDynamic = interaction.fields.getTextInputValue("owner-dynamic").trim().slice(0, 300);
+    const backstory = interaction.fields.getTextInputValue("backstory").trim().slice(0, 600);
+    if (!name || !voicePersona || !ownerDynamic) {
+      return interaction.reply({ content: "Name, Voice & Vibe, and Dynamic are all required.", ephemeral: true });
+    }
+    const updated = await store.upsertListing(userId, listing.sourceCompanionId, {
+      name, tagline: listing.tagline, voicePersona, coreTraits, ownerDynamic,
+      backstory, greeting: listing.greeting, avatarUrl: listing.avatarUrl,
+    });
+    inc("market.republished");
+    return interaction.reply({
+      ephemeral: true,
+      content: `**${updated.name}** updated to v${updated.version} — the change is live for all ${updated.addCount} adopter${updated.addCount === 1 ? "" : "s"}.`,
+    });
+  }
+
   if (interaction.customId !== "companion-edit") return;
   const userId = interaction.user.id;
   const ownerName =
@@ -1356,6 +1708,139 @@ export async function handleCompanionModal(
 export async function handleMemoryButton(interaction: ButtonInteraction, store: MemoryStore, brainFor?: BrainFor, evStore?: EventStore) {
   if (interaction.customId === "forget:cancel") return interaction.update({ content: "No memory was deleted.", components: [] });
   const parts = interaction.customId.split(":");
+
+  // market:{add|report|talk|summon|dismiss|drop|editmodal}:{id} — the companion
+  // marketplace. Add/Report live on public forum cards and stay put after the
+  // click; talk/summon/dismiss/drop are picker buttons on the caller's own
+  // ephemeral replies, so they replace the message. Ownership is always
+  // re-derived from the roster — the button ID alone authorizes nothing.
+  if (parts[0] === "market") {
+    const sub = parts[1];
+    const id = Number(parts[2]);
+    const userId = interaction.user.id;
+    if (!Number.isFinite(id)) return interaction.reply({ content: "That button is no longer valid.", ephemeral: true });
+
+    if (sub === "add") {
+      const listing = await store.listingById(id);
+      if (!listing || listing.status !== "active") {
+        return interaction.reply({ content: "That listing is no longer available.", ephemeral: true });
+      }
+      const account = store.creditsSupported
+        ? await store.accountForDiscordUser(userId).catch(() => null)
+        : null;
+      // Self-host lane has no billing → no adoption cap; hosted free = FREE_ADOPTION_SLOTS, premium uncapped.
+      const maxSlots = !store.creditsSupported || account?.plan === "premium"
+        ? Number.MAX_SAFE_INTEGER
+        : config.freeAdoptionSlots;
+      const res = await store.adoptListing(userId, id, maxSlots, config.adoptionCooldownMs);
+      if (!res.ok) {
+        const msg =
+          res.reason === "cap" ? `Free accounts can have ${config.freeAdoptionSlots} active adoption${config.freeAdoptionSlots === 1 ? "" : "s"} — drop one first, or go Premium for unlimited: ${config.siteUrl}/dashboard#billing`
+          : res.reason === "cooldown" ? `You dropped **${listing.name}** recently — you can adopt them again ${res.cooldownUntil ? `<t:${Math.floor(new Date(res.cooldownUntil).getTime() / 1000)}:R>` : "in about 12 hours"}.`
+          : res.reason === "own_listing" ? `**${listing.name}** is your own companion — they're already bound to you.`
+          : "That listing is no longer available.";
+        return interaction.reply({ content: msg, ephemeral: true });
+      }
+      await store.setActiveDmCompanion(userId, res.companion.id);
+      const greeted = await sendAdoptionGreeting(interaction.user, res.companion, listing.greeting);
+      if (greeted) await store.markDmIntroduced(res.adoption.id);
+      inc("market.adopted");
+      return interaction.reply({
+        ephemeral: true,
+        content:
+          `**${res.companion.name}** has joined your companions${res.reused ? " (re-adopted — your history with them continues)" : ""} — they'll answer your DMs now.` +
+          (greeted
+            ? " They've introduced themselves — check your DMs! Once introduced, `/companion action:summon` works in servers too."
+            : " I couldn't reach your DMs — open them once so they can introduce themselves (required before server summoning).") +
+          " `/companion action:switch` changes who's answering.",
+      });
+    }
+
+    if (sub === "report") {
+      const listing = await store.listingById(id);
+      if (!listing || listing.status !== "active") {
+        return interaction.reply({ content: "That listing is no longer available.", ephemeral: true });
+      }
+      if (listing.creatorUserId === userId) {
+        return interaction.reply({ content: "This is your own listing — use `/companion action:unpublish` to take it down.", ephemeral: true });
+      }
+      const count = await store.reportListing(id, userId);
+      if (count < 0) {
+        return interaction.reply({ content: "You've already reported this listing — the team has it.", ephemeral: true });
+      }
+      const flagged = count >= config.marketplaceReportFlagThreshold && listing.status === "active";
+      if (flagged) await store.flagListing(id);
+      if (config.marketplaceModChannelId) {
+        const modChannel = await interaction.client.channels.fetch(config.marketplaceModChannelId).catch(() => null);
+        if (modChannel?.isTextBased() && "send" in modChannel) {
+          await (modChannel as TextChannel).send(
+            `🚩 Listing report: **${listing.name}** (id ${listing.id}, creator <@${listing.creatorUserId}>) — ${count} report${count === 1 ? "" : "s"}${flagged ? " — **auto-flagged, new Adds blocked**" : ""}.`,
+          ).catch(() => {});
+        }
+      }
+      inc("market.reported");
+      return interaction.reply({ content: "Thanks — your report has been recorded and the listing flagged for review.", ephemeral: true });
+    }
+
+    if (sub === "talk") {
+      const roster = await store.listCompanionsForUser(userId);
+      const companion = roster.find(c => c.id === id);
+      if (!companion) {
+        return interaction.update({ content: "That companion isn't on your roster.", components: [] });
+      }
+      await store.setActiveDmCompanion(userId, companion.id);
+      let extra = "";
+      if (companion.kind === "adopted") {
+        const adoption = await store.adoptionForCompanion(companion.id);
+        if (adoption && !adoption.dmIntroducedAt) {
+          const listing = companion.adoptedFromListingId ? await store.listingById(companion.adoptedFromListingId) : null;
+          const greeted = await sendAdoptionGreeting(interaction.user, companion, listing?.greeting ?? "");
+          if (greeted) {
+            await store.markDmIntroduced(adoption.id);
+            extra = " They've just introduced themselves — check your DMs.";
+          } else {
+            extra = " Open your DMs once so they can introduce themselves (required before server summoning).";
+          }
+        }
+      }
+      return interaction.update({ content: `**${companion.name}** is answering your DMs now.${extra}`, components: [] });
+    }
+
+    if (sub === "summon" || sub === "dismiss") {
+      const roster = await store.listCompanionsForUser(userId);
+      const companion = roster.find(c => c.id === id);
+      if (!companion) {
+        return interaction.update({ content: "That companion isn't on your roster.", components: [] });
+      }
+      return sub === "summon"
+        ? summonPickedCompanion(interaction, companion, store)
+        : dismissPickedCompanion(interaction, companion, store);
+    }
+
+    if (sub === "drop") {
+      const dropped = await store.dropAdoption(userId, id, config.adoptionCooldownMs);
+      if (!dropped) {
+        return interaction.update({ content: "That adoption is no longer active.", components: [] });
+      }
+      inc("market.dropped");
+      return interaction.update({
+        content: `Dropped — you can't re-adopt this companion until <t:${Math.floor(new Date(dropped.cooldownUntil!).getTime() / 1000)}:R>. Your history with them is kept if you come back.`,
+        components: [],
+      });
+    }
+
+    if (sub === "editmodal") {
+      const listing = await store.listingById(id);
+      if (!listing || listing.creatorUserId !== userId) {
+        return interaction.reply({ content: "That's not your listing.", ephemeral: true });
+      }
+      if (typeof interaction.showModal !== "function") {
+        return interaction.reply({ content: "Editing requires modal support.", ephemeral: true });
+      }
+      return interaction.showModal(buildMarketPersonaModal(listing));
+    }
+    return;
+  }
 
   // serverbuild:{confirm|cancel}:{guildId}:{userId}:{channelId?} — the
   // /server-build consent gate. Same-user and ManageGuild are both re-checked:

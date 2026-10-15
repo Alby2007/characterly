@@ -67,6 +67,14 @@ const env = z.object({
   LOW_CREDIT_ALERT: z.coerce.number().int().min(0).default(5),
   // Cooldown between "link your account" prompts per unlinked user.
   LINK_PROMPT_COOLDOWN_MS: z.coerce.number().int().min(60_000).default(14_400_000),
+  // Companion marketplace (hub forum): publish target + report ping channel.
+  MARKETPLACE_CHANNEL_ID: z.string().optional(),
+  MARKETPLACE_MOD_CHANNEL_ID: z.string().optional(),
+  // Per-listing re-adopt cooldown after a drop (default 12h), free-tier active
+  // adoption cap (premium is uncapped), and reports needed to auto-flag.
+  ADOPTION_COOLDOWN_MS: z.coerce.number().int().min(3_600_000).default(43_200_000),
+  FREE_ADOPTION_SLOTS: z.coerce.number().int().min(0).default(1),
+  MARKETPLACE_REPORT_FLAG_THRESHOLD: z.coerce.number().int().min(1).default(3),
 }).parse(process.env);
 
 export const config = {
@@ -135,4 +143,9 @@ export const config = {
   hostedDailyLlmCap: env.HOSTED_DAILY_LLM_CAP,
   lowCreditAlert: env.LOW_CREDIT_ALERT,
   linkPromptCooldownMs: env.LINK_PROMPT_COOLDOWN_MS,
+  marketplaceChannelId: env.MARKETPLACE_CHANNEL_ID,
+  marketplaceModChannelId: env.MARKETPLACE_MOD_CHANNEL_ID,
+  adoptionCooldownMs: env.ADOPTION_COOLDOWN_MS,
+  freeAdoptionSlots: env.FREE_ADOPTION_SLOTS,
+  marketplaceReportFlagThreshold: env.MARKETPLACE_REPORT_FLAG_THRESHOLD,
 };

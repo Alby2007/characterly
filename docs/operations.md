@@ -114,6 +114,18 @@ SELECT kind, sum(delta) FROM credit_ledger
 
 Ops utilities (run via `npx tsx scripts/<name>.mjs` with env loaded): `maintain.mjs`, `build-profiles.mjs`, `verify-memories.mjs`, `contest-sweep.mjs`, `backfill-relationships.mjs`, `purge-nonopted.mjs` (**destructive — `PURGE_CONFIRM=1`**), `requeue-dead-jobs.mjs`.
 
+## Companion marketplace (v34)
+
+Listings live in a **forum channel in the hub Discord server**. One-time setup:
+
+1. Create a forum channel in the hub server; grant the bot `Create Public Threads` (and `Manage Threads` if you want unpublish to archive threads).
+2. Set `MARKETPLACE_CHANNEL_ID=<forum channel id>` in the VM `.env` and restart — unset disables `/companion action:publish` and hides the surface.
+3. Optional: `MARKETPLACE_MOD_CHANNEL_ID=<text channel id>` — gets a ping on every listing report, and on auto-flag events.
+
+Related env (defaults are sane): `ADOPTION_COOLDOWN_MS=43200000` (12h re-adopt cooldown), `FREE_ADOPTION_SLOTS=1` (Premium is uncapped in code), `MARKETPLACE_REPORT_FLAG_THRESHOLD=3`.
+
+Moderation state is all in Postgres — `companion_listings.status` (`active`/`flagged`/`delisted`) and `listing_reports`. Delisting/unlisting is a status flip, so it can be done by SQL if the bot is down: `UPDATE companion_listings SET status='delisted' WHERE id=<listing>` blocks new Adds immediately. Existing adopters keep their companions either way.
+
 ## Rollback
 
 ```bash

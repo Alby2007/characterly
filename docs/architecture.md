@@ -76,6 +76,20 @@ Each Discord user awakens **one permanent personal AI companion per account** in
 
 ---
 
+## Companion Marketplace — publish & adoption (v34)
+
+A Character.AI-style discovery lane layered on top of (never replacing) the permanent awakened bond. Creators list their awakened companion in the hub server's forum channel; adopters add them and chat in DMs, then can summon them into servers.
+
+- **Publishing is bot-mediated** — users never post raw forum links (those could be faked). `/companion action:publish` opens a modal (display name, tagline, greeting), `handleCompanionModal` upserts a `companion_listings` row, then the **bot** creates the forum thread and posts the listing card with **Add** / **Report** buttons (`market:add:<listingId>` / `market:report:<listingId>`) it owns. Publishing requires a linked web account for creator accountability; `MARKETPLACE_CHANNEL_ID` unset disables the whole surface.
+- **Adoption ≠ awakening.** Clicking **Add** runs `store.adoptListing` in one transaction: a new `companions` row is cloned from the listing with `kind='adopted'` and **owned by the adopter** — so billing (`dm:<adopter>` key or hosted credits), memories, journals, and guild presence all resolve per-adopter through the existing machinery with zero special cases, and creators never pay for other users' chats. The awakened uniqueness survives via the partial index `companions_one_awakened (owner_user_id) WHERE kind='awakened'`.
+- **Slots & cooldown.** Free accounts hold `FREE_ADOPTION_SLOTS` (default 1) active adoption; Premium is uncapped. `/companion action:drop` (or the roster picker) sets `dropped_at` + `cooldown_until` (12h, `ADOPTION_COOLDOWN_MS`), dismisses the clone from all guilds, and clears the DM pick. Re-adopting after cooldown **reuses the same clone row** so the relationship and memories continue.
+- **Greeting & DM introduction.** Listings carry a `greeting` — the character's first message. Adoption flips `user_bot_settings.active_dm_companion_id` to the clone and DMs the greeting as the character; `dm_introduced_at` is stamped **only on a successful send** (closed DMs replay the greeting on next contact in `handleMessage`). Server summoning an unintroduced adopted companion gets an ephemeral warning — the character must have "met" its adopter first.
+- **Live reference + versioning.** Listings are editable (`market_edit` persona modal, republish modal). Every upsert bumps `version`, snapshots the persona into `companion_persona_versions` (audit trail), and `propagateListingVersion` pushes persona fields into all clones — adopter-owned state (memories, journal, guild rows, introduction flag) is never touched.
+- **Moderation foundations.** `listing_reports` dedupes one report per user; `report_count` ≥ `MARKETPLACE_REPORT_FLAG_THRESHOLD` auto-flags the listing (new Adds blocked, existing adopters unaffected), and `MARKETPLACE_MOD_CHANNEL_ID` gets a ping on every report. `/companion action:unpublish` delists + archives the thread. Deeper safety policy is deliberately a later phase.
+- **Roster model.** `listCompanionsForUser` = awakened companion + active adoptions; `resolveDmCompanion` = the explicit DM pick while valid, else the awakened companion. `/companion action:summon|dismiss|switch|drop|card|status` all became roster-aware; `getCompanionByOwner` stays awakened-only so onboarding, avatar, and the permanent-bond semantics are untouched.
+
+---
+
 ## Multi-Companion Server Scene Routing & Webhooks
 
 In Discord servers, Characterly acts as the shared host ("plumbing"):

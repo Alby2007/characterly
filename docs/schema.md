@@ -10,21 +10,26 @@ Characterly stores all state in Postgres — Supabase in production, or any Post
 
 ### `companions`
 
-One row per user account (v21). Each user awakens **one permanent companion per account** in 1:1 DMs (`dm:<owner_user_id>`); once `onboarding_state = 'active'`, the companion's identity is permanently locked.
+Each user awakens **one permanent companion per account** in 1:1 DMs (`dm:<owner_user_id>`); once `onboarding_state = 'active'`, an awakened companion's identity is permanently locked. Marketplace adoptions (v34) add **cloned rows** for the same owner with `kind = 'adopted'` — one clone per adoption, owned by the adopter so billing, memories, journals, and guild presence all resolve per-adopter with zero special cases.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | BIGINT PK | `GENERATED ALWAYS AS IDENTITY`; referenced as subject ID `companion:<id>` in `members`, `memories`, and `relationships` |
-| `owner_user_id` | TEXT UNIQUE | Discord user ID of the companion's owner (enforces 1 companion per account) |
+| `owner_user_id` | TEXT | Discord user ID of the companion's owner. Unique **only for `kind='awakened'`** — enforced by partial unique index `companions_one_awakened` (v34); adopted clones share the owner's id freely |
 | `name` | TEXT | Companion's display name |
 | `avatar_url` | TEXT NULL | Public image URL used for webhook avatars and profile cards |
 | `voice_persona` | TEXT | How the companion talks and acts |
 | `core_traits` | TEXT[] | Up to 8 core personality trait tags |
 | `owner_dynamic` | TEXT | The companion's bond/relationship with their owner |
 | `backstory` | TEXT | Optional slice-of-life background or lore |
-| `onboarding_state` | TEXT | `'onboarding'` (mutable draft) or `'active'` (permanently locked) |
+| `onboarding_state` | TEXT | `'onboarding'` (mutable draft) or `'active'` (permanently locked; adopted clones insert as `'active'`) |
 | `onboarding_turns` | INTEGER | Number of DM onboarding turns completed |
+| `kind` | TEXT | `'awakened'` (default — the permanent bond) or `'adopted'` (marketplace clone synced from its listing) |
+| `adopted_from_listing_id` | BIGINT NULL | For adopted clones: the `companion_listings` row they were cloned from |
+| `listing_version` | INTEGER | Persona version the adopted clone was last synced to (0 for awakened) |
 | `created_at` / `updated_at` | TIMESTAMPTZ | Creation and last-update timestamps |
+
+**Indexes:** `companions_one_awakened` partial unique `(owner_user_id) WHERE kind='awakened'`; `companions_owner (owner_user_id)`; `companions_adopted_from (adopted_from_listing_id) WHERE adopted_from_listing_id IS NOT NULL`.
 
 ---
 
@@ -577,9 +582,83 @@ Per-Discord-user bot toggles (v29), keyed by `discord_user_id` **outside** the a
 | `discord_user_id` | TEXT PK | |
 | `c2c_enabled` | BOOLEAN | Default true — companion replies to other companions (those turns spend the owner's tokens) |
 | `low_credit_alerts` | BOOLEAN | Default true — once-per-UTC-day DM when the balance runs low |
+| `active_dm_companion_id` | BIGINT NULL | Which roster companion answers the user's DMs (v34); null = the awakened companion. Cleared automatically when the picked adoption is dropped |
 | `updated_at` | TIMESTAMPTZ | |
 
 **RLS:** enabled, zero policies — the bot reads/writes via the postgres role; the site uses `my_bot_settings()` / `upsert_my_settings(patch)` / `my_byok_status()` security-definer rpcs (authenticated role only).
+
+---
+
+### `companion_listings`
+
+The marketplace's publishable persona (v34): a creator's awakened companion projected into the hub server's forum channel via `/companion action:publish`. Editable and versioned — adopters hold *live references*: persona edits bump `version` and propagate into every adopted clone's `companions` row.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT PK | Referenced by `market:add:<id>` / `market:report:<id>` button custom IDs |
+| `creator_user_id` | TEXT | Discord user ID of the publisher (must hold a linked web account) |
+| `source_companion_id` | BIGINT UNIQUE | FK → `companions.id` — the awakened companion the listing projects |
+| `name` / `tagline` | TEXT | Display name + listing-card blurb |
+| `voice_persona` / `core_traits` / `owner_dynamic` / `backstory` | — | Persona fields cloned into adopters' `companions` rows |
+| `greeting` | TEXT | First DM the character sends on adoption — stamps `dm_introduced_at` on successful send |
+| `avatar_url` | TEXT NULL | |
+| `forum_thread_id` | TEXT NULL | The bot-created forum post (its embed card owns the Add/Report buttons) |
+| `version` | INTEGER | Increments on every upsert; each version is snapshotted in `companion_persona_versions` |
+| `status` | TEXT | `'active'` → `'flagged'` (auto at report threshold) or `'delisted'` (unpublish/mod) — non-active statuses block new adoptions |
+| `report_count` / `add_count` | INTEGER | Denormalized counters |
+| `created_at` / `updated_at` | TIMESTAMPTZ | |
+
+**RLS:** enabled, zero policies — bot-owned, no site access.
+
+---
+
+### `companion_persona_versions`
+
+Append-only audit trail for listing personas (v34): one row per `(listing_id, version)` with the full persona as `persona_json` — "the character said X on version 3" stays checkable even while the live listing moves forward.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT PK | |
+| `listing_id` | BIGINT | FK → `companion_listings.id ON DELETE CASCADE` (indexed) |
+| `version` | INTEGER | Composite unique with `listing_id` |
+| `persona_json` | JSONB | Snapshot of name/tagline/persona/greeting/avatar fields |
+| `created_at` | TIMESTAMPTZ | |
+
+**RLS:** enabled, zero policies.
+
+---
+
+### `companion_adoptions`
+
+One row per (user, listing) adoption relationship (v34). `companion_id` points at the adopter-owned clone; `dropped_at`/`cooldown_until` drive the 12-hour re-adopt cooldown; `dm_introduced_at` is stamped only when the greeting DM actually lands and gates server summoning.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT PK | |
+| `user_id` | TEXT | The adopter (partial index `adoptions_active` on `dropped_at IS NULL` feeds the free-tier slot count) |
+| `listing_id` | BIGINT | FK → `companion_listings.id ON DELETE CASCADE` (indexed) |
+| `companion_id` | BIGINT | FK → `companions.id ON DELETE CASCADE` — the `kind='adopted'` clone (indexed) |
+| `adopted_at` | TIMESTAMPTZ | Resets on re-adoption |
+| `dropped_at` / `cooldown_until` | TIMESTAMPTZ NULL | Set together by `dropAdoption`; re-adoption clears both and reuses the same clone |
+| `dm_introduced_at` | TIMESTAMPTZ NULL | Stamped by `markDmIntroduced` after the greeting send succeeds |
+
+**RLS:** enabled, zero policies.
+
+---
+
+### `listing_reports`
+
+Moderation foundation (v34): one row per (listing, reporter) so reports dedupe naturally; the report counter on `companion_listings` auto-flags at `MARKETPLACE_REPORT_FLAG_THRESHOLD` and pings `MARKETPLACE_MOD_CHANNEL_ID`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT PK | |
+| `listing_id` | BIGINT | FK → `companion_listings.id ON DELETE CASCADE` (indexed) |
+| `reporter_user_id` | TEXT | Composite unique with `listing_id` — a user reports once |
+| `reason` | TEXT | Optional free text (v1 reports have no modal) |
+| `created_at` | TIMESTAMPTZ | |
+
+**RLS:** enabled, zero policies.
 
 ---
 
@@ -631,3 +710,4 @@ Version tracking for the migration system.
 | 31 | `v31_stripe_packs` | `web_profiles` gains `stripe_customer_id`/`stripe_subscription_id` (unique partial index on customer); `credit_ledger` gains `'purchase'` kind + `stripe_ref` (unique partial — webhook idempotency); `grant_pack` rpc (service_role only — atomic pack credit under the account row lock) |
 | 32 | `v32_stripe_webhook_hardening` | `grant_pack` gains a positive-amount guard; `account_id_for_email` rpc (service_role only) resolves checkout emails → `web_profiles.id` for bare payment links |
 | 33 | `v33_message_image_context` | `messages.image_context` — cached vision description shared by the extract job and reply paths |
+| 34 | `v34_companion_marketplace` | Companion marketplace: `companions.kind`/`adopted_from_listing_id`/`listing_version`, partial unique index `companions_one_awakened` replaces the blanket owner uniqueness, `companion_listings`/`companion_persona_versions`/`companion_adoptions`/`listing_reports` tables, `user_bot_settings.active_dm_companion_id` |

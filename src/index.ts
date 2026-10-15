@@ -17,6 +17,7 @@ import {
   handleMemoryButton,
   handleMemoryCommand,
   handleSetupModal,
+  sendAdoptionGreeting,
 } from "./commands.js";
 import { containsPrivateSubtext, looksLikeSchemaLeak, shouldInspectForMemory, toolCues } from "./perception.js";
 import { ConversationTracker } from "./conversation.js";
@@ -715,11 +716,16 @@ async function handleDmMessage(
     return;
   }
 
+  // Resolve who answers: the user's active DM pick (adopted or awakened),
+  // falling back to the awakened companion/onboarding draft. `existing` stays
+  // the awakened row so onboarding behaves exactly as before.
   const existing = await store.getCompanionByOwner(userId);
+  const dmCompanion = await store.resolveDmCompanion(userId).catch(() => null);
+  const activeCompanion = dmCompanion ?? existing;
   const replyToId = message.reference?.messageId ?? undefined;
 
   // ── 1:1 DM Conversational Onboarding ───────────────────────────────────────
-  if (!existing || existing.onboardingState !== "active") {
+  if (!activeCompanion || activeCompanion.onboardingState !== "active") {
     if (!replyThrottle.consume(dmScope, userId)) { inc("reply.cooldown"); return; }
     try {
       await message.channel.sendTyping();
@@ -832,7 +838,19 @@ async function handleDmMessage(
   }
 
   // ── Active 1:1 DM Companion Chat ───────────────────────────────────────────
-  const companion = existing;
+  const companion = activeCompanion;
+  // An adopted companion selected in the marketplace without reachable DMs
+  // introduces itself on first contact here — only a successful send counts.
+  if (companion.kind === "adopted") {
+    const adoption = await store.adoptionForCompanion(companion.id).catch(() => null);
+    if (adoption && !adoption.dmIntroducedAt) {
+      const listing = companion.adoptedFromListingId
+        ? await store.listingById(companion.adoptedFromListingId).catch(() => null)
+        : null;
+      const greeted = await sendAdoptionGreeting(message.author, companion, listing?.greeting ?? "");
+      if (greeted) await store.markDmIntroduced(adoption.id).catch(() => {});
+    }
+  }
   const compSubj = MemoryStore.companionSubjectId(companion.id);
   const event: MessageEvent = {
     guildId: dmScope,

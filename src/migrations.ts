@@ -1709,6 +1709,119 @@ const migrations: Migration[] = [
       await sql`ALTER TABLE messages DROP COLUMN IF EXISTS image_context`;
     },
   },
+  // Marketplace: creators publish their awakened companion to a forum listing;
+  // adopters get a cloned companions row (kind='adopted') owned by them, so
+  // billing/memory/journal machinery is per-adopter with zero special cases.
+  // The awakened bond stays unique via a partial index on kind='awakened'.
+  {
+    version: 34,
+    name: "v34_companion_marketplace",
+    up: async (sql) => {
+      await addColumn(sql, "companions", "kind TEXT NOT NULL DEFAULT 'awakened'");
+      await addColumn(sql, "companions", "adopted_from_listing_id BIGINT");
+      await addColumn(sql, "companions", "listing_version INTEGER NOT NULL DEFAULT 0");
+      // One awakened companion per account — adopted clones share the owner's
+      // id freely, so the blanket UNIQUE narrows to awakened rows only.
+      await sql`ALTER TABLE companions DROP CONSTRAINT IF EXISTS companions_owner_user_id_key`;
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS companions_one_awakened ON companions(owner_user_id) WHERE kind = 'awakened'`;
+      await sql`CREATE INDEX IF NOT EXISTS companions_owner ON companions(owner_user_id)`;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS companion_listings (
+          id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          creator_user_id     TEXT NOT NULL,
+          source_companion_id BIGINT NOT NULL REFERENCES companions(id) ON DELETE CASCADE,
+          name                TEXT NOT NULL DEFAULT '',
+          tagline             TEXT NOT NULL DEFAULT '',
+          voice_persona       TEXT NOT NULL DEFAULT '',
+          core_traits         TEXT[] NOT NULL DEFAULT '{}',
+          owner_dynamic       TEXT NOT NULL DEFAULT '',
+          backstory           TEXT NOT NULL DEFAULT '',
+          greeting            TEXT NOT NULL DEFAULT '',
+          avatar_url          TEXT,
+          forum_thread_id     TEXT,
+          version             INTEGER NOT NULL DEFAULT 1,
+          status              TEXT NOT NULL DEFAULT 'active',
+          report_count        INTEGER NOT NULL DEFAULT 0,
+          add_count           INTEGER NOT NULL DEFAULT 0,
+          created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(source_companion_id)
+        )
+      `;
+      await sql`ALTER TABLE companion_listings ENABLE ROW LEVEL SECURITY`;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS companion_persona_versions (
+          id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          listing_id  BIGINT NOT NULL REFERENCES companion_listings(id) ON DELETE CASCADE,
+          version     INTEGER NOT NULL,
+          persona_json JSONB NOT NULL,
+          created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(listing_id, version)
+        )
+      `;
+      await sql`CREATE INDEX IF NOT EXISTS persona_versions_listing ON companion_persona_versions(listing_id)`;
+      await sql`ALTER TABLE companion_persona_versions ENABLE ROW LEVEL SECURITY`;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS companion_adoptions (
+          id               BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          user_id          TEXT NOT NULL,
+          listing_id       BIGINT NOT NULL REFERENCES companion_listings(id) ON DELETE CASCADE,
+          companion_id     BIGINT NOT NULL REFERENCES companions(id) ON DELETE CASCADE,
+          adopted_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          dropped_at       TIMESTAMPTZ,
+          cooldown_until   TIMESTAMPTZ,
+          dm_introduced_at TIMESTAMPTZ,
+          UNIQUE(user_id, listing_id)
+        )
+      `;
+      await sql`ALTER TABLE companion_adoptions ENABLE ROW LEVEL SECURITY`;
+      // One active adoption row per (user, listing); the per-user active-slot
+      // count is enforced in code (plan-dependent) over this index.
+      await sql`CREATE INDEX IF NOT EXISTS adoptions_active ON companion_adoptions(user_id) WHERE dropped_at IS NULL`;
+      await sql`CREATE INDEX IF NOT EXISTS adoptions_listing ON companion_adoptions(listing_id)`;
+      await sql`CREATE INDEX IF NOT EXISTS adoptions_companion ON companion_adoptions(companion_id)`;
+      await sql`CREATE INDEX IF NOT EXISTS companions_adopted_from ON companions(adopted_from_listing_id) WHERE adopted_from_listing_id IS NOT NULL`;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS listing_reports (
+          id               BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          listing_id       BIGINT NOT NULL REFERENCES companion_listings(id) ON DELETE CASCADE,
+          reporter_user_id TEXT NOT NULL,
+          reason           TEXT NOT NULL DEFAULT '',
+          created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(listing_id, reporter_user_id)
+        )
+      `;
+      await sql`ALTER TABLE listing_reports ENABLE ROW LEVEL SECURITY`;
+      await sql`CREATE INDEX IF NOT EXISTS listing_reports_listing ON listing_reports(listing_id)`;
+
+      await addColumn(sql, "user_bot_settings", "active_dm_companion_id BIGINT");
+    },
+    down: async (sql) => {
+      await sql`ALTER TABLE user_bot_settings DROP COLUMN IF EXISTS active_dm_companion_id`;
+      await sql`DROP INDEX IF EXISTS listing_reports_listing`;
+      await sql`DROP TABLE IF EXISTS listing_reports`;
+      await sql`DROP INDEX IF EXISTS adoptions_active`;
+      await sql`DROP INDEX IF EXISTS adoptions_listing`;
+      await sql`DROP INDEX IF EXISTS adoptions_companion`;
+      await sql`DROP INDEX IF EXISTS companions_adopted_from`;
+      await sql`DROP TABLE IF EXISTS companion_adoptions`;
+      await sql`DROP INDEX IF EXISTS persona_versions_listing`;
+      await sql`DROP TABLE IF EXISTS companion_persona_versions`;
+      await sql`DROP TABLE IF EXISTS companion_listings`;
+      await sql`DROP INDEX IF EXISTS companions_owner`;
+      await sql`DROP INDEX IF EXISTS companions_one_awakened`;
+      await sql`ALTER TABLE companions DROP COLUMN IF EXISTS listing_version`;
+      await sql`ALTER TABLE companions DROP COLUMN IF EXISTS adopted_from_listing_id`;
+      await sql`ALTER TABLE companions DROP COLUMN IF EXISTS kind`;
+      // Restore the original blanket uniqueness — safe because rollback only
+      // happens before any adopted rows exist in practice.
+      await sql`ALTER TABLE companions ADD CONSTRAINT companions_owner_user_id_key UNIQUE (owner_user_id)`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

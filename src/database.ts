@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto";
-import type { AttributeStatus, Companion, CompanionSpec, EvidenceEffect, EvidenceType, GuildCompanion, JournalCandidate, JournalEntry, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, VerificationVerdict, WebhookMessageRecord } from "./types.js";
+import type { AttributeStatus, Companion, CompanionAdoption, CompanionListing, CompanionSpec, EvidenceEffect, EvidenceType, GuildCompanion, JournalCandidate, JournalEntry, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, VerificationVerdict, WebhookMessageRecord } from "./types.js";
 import { sql as defaultSql, type Sql } from "./db.js";
 import { runMigrations } from "./migrations.js";
 import { findMentionedUsers } from "./entity-resolution.js";
@@ -2212,6 +2212,7 @@ export class MemoryStore {
     id: number | string; owner_user_id: string; name: string; avatar_url: string | null;
     voice_persona: string; core_traits: string[] | null; owner_dynamic: string;
     backstory: string; onboarding_state: string; onboarding_turns: number;
+    kind?: string; adopted_from_listing_id?: number | string | null; listing_version?: number;
     created_at: Date | string; updated_at: Date | string;
   }): Companion {
     return {
@@ -2225,14 +2226,19 @@ export class MemoryStore {
       backstory: r.backstory,
       onboardingState: (r.onboarding_state === "active" ? "active" : "onboarding") as OnboardingState,
       onboardingTurns: Number(r.onboarding_turns),
+      kind: (r.kind === "adopted" ? "adopted" : "awakened"),
+      adoptedFromListingId: r.adopted_from_listing_id != null ? Number(r.adopted_from_listing_id) : null,
+      listingVersion: Number(r.listing_version ?? 0),
       createdAt: ts(r.created_at),
       updatedAt: ts(r.updated_at),
     };
   }
 
-  async getCompanionByOwner(ownerUserId: string): Promise<Companion | null> {
+  /** The user's awakened companion by default — pass kind='adopted' only where
+   *  the adopted roster is explicitly wanted (marketplace internals). */
+  async getCompanionByOwner(ownerUserId: string, kind: "awakened" | "adopted" = "awakened"): Promise<Companion | null> {
     const rows = await this.sql<Array<any>>`
-      SELECT * FROM companions WHERE owner_user_id = ${ownerUserId}
+      SELECT * FROM companions WHERE owner_user_id = ${ownerUserId} AND kind = ${kind}
     `;
     return rows[0] ? this.rowToCompanion(rows[0]) : null;
   }
@@ -2269,7 +2275,7 @@ export class MemoryStore {
         ${incTurn},
         NOW(), NOW()
       )
-      ON CONFLICT (owner_user_id) DO UPDATE SET
+      ON CONFLICT (owner_user_id) WHERE kind = 'awakened' DO UPDATE SET
         name             = CASE WHEN ${spec.name?.trim() ?? ""} <> '' THEN ${spec.name?.trim() ?? ""} ELSE companions.name END,
         avatar_url       = COALESCE(${spec.avatarUrl ?? null}, companions.avatar_url),
         voice_persona    = CASE WHEN ${spec.voicePersona?.trim() ?? ""} <> '' THEN ${spec.voicePersona?.trim() ?? ""} ELSE companions.voice_persona END,
@@ -2312,7 +2318,7 @@ export class MemoryStore {
         1,
         NOW(), NOW()
       )
-      ON CONFLICT (owner_user_id) DO UPDATE SET
+      ON CONFLICT (owner_user_id) WHERE kind = 'awakened' DO UPDATE SET
         name             = CASE WHEN ${spec.name.trim()} <> '' THEN ${spec.name.trim()} ELSE companions.name END,
         avatar_url       = COALESCE(${spec.avatarUrl ?? null}, companions.avatar_url),
         voice_persona    = CASE WHEN ${spec.voicePersona.trim()} <> '' THEN ${spec.voicePersona.trim()} ELSE companions.voice_persona END,
@@ -2348,7 +2354,7 @@ export class MemoryStore {
   async updateCompanionAvatar(ownerUserId: string, avatarUrl: string | null): Promise<Companion | null> {
     const rows = await this.sql<Array<any>>`
       UPDATE companions SET avatar_url = ${avatarUrl}, updated_at = NOW()
-      WHERE owner_user_id = ${ownerUserId}
+      WHERE owner_user_id = ${ownerUserId} AND kind = 'awakened'
       RETURNING *
     `;
     return rows[0] ? this.rowToCompanion(rows[0]) : null;
@@ -2426,9 +2432,339 @@ export class MemoryStore {
 
   async listActiveDmScopes(): Promise<string[]> {
     const rows = await this.sql<Array<{ owner_user_id: string }>>`
-      SELECT owner_user_id FROM companions WHERE onboarding_state = 'active'
+      SELECT DISTINCT owner_user_id FROM companions WHERE onboarding_state = 'active'
     `;
     return rows.map(r => `dm:${r.owner_user_id}`);
+  }
+
+  // ── Companion marketplace (v34) ────────────────────────────────────────────
+  // Listings project a creator's awakened companion into the hub forum; each
+  // adoption clones the listing into a companions row owned by the adopter
+  // (kind='adopted'), so keys/tokens, memories, and journals all resolve
+  // against the adopter exactly like an awakened companion.
+
+  private rowToListing(r: any): CompanionListing {
+    return {
+      id: Number(r.id),
+      creatorUserId: r.creator_user_id,
+      sourceCompanionId: Number(r.source_companion_id),
+      name: r.name,
+      tagline: r.tagline,
+      voicePersona: r.voice_persona,
+      coreTraits: r.core_traits ?? [],
+      ownerDynamic: r.owner_dynamic,
+      backstory: r.backstory,
+      greeting: r.greeting,
+      avatarUrl: r.avatar_url,
+      forumThreadId: r.forum_thread_id,
+      version: Number(r.version),
+      status: r.status,
+      reportCount: Number(r.report_count),
+      addCount: Number(r.add_count),
+      createdAt: ts(r.created_at),
+      updatedAt: ts(r.updated_at),
+    };
+  }
+
+  private rowToAdoption(r: any): CompanionAdoption {
+    return {
+      id: Number(r.id),
+      userId: r.user_id,
+      listingId: Number(r.listing_id),
+      companionId: Number(r.companion_id),
+      adoptedAt: ts(r.adopted_at),
+      droppedAt: r.dropped_at ? ts(r.dropped_at) : null,
+      cooldownUntil: r.cooldown_until ? ts(r.cooldown_until) : null,
+      dmIntroducedAt: r.dm_introduced_at ? ts(r.dm_introduced_at) : null,
+    };
+  }
+
+  async listingById(listingId: number): Promise<CompanionListing | null> {
+    const rows = await this.sql<Array<any>>`SELECT * FROM companion_listings WHERE id = ${listingId}`;
+    return rows[0] ? this.rowToListing(rows[0]) : null;
+  }
+
+  async listingForCompanion(sourceCompanionId: number): Promise<CompanionListing | null> {
+    const rows = await this.sql<Array<any>>`SELECT * FROM companion_listings WHERE source_companion_id = ${sourceCompanionId}`;
+    return rows[0] ? this.rowToListing(rows[0]) : null;
+  }
+
+  /** Create or version-bump a listing. Every write records a persona version
+   *  and (on update) syncs the persona into every adopted clone — live
+   *  reference for adopters, audit trail for us. */
+  async upsertListing(
+    creatorUserId: string,
+    sourceCompanionId: number,
+    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
+    forumThreadId?: string | null,
+  ): Promise<CompanionListing> {
+    const persona = {
+      name: spec.name, tagline: spec.tagline, voicePersona: spec.voicePersona,
+      coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
+      backstory: spec.backstory, greeting: spec.greeting, avatarUrl: spec.avatarUrl,
+    };
+    const rows = await this.sql<Array<any>>`
+      INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, avatar_url, forum_thread_id, version, status, created_at, updated_at)
+      VALUES (
+        ${creatorUserId}, ${sourceCompanionId},
+        ${spec.name}, ${spec.tagline}, ${spec.voicePersona}, ${spec.coreTraits},
+        ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${spec.avatarUrl},
+        ${forumThreadId ?? null}, 1, 'active', NOW(), NOW()
+      )
+      ON CONFLICT (source_companion_id) DO UPDATE SET
+        name           = EXCLUDED.name,
+        tagline        = EXCLUDED.tagline,
+        voice_persona  = EXCLUDED.voice_persona,
+        core_traits    = EXCLUDED.core_traits,
+        owner_dynamic  = EXCLUDED.owner_dynamic,
+        backstory      = EXCLUDED.backstory,
+        greeting       = EXCLUDED.greeting,
+        avatar_url     = EXCLUDED.avatar_url,
+        forum_thread_id = COALESCE(EXCLUDED.forum_thread_id, companion_listings.forum_thread_id),
+        version        = companion_listings.version + 1,
+        status         = 'active',
+        updated_at     = NOW()
+      RETURNING *
+    `;
+    const listing = this.rowToListing(rows[0]);
+    await this.sql`
+      INSERT INTO companion_persona_versions (listing_id, version, persona_json)
+      VALUES (${listing.id}, ${listing.version}, ${JSON.stringify(persona)})
+      ON CONFLICT (listing_id, version) DO NOTHING
+    `;
+    if (listing.version > 1) await this.propagateListingVersion(listing.id);
+    return listing;
+  }
+
+  /** Push a listing's current persona into every adopted clone. Only persona
+   *  fields move — adopter-owned state (memories, journal, guilds) is theirs. */
+  async propagateListingVersion(listingId: number): Promise<number> {
+    const listing = await this.listingById(listingId);
+    if (!listing) return 0;
+    const result = await this.sql`
+      UPDATE companions SET
+        name             = ${listing.name},
+        voice_persona    = ${listing.voicePersona},
+        core_traits      = ${listing.coreTraits},
+        owner_dynamic    = ${listing.ownerDynamic},
+        backstory        = ${listing.backstory},
+        avatar_url       = ${listing.avatarUrl},
+        listing_version  = ${listing.version},
+        updated_at       = NOW()
+      WHERE adopted_from_listing_id = ${listingId} AND kind = 'adopted'
+    `;
+    return result.count;
+  }
+
+  async setListingThread(listingId: number, threadId: string): Promise<void> {
+    await this.sql`
+      UPDATE companion_listings SET forum_thread_id = ${threadId}, updated_at = NOW()
+      WHERE id = ${listingId}
+    `;
+  }
+
+  async delistListing(listingId: number): Promise<boolean> {
+    const result = await this.sql`
+      UPDATE companion_listings SET status = 'delisted', updated_at = NOW() WHERE id = ${listingId}
+    `;
+    return result.count > 0;
+  }
+
+  async reportListing(listingId: number, reporterUserId: string, reason = ""): Promise<number> {
+    const inserted = await this.sql`
+      INSERT INTO listing_reports (listing_id, reporter_user_id, reason)
+      VALUES (${listingId}, ${reporterUserId}, ${reason})
+      ON CONFLICT (listing_id, reporter_user_id) DO NOTHING
+      RETURNING id
+    `;
+    if (!inserted.length) return -1; // already reported by this user
+    const rows = await this.sql<Array<{ report_count: number }>>`
+      UPDATE companion_listings SET report_count = report_count + 1, updated_at = NOW()
+      WHERE id = ${listingId}
+      RETURNING report_count
+    `;
+    return Number(rows[0]?.report_count ?? 0);
+  }
+
+  async flagListing(listingId: number): Promise<void> {
+    await this.sql`UPDATE companion_listings SET status = 'flagged', updated_at = NOW() WHERE id = ${listingId} AND status = 'active'`;
+  }
+
+  /** The user's full roster: awakened companion first, then active adoptions. */
+  async listCompanionsForUser(userId: string): Promise<Companion[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT c.* FROM companions c
+      WHERE c.owner_user_id = ${userId} AND c.onboarding_state = 'active'
+        AND (c.kind = 'awakened' OR EXISTS (
+          SELECT 1 FROM companion_adoptions a
+          WHERE a.companion_id = c.id AND a.dropped_at IS NULL
+        ))
+      ORDER BY (c.kind = 'awakened') DESC, c.created_at ASC
+    `;
+    return rows.map(r => this.rowToCompanion(r));
+  }
+
+  /** Which companion answers in this user's DM: their explicit pick while it
+   *  stays usable, otherwise the awakened companion. */
+  async resolveDmCompanion(userId: string): Promise<Companion | null> {
+    const picked = await this.sql<Array<any>>`
+      SELECT c.* FROM user_bot_settings s
+      JOIN companions c ON c.id = s.active_dm_companion_id
+      WHERE s.discord_user_id = ${userId} AND c.owner_user_id = ${userId}
+        AND c.onboarding_state = 'active'
+        AND (c.kind = 'awakened' OR EXISTS (
+          SELECT 1 FROM companion_adoptions a
+          WHERE a.companion_id = c.id AND a.dropped_at IS NULL
+        ))
+    `;
+    if (picked[0]) return this.rowToCompanion(picked[0]);
+    return this.getCompanionByOwner(userId);
+  }
+
+  async setActiveDmCompanion(userId: string, companionId: number): Promise<void> {
+    await this.sql`
+      INSERT INTO user_bot_settings (discord_user_id, active_dm_companion_id, updated_at)
+      VALUES (${userId}, ${companionId}, NOW())
+      ON CONFLICT (discord_user_id) DO UPDATE SET active_dm_companion_id = ${companionId}, updated_at = NOW()
+    `;
+  }
+
+  async activeAdoptionCount(userId: string): Promise<number> {
+    const rows = await this.sql<[{ n: number | string }]>`
+      SELECT COUNT(*) AS n FROM companion_adoptions WHERE user_id = ${userId} AND dropped_at IS NULL
+    `;
+    return Number(rows[0].n);
+  }
+
+  async adoptionFor(userId: string, listingId: number): Promise<CompanionAdoption | null> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM companion_adoptions WHERE user_id = ${userId} AND listing_id = ${listingId}
+    `;
+    return rows[0] ? this.rowToAdoption(rows[0]) : null;
+  }
+
+  async adoptionForCompanion(companionId: number): Promise<CompanionAdoption | null> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM companion_adoptions WHERE companion_id = ${companionId}
+    `;
+    return rows[0] ? this.rowToAdoption(rows[0]) : null;
+  }
+
+  /** Adopt a listing for a user inside one transaction. maxSlots applies only
+   *  to fresh adoptions — re-adopting a cooled-down listing and idempotent
+   *  re-clicks never count against it. Returns a discriminated result so the
+   *  caller can phrase the refusal. */
+  async adoptListing(
+    userId: string,
+    listingId: number,
+    maxSlots: number,
+    cooldownMs: number,
+  ): Promise<
+    | { ok: true; companion: Companion; adoption: CompanionAdoption; reused: boolean }
+    | { ok: false; reason: "not_found" | "delisted" | "own_listing" | "cap" | "cooldown"; cooldownUntil?: string }
+  > {
+    return this.sql.begin(async sql => {
+      const listings = await sql<Array<any>>`
+        SELECT * FROM companion_listings WHERE id = ${listingId} FOR UPDATE
+      `;
+      const listing = listings[0];
+      if (!listing) return { ok: false as const, reason: "not_found" as const };
+      if (listing.status !== "active") return { ok: false as const, reason: "delisted" as const };
+      if (listing.creator_user_id === userId) return { ok: false as const, reason: "own_listing" as const };
+
+      const existingRows = await sql<Array<any>>`
+        SELECT * FROM companion_adoptions WHERE user_id = ${userId} AND listing_id = ${listingId}
+      `;
+      const existing = existingRows[0];
+      if (existing && !existing.dropped_at) {
+        return {
+          ok: true as const, reused: true,
+          companion: this.rowToCompanion((await sql<Array<any>>`SELECT * FROM companions WHERE id = ${existing.companion_id}`)[0]),
+          adoption: this.rowToAdoption(existing),
+        };
+      }
+      if (existing?.cooldown_until && new Date(existing.cooldown_until).getTime() > Date.now()) {
+        return { ok: false as const, reason: "cooldown" as const, cooldownUntil: ts(existing.cooldown_until) };
+      }
+
+      if (!existing) {
+        const countRows = await sql<[{ n: number | string }]>`
+          SELECT COUNT(*) AS n FROM companion_adoptions WHERE user_id = ${userId} AND dropped_at IS NULL
+        `;
+        if (Number(countRows[0].n) >= maxSlots) return { ok: false as const, reason: "cap" as const };
+      }
+
+      let companionId: number;
+      if (existing) {
+        companionId = Number(existing.companion_id);
+        await sql`
+          UPDATE companions SET
+            name = ${listing.name}, voice_persona = ${listing.voice_persona},
+            core_traits = ${listing.core_traits}, owner_dynamic = ${listing.owner_dynamic},
+            backstory = ${listing.backstory}, avatar_url = ${listing.avatar_url},
+            listing_version = ${listing.version}, updated_at = NOW()
+          WHERE id = ${companionId}
+        `;
+        await sql`
+          UPDATE companion_adoptions SET dropped_at = NULL, cooldown_until = NULL, adopted_at = NOW()
+          WHERE id = ${existing.id}
+        `;
+      } else {
+        const compRows = await sql<Array<any>>`
+          INSERT INTO companions (owner_user_id, name, avatar_url, voice_persona, core_traits, owner_dynamic, backstory, onboarding_state, onboarding_turns, kind, adopted_from_listing_id, listing_version, created_at, updated_at)
+          VALUES (
+            ${userId}, ${listing.name}, ${listing.avatar_url}, ${listing.voice_persona},
+            ${listing.core_traits}, ${listing.owner_dynamic}, ${listing.backstory},
+            'active', 0, 'adopted', ${listingId}, ${listing.version}, NOW(), NOW()
+          )
+          RETURNING *
+        `;
+        companionId = Number(compRows[0].id);
+        await sql`
+          INSERT INTO companion_adoptions (user_id, listing_id, companion_id, adopted_at)
+          VALUES (${userId}, ${listingId}, ${companionId}, NOW())
+        `;
+      }
+      await sql`UPDATE companion_listings SET add_count = add_count + 1 WHERE id = ${listingId}`;
+      const adoption = this.rowToAdoption(
+        (await sql<Array<any>>`SELECT * FROM companion_adoptions WHERE user_id = ${userId} AND listing_id = ${listingId}`)[0],
+      );
+      const companion = this.rowToCompanion(
+        (await sql<Array<any>>`SELECT * FROM companions WHERE id = ${companionId}`)[0],
+      );
+      return { ok: true as const, companion, adoption, reused: Boolean(existing) };
+    }) as Promise<any>;
+  }
+
+  /** Drop an adoption: frees the slot, starts the per-listing re-adopt
+   *  cooldown, dismisses the clone everywhere, and hands the DM back to the
+   *  awakened companion if it was the active pick. */
+  async dropAdoption(userId: string, companionId: number, cooldownMs: number): Promise<CompanionAdoption | null> {
+    return this.sql.begin(async sql => {
+      const rows = await sql<Array<any>>`
+        SELECT * FROM companion_adoptions
+        WHERE user_id = ${userId} AND companion_id = ${companionId} AND dropped_at IS NULL
+        FOR UPDATE
+      `;
+      if (!rows[0]) return null;
+      const until = new Date(Date.now() + cooldownMs).toISOString();
+      await sql`
+        UPDATE companion_adoptions SET dropped_at = NOW(), cooldown_until = ${until}
+        WHERE id = ${rows[0].id}
+      `;
+      await sql`UPDATE guild_companions SET active = 0 WHERE companion_id = ${companionId}`;
+      await sql`
+        UPDATE user_bot_settings SET active_dm_companion_id = NULL, updated_at = NOW()
+        WHERE discord_user_id = ${userId} AND active_dm_companion_id = ${companionId}
+      `;
+      return this.rowToAdoption({ ...rows[0], dropped_at: new Date().toISOString(), cooldown_until: until });
+    }) as Promise<CompanionAdoption | null>;
+  }
+
+  /** Stamp that the adoption greeting actually landed in the adopter's DMs —
+   *  this is what unlocks server summoning for adopted companions. */
+  async markDmIntroduced(adoptionId: number): Promise<void> {
+    await this.sql`UPDATE companion_adoptions SET dm_introduced_at = NOW() WHERE id = ${adoptionId}`;
   }
 
   // ── Companion journal (v25) ──────────────────────────────────────────────

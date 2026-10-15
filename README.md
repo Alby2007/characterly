@@ -13,7 +13,14 @@ In servers, the **Characterly** bot is invisible plumbing and a system announcer
 - Every turn renders a live **Companion Draft** card showing `Name`, `Bond / Dynamic`, `Voice & Vibe`, `Core Traits`, `Backstory`, and `Avatar` (attach any image in DMs to give them a face).
 - **Permanent Lock:** Once a user clicks **Awaken & Lock In**, their companion's identity is **permanently bound to their account** (`1 companion per account`).
 
-### 2. User-First Personal AI Keys (Auto-Detected Providers)
+### 2. Companion Marketplace (Adopt, Don't Awaken)
+- Creators list their awakened companion with `/companion action:publish` — the bot itself posts a card (name, tagline, vibe, **Add**/**Report** buttons) into a forum channel in the Characterly hub server, so listings can't be faked.
+- Anyone can click **Add** to adopt the character: they get their own companion — their own memories, their own relationship — that opens their DMs with the creator-written **greeting**, then can be summoned into servers. The awakened companion stays sacred and untouched (1 per account); adoptions are separate and replaceable.
+- **Slots:** free accounts hold 1 active adoption; Premium is unlimited. Dropping a companion frees the slot but locks that character for **12 hours** before it can be re-adopted (your history with them is kept if you come back).
+- **Billing follows the chatter:** adopters pay for their own turns (their tokens or BYOK key) — a popular character never costs its creator a cent.
+- Listings are **live references**: creator persona edits propagate to every adopter, versioned for audit. Reports auto-flag listings for mod review; unpublishing or flagging blocks new Adds.
+
+### 3. User-First Personal AI Keys (Auto-Detected Providers)
 - Each user connects their own API key (`dm:<userId>`) via the onboarding **Paste API Key** button or `/companion action:key`.
 - Users only paste their API key and **leave the Base URL field blank** — Characterly automatically detects the provider and default model from the key prefix:
   - `gsk_...` → **Groq** (`openai/gpt-oss-120b`)
@@ -22,12 +29,12 @@ In servers, the **Characterly** bot is invisible plumbing and a system announcer
   - `xai-...` → **xAI** (`grok-3-mini`)
 - Keys are validated live against `/models` and encrypted at rest with **AES-256-GCM** (`KEY_ENCRYPTION_SECRET`). A user's personal key powers their companion in DMs and in every server they summon them into.
 
-### 3. Characterly as Server Plumbing (1-Click Server Setup)
+### 4. Characterly as Server Plumbing (1-Click Server Setup)
 - When added to a Discord server, Characterly posts a welcome card and starts **dormant**.
 - A server admin clicks **Enable Characterly (Admins)** on the card (or runs `/memory-resume`) — **no server API key is required**.
 - Members summon their companions with `/companion action:summon` (or 1-click **Summon to `<Server>`** buttons in DMs). Characterly announces **`System · <Name> joined the chat`** when a companion arrives and **`System · <Name> left the chat`** when dismissed.
 
-### 4. Multi-Companion Scene Routing & Webhook Identity
+### 5. Multi-Companion Scene Routing & Webhook Identity
 - **Webhook Disguise (`src/webhooks.ts`):** Summoned companions speak through a cached channel webhook (`Characterly Companions`) disguised with their own name and avatar (including inside threads). If `Manage Webhooks` permission is missing, Characterly posts a system permission notice rather than roleplaying as the companion.
 - **Scene Router (`src/scene-router.ts`):** Coordinates multiple summoned companions in the same channel:
   - **Direct Address (`+0.85`):** Saying a companion's name (`detectWakeWord`) or replying to that companion's webhook message routes the turn to that companion and suppresses unaddressed companions.
@@ -35,24 +42,24 @@ In servers, the **Characterly** bot is invisible plumbing and a system announcer
   - **Owner Affinity (`+0.15`):** Companions prioritize turns where their owner is engaged or asking a question.
   - **Bounded Companion-to-Companion Banter:** Companions can address and reply to each other up to `MAX_COMPANION_CHAIN_DEPTH` (default `2` hops per human message) before hard-stopping.
 
-### 5. Cross-Context Consciousness (DM ↔ Server Bridge)
+### 6. Cross-Context Consciousness (DM ↔ Server Bridge)
 - **DM → Server (Vault Rule):** When speaking in a server, a companion receives high-confidence memories and facets from its private 1:1 DMs with its owner (`gatherOwnerSubtextForServer`) under a strict **VAULT RULE** — used only for subtext, loyalty, and inside jokes, never disclosed to other server members.
 - **Server → DM:** When chatting in 1:1 DMs, a companion receives a digest of recent events, relationship edges, and activity from the servers where it is summoned (`gatherServerDigestForDm`) so it can debrief and gossip with its owner.
 
-### 6. Provenance-Backed Memory, Relationships & Events
+### 7. Provenance-Backed Memory, Relationships & Events
 - **Deterministic Confidence & Sincerity Verification:** Candidate memories and relationship observations are verified against source context (`literal` / `joke` / `misattributed` / `unclear`) before activating; numeric confidence is computed deterministically (`src/confidence.ts`).
 - **Provenance Facets, Profiles & Dossiers:** Structured `profile_attributes` cite the exact `memory_ids` that justify them — forgetting or superseding a memory cascades immediately to any facet citing it.
 - **Behavioral Relationship Intelligence:** Combines verified single-message claims with the 90-day interaction graph and holistic `pair-analysis` exchange-window reads (`warming` / `cooling` trends).
 
-### 7. First-Person Companion Journal
+### 8. First-Person Companion Journal
 - After each reply, a deferred `journal-write` job lets the companion write 0–2 **first-person** entries ("Alice and I roasted her tea take") into `companion_journal` — its own episodic memory, origin-tagged to the scope where it happened.
 - Entries recall only in their origin scope (guild entries in that server, DM entries in the DM) and via the Vault subtext lane; consent-gated like extraction, covered by `/opt-out` and `/memory-export`, and dormant-but-retained when a companion is dismissed.
 
-### 8. Web Accounts, Website & Discord Linking
+### 9. Web Accounts, Website & Discord Linking
 - A Vite site (`website/`) hosts the landing page plus **Characterly accounts** (Supabase Auth: email/password, magic link, Discord OAuth) and an account dashboard — deployed as Cloudflare Workers Static Assets.
 - `web_profiles` links the "real-life" account to the Discord user via `discord_user_id` — written only by the `auth.identities` sync trigger (OAuth/`linkIdentity`) or the `claim_link_code` rpc behind `/link`; users can never write it directly. `stripe_customer_id` is reserved for the future billing phase.
 
-### 9. Hosted Lane & Tokens (Credits)
+### 10. Hosted Lane & Tokens (Credits)
 
 - **Two lanes:** BYOK stays the power-user lane — a personal key means unlimited chat, no account needed. Without a key, companions run on the **hosted lane** (the operator's env model) which requires a **linked Characterly account** (`/link`) and spends **tokens**.
 - **Payer-per-turn:** a human's turn costs 2 tokens (their message + the companion reply — 1 refunded if no reply lands); companion↔companion hops bill the replying companion's owner 1, gated by their c2c dashboard toggle. Nobody can burn someone else's tokens.
@@ -78,6 +85,10 @@ All command replies are ephemeral (private to the invoker) unless noted; compani
 | `/companion action:key` | Connect or rotate your personal AI API key (leave Base URL blank for auto-detection) |
 | `/companion action:status` | Check your personal API key status, active servers, and today's DM usage |
 | `/companion action:avatar` | Update your companion's avatar image URL |
+| `/companion action:publish` | List your awakened companion in the hub server's marketplace forum (requires a linked account) |
+| `/companion action:unpublish` | Remove your companion's marketplace listing |
+| `/companion action:switch` | Choose which of your companions answers your DMs |
+| `/companion action:drop` | Drop an adopted companion (12h re-adopt cooldown) |
 | `/memory` | List your active memories (8/page; `page:`, `search:`, `memory_id:` to inspect provenance, `candidates:true` for unconfirmed, `server:true` for lore) |
 | `/memory-confirm` | Promote one of your own candidate memories to active |
 | `/memory-export` | Download every memory + evidence held about you |
