@@ -203,9 +203,20 @@ function renderBilling() {
     btn.removeAttribute("aria-disabled");
     btn.textContent = "Go Premium — $7.99/mo";
   }
-  $("#btn-pack-500").href = payUrl(PAY_LINKS.pack500);
-  $("#btn-pack-1500").href = payUrl(PAY_LINKS.pack1500);
-  $("#btn-pack-5000").href = payUrl(PAY_LINKS.pack5000);
+  // Packs are a Premium perk — free accounts get dead buttons, not checkout
+  // links (same double-purchase reasoning as the subscribe button above).
+  const packs = [["#btn-pack-500", PAY_LINKS.pack500], ["#btn-pack-1500", PAY_LINKS.pack1500], ["#btn-pack-5000", PAY_LINKS.pack5000]];
+  for (const [sel, link] of packs) {
+    const b = $(sel);
+    if (premium) {
+      b.href = payUrl(link);
+      b.removeAttribute("aria-disabled");
+    } else {
+      b.removeAttribute("href");
+      b.setAttribute("aria-disabled", "true");
+    }
+  }
+  $("#pack-note").hidden = premium;
 }
 
 async function renderTokens() {

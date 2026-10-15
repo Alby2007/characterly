@@ -58,7 +58,7 @@ const env = z.object({
   // Lazy refill: grants apply inside the spend tx when the marker date rolls.
   // Premium is a single 150/day floor — "practically unlimited" for humans but
   // still metered so an abusive account is bounded (≈$4.50/mo worst case).
-  FREE_DAILY_CREDITS: z.coerce.number().int().min(0).default(20),
+  FREE_DAILY_CREDITS: z.coerce.number().int().min(0).default(30),
   PREMIUM_DAILY_CREDITS: z.coerce.number().int().min(0).default(150),
   // Circuit breaker: total hosted-lane LLM calls per UTC day, fleet-wide —
   // bounds operator spend independent of per-user credits.

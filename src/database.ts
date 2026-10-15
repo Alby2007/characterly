@@ -2627,7 +2627,7 @@ export class MemoryStore {
   // balance. Grants are configured at init from env so tests control them.
 
   private creditsEnabled = false;
-  private creditGrants = { freeDaily: 20, premiumDaily: 150 };
+  private creditGrants = { freeDaily: 30, premiumDaily: 150 };
 
   /** Detect whether the web-accounts schema exists (v26+). Called once at
    * init; tests re-call after creating the fixture tables. */

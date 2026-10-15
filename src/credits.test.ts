@@ -9,7 +9,7 @@ import { MemoryStore } from "./database.js";
 // fixture so spendCredits/refundCredits/userBotSettings exercise real SQL.
 // Grants are injected via initCreditsSupport so tests don't depend on env.
 
-const GRANTS = { freeDaily: 20, premiumDaily: 150 };
+const GRANTS = { freeDaily: 30, premiumDaily: 150 };
 
 // Fixture tables must not leak into other test files sharing this DB — e.g.
 // credit_ledger's FK would block migration rollback tests that drop web_profiles.
@@ -168,20 +168,20 @@ test("refill never pushes a balance past the grant floor", async () => {
 test("concurrent spends serialize on the account row lock — never overspend", async () => {
   const sql = makeTestSql();
   const store = await fixture(sql);
-  await addAccount(sql, "u-alice"); // refills to 20 on first spend
-  // Two parallel spends of 15: exactly one may win; the loser sees the
-  // post-grant balance of 5 and fails instead of driving the account negative.
+  await addAccount(sql, "u-alice"); // refills to 30 on first spend
+  // Two parallel spends of 20: exactly one may win; the loser sees the
+  // post-grant balance of 10 and fails instead of driving the account negative.
   const [a, b] = await Promise.all([
-    store.spendCredits("u-alice", 15, "one"),
-    store.spendCredits("u-alice", 15, "two"),
+    store.spendCredits("u-alice", 20, "one"),
+    store.spendCredits("u-alice", 20, "two"),
   ]);
   const wins = [a, b].filter(r => r.ok);
   assert.equal(wins.length, 1, "exactly one concurrent spend may succeed");
-  assert.equal(wins[0].balance, GRANTS.freeDaily - 15);
+  assert.equal(wins[0].balance, GRANTS.freeDaily - 20);
   const loser = [a, b].find(r => !r.ok)!;
-  assert.equal(loser.balance, GRANTS.freeDaily - 15, "loser sees the debited balance, not a stale one");
+  assert.equal(loser.balance, GRANTS.freeDaily - 20, "loser sees the debited balance, not a stale one");
   const rows = await sql`SELECT credit_balance FROM web_profiles WHERE discord_user_id = 'u-alice'`;
-  assert.equal(Number(rows[0].credit_balance), GRANTS.freeDaily - 15);
+  assert.equal(Number(rows[0].credit_balance), GRANTS.freeDaily - 20);
   await sql.end();
 });
 
