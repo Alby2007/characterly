@@ -3,14 +3,25 @@
 // Fulfillment ONLY happens here (never on the success page): payment links
 // redirect to the dashboard, but this function is what actually grants tokens
 // or flips plan. Runs on the service role so RLS is bypassed deliberately —
-// the trust boundary is Stripe's webhook signature, verified below with
-// WebCrypto (HMAC-SHA256 over `${t}.${payload}`, 5-minute tolerance). No Stripe
-// API key is needed: the handler never calls back into Stripe.
+// the trust boundary is Stripe's webhook signature, verified with WebCrypto
+// (HMAC-SHA256 over `${t}.${payload}`, 5-minute tolerance). No Stripe API key
+// is needed: the handler never calls back into Stripe.
+//
+// Routing decisions live in ./core.ts — a dependency-free module so the same
+// file runs under Deno here and Node/tsx in src/stripe-webhook.test.ts.
 //
 // Secrets: STRIPE_WEBHOOK_SECRET (from the endpoint you register in Stripe).
 // SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY are auto-injected by Supabase.
+// verify_jwt=false is pinned in supabase/config.toml — redeploys must not
+// re-enable JWT auth or every Stripe delivery starts failing with 401s.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
+import {
+  classifyCheckout,
+  classifySubscription,
+  isUuid,
+  verifyStripeSignature,
+} from "./core.ts";
 
 // payment_link id → tokens granted. One entry per pack link — keyed on the
 // link (not amount) so sales tax can't shift the mapping.
@@ -21,59 +32,91 @@ const PACK_LINKS: Record<string, number> = {
 };
 // The premium subscription link — sessions from it get mode === "subscription".
 const PREMIUM_LINK = "plink_1UQoEiGAOUmNDfnh04xXiYkf";
+// The premium price on prod_VRhdA8UQOkzj2r — subscription events are only
+// ours if the sub carries this item; foreign products can't touch `plan`.
+const PREMIUM_PRICE_ID = "price_1UQoE5GAOUmNDfnhulTyoL1o";
 
-const TOLERANCE_S = 300;
-
-async function verifySignature(payload: string, header: string, secret: string): Promise<boolean> {
-  const parts = new Map(header.split(",").map(p => p.split("=", 2) as [string, string]));
-  const t = parts.get("t");
-  const v1s = header.split(",").filter(p => p.startsWith("v1=")).map(p => p.slice(3));
-  if (!t || !v1s.length) return false;
-  if (Math.abs(Math.floor(Date.now() / 1000) - Number(t)) > TOLERANCE_S) return false;
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${t}.${payload}`));
-  const expected = [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, "0")).join("");
-  return v1s.some(v => v === expected);
+// supabase-js resolves { data, error } instead of throwing on PostgREST/RPC
+// failures — an unchecked result returns 200 to Stripe and drops the event
+// forever. Every call goes through must() so a failed write actually retries.
+async function must<T>(p: PromiseLike<{ data: T; error: { code?: string; message: string } | null }>, what: string): Promise<T> {
+  const { data, error } = await p;
+  if (error) throw new Error(`${what}: ${error.code ?? ""} ${error.message}`);
+  return data as T;
 }
 
-Deno.serve(async (req) => {
+Deno.serve(async (request) => {
   const secret = Deno.env.get("STRIPE_WEBHOOK_SECRET");
   if (!secret) return new Response("not configured", { status: 500 });
 
-  const payload = await req.text();
-  const sig = req.headers.get("stripe-signature") ?? "";
-  if (!(await verifySignature(payload, sig, secret))) {
+  const payload = await request.text();
+  const sig = request.headers.get("stripe-signature") ?? "";
+  if (!(await verifyStripeSignature(payload, sig, secret))) {
     return new Response("bad signature", { status: 400 });
   }
 
-  const event = JSON.parse(payload);
+  let event: { type: string; data: { object: Record<string, unknown> } };
+  try {
+    event = JSON.parse(payload);
+  } catch {
+    // A signed-but-malformed body can't happen from Stripe — 400, not a retry.
+    return new Response("bad json", { status: 400 });
+  }
   const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+
+  // Payment links are public — a forwarded or bare link loses the
+  // client_reference_id. Fall back to the email typed at checkout so the
+  // purchase still lands instead of vanishing into a silent no-op.
+  const accountForSession = async (s: Record<string, any>): Promise<string | null> => {
+    if (isUuid(s.client_reference_id)) return s.client_reference_id;
+    const email = s.customer_details?.email;
+    if (!email) return null;
+    return await must(
+      sb.rpc("account_id_for_email", { p_email: email }),
+      "account_id_for_email",
+    );
+  };
 
   try {
     switch (event.type) {
       case "checkout.session.completed":
       case "checkout.session.async_payment_succeeded": {
         const s = event.data.object;
-        if (s.payment_status !== "paid") break; // async methods settle later
-        const userId = s.client_reference_id;
-        if (!userId) break; // link opened without our ?client_reference_id — nothing to credit
-
-        if (s.mode === "subscription" || s.payment_link === PREMIUM_LINK) {
-          await sb.from("web_profiles").update({
-            plan: "premium",
-            stripe_customer_id: s.customer,
-            stripe_subscription_id: s.subscription,
-            updated_at: new Date().toISOString(),
-          }).eq("id", userId);
+        const action = classifyCheckout(s as never, { packLinks: PACK_LINKS, premiumLink: PREMIUM_LINK });
+        if (action.kind === "ignore") break;
+        const accountId = await accountForSession(s);
+        if (!accountId) {
+          // Permanent — nothing to credit. Log so the paid-but-unattributed
+          // session is visible in function logs instead of silently acked.
+          console.error(
+            `checkout ${s.id}: no account (client_reference_id=${s.client_reference_id}, email=${s.customer_details?.email ?? "none"})`,
+          );
+          break;
+        }
+        if (action.kind === "premium") {
+          const updated = await must(
+            sb.from("web_profiles").update({
+              stripe_customer_id: action.customer,
+              stripe_subscription_id: action.subscriptionId,
+              ...(action.grantPlan ? { plan: "premium" } : {}),
+              updated_at: new Date().toISOString(),
+            }).eq("id", accountId).select("id"),
+            "premium checkout",
+          );
+          if (!updated?.length) console.error(`checkout ${s.id}: no web_profiles row for ${accountId}`);
         } else {
-          const tokens = PACK_LINKS[s.payment_link as string];
-          if (tokens) {
-            // Idempotent on the session id — redelivery returns duplicate:true.
-            await sb.rpc("grant_pack", { p_account: userId, p_tokens: tokens, p_ref: s.id });
-            // Keep the customer id for later subscription events even on packs.
-            if (s.customer) {
-              await sb.from("web_profiles").update({ stripe_customer_id: s.customer }).eq("id", userId).is("stripe_customer_id", null);
-            }
+          const res = await must(
+            sb.rpc("grant_pack", { p_account: accountId, p_tokens: action.tokens, p_ref: action.ref }),
+            "grant_pack",
+          );
+          if (!res?.ok) console.error(`grant_pack rejected ${action.ref}: ${JSON.stringify(res)}`);
+          // Keep the customer id for later subscription events even on packs.
+          if (action.customer) {
+            await must(
+              sb.from("web_profiles").update({ stripe_customer_id: action.customer })
+                .eq("id", accountId).is("stripe_customer_id", null),
+              "customer mapping",
+            );
           }
         }
         break;
@@ -81,20 +124,68 @@ Deno.serve(async (req) => {
 
       case "customer.subscription.updated":
       case "customer.subscription.deleted": {
-        const sub = event.data.object;
-        // active/trialing → premium; canceled/deleted → free. past_due and
-        // unpaid leave the plan alone while Stripe retries the card — dunning
-        // shouldn't strip perks mid-retry, only terminal states do.
-        const plan = ["active", "trialing"].includes(sub.status) ? "premium"
-          : event.type === "customer.subscription.deleted" || sub.status === "canceled" ? "free" : null;
-        if (!plan) break;
-        await sb.from("web_profiles").update({
-          plan,
-          ...(plan === "free" ? { stripe_subscription_id: null } : {}),
-          updated_at: new Date().toISOString(),
-        }).or(`stripe_customer_id.eq.${sub.customer},stripe_subscription_id.eq.${sub.id}`);
+        const action = classifySubscription(event.data.object as never, event.type, PREMIUM_PRICE_ID);
+        if (action.kind === "ignore") break;
+        if (action.kind === "activate") {
+          // customer→account was recorded at checkout; matching by either id
+          // lets a sub created before the mapping existed still heal.
+          const clauses = [`stripe_subscription_id.eq.${action.subscriptionId}`];
+          if (action.customer) clauses.push(`stripe_customer_id.eq.${action.customer}`);
+          const updated = await must(
+            sb.from("web_profiles").update({
+              plan: "premium",
+              stripe_subscription_id: action.subscriptionId,
+              ...(action.customer ? { stripe_customer_id: action.customer } : {}),
+              updated_at: new Date().toISOString(),
+            }).or(clauses.join(",")).select("id"),
+            "subscription activate",
+          );
+          if (!updated?.length) console.error(`sub ${action.subscriptionId} activated but matched no web_profiles row`);
+        } else {
+          // Only the tracked subscription can revoke — a stale or duplicate
+          // sub ending must not strip a plan a different live sub pays for.
+          await must(
+            sb.from("web_profiles").update({
+              plan: "free",
+              stripe_subscription_id: null,
+              updated_at: new Date().toISOString(),
+            }).eq("stripe_subscription_id", action.subscriptionId),
+            "subscription deactivate",
+          );
+        }
         break;
       }
+
+      case "charge.refunded": {
+        // Audit-only: a zero-delta adjust row makes the refund visible in the
+        // ledger and ops queries. Tokens aren't clawed back automatically —
+        // charge events don't carry the session→pack mapping.
+        const ch = event.data.object;
+        const acct = ch.customer
+          ? await must(
+            sb.from("web_profiles").select("id, credit_balance").eq("stripe_customer_id", ch.customer).maybeSingle(),
+            "refund lookup",
+          )
+          : null;
+        if (!acct) {
+          console.error(`charge.refunded ${ch.id}: unmapped customer ${ch.customer}`);
+          break;
+        }
+        const { error } = await sb.from("credit_ledger").insert({
+          account_id: acct.id,
+          delta: 0,
+          kind: "adjust",
+          reason: `stripe_refund:${ch.id}`,
+          stripe_ref: `refund:${ch.id}`, // dedupes redelivered refund events
+          balance_after: acct.credit_balance,
+        });
+        if (error && error.code !== "23505") throw new Error(`refund audit: ${error.message}`);
+        break;
+      }
+
+      case "checkout.session.async_payment_failed":
+        console.error(`async payment failed: ${event.data.object?.id}`);
+        break;
     }
     return new Response("ok");
   } catch (e) {

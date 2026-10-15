@@ -165,6 +165,44 @@ test("refill never pushes a balance past the grant floor", async () => {
   await sql.end();
 });
 
+test("concurrent spends serialize on the account row lock — never overspend", async () => {
+  const sql = makeTestSql();
+  const store = await fixture(sql);
+  await addAccount(sql, "u-alice"); // refills to 20 on first spend
+  // Two parallel spends of 15: exactly one may win; the loser sees the
+  // post-grant balance of 5 and fails instead of driving the account negative.
+  const [a, b] = await Promise.all([
+    store.spendCredits("u-alice", 15, "one"),
+    store.spendCredits("u-alice", 15, "two"),
+  ]);
+  const wins = [a, b].filter(r => r.ok);
+  assert.equal(wins.length, 1, "exactly one concurrent spend may succeed");
+  assert.equal(wins[0].balance, GRANTS.freeDaily - 15);
+  const loser = [a, b].find(r => !r.ok)!;
+  assert.equal(loser.balance, GRANTS.freeDaily - 15, "loser sees the debited balance, not a stale one");
+  const rows = await sql`SELECT credit_balance FROM web_profiles WHERE discord_user_id = 'u-alice'`;
+  assert.equal(Number(rows[0].credit_balance), GRANTS.freeDaily - 15);
+  await sql.end();
+});
+
+test("purchaseCredits on a missing account fails closed, no ledger row", async () => {
+  const sql = makeTestSql();
+  const store = await fixture(sql);
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS credit_ledger_stripe_ref ON credit_ledger (stripe_ref) WHERE stripe_ref IS NOT NULL`;
+  const r = await store.purchaseCredits("3f2f4b0e-9b1a-4f5c-8d6e-7a8b9c0d1e2f", 500, "pack_500", "cs_ghost");
+  assert.deepEqual(r, { ok: false, duplicate: false, balance: 0 });
+  const n = await sql`SELECT count(*)::int AS n FROM credit_ledger`;
+  assert.equal(n[0].n, 0);
+  await sql.end();
+});
+
+test("refundCredits on an unlinked user fails closed", async () => {
+  const sql = makeTestSql();
+  const store = await fixture(sql);
+  assert.deepEqual(await store.refundCredits("u-ghost", 1, "x"), { ok: false, balance: 0 });
+  await sql.end();
+});
+
 test("insufficient balance fails but keeps the grant it applied", async () => {
   const sql = makeTestSql();
   const store = await fixture(sql);

@@ -1,6 +1,6 @@
 # Website & Web Accounts
 
-The `website/` directory is a self-contained Vite multi-page app — the public face of Characterly and the "real-life user" half of the product (accounts, future billing). It shares the Supabase Postgres database with the bot but is otherwise independent: no build step touches `src/`, and the bot never serves it.
+The `website/` directory is a self-contained Vite multi-page app — the public face of Characterly and the "real-life user" half of the product (accounts, billing). It shares the Supabase Postgres database with the bot but is otherwise independent: no build step touches `src/`, and the bot never serves it.
 
 Production: **https://characterly-website.albertjemmettwaite.workers.dev** (Cloudflare Workers Static Assets).
 

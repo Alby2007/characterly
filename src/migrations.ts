@@ -1587,12 +1587,108 @@ const migrations: Migration[] = [
         DO $undo$
         BEGIN
           IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+            EXECUTE 'DROP FUNCTION IF EXISTS public.grant_pack(uuid, int, text)';
             EXECUTE 'DROP INDEX IF EXISTS public.credit_ledger_stripe_ref';
             EXECUTE 'ALTER TABLE public.credit_ledger DROP COLUMN IF EXISTS stripe_ref';
+            EXECUTE 'ALTER TABLE public.credit_ledger DROP CONSTRAINT IF EXISTS credit_ledger_kind_check';
             EXECUTE 'DROP INDEX IF EXISTS public.web_profiles_stripe_customer';
             EXECUTE 'ALTER TABLE public.web_profiles
               DROP COLUMN IF EXISTS stripe_customer_id,
               DROP COLUMN IF EXISTS stripe_subscription_id';
+          END IF;
+        END $undo$
+      `;
+    },
+  },
+  // ── v32: Stripe webhook hardening ──────────────────────────────────────────
+  // grant_pack gains a positive-amount guard — it's service_role-only, but a
+  // negative p_tokens would *debit* the account. account_id_for_email backs
+  // the webhook's bare-link fallback: a payment link shared without
+  // ?client_reference_id resolves the buyer by the email they typed at
+  // checkout instead of silently dropping a paid event.
+  {
+    version: 32,
+    name: "v32_stripe_webhook_hardening",
+    up: async (sql) => {
+      await sql`
+        DO $mig$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'credit_ledger') THEN
+            EXECUTE $rpc$
+              CREATE OR REPLACE FUNCTION public.grant_pack(
+                p_account uuid, p_tokens int, p_ref text
+              ) RETURNS jsonb
+              LANGUAGE plpgsql SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                bal integer;
+                dup boolean := false;
+              BEGIN
+                IF p_tokens IS NULL OR p_tokens <= 0 THEN
+                  RAISE EXCEPTION 'invalid_token_amount';
+                END IF;
+                PERFORM 1 FROM public.web_profiles WHERE id = p_account FOR UPDATE;
+                IF NOT FOUND THEN
+                  RETURN jsonb_build_object('ok', false, 'reason', 'no_account');
+                END IF;
+                INSERT INTO public.credit_ledger (account_id, delta, kind, reason, stripe_ref, balance_after)
+                SELECT p_account, p_tokens, 'purchase', 'pack_' || p_tokens, p_ref,
+                       w.credit_balance + p_tokens
+                FROM public.web_profiles w WHERE w.id = p_account
+                ON CONFLICT (stripe_ref) WHERE stripe_ref IS NOT NULL DO NOTHING;
+                IF NOT FOUND THEN
+                  dup := true;
+                ELSE
+                  UPDATE public.web_profiles
+                  SET credit_balance = credit_balance + p_tokens, updated_at = now()
+                  WHERE id = p_account
+                  RETURNING credit_balance INTO bal;
+                END IF;
+                SELECT credit_balance INTO bal FROM public.web_profiles WHERE id = p_account;
+                RETURN jsonb_build_object('ok', true, 'duplicate', dup, 'balance', bal);
+              END
+              $body$
+            $rpc$;
+          END IF;
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+            EXECUTE $rpc$
+              CREATE OR REPLACE FUNCTION public.account_id_for_email(p_email text)
+              RETURNS uuid
+              LANGUAGE plpgsql SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid;
+              BEGIN
+                SELECT u.id INTO uid FROM auth.users u
+                WHERE lower(u.email) = lower(trim(p_email))
+                LIMIT 1;
+                RETURN uid;
+              END
+              $body$
+            $rpc$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.account_id_for_email(text) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.account_id_for_email(text) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.account_id_for_email(text) FROM authenticated';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.account_id_for_email(text) TO service_role';
+            END IF;
+          END IF;
+        END $mig$
+      `;
+    },
+    down: async (sql) => {
+      await sql`
+        DO $undo$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+            EXECUTE 'DROP FUNCTION IF EXISTS public.account_id_for_email(text)';
           END IF;
         END $undo$
       `;

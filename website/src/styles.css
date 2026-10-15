@@ -264,7 +264,8 @@ code, .cmd {
 .btn-ghost:hover { border-color: var(--gold); background: rgba(212, 163, 91, 0.06); color: var(--gold-hi); }
 .btn-danger { color: #f0b49e; background: rgba(196, 103, 63, 0.08); border-color: rgba(196, 103, 63, 0.4); }
 .btn-danger:hover { background: rgba(196, 103, 63, 0.16); border-color: var(--ember); }
-.btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; }
+.btn:disabled, .btn[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; }
+.btn[aria-disabled="true"]:hover { border-color: var(--rule-2); background: transparent; color: var(--paper); }
 .btn:active:not(:disabled) { transform: translateY(0); }
 .btn-lg { padding: 16px 28px; font-size: 16px; }
 .btn-sm { padding: 9px 16px; font-size: 14px; }

@@ -84,10 +84,12 @@ SELECT kind, sum(delta) FROM credit_ledger
 
 - **Catalog** (live account): `prod_VRhdA8UQOkzj2r` Premium $7.99/mo (`price_1UQoE5GAOUmNDfnhulTyoL1o`); `prod_VRhdvPYT4YwrPt` Token Pack — 500/$4.99 (`price_1UQoE5GAOUmNDfnhwHI9mwm7`), 1,500/$9.99 (`price_1UQoE6GAOUmNDfnh2W16RjDr`), 5,000/$24.99 (`price_1UQoE6GAOUmNDfnh0egnY8GD`). Both carry `txcd_10000000` (SaaS) for Managed Payments.
 - **Checkout** is Stripe Payment Links — zero backend for purchase. Dashboard appends `?client_reference_id=<web_profiles.id>&prefilled_email=<email>`.
-- **Fulfillment** is the `stripe-webhook` edge function (`supabase/functions/stripe-webhook`, source in repo): verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET` (WebCrypto HMAC-SHA256, 5-min tolerance), then service-role writes `plan`/pack grants. Endpoint `we_1UQoI5GAOUmNDfnhTp1AGDEn` listens for `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `customer.subscription.updated`, `customer.subscription.deleted`.
+- **Fulfillment** is the `stripe-webhook` edge function (`supabase/functions/stripe-webhook`, source in repo): verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET` (WebCrypto HMAC-SHA256, 5-min tolerance), then service-role writes `plan`/pack grants. Endpoint `we_1UQoI5GAOUmNDfnhTp1AGDEn` listens for `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `customer.subscription.updated`, `customer.subscription.deleted` — add `charge.refunded` (audit rows) and optionally `checkout.session.async_payment_failed` (logged) for full coverage.
 - **Secret setup**: `STRIPE_WEBHOOK_SECRET` must be set on the edge function — Dashboard → Edge Functions → Secrets, or `npx supabase secrets set STRIPE_WEBHOOK_SECRET=whsec_… --project-ref tfukkoektmsrolykliop`. The function returns 500 ("not configured") until then, and Stripe retries.
-- **Pack→link map** is hardcoded in the function (`PACK_LINKS`) — new packs need a new link + map entry + redeploy.
-- **Plan transitions**: `active`/`trialing` → premium; `canceled`/`deleted` → free; `past_due`/`unpaid` leave plan alone during Stripe's retry window.
+- **`verify_jwt=false`** is pinned in `supabase/config.toml` — Stripe sends no bearer token. Deploys must keep it disabled or every event 401s.
+- **Pack→link map** is hardcoded in the function (`PACK_LINKS`) — new packs need a new link + map entry + redeploy. Pack/plan attribution is `client_reference_id` (the dashboard appends it) with a `customer_details.email` → `account_id_for_email` fallback for bare links; unresolvable sessions log `no account` and ack.
+- **Error contract**: PostgREST/RPC errors throw → 500 → Stripe retries; only unresolvable or duplicate events ack quietly (and log). supabase-js never throws on DB errors itself — every call goes through `must()`.
+- **Plan transitions**: `active`/`trialing` → premium; `canceled`/`unpaid`/`paused`/`incomplete_expired`/deleted → free; `past_due`/`incomplete` keep perks during Stripe's retry window. Deactivation matches only the stored `stripe_subscription_id` — a stale/duplicate sub ending can't strip a plan another sub pays for.
 
 ## Secrets & rotation
 

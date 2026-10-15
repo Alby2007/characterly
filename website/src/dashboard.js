@@ -186,11 +186,23 @@ function payUrl(base) {
 }
 
 function renderBilling() {
-  $("#billing-plan").textContent = profile?.plan === "premium" ? "Premium" : "Free";
-  $("#billing-plan").className = profile?.plan === "premium" ? "badge badge-ok" : "badge badge-soon";
-  $("#btn-subscribe").href = payUrl(PAY_LINKS.premium);
-  $("#btn-subscribe").textContent = profile?.plan === "premium" ? "Premium — active" : "Go Premium — $7.99/mo";
-  $("#btn-subscribe").classList.toggle("btn-ghost", profile?.plan === "premium");
+  const premium = profile?.plan === "premium";
+  $("#billing-plan").textContent = premium ? "Premium" : "Free";
+  $("#billing-plan").className = premium ? "badge badge-ok" : "badge badge-soon";
+  const btn = $("#btn-subscribe");
+  btn.classList.toggle("btn-ghost", premium);
+  // Payment links happily sell a second concurrent subscription — a premium
+  // user must NOT get a live checkout link (double-billing + a stale sub
+  // ending can strip the live plan). Disabled anchor, not an href.
+  if (premium) {
+    btn.removeAttribute("href");
+    btn.setAttribute("aria-disabled", "true");
+    btn.textContent = "Premium — active";
+  } else {
+    btn.href = payUrl(PAY_LINKS.premium);
+    btn.removeAttribute("aria-disabled");
+    btn.textContent = "Go Premium — $7.99/mo";
+  }
   $("#btn-pack-500").href = payUrl(PAY_LINKS.pack500);
   $("#btn-pack-1500").href = payUrl(PAY_LINKS.pack1500);
   $("#btn-pack-5000").href = payUrl(PAY_LINKS.pack5000);

@@ -1,0 +1,8 @@
+project_id = "tfukkoektmsrolykliop"
+
+# The Stripe webhook does its own signature verification and must not sit
+# behind Supabase JWT auth — Stripe sends no bearer token. Pinning it here
+# keeps a bare `supabase functions deploy` from re-enabling JWT verification
+# and silently 401ing every billing event.
+[functions.stripe-webhook]
+verify_jwt = false
