@@ -484,6 +484,7 @@ details[open] .faq-icon::after { transform: rotate(90deg); opacity: 0; }
 }
 .auth-notice h2 { font-size: 20px; margin-bottom: 8px; }
 .auth-notice p { font-size: 14px; color: var(--ink-dim); }
+.notice-actions { display: flex; gap: 8px; justify-content: center; margin-top: 16px; }
 .auth-foot { margin-top: 22px; font-size: 13.5px; color: var(--ink-faint); }
 .auth-foot a { color: var(--ink-dim); }
 

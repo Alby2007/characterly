@@ -4,8 +4,8 @@ import "./styles.css";
 import { LINKS, DISCORD_OAUTH_ENABLED } from "./config.js";
 import { supabase } from "./supabase.js";
 import {
-  getSession, onAuthChange, signIn, signUp, magicLink,
-  signInWithDiscord, resetPassword, updatePassword,
+  getSession, onAuthChange, authRedirectTarget, signIn, signUp, magicLink,
+  resendVerification, signInWithDiscord, resetPassword, updatePassword,
 } from "./auth.js";
 
 for (const el of document.querySelectorAll("[data-link]")) {
@@ -25,6 +25,7 @@ const tabBar = $("#tab-bar");
 const errorBox = $("#form-error");
 const notice = $("#auth-notice");
 const noticeText = $("#notice-text");
+const noticeResend = $("#notice-resend");
 const title = $("#auth-title");
 const sub = $("#auth-sub");
 
@@ -32,12 +33,16 @@ function showError(msg) {
   errorBox.textContent = msg;
   errorBox.hidden = !msg;
 }
-function showNotice(msg) {
+// {type, email} so the "Resend" button can fire the right send again.
+let lastEmail = null;
+function showNotice(msg, resend) {
   for (const f of Object.values(forms)) f.hidden = true;
   tabBar.hidden = true;
   $("#oauth-divider").hidden = true;
   $("#btn-discord").hidden = true;
   showError("");
+  lastEmail = resend ?? null;
+  noticeResend.hidden = !lastEmail;
   noticeText.textContent = msg;
   notice.hidden = false;
 }
@@ -72,23 +77,57 @@ tabBar.addEventListener("click", e => {
 });
 $("#forgot-link").addEventListener("click", () => setMode("forgot"));
 $("#back-to-signin").addEventListener("click", () => setMode("signin"));
+$("#notice-back").addEventListener("click", () => setMode("signin"));
+noticeResend.addEventListener("click", async () => {
+  if (!lastEmail) return;
+  noticeResend.disabled = true;
+  const send = { signup: resendVerification, magic: magicLink, forgot: resetPassword }[lastEmail.type];
+  const { error } = await send(lastEmail.email);
+  noticeResend.disabled = false;
+  if (error) return showError(error.message);
+  noticeResend.textContent = "Sent again";
+});
+
+// ── URL params: recovery mode + OAuth/provider errors ───────────────────────
+const params = new URLSearchParams(window.location.search);
+const hashParams = new URLSearchParams(window.location.hash.slice(1));
+const urlError =
+  params.get("error_description") || params.get("error") ||
+  hashParams.get("error_description") || hashParams.get("error");
+if (urlError) showError(urlError.replace(/\+/g, " "));
 
 // ── Recovery link detection ────────────────────────────────────────────────
 // Supabase lands here with tokens in the URL hash; the client exchanges them
-// and fires a PASSWORD_RECOVERY event.
-const params = new URLSearchParams(window.location.search);
-if (params.get("mode") === "recovery") setMode("recovery");
-onAuthChange(session => {
-  // PASSWORD_RECOVERY arrives with a session — force the recovery form.
-  if (params.get("mode") === "recovery") setMode("recovery");
+// and fires a PASSWORD_RECOVERY event. No event/session within a few seconds
+// means the link was expired or already used — say so instead of showing a
+// form that can only fail.
+const inRecovery = params.get("mode") === "recovery";
+let recoveryReady = false;
+if (inRecovery) setMode("recovery");
+
+getSession().then(session => {
+  if (inRecovery) {
+    if (session) recoveryReady = true;
+    return;
+  }
+  if (session) window.location.replace(authRedirectTarget());
 });
 
-// If already signed in (and not in recovery), go straight to the dashboard.
-getSession().then(session => {
-  if (session && params.get("mode") !== "recovery") {
-    window.location.replace("/dashboard.html");
+onAuthChange((event, session) => {
+  if (inRecovery && (event === "PASSWORD_RECOVERY" || session)) {
+    recoveryReady = true;
+    setMode("recovery");
   }
 });
+if (inRecovery) {
+  setTimeout(() => {
+    if (recoveryReady || mode !== "recovery") return;
+    for (const f of Object.values(forms)) f.hidden = true;
+    showError("That reset link is expired or already used. Request a new one below.");
+    forms.forgot.hidden = false;
+    tabBar.hidden = true;
+  }, 3000);
+}
 
 // ── OAuth button visibility ────────────────────────────────────────────────
 if (DISCORD_OAUTH_ENABLED) {
@@ -114,45 +153,52 @@ forms.signin.addEventListener("submit", async e => {
   busy(btn, true); showError("");
   const { error } = await signIn(fd.get("email").trim(), fd.get("password"));
   busy(btn, false);
-  if (error) showError(error.message === "Invalid login credentials"
+  if (error) return showError(error.message === "Invalid login credentials"
     ? "Wrong email or password."
     : error.message);
+  window.location.href = authRedirectTarget();
 });
 
 forms.signup.addEventListener("submit", async e => {
   e.preventDefault();
   const btn = e.target.querySelector("[type=submit]");
   const fd = new FormData(e.target);
+  const email = fd.get("email").trim();
   const password = fd.get("password");
   if (password.length < 8) { showError("Password must be at least 8 characters."); return; }
   busy(btn, true); showError("");
-  const { data, error } = await signUp(fd.get("email").trim(), password, fd.get("display_name").trim());
+  const { data, error } = await signUp(email, password, fd.get("display_name").trim());
   busy(btn, false);
   if (error) return showError(error.message);
-  if (data.session) { window.location.href = "/dashboard.html"; return; }
-  showNotice("We sent a verification link to your email. Click it to finish creating your account.");
+  if (data.session) { window.location.href = authRedirectTarget(); return; }
+  showNotice("We sent a verification link to your email. Click it to finish creating your account.",
+    { type: "signup", email });
 });
 
 forms.magic.addEventListener("submit", async e => {
   e.preventDefault();
   const btn = e.target.querySelector("[type=submit]");
   const fd = new FormData(e.target);
+  const email = fd.get("email").trim();
   busy(btn, true); showError("");
-  const { error } = await magicLink(fd.get("email").trim());
+  const { error } = await magicLink(email);
   busy(btn, false);
   if (error) return showError(error.message);
-  showNotice("We sent a sign-in link to your email. It opens your dashboard in one click.");
+  showNotice("We sent a sign-in link to your email. It opens your dashboard in one click.",
+    { type: "magic", email });
 });
 
 forms.forgot.addEventListener("submit", async e => {
   e.preventDefault();
   const btn = e.target.querySelector("[type=submit]");
   const fd = new FormData(e.target);
+  const email = fd.get("email").trim();
   busy(btn, true); showError("");
-  const { error } = await resetPassword(fd.get("email").trim());
+  const { error } = await resetPassword(email);
   busy(btn, false);
   if (error) return showError(error.message);
-  showNotice("If that email is on file, a password reset link is on its way.");
+  showNotice("If that email is on file, a password reset link is on its way.",
+    { type: "forgot", email });
 });
 
 forms.recovery.addEventListener("submit", async e => {
@@ -165,5 +211,5 @@ forms.recovery.addEventListener("submit", async e => {
   const { error } = await updatePassword(password);
   busy(btn, false);
   if (error) return showError(error.message);
-  window.location.href = "/dashboard.html";
+  window.location.href = authRedirectTarget();
 });

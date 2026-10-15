@@ -1027,6 +1027,158 @@ const migrations: Migration[] = [
       await sql`DROP TABLE IF EXISTS link_codes`;
     },
   },
+  // ── v28: account-linking hardening ─────────────────────────────────────────
+  // Three audit fixes: handle_new_user falls back to OAuth metadata keys
+  // (Discord supplies full_name/name, not display_name); claim_link_code
+  // verifies the profile row actually updated before consuming the code; and
+  // unlink_discord clears a code-claimed link — those users have no auth
+  // identity row for unlinkIdentity to remove.
+  {
+    version: 28,
+    name: "v28_link_hardening",
+    up: async (sql) => {
+      await sql`
+        DO $hard$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION internal.handle_new_user()
+              RETURNS trigger
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              BEGIN
+                INSERT INTO public.web_profiles (id, display_name)
+                VALUES (new.id, coalesce(
+                  new.raw_user_meta_data->>'display_name',
+                  new.raw_user_meta_data->>'full_name',
+                  new.raw_user_meta_data->>'name',
+                  ''
+                ))
+                ON CONFLICT (id) DO NOTHING;
+                RETURN new;
+              END
+              $body$
+            $fn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION internal.handle_new_user() FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION internal.handle_new_user() FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION internal.handle_new_user() FROM authenticated';
+            END IF;
+
+            EXECUTE $rpc$
+              CREATE OR REPLACE FUNCTION public.claim_link_code(p_code text)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                rec record;
+                n integer;
+              BEGIN
+                IF uid IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                SELECT * INTO rec FROM public.link_codes
+                WHERE code = upper(trim(p_code));
+                IF NOT FOUND THEN
+                  RAISE EXCEPTION 'invalid_code: that code does not exist — check it and try again';
+                END IF;
+                IF rec.claimed_by IS NOT NULL THEN
+                  RAISE EXCEPTION 'code_used: that code was already claimed — run /link again for a fresh one';
+                END IF;
+                IF rec.expires_at < now() THEN
+                  RAISE EXCEPTION 'code_expired: that code expired — run /link again for a fresh one';
+                END IF;
+                IF EXISTS (
+                  SELECT 1 FROM public.web_profiles
+                  WHERE discord_user_id = rec.discord_user_id AND id <> uid
+                ) THEN
+                  RAISE EXCEPTION 'discord_already_linked: this Discord account is already linked to a different Characterly account';
+                END IF;
+                UPDATE public.web_profiles
+                SET discord_user_id = rec.discord_user_id, updated_at = now()
+                WHERE id = uid;
+                GET DIAGNOSTICS n = ROW_COUNT;
+                IF n = 0 THEN
+                  RAISE EXCEPTION 'no_profile: account row missing — sign out and back in, then retry';
+                END IF;
+                UPDATE public.link_codes SET claimed_by = uid WHERE code = rec.code;
+              END
+              $body$
+            $rpc$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.claim_link_code(text) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.claim_link_code(text) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.claim_link_code(text) TO authenticated';
+            END IF;
+
+            EXECUTE $rpc$
+              CREATE OR REPLACE FUNCTION public.unlink_discord()
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+              BEGIN
+                IF uid IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                UPDATE public.web_profiles
+                SET discord_user_id = NULL, updated_at = now()
+                WHERE id = uid;
+                IF NOT FOUND THEN
+                  RAISE EXCEPTION 'no_profile: account row missing';
+                END IF;
+              END
+              $body$
+            $rpc$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.unlink_discord() FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.unlink_discord() FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.unlink_discord() TO authenticated';
+            END IF;
+          END IF;
+        END $hard$
+      `;
+    },
+    down: async (sql) => {
+      await sql`
+        DO $undo$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+            EXECUTE 'DROP FUNCTION IF EXISTS public.unlink_discord()';
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION internal.handle_new_user()
+              RETURNS trigger
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              BEGIN
+                INSERT INTO public.web_profiles (id, display_name)
+                VALUES (new.id, coalesce(new.raw_user_meta_data->>'display_name', ''))
+                ON CONFLICT (id) DO NOTHING;
+                RETURN new;
+              END
+              $body$
+            $fn$;
+          END IF;
+        END $undo$
+      `;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

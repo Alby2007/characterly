@@ -125,7 +125,7 @@ cp .env.example .env   # fill in DISCORD_TOKEN, KEY_ENCRYPTION_SECRET, DATABASE_
 npm run dev            # or: npm start
 ```
 
-Migrations (`v1`–`v27`) apply automatically on first boot — no manual SQL.
+Migrations (`v1`–`v28`) apply automatically on first boot — no manual SQL.
 
 ### Key Configuration
 

@@ -1,6 +1,6 @@
 # Database Schema
 
-Characterly stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts` (`v1`–`v27`).
+Characterly stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts` (`v1`–`v28`).
 
 **Supabase lockdown (v23+):** every `public`-schema table has `ENABLE ROW LEVEL SECURITY` with zero Data-API policies — deny-all for `anon`/`authenticated`, while the bot's `postgres` role bypasses RLS. The exceptions are the web-account tables (`web_profiles`, `link_codes`), which have their own policy/grant design documented below. All Supabase-specific DDL is conditional on the `auth` schema existing, so plain-Postgres test/local databases run every migration unchanged.
 
@@ -522,9 +522,10 @@ Web account profiles for Supabase Auth users (v26) — the "real life user" half
 
 **Supporting functions & triggers** (all under the auth-schema gate, `SECURITY DEFINER`, `search_path = ''`, revoked from PUBLIC/anon):
 
-- `internal.handle_new_user()` + `on_auth_user_created` (v26) — inserts a `web_profiles` row for each new `auth.users` row.
+- `internal.handle_new_user()` + `on_auth_user_created` (v26; metadata fallbacks `display_name`/`full_name`/`name` from v28) — inserts a `web_profiles` row for each new `auth.users` row.
 - `internal.sync_discord_identity()` + `on_identity_sync` on `auth.identities` (v27) — on `INSERT`/`DELETE` of a `discord` identity, copies `provider_id` into `web_profiles.discord_user_id` (or NULLs it back out, guarded on the exact provider_id). Covers OAuth signup, `linkIdentity`, auto-merged identities, unlink, and account deletion; a duplicate link raises `discord_already_linked`. v27 also backfilled pre-existing Discord sign-ins.
-- `public.claim_link_code(p_code)` (v27) — `EXECUTE` granted to `authenticated`; validates a `/link` code (exists, unclaimed, unexpired, Discord account not already linked elsewhere) and stamps `discord_user_id`. Errors are `tag: message` strings (`invalid_code`, `code_used`, `code_expired`, `discord_already_linked`).
+- `public.claim_link_code(p_code)` (v27; v28 adds a rowcount check so a missing `web_profiles` row raises `no_profile` instead of silently consuming the code) — `EXECUTE` granted to `authenticated`; validates a `/link` code (exists, unclaimed, unexpired, Discord account not already linked elsewhere) and stamps `discord_user_id`. Errors are `tag: message` strings (`invalid_code`, `code_used`, `code_expired`, `discord_already_linked`, `no_profile`).
+- `public.unlink_discord()` (v28) — `EXECUTE` granted to `authenticated`; clears the caller's `discord_user_id`. Needed because code-claimed links have no `auth.identities` row for `unlinkIdentity` to remove (identity-backed links should unlink via `unlinkIdentity`, which the trigger mirrors).
 - `public.delete_own_account()` (v26) — `EXECUTE` granted to `authenticated`; deletes the caller's `auth.users` row (cascades to `web_profiles`).
 
 ---
@@ -587,3 +588,4 @@ Version tracking for the migration system.
 | 25 | `v25_companion_journal` | `companion_journal` — first-person origin-scoped companion journal entries |
 | 26 | `v26_web_profiles` | `public.web_profiles` (RLS, own-row policies), `internal.handle_new_user` trigger on `auth.users`, `public.delete_own_account` rpc — Supabase Auth web accounts |
 | 27 | `v27_discord_link` | `link_codes` + `public.claim_link_code` rpc; `internal.sync_discord_identity` trigger on `auth.identities`; `web_profiles` update grants narrowed to `(display_name, updated_at)` — Discord ↔ web account linking |
+| 28 | `v28_link_hardening` | `public.unlink_discord` rpc (code-claimed links); `claim_link_code` rowcount guard; `handle_new_user` falls back to OAuth `full_name`/`name` metadata |

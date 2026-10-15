@@ -32,7 +32,7 @@ Alongside the bot, `website/` is a Vite multi-page site (landing page, account s
 | `src/types.ts` | `Companion`, `CompanionPersona`, `GuildCompanion`, `MessageEvent`, … | Shared TypeScript types across modules |
 | `src/database.ts` | `MemoryStore` | Postgres persistence: companions, guild summons, webhook attribution, memory CRUD, lifecycle, conflict resolution, episode consolidation |
 | `src/events.ts` | `EventStore` | Postgres persistence: event CRUD, participants, message/memory attachments |
-| `src/migrations.ts` | `runMigrations`, `getMigrationVersion`, `LATEST_MIGRATION_VERSION` | Versioned schema migrations (v1–v27) with rollback support |
+| `src/migrations.ts` | `runMigrations`, `getMigrationVersion`, `LATEST_MIGRATION_VERSION` | Versioned schema migrations (v1–v28) with rollback support |
 | `src/confidence.ts` | `calculateInitialConfidence`, `updateConfidence`, `calculateDefaultImportance`, `calculateDefaultExplicitness` | Deterministic numeric formulas; no LLM involvement |
 | `src/perception.ts` | `shouldInspectForMemory`, `detectNamingRequest`, `detectSelfNaming`, `detectWakeWord`, `detectDismissal`, `contestCue`, `botMemoryCue`, `toolCues` | Cheap pre-filter: prevents LLM calls for ordinary chat; detects naming requests, self-naming, wake words, and dismissal cues |
 | `src/event-detection.ts` | `EventPipeline` | Heuristic + LLM continuity decisions; nightly maintenance |
@@ -366,7 +366,7 @@ Back-references to a closed candidate can retroactively promote it to `event` ti
 
 ---
 
-## Web accounts & the website (v26–v27)
+## Web accounts & the website (v26–v28)
 
 `website/` is a standalone Vite multi-page app — `index.html` (landing), `account.html` (sign in / sign up / magic link / password recovery), and `dashboard.html` (profile, Discord link card, password change, account deletion) — served as Cloudflare Workers static assets (`website/cloudflare.config.ts`, `npm run deploy` → `cf deploy`; live at `SITE_URL`). It talks directly to Supabase with the publishable key in `website/src/config.js`; there is no app server — the Data API is the backend, and row-level security is the access control.
 

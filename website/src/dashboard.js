@@ -6,7 +6,7 @@ import { supabase } from "./supabase.js";
 import {
   requireAuth, getProfile, updateDisplayName,
   updatePassword, deleteAccount, signOut,
-  linkDiscord, getIdentities, unlinkDiscord, claimLinkCode,
+  linkDiscord, getIdentities, unlinkDiscord, unlinkDiscordLink, claimLinkCode,
 } from "./auth.js";
 
 for (const el of document.querySelectorAll("[data-link]")) {
@@ -16,12 +16,11 @@ for (const el of document.querySelectorAll("[data-link]")) {
 
 const $ = sel => document.querySelector(sel);
 
-const session = await requireAuth();
-if (!session) throw new Error("redirecting");
-const user = session.user;
+const user = await requireAuth();
+if (!user) throw new Error("redirecting");
 
 // ── Profile ────────────────────────────────────────────────────────────────
-const profile = await getProfile(user.id).catch(() => null);
+let profile = await getProfile(user.id).catch(() => null);
 const displayName = profile?.display_name || user.user_metadata?.display_name || user.email.split("@")[0];
 
 $("#dash-name").textContent = displayName;
@@ -59,46 +58,66 @@ if (oauthError) {
   history.replaceState(null, "", window.location.pathname);
 }
 
+function showDiscordError(message) {
+  const el = $("#discord-error");
+  el.textContent = message;
+  el.hidden = false;
+}
+
 async function renderDiscordCard() {
   const { data } = await getIdentities();
   const identities = data?.identities ?? [];
   const discordIdentity = identities.find(i => i.provider === "discord");
-  if (discordIdentity) {
+  // Two link paths: an OAuth identity, or a /link code that stamped
+  // web_profiles.discord_user_id without creating an identity row.
+  const codeLinkedId = profile?.discord_user_id;
+  if (discordIdentity || codeLinkedId) {
     $("#discord-badge").textContent = "Linked";
     $("#discord-badge").className = "badge badge-ok";
     $("#discord-linked").hidden = false;
     $("#discord-unlinked").hidden = true;
-    const d = discordIdentity.identity_data ?? {};
-    $("#discord-name").textContent = d.full_name || d.name || d.custom_claims?.global_name || "Discord user";
-    if (d.avatar_url) {
+    if (discordIdentity) {
+      const d = discordIdentity.identity_data ?? {};
+      $("#discord-name").textContent = d.full_name || d.name || d.custom_claims?.global_name || "Discord user";
+      $("#discord-sub").textContent = "Linked via Discord";
+      if (typeof d.avatar_url === "string" && d.avatar_url.startsWith("https://")) {
+        $("#discord-avatar").innerHTML = "";
+        const img = document.createElement("img");
+        img.src = d.avatar_url;
+        img.alt = "";
+        $("#discord-avatar").append(img);
+      } else {
+        $("#discord-avatar").innerHTML = "";
+        $("#discord-avatar").textContent = $("#discord-name").textContent.charAt(0).toUpperCase();
+      }
+    } else {
+      $("#discord-name").textContent = "Discord account";
+      $("#discord-sub").textContent = `Linked via code — ID ${codeLinkedId}`;
       $("#discord-avatar").innerHTML = "";
-      const img = document.createElement("img");
-      img.src = d.avatar_url;
-      img.alt = "";
-      $("#discord-avatar").append(img);
-    } else {
-      $("#discord-avatar").textContent = $("#discord-name").textContent.charAt(0).toUpperCase();
+      $("#discord-avatar").textContent = "#";
     }
-    // Supabase refuses to unlink a user's last identity, but the UI still
-    // explains the escape hatch instead of silently hiding the button.
-    if (identities.length >= 2) {
-      $("#btn-unlink-discord").hidden = false;
-      $("#discord-unlink-note").hidden = true;
-      $("#btn-unlink-discord").onclick = async () => {
-        if (!confirm("Unlink your Discord account? Subscription perks tied to it will stop applying.")) return;
-        const { error } = await unlinkDiscord(discordIdentity);
-        if (error) {
-          const el = $("#discord-error");
-          el.textContent = error.message;
-          el.hidden = false;
-          return;
+    const doUnlink = discordIdentity
+      ? async () => {
+          // Supabase refuses to unlink a user's last identity, but the UI
+          // still explains the escape hatch instead of silently hiding it.
+          if (identities.length < 2) return;
+          if (!confirm("Unlink your Discord account? Subscription perks tied to it will stop applying.")) return;
+          const { error } = await unlinkDiscord(discordIdentity);
+          if (error) return showDiscordError(error.message);
         }
-        await renderDiscordCard();
-      };
-    } else {
-      $("#btn-unlink-discord").hidden = true;
-      $("#discord-unlink-note").hidden = false;
-    }
+      : async () => {
+          if (!confirm("Unlink your Discord account? Subscription perks tied to it will stop applying.")) return;
+          const { error } = await unlinkDiscordLink();
+          if (error) return showDiscordError(error.message);
+        };
+    const canUnlink = discordIdentity ? identities.length >= 2 : true;
+    $("#btn-unlink-discord").hidden = !canUnlink;
+    $("#discord-unlink-note").hidden = canUnlink;
+    $("#btn-unlink-discord").onclick = async () => {
+      await doUnlink();
+      profile = await getProfile(user.id).catch(() => profile);
+      await renderDiscordCard();
+    };
   } else {
     $("#discord-badge").textContent = "Not linked";
     $("#discord-badge").className = "badge badge-soon";
@@ -131,6 +150,7 @@ $("#form-link-code").addEventListener("submit", async e => {
     return;
   }
   $("#input-link-code").value = "";
+  profile = await getProfile(user.id).catch(() => profile);
   await renderDiscordCard();
 });
 
@@ -154,8 +174,7 @@ $("#form-password").addEventListener("submit", async e => {
 
 // ── Sign out ───────────────────────────────────────────────────────────────
 $("#nav-signout").addEventListener("click", async () => {
-  await signOut();
-  window.location.href = "/";
+  try { await signOut(); } finally { window.location.href = "/"; }
 });
 
 // ── Delete account ─────────────────────────────────────────────────────────
@@ -181,6 +200,5 @@ deleteBtn.addEventListener("click", async () => {
     deleteBtn.disabled = false;
     return;
   }
-  await signOut();
-  window.location.href = "/";
+  try { await signOut(); } finally { window.location.href = "/"; }
 });
