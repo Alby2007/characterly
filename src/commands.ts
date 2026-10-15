@@ -774,7 +774,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
             ? [{
                 name: "Tokens",
                 value: account
-                  ? `**${account.creditBalance.toLocaleString()}** on the **${account.plan}** plan — refreshes daily at UTC midnight. Details: ${config.siteUrl}/dashboard`
+                  ? `**${account.creditBalance.toLocaleString()}** on the **${account.plan}** plan — refreshes daily at UTC midnight.${account.plan === "free" && !keyRow ? ` Premium: 150/day, live memory, web tools — ${config.siteUrl}/dashboard#billing` : ` Details: ${config.siteUrl}/dashboard`}`
                   : `Not linked — create an account at ${config.siteUrl} and run \`/link\` to get hosted tokens`,
                 inline: false,
               }]

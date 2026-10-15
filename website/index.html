@@ -32,6 +32,7 @@
       <nav class="nav-links" aria-label="Sections">
         <a href="#how">How it works</a>
         <a href="#inside">What it's like</a>
+        <a href="#pricing">Pricing</a>
         <a href="#privacy">Privacy</a>
         <a href="#faq">FAQ</a>
       </nav>
@@ -46,6 +47,7 @@
     <div class="mobile-menu" id="mobile-menu" hidden>
       <a href="#how">How it works</a>
       <a href="#inside">What it's like</a>
+      <a href="#pricing">Pricing</a>
       <a href="#privacy">Privacy</a>
       <a href="#faq">FAQ</a>
       <a href="/account" data-account-mobile>Sign in</a>
@@ -74,7 +76,7 @@
           <a class="text-link" href="#how">See how it works</a>
         </div>
         <p class="hero-meta rv" style="--d:4">
-          <span>Free</span><span>Runs on your own AI key</span><span>Remembers only with consent</span>
+          <span>Free to start</span><span>No key, no setup</span><span>Remembers only with consent</span>
         </p>
       </div>
 
@@ -114,7 +116,7 @@
         <li><div class="k">One per account</div><div class="v">Awakened once, then yours permanently.</div></li>
         <li><div class="k">Where it lives</div><div class="v">Your DMs, and any server you bring it to.</div></li>
         <li><div class="k">What it remembers</div><div class="v">Only people who have said yes.</div></li>
-        <li><div class="k">What it runs on</div><div class="v">Your own Groq, OpenRouter, OpenAI or xAI key.</div></li>
+        <li><div class="k">What it runs on</div><div class="v">Our hosted models — or your own provider key.</div></li>
       </ul>
     </div>
 
@@ -257,10 +259,58 @@
         </article>
         <article class="note rv" style="--d:1">
           <span class="note-n">vi.</span>
-          <div><h3>Your key, your limits</h3>
-            <p>Paste a key from Groq, OpenRouter, OpenAI or xAI and the provider is worked out from the key itself. It's encrypted at rest, and a daily cap stops runaway usage.</p></div>
+          <div><h3>Hosted by default, yours if you want</h3>
+            <p>Chat runs on our hosted models out of the box — nothing to configure. If you already have a Groq, OpenRouter, OpenAI or xAI key, you can paste it and your companion uses that instead: encrypted at rest, unmetered.</p></div>
         </article>
       </div>
+    </section>
+
+    <!-- ── Pricing ────────────────────────────────────────────────────── -->
+    <section class="section" id="pricing">
+      <div class="section-head center">
+        <p class="label bare rv">Plans</p>
+        <h2 class="rv" style="--d:1">Free keeps <em>office hours</em>.<br />Premium keeps <em>yours</em>.</h2>
+        <p class="rv" style="--d:2">Every account runs on our hosted models — nothing to configure, no key to find. A conversation spends tokens: one for what you say, one for what they say back.</p>
+      </div>
+
+      <div class="tiers rv" style="--d:3">
+        <article class="tier">
+          <div class="tier-head">
+            <h3>Free</h3>
+            <p class="tier-tag">for meeting them</p>
+          </div>
+          <p class="tier-price">$0</p>
+          <ul class="tier-list">
+            <li>20 tokens a day — about ten exchanges</li>
+            <li>Replies in real time</li>
+            <li>Memory and journal settle on the hour</li>
+            <li>One companion, permanently yours</li>
+            <li>Memory only with consent</li>
+          </ul>
+          <a class="btn btn-ghost" data-link="addToDiscord" target="_blank" rel="noopener noreferrer">Add to Discord</a>
+        </article>
+
+        <article class="tier tier-featured">
+          <div class="tier-head">
+            <h3>Premium</h3>
+            <p class="tier-tag tier-tag-gold">for living with them</p>
+          </div>
+          <p class="tier-price">$7.99<small>/mo</small></p>
+          <ul class="tier-list">
+            <li>150 tokens a day — a conversation that never watches the clock</li>
+            <li>Memory and journal write in the moment</li>
+            <li>Web tools — it can search, open links, and check its own memory mid-reply</li>
+            <li>Priority when the fleet is busy</li>
+            <li>Everything in Free</li>
+          </ul>
+          <a class="btn btn-primary" href="/account?next=/dashboard%23billing">Go Premium</a>
+        </article>
+      </div>
+
+      <p class="tiers-foot rv" style="--d:4">
+        Top up without subscribing — token packs never expire: 500 for $4.99 · 1,500 for $9.99 · 5,000 for $24.99.
+        Running your own provider key? It's unlimited and unmetered — connect it in Discord with <code>/companion action:key</code>.
+      </p>
     </section>
 
     <!-- ── Privacy ────────────────────────────────────────────────────── -->
@@ -299,7 +349,11 @@
       <div class="faq rv">
         <details>
           <summary>Is Characterly free?<span class="pm" aria-hidden="true"></span></summary>
-          <p>Yes. It runs on a bring-your-own-key model: you paste an API key from Groq, OpenRouter, OpenAI or xAI, and a free Groq key works well. Your companion's replies and memory use your key, which is encrypted and never shown back to you.</p>
+          <p>Yes — every companion runs on our hosted models with 20 free tokens a day, no API key or setup needed. <a href="#pricing">Premium</a> ($7.99/month) raises that to 150 a day with live memory and web tools. If you already run your own provider key, you can connect it in Discord for unlimited use instead.</p>
+        </details>
+        <details>
+          <summary>What are tokens?<span class="pm" aria-hidden="true"></span></summary>
+          <p>Hosted chat spends tokens: one for your message, one for your companion's reply. Free accounts refill to 20 each day and Premium to 150; if you run out mid-conversation, one-off packs top up your balance and never expire.</p>
         </details>
         <details>
           <summary>What permissions does it need?<span class="pm" aria-hidden="true"></span></summary>

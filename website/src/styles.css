@@ -552,6 +552,31 @@ code, .cmd {
 .note h3 { font-size: 26px; line-height: 1.15; }
 .note p { margin-top: 12px; font-size: 16.5px; color: var(--paper-2); max-width: 48ch; }
 
+/* Pricing */
+.tiers { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; max-width: 900px; margin: 0 auto; align-items: stretch; }
+.tier {
+  display: flex; flex-direction: column; padding: 38px 36px 32px;
+  background: linear-gradient(180deg, var(--bg-3), var(--bg-2));
+  border: 1px solid var(--rule); border-radius: 6px;
+}
+.tier-featured {
+  position: relative; border-color: var(--rule-2);
+  background:
+    radial-gradient(90% 50% at 50% 0%, rgba(212, 163, 91, 0.09), transparent 70%),
+    linear-gradient(180deg, var(--bg-3), var(--bg-2));
+}
+.tier-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.tier h3 { font-size: 30px; }
+.tier-tag { font-family: var(--serif); font-style: italic; font-size: 15px; color: var(--paper-3); }
+.tier-tag-gold { color: var(--gold); }
+.tier-price { font-family: var(--serif); font-size: 46px; color: var(--gold-hi); margin: 14px 0 4px; line-height: 1; }
+.tier-price small { font-family: var(--sans); font-size: 15px; color: var(--paper-3); }
+.tier-list { list-style: none; margin: 20px 0 30px; padding: 0; flex: 1; }
+.tier-list li { padding: 9px 0 9px 22px; border-top: 1px solid var(--hair); font-size: 15.5px; color: var(--paper-2); position: relative; }
+.tier-list li::before { content: "·"; position: absolute; left: 4px; color: var(--gold); font-family: var(--serif); font-size: 22px; line-height: 0.9; }
+.tiers-foot { max-width: 900px; margin: 34px auto 0; text-align: center; font-size: 14.5px; color: var(--paper-3); }
+.tiers-foot code { font-size: 0.86em; }
+
 /* The vault (privacy) */
 .vault {
   position: relative; max-width: 1040px; margin: 40px auto 0;
@@ -877,6 +902,8 @@ input.toggle:focus-visible { outline: 2px solid var(--gold-hi); outline-offset: 
   .nav-links, .nav-actions { display: none; }
   .nav-toggle { display: flex; }
   .notes { grid-template-columns: 1fr; }
+  .tiers { grid-template-columns: 1fr; }
+  .tiers-foot { padding: 0 6px; }
   .vault { padding: 84px 32px 48px; }
   .vows { grid-template-columns: 1fr; gap: 32px; }
   .auth { grid-template-columns: 1fr; }

@@ -133,7 +133,7 @@ function linkPromptDue(key: string): boolean {
   return true;
 }
 const LINK_PROMPT = `To use Characterly's hosted features, create a free account at ${config.siteUrl} and run \`/link\` here to connect it to your Discord — it takes about a minute.`;
-const TOKEN_EMPTY = `You're out of tokens — they refresh daily at midnight UTC. Balance and settings: ${config.siteUrl}/dashboard`;
+const TOKEN_EMPTY = `You're out of tokens — they refresh daily at midnight UTC. Premium refills to 150/day: ${config.siteUrl}/dashboard#billing`;
 const HOSTED_CAPACITY = `The hosted model is at today's capacity — it resets at midnight UTC. Bringing your own API key (\`/companion action:key\`) always works.`;
 
 // One "low tokens" DM per user per UTC day.
@@ -149,6 +149,18 @@ async function maybeAlertLowCredit(userId: string, balance: number): Promise<voi
   const user = await client.users.fetch(userId).catch(() => null);
   await user?.send(`You're down to ${balance} token${balance === 1 ? "" : "s"} — they refresh daily at midnight UTC. Settings: ${config.siteUrl}/dashboard`).catch(() => {});
   inc("credits.low_alert");
+}
+
+// One "your companion almost used a web tool" nudge per user per UTC day —
+// free+hosted lanes never see tools, so a rare pointer is the only way they
+// learn Premium unlocks them. DM path only: a guild nudge would be public.
+const toolsNudgeAt = new Map<string, string>();
+function toolsNudgeDue(userId: string): boolean {
+  const today = new Date().toISOString().slice(0, 10);
+  if (toolsNudgeAt.get(userId) === today) return false;
+  if (toolsNudgeAt.size > 10_000) toolsNudgeAt.clear();
+  toolsNudgeAt.set(userId, today);
+  return true;
 }
 
 /** Next UTC hour boundary — free+hosted extraction/journal jobs coalesce here
@@ -961,7 +973,8 @@ async function handleDmMessage(
     };
     // Tools (compound web_search etc.) are premium-only on the hosted lane —
     // per-call tool billing can run ~5x a plain reply. BYOK lanes keep tools.
-    const toolsOn = config.replyTools && toolCues(event.content) && (!hostedDm || account?.plan === "premium");
+    const toolsWanted = config.replyTools && toolCues(event.content);
+    const toolsOn = toolsWanted && (!hostedDm || account?.plan === "premium");
     const { text } = await brain.reply(
       { ...event, authorName: freshOwnerName },
       context,
@@ -1005,6 +1018,12 @@ async function handleDmMessage(
         replyMessageId: sent.id, channelId: message.channel.id,
       }, journalDelay).catch(() => inc("jobs.enqueue_error"));
       if (chargedDm) void maybeAlertLowCredit(userId, dmBalance);
+      // Free+hosted users never see tools — a once-a-day hint that Premium
+      // unlocks them is the only way they'd learn the feature exists.
+      if (toolsWanted && !toolsOn && account && account.plan !== "premium" && toolsNudgeDue(userId)) {
+        inc("premium.tools_nudge");
+        message.channel.send(`${companion.name} almost went looking that up — Premium unlocks web search and link-reading: ${config.siteUrl}/dashboard#billing`).catch(() => {});
+      }
     } else {
       inc("reply.empty");
       replyThrottle.refund(dmScope, userId);
