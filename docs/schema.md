@@ -76,7 +76,7 @@ Raw Discord message archive. Purged on a rolling retention window.
 | `created_at` | TEXT | ISO-8601 timestamp |
 | `triage_result` | TEXT \| NULL | Durability/extraction state (v6): `'regex'` passed the regex gate, `'durable'` flagged by LLM triage, `'noise'` rejected, `'queued'` has a live extract job (v17), `'dead'` its only job dead-lettered (terminal for the sweep, still reachable by `/profile-build`), `'extracted'` extraction ran (terminal — never re-selected, even with zero evidence rows). NULL = not yet triaged |
 | `reply_to_id` | TEXT \| NULL | Discord ID of the message this one replies to (v7) |
-| `author_is_bot` | INTEGER | `1` when the author was another bot (v18) — archive-only context so other bots' messages can be recalled but excluded from extraction, profiles, and the interaction graph |
+| `author_is_bot` | BOOLEAN | `true` when the author was another bot (v18) — archive-only context: the sweep never triages/extracts these rows, a queued extract job drops them, and they're excluded from profiles and the interaction graph |
 
 **Index:** `messages_context (guild_id, channel_id, created_at DESC)` — used by `recentContext()`.
 
@@ -291,7 +291,7 @@ One row per detected server incident.
 | `occurred_at` | TEXT | Timestamp of the first message in the event |
 | `closed_at` | TEXT | ISO-8601 when the event window was closed (null = still open) |
 | `reference_count` | INTEGER | Number of times the event was referenced after closing |
-| `classifications` | INTEGER | Number of LLM classification passes run on this event (v18) — caps re-scoring at 3 so a stuck candidate can't burn calls forever |
+| `classifications` | INTEGER | Re-classification pass counter (v18) — each discard-verdict pass bumps it; `>= 3` stops re-scoring so a stuck candidate can't burn an LLM call on every future reference |
 | `created_at` | TEXT | ISO-8601 |
 | `updated_at` | TEXT | ISO-8601 |
 
@@ -356,7 +356,7 @@ Member registry — one row per (guild, user). Built by `recordMessage()` so bot
 | `first_seen_at` | TEXT | ISO-8601 |
 | `last_seen_at` | TEXT | ISO-8601 |
 | `message_count` | INTEGER | Total recorded messages |
-| `opted_out` | INTEGER | 1 = hard revoke: `/opt-out` forgets existing memories, hard-deletes relationship observations/edges, deletes the profile, and clears `opted_in` — opt-out always wins |
+| `opted_out` | INTEGER | 1 = hard revoke: `/opt-out` forgets existing memories, hard-deletes relationship observations/edges and `companion_journal` entries about them (`forgetJournalAbout`), deletes the profile, and clears `opted_in` — opt-out always wins |
 | `opted_in` | INTEGER | 1 = consent for derived data (person memories, relationship observations, attributes, profiles, dossiers). Effective consent = `opted_in=1 AND opted_out=0`. Set by `/opt-in` and `/profile-build` |
 
 ---
@@ -450,6 +450,101 @@ Extraction: deterministic regexes on `person_fact`/`person_preference` content r
 
 ---
 
+### `alias_candidates`
+
+Provenance for learned display-name aliases (v9). When the bot hears someone addressed by a name that isn't in `members.known_names`, the candidate is logged here before the alias is trusted.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT PK | Identity |
+| `guild_id` | TEXT | Server scope |
+| `user_id` | TEXT | Discord user ID the alias may belong to |
+| `name` | TEXT | Candidate display name |
+| `source` | TEXT | How the candidate was observed |
+| `evidence_message_id` | TEXT | Message that produced the candidate |
+| `created_at` | TIMESTAMPTZ | |
+
+**Unique constraint:** `(guild_id, user_id, name, evidence_message_id)`. Pruned at 90 days by `pruneDerivedData`.
+
+---
+
+### `unresolved_names`
+
+Names that failed entity resolution (v10) — the discovery surface for aliases the self-naming path can't catch and for recurring non-member entities.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT PK | Identity |
+| `guild_id` | TEXT | Server scope |
+| `name` | TEXT | Unresolved name as written |
+| `message_id` | TEXT | Message where resolution failed |
+| `created_at` | TIMESTAMPTZ | |
+
+**Unique constraint:** `(guild_id, name, message_id)`. Pruned at 90 days by `pruneDerivedData`.
+
+---
+
+### `companion_journal`
+
+A companion's own first-person episodic memory (v25) — what *it* experienced ("Alice and I roasted her tea take"), written after each reply by the deferred `journal-write` job. `origin_scope` keys recall: entries surface only where they formed, and `dm:<owner>` entries additionally ride the vault subtext into servers.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT PK | Identity |
+| `companion_id` | BIGINT | FK → `companions.id ON DELETE CASCADE` |
+| `origin_scope` | TEXT | `<guildId>` or `dm:<userId>` — recall is scoped to where the entry formed |
+| `kind` | TEXT | `moment` · `opinion` · `inside_joke` · `promise` |
+| `content` | TEXT | First-person journal text |
+| `about_subject_ids` | TEXT[] | Subjects the entry mentions — consent-gated at write *and* read time |
+| `importance` | DOUBLE | 0–1, ranks recall order and prune eviction |
+| `status` | TEXT | `active` · `forgotten` |
+| `source_message_id` | TEXT NULL | The companion's own reply that produced the entry (provenance + idempotency key) |
+| `created_at` / `updated_at` | TIMESTAMPTZ | |
+| `last_recalled_at` | TIMESTAMPTZ NULL | Stamped on each `journalFor` hit — drives the 30-day decay in `pruneJournal` |
+
+**Unique constraint:** `(companion_id, origin_scope, source_message_id, kind, content)` — a crashed job resaving identical output can't stack rows. **Indexes:** `companion_journal_lookup (companion_id, origin_scope, status, importance DESC)`; `companion_journal_about` GIN on `about_subject_ids`. RLS enabled (v25) with no policies — Data-API deny-all. Write-time trgm dedup drops paraphrases (similarity ≥ 0.75); nightly `pruneJournal` caps 200 active entries per (companion, scope).
+
+---
+
+### `web_profiles`
+
+Web account profiles for Supabase Auth users (v26) — the "real life user" half, named `web_profiles` because `profiles` is already the subject-profile table. Only created when the `auth` schema exists (Supabase); plain Postgres skips it.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | UUID PK | FK → `auth.users.id ON DELETE CASCADE` — the Supabase Auth user |
+| `display_name` | TEXT | Editable display name (seeded from `raw_user_meta_data`) |
+| `discord_user_id` | TEXT UNIQUE NULL | Linked Discord snowflake — **server-managed** (v27): written only by the `on_identity_sync` trigger or the `claim_link_code` rpc; not user-writable |
+| `stripe_customer_id` | TEXT UNIQUE NULL | Reserved for billing — server-managed, not user-writable |
+| `created_at` / `updated_at` | TIMESTAMPTZ | |
+
+**RLS:** own-row `SELECT`/`INSERT`/`UPDATE` policies for `authenticated`; `UPDATE` granted only on `(display_name, updated_at)` (v27) so a user can never forge `discord_user_id` or `stripe_customer_id` on their own row.
+
+**Supporting functions & triggers** (all under the auth-schema gate, `SECURITY DEFINER`, `search_path = ''`, revoked from PUBLIC/anon):
+
+- `internal.handle_new_user()` + `on_auth_user_created` (v26) — inserts a `web_profiles` row for each new `auth.users` row.
+- `internal.sync_discord_identity()` + `on_identity_sync` on `auth.identities` (v27) — on `INSERT`/`DELETE` of a `discord` identity, copies `provider_id` into `web_profiles.discord_user_id` (or NULLs it back out, guarded on the exact provider_id). Covers OAuth signup, `linkIdentity`, auto-merged identities, unlink, and account deletion; a duplicate link raises `discord_already_linked`. v27 also backfilled pre-existing Discord sign-ins.
+- `public.claim_link_code(p_code)` (v27) — `EXECUTE` granted to `authenticated`; validates a `/link` code (exists, unclaimed, unexpired, Discord account not already linked elsewhere) and stamps `discord_user_id`. Errors are `tag: message` strings (`invalid_code`, `code_used`, `code_expired`, `discord_already_linked`).
+- `public.delete_own_account()` (v26) — `EXECUTE` granted to `authenticated`; deletes the caller's `auth.users` row (cascades to `web_profiles`).
+
+---
+
+### `link_codes`
+
+One-time Discord → web linking codes (v27). `/link` in Discord mints a code (`XXXX-XXXX`, unambiguous alphabet); the site claims it via `claim_link_code`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `code` | TEXT PK | The one-time code (uppercased at claim) |
+| `discord_user_id` | TEXT | Discord user the code was minted for |
+| `created_at` | TIMESTAMPTZ | |
+| `expires_at` | TIMESTAMPTZ | 10-minute lifetime; minting a new code deletes prior/expired rows for the user |
+| `claimed_by` | UUID NULL | `auth.users.id` that claimed it — set exactly once |
+
+**Index:** `link_codes_user (discord_user_id, expires_at)`. **RLS:** enabled with zero policies — only the bot (postgres role) reads/writes; web claims funnel through the security-definer rpc. Lives outside the auth-schema gate so `/link` works on any database.
+
+---
+
 ### `schema_migrations`
 
 Version tracking for the migration system.
@@ -486,3 +581,9 @@ Version tracking for the migration system.
 | 19 | `v19_relationship_observation_author` | `relationship_observations.author_id` — assertor provenance for opt-out deletion and party-authored weighting |
 | 20 | `v20_relationship_intelligence` | `relationship_observations.source` (`'message'` vs `'pair_window'`); `relationships.behavioral_count`, `party_count`, `trend`, and `inferred` |
 | 21 | `v21_companions_and_webhooks` | `companions` (1 permanent companion per user account), `guild_companions` (server summons), and `webhook_messages` (webhook attribution + `chain_depth`) |
+| 22 | `v22_guild_keys_model` | `guild_keys.model` — per-key model override, required for custom base URLs |
+| 23 | `v23_rls_lockdown` | `ENABLE ROW LEVEL SECURITY` on every `public` table (deny-all for `anon`/`authenticated`); revoked default table grants to those roles; moved `pg_trgm` into `extensions` schema when present |
+| 24 | `v24_fk_indexes` | Covering indexes for unindexed FKs: `guild_companions(companion_id)`, `memory_history(evidence_id)`, `webhook_messages(companion_id)` |
+| 25 | `v25_companion_journal` | `companion_journal` — first-person origin-scoped companion journal entries |
+| 26 | `v26_web_profiles` | `public.web_profiles` (RLS, own-row policies), `internal.handle_new_user` trigger on `auth.users`, `public.delete_own_account` rpc — Supabase Auth web accounts |
+| 27 | `v27_discord_link` | `link_codes` + `public.claim_link_code` rpc; `internal.sync_discord_identity` trigger on `auth.identities`; `web_profiles` update grants narrowed to `(display_name, updated_at)` — Discord ↔ web account linking |

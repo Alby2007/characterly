@@ -1,6 +1,6 @@
 # Event Detection Pipeline
 
-The event pipeline (v0.2) groups related Discord messages into named, scored "events" — notable server incidents that can be recalled via `/event`. It runs after memory extraction on every message and also runs a nightly maintenance pass.
+The event pipeline (v0.2) groups related Discord messages into named, scored "events" — notable server incidents that can be recalled via `/event`. It runs after memory extraction on every processed message — inside the `extract` job worker (`src/extract-job.ts`) on the live path, and inline during `runServerIngest` — plus a nightly maintenance pass.
 
 Source files: `src/event-detection.ts`, `src/event-significance.ts`, `src/events.ts`.
 
@@ -22,7 +22,7 @@ Individual memories record facts about people. Events capture *what happened*: t
 
 ### `EventPipeline.process(message, savedMemoryIds, eventStore, memoryStore, brain, replyToMessageId?)`
 
-Called from `index.ts` (and `ingest.ts`) after `saveMemory()` on every message where `memoryEnabled` is true. Returns `true` if an LLM call was made (used by `ingest.ts` to pace requests).
+Called from `src/extract-job.ts` (the deferred worker) after `saveMemory()` on every durable message, and inline by `server-ingest.ts` during historical builds. Returns `true` if an LLM call was made (used by ingest to pace requests).
 
 ### `EventPipeline.maintainEvents(guildId, eventStore, memoryStore, brain, maxAgeMs?)`
 
@@ -52,10 +52,12 @@ Events older than 4 hours are automatically excluded (score = −1).
 Based on the top heuristic score, one of three paths is taken:
 
 ```
-top score ≥ 0.60  →  definite ATTACH  (no LLM)
-top score < 0.15  →  definite NEW     (no LLM)
-0.15 ≤ score < 0.60  →  ambiguous → LLM assessContinuity()
+reply-chain hit OR top score ≥ 0.60  →  definite ATTACH  (no LLM)
+top score < 0.15                     →  definite NEW     (no LLM)
+0.15 ≤ score < 0.60                  →  ambiguous → LLM assessContinuity()
 ```
+
+(A direct reply to a message already inside an event attaches unconditionally — the strongest continuity signal there is.)
 
 The LLM receives up to 3 candidate event windows (each with title/summary and the last 5 messages) and returns one of four decisions:
 
@@ -96,7 +98,7 @@ Any open event window older than `maxAgeMs` (default 24 hours) is closed by sett
 
 ### Phase 2: Score closed candidates
 
-For each closed candidate event that has not yet been scored (`significance = 0`):
+For each closed candidate event that has not yet been scored (`significance = 0`) and is under the re-classification cap (`classifications < 3`, v18 — each pass bumps the counter so a stuck candidate can't burn LLM calls forever):
 
 1. **Build a cluster** — retrieve the raw messages from the archive (if still present after retention purges) plus participant names and memory count.
 2. **LLM classification** — `brain.classifyEvent()` returns `significance` (0–1), `tier` (`low`/`medium`/`high`), `tone`, `narrativeComplete`, `futureRelevant`, `title`, `summary`.

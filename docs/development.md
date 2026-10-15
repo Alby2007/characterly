@@ -52,7 +52,9 @@ One-shot operational scripts. They import `src/*.ts` sources directly, so run th
 | `verify-memories.mjs` | Batch-runs sincerity verification over pending candidate memories (`VERIFY_MODEL`). |
 | `contest-sweep.mjs` | Retroactively applies bot-addressed denials/corrections as contest evidence on archived messages. |
 | `backfill-relationships.mjs` | One-off: re-extracts relationship observations over the archive, verifies, recomputes edges, rebuilds profiles. |
+| `requeue-dead-jobs.mjs` | Re-drives dead-lettered `jobs` rows back into the claimable set (`GUILD_ID` optional). |
 | `purge-nonopted.mjs` | Hard-deletes all derived data (memories, evidence, attributes, profiles, relationships) for non-consenting members. Requires `PURGE_CONFIRM=1` — irreversible. See README privacy section. |
+| `_lib.mjs` | Shared helpers imported by the other scripts (not run directly). |
 | `dev/` | Quarantined one-offs and diagnostics (`check-db`, `list-models`, `audit-filter`) — kept for reference, not maintained. |
 
 ---
@@ -82,6 +84,17 @@ Tests live alongside source files as `*.test.ts`. Run them all with `npm test`.
 | `conversation.test.ts` | `ConversationTracker` participant enrollment, TTL expiry, share-of-voice window, and `bystanderVoices` 1:1 vs shared-floor detection |
 | `speech-gate.test.ts` | `evaluateSpeechTurn` transcript replay, dismissal overrides, room-directed suppression, and `ReplyThrottle` burst/refund behavior |
 | `tools.test.ts` | `isSafeUrl` SSRF guards; `stripHtml`/`parseDdgLite` parsing; `executeTool` error strings never throw |
+| `jobs.test.ts` | Queue claim protocol: `run_after` ordering, `SKIP LOCKED` no-double-claim, at-cap guild exclusion, dead-letter at max attempts, BudgetExceeded midnight reschedule without burning attempts |
+| `extract-job.test.ts` | Worker drain: queued message → `extracted` with consented memories; consent drops; dormant guild drops; failed job stays claimable; vision client metering |
+| `journal.test.ts` | `Brain.writeJournal` prompt/parsing; origin-scoped recall; write-time consent filter; opt-out recall filtering + `forgetJournalAbout` |
+| `pair-analysis-job.test.ts` | Directed literal observation writes; unconfident → `unclear` marker only; both-party consent requirement; thin-window/dormant drops |
+| `pairwise.test.ts` | `pairwiseContext` edge direction, literal-only observations, cross-authored claims, opt-out erasure |
+| `lookup-tools.test.ts` | Internal reply tools: friendly error strings, consent refusals, active-attribute-only rendering |
+| `isolation.test.ts` | Cross-guild isolation proof: every store read and command surface returns only the querying guild's rows (incl. `jobs`/`guild_usage`/`guild_keys`, `purgeGuild` scoping) |
+| `guild-lifecycle.test.ts` | Dormant defaults on fresh guilds, `announced_at` idempotency, `purgeGuild` FK-ordered wipe |
+| `link-code.test.ts` | `/link` code minting: `XXXX-XXXX` unambiguous alphabet, re-issue replaces, expiry sweeps, per-user uniqueness |
+| `secrets.test.ts` | AES-256-GCM roundtrip, random IV uniqueness, wrong-key and tamper rejection |
+| `vision.test.ts` | `qualifyingImages` type/byte/count gates; `formatImageContext` framing; `describeImage` data-URI + strict json_schema |
 
 ### Adding a test
 
@@ -97,6 +110,8 @@ TEST_DATABASE_URL=postgresql://postgres:[pw]@db.[ref].supabase.co:5432/postgres 
 ```
 
 Each test creates a fresh `sql` connection via `makeTestSql()` from `src/test-helpers.ts`, runs migrations, truncates all data, then closes the connection on teardown. Tests do not share state.
+
+**Run files serially.** `npm test` passes `--test-concurrency=1` because all DB tests share one database — running `tsx --test src/*.test.ts` directly races the migrations/truncates and fails en masse. Pointing `TEST_DATABASE_URL` at a hosted Supabase project can also flake under load; a local Docker Postgres is the reliable choice.
 
 ```ts
 import assert from "node:assert/strict";
@@ -162,7 +177,7 @@ SELECT status, COUNT(*) FROM memories GROUP BY status;
 \dt
 ```
 
-No local files are written. There is no `data/` directory.
+The bot writes no local files — all state lives in Postgres. (`data/` is gitignored and may hold local dev leftovers; nothing in the runtime touches it.)
 
 ---
 
@@ -203,32 +218,95 @@ All errors must be resolved before committing. The project uses `strict: true`.
 ```
 characterly/
 ├── src/
-│   ├── index.ts              # Entry point — Discord client, 1:1 DM onboarding/chat, server message loop
+│   ├── index.ts              # Entry point — Discord client, 1:1 DM onboarding/chat, server message loop, job worker, daily maintenance
 │   ├── scene-router.ts       # Multi-companion scene router & chain-depth loop guard
 │   ├── webhooks.ts           # Per-companion Discord webhook sender & thread routing
 │   ├── cross-context.ts      # Asymmetric DM ↔ Server consciousness bridges
+│   ├── conversation.ts       # Per-channel/per-companion conversation objects & share-of-voice pacing
 │   ├── brains.ts             # User-first Brain resolver & API key prefix provider auto-detection
-│   ├── brain.ts              # All LLM calls (onboarding, extraction, verification, replies)
-│   ├── config.ts             # Env validation
+│   ├── brain.ts              # All LLM calls (onboarding, extraction, verification, journal, replies)
+│   ├── budget.ts             # meteredClient — per-scope daily LLM budget charged via guild_usage
+│   ├── secrets.ts            # AES-256-GCM key encryption, masking, live key validation
+│   ├── config.ts             # Env validation (zod)
 │   ├── types.ts              # Shared TypeScript types
 │   ├── db.ts                 # Shared postgres.js connection singleton
-│   ├── database.ts           # MemoryStore (Postgres: companions, webhooks, memories, edges)
+│   ├── database.ts           # MemoryStore (Postgres: companions, journal, link codes, memories, edges)
 │   ├── events.ts             # EventStore (Postgres)
-│   ├── migrations.ts         # Versioned schema migrations (v1–v21)
+│   ├── migrations.ts         # Versioned schema migrations (v1–v27)
 │   ├── confidence.ts         # Deterministic confidence formulas
-│   ├── perception.ts         # Pre-filter regex, wake words, dismissals
-│   ├── event-detection.ts    # EventPipeline
+│   ├── perception.ts         # Pre-filter regex, wake words, dismissals, tool cues
+│   ├── event-detection.ts    # EventPipeline — heuristic + LLM continuity
 │   ├── event-significance.ts # Significance scoring formula
+│   ├── entity-resolution.ts  # Display-name → user-ID resolution & alias map
+│   ├── persist-extraction.ts # Single consent-gated write path for extraction
+│   ├── extract-job.ts        # Worker handler for 'extract' jobs
+│   ├── journal-job.ts        # Worker handler for 'journal-write' jobs
+│   ├── pair-analysis-job.ts  # Worker handler for 'pair-analysis' jobs
+│   ├── jobs.ts               # Postgres job queue (SKIP LOCKED, leases, dead-letter)
+│   ├── contest.ts            # Bot-addressed denial/correction detection
+│   ├── profiles.ts           # ProfileStore — cards + dossiers
+│   ├── attributes.ts         # Structured provenance-backed profile facets
+│   ├── dossier.ts            # Per-section dossier input gathering
+│   ├── profile-build.ts      # /profile-build per-user scan
+│   ├── server-ingest.ts      # Server-level historical build (ingest + /server-build)
+│   ├── ingest.ts             # CLI wrapper for runServerIngest
+│   ├── guild-lifecycle.ts    # Join disclosure card, 1-click enable, kick-purge
 │   ├── commands.ts           # Slash commands, onboarding cards/modals, interaction handlers
-│   └── *.test.ts             # Test files (co-located with source)
+│   ├── speech-gate.ts        # Standalone speak/silence evaluator for tests
+│   ├── reply-throttle.ts     # Per-user reply token bucket
+│   ├── reply-format.ts       # Shared prompt/tool output formatters
+│   ├── tools.ts              # Reply tool dispatcher (web + internal lookups)
+│   ├── lookup-tools.ts       # Read-only internal lookup tools
+│   ├── vision.ts             # Image-attachment gate & description
+│   ├── metrics.ts            # In-process operational counters (/status)
+│   ├── retry.ts              # Shared LLM retry helper (rate-limit aware)
+│   ├── test-helpers.ts       # Shared Postgres test utilities (TEST_DATABASE_URL)
+│   └── *.test.ts             # 30 test files, co-located with source
+├── website/
+│   ├── index.html            # Landing page
+│   ├── account.html          # Sign in / sign up / magic link / recovery
+│   ├── dashboard.html        # Profile, Discord link card, password, account deletion
+│   ├── src/                  # auth.js, dashboard.js, account.js, config.js, supabase.js, main.js, styles.css
+│   ├── cloudflare.config.ts  # characterly-website Worker (static assets)
+│   └── vite.config.js        # Multi-page inputs + @cloudflare/vite-plugin
+├── .github/workflows/
+│   └── test.yml              # CI: check + tests on Postgres service; gated deploy to Oracle
+├── scripts/                  # Operational one-shots (see table above)
 ├── docs/
-│   ├── architecture.md       # Module map, companion onboarding, scene routing, and data flow
-│   ├── schema.md             # Database schema reference (through v21)
+│   ├── architecture.md       # Module map, companions, journal, web accounts, data flow
+│   ├── schema.md             # Database schema reference (through v27)
 │   ├── event-pipeline.md     # Event detection explainer
-│   ├── configuration.md      # Env var reference
-│   └── development.md        # This file
-├── src/test-helpers.ts       # Shared Postgres test utilities
+│   ├── configuration.md      # Env var + website config reference
+│   ├── development.md        # This file
+│   └── phase-*.md            # Historical phase reports (point-in-time, Sep 2026)
 ├── .env.example              # Template for environment variables
 ├── package.json
 └── tsconfig.json
 ```
+
+---
+
+## Website
+
+The site is a standalone Vite multi-page app — it has its own `package.json` and node_modules:
+
+```bash
+cd website
+npm install
+npm run dev      # http://localhost:5173
+npm run build    # production bundle → dist/
+npm run deploy   # cf deploy → Cloudflare Workers static assets
+```
+
+`npm run deploy` uses the [cf CLI](https://developers.cloudflare.com/workers/ci-cd/) — `@cloudflare/vite-plugin` emits the Build Output Spec at build time and `cloudflare.config.ts` declares the `characterly-website` worker (assets-only, 404-page handling). First deploy requires `cf login` (or an API token). The publishable Supabase key in `src/config.js` is public by design — RLS enforces access. Discord OAuth must be configured in Supabase Auth (Discord provider client id/secret from the bot's Discord application, callback URL registered in the Discord developer portal) before `DISCORD_OAUTH_ENABLED` is flipped on.
+
+---
+
+## CI / CD
+
+`.github/workflows/test.yml` runs on every push and PR:
+
+1. **test** — `npm ci`, `npm run check` (tsc), then `npm test` against a Postgres 16 service (`TEST_DATABASE_URL` pointed at the service container).
+2. **deploy** — only on green pushes to `main`, gated by `environment: production` (attach required reviewers in repo settings so a push alone can't ship). SSHes to the Oracle host and runs `cd ~/characterly && git pull --ff-only && npm ci && sudo systemctl restart characterly`. Required secrets: `ORACLE_SSH_KEY`, `ORACLE_HOST_KEY` (`ssh-keyscan` output — pinned host key, fails closed), `ORACLE_SSH_HOST` (`user@ip`).
+
+The website deploys separately — `npm run deploy` inside `website/` — and is not part of CI.

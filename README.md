@@ -44,6 +44,14 @@ In servers, the **Characterly** bot is invisible plumbing and a system announcer
 - **Provenance Facets, Profiles & Dossiers:** Structured `profile_attributes` cite the exact `memory_ids` that justify them — forgetting or superseding a memory cascades immediately to any facet citing it.
 - **Behavioral Relationship Intelligence:** Combines verified single-message claims with the 90-day interaction graph and holistic `pair-analysis` exchange-window reads (`warming` / `cooling` trends).
 
+### 7. First-Person Companion Journal
+- After each reply, a deferred `journal-write` job lets the companion write 0–2 **first-person** entries ("Alice and I roasted her tea take") into `companion_journal` — its own episodic memory, origin-tagged to the scope where it happened.
+- Entries recall only in their origin scope (guild entries in that server, DM entries in the DM) and via the Vault subtext lane; consent-gated like extraction, covered by `/opt-out` and `/memory-export`, and dormant-but-retained when a companion is dismissed.
+
+### 8. Web Accounts, Website & Discord Linking
+- A Vite site (`website/`) hosts the landing page plus **Characterly accounts** (Supabase Auth: email/password, magic link, Discord OAuth) and an account dashboard — deployed as Cloudflare Workers Static Assets.
+- `web_profiles` links the "real-life" account to the Discord user via `discord_user_id` — written only by the `auth.identities` sync trigger (OAuth/`linkIdentity`) or the `claim_link_code` rpc behind `/link`; users can never write it directly. `stripe_customer_id` is reserved for the future billing phase.
+
 ---
 
 ## Commands
@@ -73,6 +81,7 @@ All command replies are ephemeral (private to the invoker) unless noted; compani
 | `/profile` | View your profile card (another member's: admins only) |
 | `/dossier` | Deep dossier — voice, life situation, temperament, beliefs, relationship map, reputation, timeline |
 | `/event` | Inspect the server event a memory is attached to |
+| `/link` | Get a one-time code to link this Discord account to your Characterly web account |
 
 ### Server Administrators (`Manage Server`)
 
@@ -116,7 +125,7 @@ cp .env.example .env   # fill in DISCORD_TOKEN, KEY_ENCRYPTION_SECRET, DATABASE_
 npm run dev            # or: npm start
 ```
 
-Migrations (`v1`–`v21`) apply automatically on first boot — no manual SQL.
+Migrations (`v1`–`v27`) apply automatically on first boot — no manual SQL.
 
 ### Key Configuration
 
@@ -158,6 +167,7 @@ src/
   brain.ts          # All LLM calls (onboarding, extraction, verification, replies)
   database.ts       # MemoryStore — companions, webhooks, memories, evidence, relationships
   commands.ts       # Slash commands, onboarding cards/modals, interaction handlers
-  attributes.ts / profiles.ts / dossier.ts / events.ts / jobs.ts / ...
+  attributes.ts / profiles.ts / dossier.ts / events.ts / jobs.ts / journal-job.ts / ...
+website/            # Vite site — landing + accounts/dashboard, deployed to Cloudflare Workers
 scripts/            # Ops utilities (sweeps, backfills, verification, dead-letter requeue)
 ```

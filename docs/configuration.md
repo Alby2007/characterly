@@ -20,13 +20,14 @@ Characterly is configured through environment variables validated at startup by 
 |----------|---------|-------------|
 | `GROQ_MODEL` | `openai/gpt-oss-120b` | Default model name passed to Groq (or custom provider). |
 | `GROQ_BASE_URL` | `https://api.groq.com/openai/v1` | Default OpenAI-compatible base URL when not auto-detected from a user's key prefix. |
-| `KEY_ENCRYPTION_SECRET` | unset | Master passphrase encrypting user API keys at rest (AES-256-GCM, SHA-256-derived). Required for `/companion action:key`, `/setup`, and the onboarding **Paste API Key** modal. When users leave Base URL blank, Characterly auto-detects Groq (`gsk_...`), OpenRouter (`sk-or-...`), OpenAI (`sk-...`), or xAI (`xai-...`). |
-| `REQUIRE_GUILD_KEYS` | `0` | Hosted BYOK mode: `1` disables the operator `GROQ_API_KEY` fallback so companions and servers run strictly on user-supplied personal keys (`dm:<userId>`). |
+| `KEY_ENCRYPTION_SECRET` | unset | Master passphrase encrypting user API keys at rest (AES-256-GCM, SHA-256-derived). Required for `/companion action:key`, `/setup`, and the onboarding **Paste API Key** modal. When users leave Base URL blank, Characterly auto-detects Groq (`gsk_...`), OpenRouter (`sk-or-...`), OpenAI (`sk-...`), or xAI (`xai-...`). Any string; rotating it orphans existing `guild_keys` rows (recovery = re-run `/companion action:key` or `/setup`). |
+| `REQUIRE_GUILD_KEYS` | `0` | Hosted BYOK mode: `1` disables the operator `GROQ_API_KEY` fallback so companions and servers run strictly on user-supplied personal keys (`dm:<userId>`) — a keyless guild goes fully dormant (no archive, no replies, no LLM spend). Self-hosters leave this off. Note this is a *key* gate, orthogonal to the consent posture: every guild also starts dormant (`memory_enabled=0`) until an admin runs `/memory-resume`. |
 | `DM_LLM_DAILY_CAP` | `250` | Per-user daily LLM call cap for 1:1 DMs (`dm:<userId>` scope, resets at UTC midnight). |
 | `MAX_COMPANION_CHAIN_DEPTH` | `2` | Maximum consecutive companion-to-companion replies per human message in a server channel (0–5). Hard-stops runaway bot loops. |
 | `REPLY_BURST` | `4` | Per-user/actor token-bucket burst capacity before reply throttling kicks in (refunded automatically if a reply is unsent). |
 | `REPLY_REFILL_MS` | `30000` | Milliseconds to refill 1 token in the per-user reply throttle bucket. |
 | `GUILD_ID` | (empty) | If set, restricts the bot to a single Discord server. **Recommended during development** to avoid accidental activity in other servers. Leave empty to enable all servers the bot has joined. |
+| `SITE_URL` | `https://characterly-website.albertjemmettwaite.workers.dev` | Public URL of the Characterly website — `/link` replies point users at `${SITE_URL}/dashboard` to claim their link code. |
 | `SPEAK_THRESHOLD` | `0.70` | Minimum `selectCompanionForTurn()` / `brain.decide()` score required to send a reply. Range 0–1. |
 | `RAW_MESSAGE_RETENTION_DAYS` | `30` | How many days of raw Discord messages to keep in the `messages` table. Messages older than this are deleted by the daily maintenance job. Evidence quotes in `memory_evidence` are **not** affected by this purge. Range 1–365. |
 | `CANDIDATE_CONFIDENCE_THRESHOLD` | `0.70` | Minimum confidence required to auto-promote a candidate memory to active status (subject to evidence type gates). Range 0–1. |
@@ -47,13 +48,7 @@ Characterly is configured through environment variables validated at startup by 
 | `ENGAGEMENT` | `1` | Conversational engagement: once someone addresses the bot (mention, reply-to-bot, or wake word), a per-channel conversation opens and their follow-up messages get a mid-tier reply score (+0.70) for `ENGAGEMENT_TTL_MS` without re-mentioning — the bot stays in the thread. Participants leave three ways: TTL expiry (refreshes only on addressed messages, so drift decays out), explicit dismissals ("shut up &lt;name&gt;", "we're done" — deterministic override), or the reply model's `end_conversation` signal. `0` reverts to address-only replies. |
 | `REPLY_EXIT` | `1` | Honor the reply model's `end_conversation` flag — when the model reads a wrap-up ("ok cool thanks that's all") the human leaves the conversation, so wrap-ups the dismissal regex can't parse don't keep the +0.70 bonus alive for the full TTL. `0` ignores the flag; regex dismissal keeps working regardless. |
 | `ENGAGEMENT_TTL_MS` | `120000` | How long a participant stays "in conversation" after their last addressed message. Range 10s–1h. Longer = chattier mid-flow but slower to drop out. |
-| `PROACTIVE` | unset (off) | Proactive speaking global kill switch — **opt-in**, `1` required. When on, the bot may answer a question nobody answered after a channel silence, but only when it has grounded server lore/event context, only after the server's own `proactive_enabled` flag is set via `/proactive enabled:true`, and capped per channel per day. Any other value = feature entirely off regardless of server settings. |
-| `PROACTIVE_DELAY_MS` | `75000` | Idle silence a question must survive before the bot considers answering it. Range 15s–10min. Any follow-up message or reaction on the question cancels the pending attempt — the point is waiting to see if a human answers first. |
-| `PROACTIVE_DAILY_CAP` | `3` | Hard per-channel cap on proactive messages per day. Range 1–20. In-memory (restart resets) — bounds the worst case to "a few messages" no matter how many qualifying silences occur. |
-| `PROACTIVE_RESPONSE_WINDOW_MS` | `600000` | How long a sent proactive reply waits for engagement (a reply-edge or a reaction) before counting as ignored. Range 1min–1h. |
-| `PROACTIVE_BACKOFF_MS` | `21600000` | How long the elevated confidence floor stays hot after an ignored proactive reply (6h default). Range 5min–48h. While hot, the LLM gate requires higher confidence before the bot tries again. |
-| `KEY_ENCRYPTION_SECRET` | unset | Master passphrase encrypting per-guild LLM keys at rest (AES-256-GCM, SHA-256-derived). Required for `/setup` — without it the command tells admins key storage is unavailable. Any string; rotating it orphans existing `guild_keys` rows (recovery = re-run `/setup`). |
-| `REQUIRE_GUILD_KEYS` | `0` | Hosted BYOK mode: `1` disables the `GROQ_API_KEY` fallback so a guild without a stored key is fully dormant — no archiving, no replies, no LLM spend. Self-hosters leave this off. Note this is a *key* gate, orthogonal to the consent posture: every guild also starts dormant (`memory_enabled=0`) until an admin runs `/memory-resume`. |
+| `PROACTIVE`, `PROACTIVE_DELAY_MS`, `PROACTIVE_DAILY_CAP`, `PROACTIVE_RESPONSE_WINDOW_MS`, `PROACTIVE_BACKOFF_MS` | — | **Legacy no-ops.** The proactive-speaking feature was removed (the bot is pure plumbing and never speaks unprompted). These variables are still parsed so old `.env` files don't fail validation, but nothing reads them — setting any of them has no effect. Same for `server_settings.proactive_enabled`. |
 
 ---
 
@@ -79,8 +74,7 @@ Administrators can adjust per-server behaviour at runtime without restarting the
 |---------|--------|
 | `/memory-pause` | Sets `memory_enabled=0` and `reply_enabled=0`. The bot stops observing and replying immediately. |
 | `/memory-resume` | Sets both back to 1. |
-| `/proactive enabled:<true|false>` | Sets `proactive_enabled` for this server. Off by default and independently required alongside the global `PROACTIVE=1` env flag — unprompted speech is a different risk profile than replying when addressed, so both must explicitly opt in. |
-| `/memory-settings` | Shows current values of `memory_enabled`, `reply_enabled`, `proactive_enabled`, `raw_retention_days`, `llm_daily_cap`, and the `ignored_channels` list. |
+| `/memory-settings` | Shows current values of `memory_enabled`, `reply_enabled`, `raw_retention_days`, `llm_daily_cap`, and the `ignored_channels` list. |
 | `/limits daily_cap:N` | Sets `llm_daily_cap` — the per-guild LLM-call budget per UTC day (default 1000, range 0–100000). `0` blocks every LLM call for the guild; usage resets at UTC midnight. Deferrable work (extract jobs) reschedules to the next day rather than failing; a reply-path call at cap posts a one-per-channel-per-day notice. |
 | `/ignore-channel channel:#c` | Adds a channel to `ignored_channels` — fully invisible to the bot: no archiving, no replies, no member writes, no `/server-build` scans. |
 | `/unignore-channel channel:#c` | Removes a channel from `ignored_channels`. |
@@ -93,12 +87,11 @@ Administrators can adjust per-server behaviour at runtime without restarting the
 - `SPEAK_THRESHOLD` and `CANDIDATE_CONFIDENCE_THRESHOLD` are process-level constants. They apply to all guilds and can only be changed by restarting with different env values.
 - `RAW_MESSAGE_RETENTION_DAYS` sets the initial default for new guilds. Once a guild row exists in `server_settings`, the `raw_retention_days` column is the authoritative value for that guild.
 - `reply_enabled` is checked before `SPEAK_THRESHOLD`. A paused server will never receive a reply even if the score exceeds the threshold.
-- `proactive_enabled` requires `PROACTIVE=1` globally AND the per-server flag — double opt-in. Either switch independently suppresses the entire feature. Proactive answers draw only on `server_lore` memories and promoted events; `person_fact`/`person_preference` memories are excluded at the query layer, so the bot never volunteers personal facts unprompted. |
 - `llm_daily_cap` bounds a guild's total LLM spend per UTC day — every call through the guild's resolved `Brain` (extraction, triage, replies, verification, tools) charges `guild_usage` atomically before executing. `0` means "no LLM calls at all"; archived messages still record, they just queue for extraction until the cap resets.
 
 ### Job queue (fixed parameters)
 
-Deferrable cognition (memory extraction, contest checks, event-pipeline processing) runs on a Postgres-backed queue rather than inside the live message handler. The constants are compile-time in `src/jobs.ts`, not env-configurable: global in-flight cap **8**, per-guild concurrency **1** (preserves event ordering), 3-second poll with `LISTEN`/`NOTIFY` wake hints, 10-minute claim lease, exponential backoff, dead-letter at **5** attempts. Jobs that hit `BudgetExceeded` reschedule to the next UTC midnight without consuming an attempt.
+Deferrable cognition (`extract`, `journal-write`, and `pair-analysis` jobs — memory extraction, contest checks, event-pipeline processing, companion journaling, relationship reads) runs on a Postgres-backed queue rather than inside the live message handler. The constants are compile-time in `src/jobs.ts`, not env-configurable: global in-flight cap **8**, per-guild concurrency **1** (preserves event ordering), 3-second poll with `LISTEN`/`NOTIFY` wake hints, 10-minute claim lease, exponential backoff, dead-letter at **5** attempts. Jobs that hit `BudgetExceeded` reschedule to the next UTC midnight without consuming an attempt.
 
 ---
 
@@ -107,3 +100,23 @@ Deferrable cognition (memory extraction, contest checks, event-pipeline processi
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `INGEST_CHANNEL` | `general-chat` | Name of the channel to fetch history from when running `npm run ingest`. Only used by `src/ingest.ts`; ignored by the live bot. |
+
+## Test-only variable
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TEST_DATABASE_URL` | unset | Postgres connection string for the test suite. Read directly by `src/test-helpers.ts` (not `config.ts`) and honored **only inside the test runner** — it can never redirect a real bot. Required for the DB-backed tests; see [development.md](development.md#test-suite). |
+
+---
+
+## Website configuration
+
+The site in `website/` has no env file — its client config is compile-time in `website/src/config.js`:
+
+| Key | Purpose |
+|-----|---------|
+| `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` | The same Supabase project as the bot (`tfukkoektmsrolykliop`). The publishable key is public by design — access is enforced by RLS, not key secrecy. |
+| `LINKS` | Single source of truth for outbound links (bot invite, Discord invite, repo, legal pages). |
+| `DISCORD_OAUTH_ENABLED` | Shows the Discord sign-in/link buttons once the Discord provider is configured in Supabase Auth (client id + secret from the bot's Discord application, callback URL registered in the Discord developer portal). Currently `true`. |
+
+Server-side, `SITE_URL` (above) tells the bot where to send users claiming a `/link` code.
