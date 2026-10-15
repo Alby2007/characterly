@@ -1,3 +1,4 @@
+import { randomInt } from "node:crypto";
 import type { AttributeStatus, Companion, CompanionSpec, EvidenceEffect, EvidenceType, GuildCompanion, JournalCandidate, JournalEntry, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, VerificationVerdict, WebhookMessageRecord } from "./types.js";
 import { sql as defaultSql, type Sql } from "./db.js";
 import { runMigrations } from "./migrations.js";
@@ -2518,5 +2519,24 @@ export class MemoryStore {
       chainDepth: Number(r.chain_depth),
       createdAt: ts(r.created_at),
     };
+  }
+
+  // ── Account linking ──────────────────────────────────────────────────────
+
+  /** Mint a one-time link code for /link — the web account claims it via
+   * claim_link_code(), which stamps web_profiles.discord_user_id. One active
+   * code per Discord user; issuing a new one sweeps stale/expired rows.
+   * Alphabet avoids ambiguous glyphs (0/O, 1/I) since users retype it. */
+  async createLinkCode(discordUserId: string, ttlMinutes = 10): Promise<string> {
+    const alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let code = "";
+    for (let i = 0; i < 8; i++) code += alphabet[randomInt(alphabet.length)];
+    code = `${code.slice(0, 4)}-${code.slice(4)}`;
+    await this.sql`DELETE FROM link_codes WHERE discord_user_id = ${discordUserId} OR expires_at < NOW()`;
+    await this.sql`
+      INSERT INTO link_codes (code, discord_user_id, expires_at)
+      VALUES (${code}, ${discordUserId}, NOW() + (${ttlMinutes} || ' minutes')::interval)
+    `;
+    return code;
   }
 }

@@ -5,7 +5,8 @@ import { LINKS, DISCORD_OAUTH_ENABLED } from "./config.js";
 import { supabase } from "./supabase.js";
 import {
   requireAuth, getProfile, updateDisplayName,
-  updatePassword, deleteAccount, signOut, signInWithDiscord,
+  updatePassword, deleteAccount, signOut,
+  linkDiscord, getIdentities, unlinkDiscord, claimLinkCode,
 } from "./auth.js";
 
 for (const el of document.querySelectorAll("[data-link]")) {
@@ -45,20 +46,95 @@ $("#form-name").addEventListener("submit", async e => {
 });
 
 // ── Discord identity ───────────────────────────────────────────────────────
-const discordIdentity = (user.identities ?? []).find(i => i.provider === "discord");
-if (discordIdentity) {
-  $("#discord-badge").textContent = "Linked";
-  $("#discord-badge").className = "badge badge-ok";
-  $("#discord-linked").hidden = false;
-  $("#discord-note").hidden = true;
-  const d = discordIdentity.identity_data ?? {};
-  $("#discord-name").textContent = d.full_name || d.name || d.custom_claims?.global_name || "Discord user";
-  $("#discord-avatar").textContent = ($("#discord-name").textContent).charAt(0).toUpperCase();
-} else if (DISCORD_OAUTH_ENABLED) {
-  $("#discord-note").hidden = true;
-  $("#btn-link-discord").hidden = false;
-  $("#btn-link-discord").addEventListener("click", () => signInWithDiscord());
+// OAuth errors return on the redirect URL — either as query params or in the
+// hash fragment (implicit flow), so check both and surface them.
+const urlParams = new URLSearchParams(window.location.search);
+const hashParams = new URLSearchParams(window.location.hash.slice(1));
+const oauthError = urlParams.get("error_description") || hashParams.get("error_description")
+  || urlParams.get("error") || hashParams.get("error");
+if (oauthError) {
+  const el = $("#discord-error");
+  el.textContent = decodeURIComponent(oauthError).replace(/\+/g, " ");
+  el.hidden = false;
+  history.replaceState(null, "", window.location.pathname);
 }
+
+async function renderDiscordCard() {
+  const { data } = await getIdentities();
+  const identities = data?.identities ?? [];
+  const discordIdentity = identities.find(i => i.provider === "discord");
+  if (discordIdentity) {
+    $("#discord-badge").textContent = "Linked";
+    $("#discord-badge").className = "badge badge-ok";
+    $("#discord-linked").hidden = false;
+    $("#discord-unlinked").hidden = true;
+    const d = discordIdentity.identity_data ?? {};
+    $("#discord-name").textContent = d.full_name || d.name || d.custom_claims?.global_name || "Discord user";
+    if (d.avatar_url) {
+      $("#discord-avatar").innerHTML = "";
+      const img = document.createElement("img");
+      img.src = d.avatar_url;
+      img.alt = "";
+      $("#discord-avatar").append(img);
+    } else {
+      $("#discord-avatar").textContent = $("#discord-name").textContent.charAt(0).toUpperCase();
+    }
+    // Supabase refuses to unlink a user's last identity, but the UI still
+    // explains the escape hatch instead of silently hiding the button.
+    if (identities.length >= 2) {
+      $("#btn-unlink-discord").hidden = false;
+      $("#discord-unlink-note").hidden = true;
+      $("#btn-unlink-discord").onclick = async () => {
+        if (!confirm("Unlink your Discord account? Subscription perks tied to it will stop applying.")) return;
+        const { error } = await unlinkDiscord(discordIdentity);
+        if (error) {
+          const el = $("#discord-error");
+          el.textContent = error.message;
+          el.hidden = false;
+          return;
+        }
+        await renderDiscordCard();
+      };
+    } else {
+      $("#btn-unlink-discord").hidden = true;
+      $("#discord-unlink-note").hidden = false;
+    }
+  } else {
+    $("#discord-badge").textContent = "Not linked";
+    $("#discord-badge").className = "badge badge-soon";
+    $("#discord-linked").hidden = true;
+    $("#discord-unlinked").hidden = false;
+    if (DISCORD_OAUTH_ENABLED) $("#btn-link-discord").hidden = false;
+  }
+}
+
+$("#btn-link-discord").addEventListener("click", async () => {
+  const { error } = await linkDiscord();
+  if (error) {
+    const el = $("#discord-error");
+    el.textContent = error.message;
+    el.hidden = false;
+  }
+});
+
+$("#form-link-code").addEventListener("submit", async e => {
+  e.preventDefault();
+  const msg = $("#link-code-msg");
+  msg.hidden = true; msg.classList.remove("ok");
+  const code = $("#input-link-code").value.trim();
+  if (!code) return;
+  const { error } = await claimLinkCode(code);
+  if (error) {
+    // rpc raises "tag: message" — show just the message half.
+    msg.textContent = error.message.includes(":") ? error.message.split(":").slice(1).join(":").trim() : error.message;
+    msg.hidden = false;
+    return;
+  }
+  $("#input-link-code").value = "";
+  await renderDiscordCard();
+});
+
+await renderDiscordCard();
 
 // ── Password change ────────────────────────────────────────────────────────
 $("#form-password").addEventListener("submit", async e => {

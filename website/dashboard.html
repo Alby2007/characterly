@@ -74,17 +74,30 @@
           <span class="badge badge-soon" id="discord-badge">Not linked</span>
         </div>
         <p class="dash-desc">Link your Discord account so your companion, billing and perks know who you are.</p>
+        <div class="form-error" id="discord-error" role="alert" hidden></div>
         <div id="discord-linked" hidden>
           <div class="linked-row">
             <div class="avatar-xl small" id="discord-avatar">D</div>
             <div>
               <div id="discord-name" class="profile-email"></div>
-              <div class="profile-since">Linked via Discord sign-in</div>
+              <div class="profile-since">Linked via Discord</div>
             </div>
           </div>
+          <button class="btn btn-ghost btn-sm" id="btn-unlink-discord" type="button" hidden>Unlink Discord</button>
+          <p class="dash-note" id="discord-unlink-note" hidden>Discord is your only sign-in method — set a password below before unlinking, or you'd lock yourself out.</p>
         </div>
-        <button class="btn btn-ghost" id="btn-link-discord" type="button" hidden>Link Discord account</button>
-        <p class="dash-note" id="discord-note">Discord sign-in isn't enabled yet — linking will light up when it is.</p>
+        <div id="discord-unlinked">
+          <button class="btn btn-ghost" id="btn-link-discord" type="button" hidden>Link Discord account</button>
+          <form id="form-link-code" class="inline-form" novalidate>
+            <label class="field grow">
+              <span>Link code</span>
+              <input class="input" type="text" id="input-link-code" maxlength="12" autocomplete="off" placeholder="XXXX-XXXX" />
+            </label>
+            <button class="btn btn-ghost btn-sm" type="submit">Claim</button>
+          </form>
+          <div class="form-error" id="link-code-msg" role="alert" hidden></div>
+          <p class="dash-note">Have a code? Run <code>/link</code> in Discord (a DM or any server — only you see the reply).</p>
+        </div>
       </section>
 
       <!-- Billing -->

@@ -482,7 +482,8 @@ export const commandDefinitions = [
   ] },
   // In a server this is the guild-scope key (admin only); in DMs it stores the
   // user's personal key — the same modal backs both paths.
-  { name: "setup", description: "Connect an AI API key — server key for admins here, your personal key in DMs", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() }
+  { name: "setup", description: "Connect an AI API key — server key for admins here, your personal key in DMs", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
+  { name: "link", description: "Get a one-time code to link this Discord account to your Characterly web account" }
 ];
 
 const confidence = (value: number | undefined) => {
@@ -513,6 +514,16 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     return interaction.reply({ content: "That command can only be used inside a Discord server.", ephemeral: true });
   }
   const guildId = interaction.guildId ?? `dm:${interaction.user.id}`;
+  if (interaction.commandName === "link") {
+    const code = await store.createLinkCode(interaction.user.id);
+    return interaction.reply({
+      ephemeral: true,
+      content:
+        `**Link code:** \`${code}\`\n\n` +
+        `Enter it on your Characterly account page: ${config.siteUrl}/dashboard\n` +
+        `It expires in 10 minutes and only you can see this message.`
+    });
+  }
   if (interaction.commandName === "companion") {
     const action = interaction.options.getString("action", true);
     if (action === "summon") {

@@ -51,6 +51,9 @@ const env = z.object({
   DM_LLM_DAILY_CAP: z.coerce.number().int().min(0).max(100_000).default(250),
   // Maximum consecutive companion-to-companion replies per human message in a server channel.
   MAX_COMPANION_CHAIN_DEPTH: z.coerce.number().int().min(0).max(5).default(2),
+  // Where the public website lives — /link replies point users here to claim
+  // their code. Override for self-hosted/front-end forks.
+  SITE_URL: z.string().default("https://characterly-website.albertjemmettwaite.workers.dev"),
 }).parse(process.env);
 
 export const config = {
@@ -110,4 +113,5 @@ export const config = {
   requireGuildKeys: env.REQUIRE_GUILD_KEYS === "1",
   dmLlmDailyCap: env.DM_LLM_DAILY_CAP,
   maxCompanionChainDepth: env.MAX_COMPANION_CHAIN_DEPTH,
+  siteUrl: env.SITE_URL,
 };

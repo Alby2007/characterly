@@ -80,8 +80,8 @@
       "source": "docs.stripe.com",
       "sourceUrl": "https://docs.stripe.com",
       "sourceType": "well-known",
-      "computedHash": "ca550aa60d827c8c77ee604c9d3d3aa909031ca6fc0791bc0e31b28c2ef71123",
-      "wellKnownDigest": "sha256:cdf27cde9ccda605b06fb86570cfdcbaa916d1fdd33830ae330a6a3de7b9badd"
+      "computedHash": "49329b6ceef24770d415c2b1e9f29dc752d770b552b6b933bf8e9aa6c9b8543d",
+      "wellKnownDigest": "sha256:6bb3a951ab566ff7ce9e1c838a5a3d1f6ed5db1ed5b7bf3585c74f4f1867ffb9"
     }
   }
 }

@@ -50,6 +50,29 @@ export function signInWithDiscord() {
   });
 }
 
+// Manual identity linking — attaches a Discord identity to the *current*
+// account via OAuth (requires "Allow manual linking" enabled in Supabase).
+export function linkDiscord() {
+  return supabase.auth.linkIdentity({
+    provider: "discord",
+    options: { redirectTo: `${origin()}/dashboard.html` },
+  });
+}
+
+export function getIdentities() {
+  return supabase.auth.getUserIdentities();
+}
+
+export function unlinkDiscord(identity) {
+  return supabase.auth.unlinkIdentity(identity);
+}
+
+// Claims a /link code minted in Discord — stamps web_profiles.discord_user_id
+// via the security-definer rpc (the column itself is not user-writable).
+export function claimLinkCode(code) {
+  return supabase.rpc("claim_link_code", { p_code: code });
+}
+
 export function resetPassword(email) {
   return supabase.auth.resetPasswordForEmail(email, {
     redirectTo: `${origin()}/account.html?mode=recovery`,

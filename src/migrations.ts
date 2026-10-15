@@ -861,6 +861,172 @@ const migrations: Migration[] = [
       await sql`DROP TABLE IF EXISTS public.web_profiles`;
     },
   },
+  // ── v27: Discord ↔ web account linking ─────────────────────────────────────
+  // web_profiles.discord_user_id becomes server-managed: column-level grants
+  // stop users writing it (a forged snowflake would steal another user's
+  // perks), and a trigger on auth.identities syncs it from what Discord itself
+  // attested — covering OAuth sign-up, linkIdentity, auto-merged identities,
+  // and unlink/account deletion. link_codes + claim_link_code implement the
+  // Discord-originated /link flow: bot mints a one-time code, site claims it.
+  {
+    version: 27,
+    name: "v27_discord_link",
+    up: async (sql) => {
+      // link_codes lives outside the auth-schema gate so the bot can mint codes
+      // on any database; the claim rpc that consumes it needs auth.uid().
+      await sql`
+        CREATE TABLE IF NOT EXISTS link_codes (
+          code            TEXT PRIMARY KEY,
+          discord_user_id TEXT NOT NULL,
+          created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          expires_at      TIMESTAMPTZ NOT NULL,
+          claimed_by      UUID
+        )
+      `;
+      await sql`CREATE INDEX IF NOT EXISTS link_codes_user ON link_codes(discord_user_id, expires_at)`;
+      // RLS with no policies = deny-all for Data API roles; only the bot
+      // (postgres, bypasses RLS) reads/writes, and web claims go through the
+      // security-definer rpc below.
+      await sql`ALTER TABLE link_codes ENABLE ROW LEVEL SECURITY`;
+
+      await sql`
+        DO $link$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+            -- Tighten the writable surface: authenticated can update only
+            -- display_name/updated_at on their own row. discord_user_id and
+            -- stripe_customer_id are server-write-only from here on.
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'REVOKE UPDATE ON public.web_profiles FROM authenticated';
+              EXECUTE 'GRANT UPDATE (display_name, updated_at) ON public.web_profiles TO authenticated';
+            END IF;
+
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION internal.sync_discord_identity()
+              RETURNS trigger
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              BEGIN
+                IF TG_OP = 'INSERT' AND new.provider = 'discord' THEN
+                  IF EXISTS (
+                    SELECT 1 FROM public.web_profiles
+                    WHERE discord_user_id = new.provider_id AND id <> new.user_id
+                  ) THEN
+                    RAISE EXCEPTION 'discord_already_linked: this Discord account is already linked to a different Characterly account';
+                  END IF;
+                  UPDATE public.web_profiles
+                  SET discord_user_id = new.provider_id, updated_at = now()
+                  WHERE id = new.user_id;
+                  RETURN new;
+                END IF;
+                IF TG_OP = 'DELETE' AND old.provider = 'discord' THEN
+                  -- Guard on the exact provider_id so a re-link to a different
+                  -- Discord account isn't clobbered by the old row's delete.
+                  UPDATE public.web_profiles
+                  SET discord_user_id = NULL, updated_at = now()
+                  WHERE id = old.user_id AND discord_user_id = old.provider_id;
+                  RETURN old;
+                END IF;
+                RETURN coalesce(new, old);
+              END
+              $body$
+            $fn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION internal.sync_discord_identity() FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION internal.sync_discord_identity() FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION internal.sync_discord_identity() FROM authenticated';
+            END IF;
+
+            EXECUTE 'DROP TRIGGER IF EXISTS on_identity_sync ON auth.identities';
+            EXECUTE $trg$
+              CREATE TRIGGER on_identity_sync
+              AFTER INSERT OR DELETE ON auth.identities
+              FOR EACH ROW EXECUTE FUNCTION internal.sync_discord_identity()
+            $trg$;
+
+            -- Backfill users who already signed in via Discord before this
+            -- trigger existed.
+            EXECUTE $bf$
+              UPDATE public.web_profiles wp
+              SET discord_user_id = i.provider_id, updated_at = now()
+              FROM auth.identities i
+              WHERE i.user_id = wp.id AND i.provider = 'discord'
+                AND wp.discord_user_id IS NULL
+            $bf$;
+
+            EXECUTE $rpc$
+              CREATE OR REPLACE FUNCTION public.claim_link_code(p_code text)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                rec record;
+              BEGIN
+                IF uid IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                SELECT * INTO rec FROM public.link_codes
+                WHERE code = upper(trim(p_code));
+                IF NOT FOUND THEN
+                  RAISE EXCEPTION 'invalid_code: that code does not exist — check it and try again';
+                END IF;
+                IF rec.claimed_by IS NOT NULL THEN
+                  RAISE EXCEPTION 'code_used: that code was already claimed — run /link again for a fresh one';
+                END IF;
+                IF rec.expires_at < now() THEN
+                  RAISE EXCEPTION 'code_expired: that code expired — run /link again for a fresh one';
+                END IF;
+                IF EXISTS (
+                  SELECT 1 FROM public.web_profiles
+                  WHERE discord_user_id = rec.discord_user_id AND id <> uid
+                ) THEN
+                  RAISE EXCEPTION 'discord_already_linked: this Discord account is already linked to a different Characterly account';
+                END IF;
+                UPDATE public.web_profiles
+                SET discord_user_id = rec.discord_user_id, updated_at = now()
+                WHERE id = uid;
+                UPDATE public.link_codes SET claimed_by = uid WHERE code = rec.code;
+              END
+              $body$
+            $rpc$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.claim_link_code(text) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.claim_link_code(text) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.claim_link_code(text) TO authenticated';
+            END IF;
+          END IF;
+        END $link$
+      `;
+    },
+    down: async (sql) => {
+      await sql`
+        DO $unlink$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+            EXECUTE 'DROP TRIGGER IF EXISTS on_identity_sync ON auth.identities';
+            EXECUTE 'DROP FUNCTION IF EXISTS public.claim_link_code(text)';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'REVOKE UPDATE (display_name, updated_at) ON public.web_profiles FROM authenticated';
+              EXECUTE 'GRANT UPDATE ON public.web_profiles TO authenticated';
+            END IF;
+          END IF;
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'internal') THEN
+            EXECUTE 'DROP FUNCTION IF EXISTS internal.sync_discord_identity()';
+          END IF;
+        END $unlink$
+      `;
+      await sql`DROP TABLE IF EXISTS link_codes`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a
