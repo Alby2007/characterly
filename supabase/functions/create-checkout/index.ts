@@ -77,16 +77,20 @@ Deno.serve(async (request) => {
     client_reference_id: profile.id,
     "line_items[0][price]": p.price,
     "line_items[0][quantity]": "1",
+    // The whole catalog carries the SaaS tax code under Managed Payments —
+    // API sessions must opt in or Stripe rejects the price outright.
+    "managed_payments[enabled]": "true",
     "metadata[checkout_kind]": p.meta,
     success_url: `${site}/dashboard#billing`,
     cancel_url: `${site}/dashboard#billing`,
     // Reuse the known Stripe customer so sub events + refund audits map to
-    // the same identity; otherwise collect the email and (for payments, where
-    // no Customer is created by default) force customer creation so
-    // charge.refunded can map the charge back to this account.
+    // the same identity; otherwise collect the email (only when the account
+    // has one — an empty string is a Stripe 400) and, for payments where no
+    // Customer is created by default, force creation so charge.refunded can
+    // map the charge back to this account.
     ...(profile.stripe_customer_id
       ? { customer: profile.stripe_customer_id }
-      : { customer_email: user.email ?? "", ...(p.mode === "payment" ? { customer_creation: "always" } : {}) }),
+      : { ...(user.email ? { customer_email: user.email } : {}), ...(p.mode === "payment" ? { customer_creation: "always" } : {}) }),
   });
 
   const res = await fetch("https://api.stripe.com/v1/checkout/sessions", {
@@ -96,8 +100,9 @@ Deno.serve(async (request) => {
   });
   const body = await res.json().catch(() => null);
   if (!res.ok || !body?.url) {
+    const why = body?.error?.message ?? `stripe ${res.status}`;
     console.error(`checkout create failed for ${user.id}: ${res.status} ${JSON.stringify(body)}`);
-    return json({ error: "checkout unavailable" }, 502);
+    return json({ error: `checkout unavailable — ${why}` }, 502);
   }
   return json({ url: body.url });
 });
