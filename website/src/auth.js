@@ -79,3 +79,16 @@ export async function updateDisplayName(userId, name) {
 }
 export const getIdentities = () => supabase.auth.getUserIdentities();
 export const claimLinkCode = code => supabase.rpc("claim_link_code", { p_code: code });
+
+// ── Tokens + companion settings (hosted lane) ───────────────────────────────
+// Balance/plan/grant timestamps come through getProfile (web_profiles row).
+// Settings + BYOK status go through rpcs that resolve the caller's own linked
+// discord_user_id server-side — never trusted from the client.
+export const getBotSettings = () => supabase.rpc("my_bot_settings");
+export const saveBotSettings = patch => supabase.rpc("upsert_my_settings", { patch });
+export const getByokStatus = () => supabase.rpc("my_byok_status");
+export const getCreditLedger = (limit = 8) =>
+  supabase.from("credit_ledger")
+    .select("delta,kind,reason,balance_after,created_at")
+    .order("id", { ascending: false })
+    .limit(limit);

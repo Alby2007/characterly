@@ -1,18 +1,11 @@
-import "@fontsource-variable/inter";
-import "@fontsource-variable/space-grotesk";
-import "./styles.css";
-import { LINKS, DISCORD_OAUTH_ENABLED } from "./config.js";
-import { supabase } from "./supabase.js";
+import "./base.js";
+import { DISCORD_OAUTH_ENABLED } from "./config.js";
 import {
   requireAuth, getProfile, updateDisplayName,
   updatePassword, deleteAccount, signOut,
   linkDiscord, getIdentities, unlinkDiscord, unlinkDiscordLink, claimLinkCode,
+  getBotSettings, saveBotSettings, getByokStatus, getCreditLedger,
 } from "./auth.js";
-
-for (const el of document.querySelectorAll("[data-link]")) {
-  const url = LINKS[el.dataset.link];
-  if (url) el.setAttribute("href", url);
-}
 
 const $ = sel => document.querySelector(sel);
 
@@ -23,6 +16,8 @@ if (!user) throw new Error("redirecting");
 let profile = await getProfile(user.id).catch(() => null);
 const displayName = profile?.display_name || user.user_metadata?.display_name || user.email.split("@")[0];
 
+const hour = new Date().getHours();
+$("#dash-greeting").textContent = hour < 5 ? "Up late" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
 $("#dash-name").textContent = displayName;
 $("#profile-email").textContent = user.email;
 $("#profile-avatar").textContent = displayName.charAt(0).toUpperCase();
@@ -117,6 +112,8 @@ async function renderDiscordCard() {
       await doUnlink();
       profile = await getProfile(user.id).catch(() => profile);
       await renderDiscordCard();
+      await renderTokens();
+      await renderBotSettings();
     };
   } else {
     $("#discord-badge").textContent = "Not linked";
@@ -152,9 +149,77 @@ $("#form-link-code").addEventListener("submit", async e => {
   $("#input-link-code").value = "";
   profile = await getProfile(user.id).catch(() => profile);
   await renderDiscordCard();
+  await renderTokens();
+  await renderBotSettings();
 });
 
 await renderDiscordCard();
+
+// ── Tokens + companion settings ──────────────────────────────────────────────
+// Tokens are the user-facing name for hosted-lane credits. Balance/plan live
+// on the profile row; settings + BYOK state come from rpcs that stamp the
+// caller's own discord_user_id server-side.
+const LEDGER_LABELS = { grant_daily: "Daily refill", grant_weekly: "Weekly refill", refund: "Refund", adjust: "Adjustment" };
+const REASON_LABELS = { dm_turn: "DM chat", guild_turn: "Server chat", c2c: "Companion chat", dm_turn_refund: "Chat refund", guild_turn_refund: "Chat refund" };
+
+async function renderTokens() {
+  const linked = Boolean(profile?.discord_user_id);
+  $("#tokens-body").hidden = !linked;
+  $("#tokens-locked").hidden = linked;
+  if (!linked) return;
+  const premium = profile.plan === "premium";
+  $("#tokens-plan").textContent = premium ? "Premium" : "Free";
+  $("#tokens-plan").className = premium ? "badge badge-ok" : "badge badge-soon";
+  $("#tokens-balance").textContent = Number(profile.credit_balance ?? 0).toLocaleString();
+  $("#tokens-grant").textContent = premium
+    ? "Daily top-up plus a weekly refill — applied automatically as you chat."
+    : "Your free allowance refills each UTC day — applied automatically as you chat.";
+  const ul = $("#tokens-ledger");
+  ul.innerHTML = "";
+  const { data: ledger } = await getCreditLedger(8).catch(() => ({ data: null }));
+  for (const row of ledger ?? []) {
+    const li = document.createElement("li");
+    const label = document.createElement("span");
+    label.textContent = row.kind === "spend"
+      ? (REASON_LABELS[row.reason] ?? "Chat")
+      : (LEDGER_LABELS[row.kind] ?? row.kind);
+    const delta = document.createElement("span");
+    delta.textContent = `${row.delta > 0 ? "+" : ""}${row.delta}`;
+    delta.className = row.delta > 0 ? "pos" : "neg";
+    li.append(label, delta);
+    ul.append(li);
+  }
+}
+
+async function renderBotSettings() {
+  const { data: s } = await getBotSettings().catch(() => ({ data: null }));
+  const linked = Boolean(s?.linked ?? profile?.discord_user_id);
+  $("#botset-controls").hidden = !linked;
+  $("#botset-locked").hidden = linked;
+  if (!linked) return;
+  $("#set-c2c").checked = s?.c2c_enabled !== false;
+  $("#set-alerts").checked = s?.low_credit_alerts !== false;
+  const { data: byok } = await getByokStatus().catch(() => ({ data: null }));
+  $("#byok-status").textContent = byok?.has_key
+    ? `Personal AI key connected${byok.validated_at ? " · verified" : ""} — your chats don't spend tokens.`
+    : "No personal key — your chats spend hosted tokens.";
+}
+
+for (const [sel, key] of [["#set-c2c", "c2c_enabled"], ["#set-alerts", "low_credit_alerts"]]) {
+  $(sel).addEventListener("change", async e => {
+    const msg = $("#botset-msg");
+    msg.hidden = true;
+    const { error } = await saveBotSettings({ [key]: e.target.checked });
+    if (error) {
+      e.target.checked = !e.target.checked;
+      msg.textContent = error.message;
+      msg.hidden = false;
+    }
+  });
+}
+
+await renderTokens();
+await renderBotSettings();
 
 // ── Password change ────────────────────────────────────────────────────────
 $("#form-password").addEventListener("submit", async e => {
@@ -173,9 +238,11 @@ $("#form-password").addEventListener("submit", async e => {
 });
 
 // ── Sign out ───────────────────────────────────────────────────────────────
-$("#nav-signout").addEventListener("click", async () => {
-  try { await signOut(); } finally { window.location.href = "/"; }
-});
+for (const btn of [$("#nav-signout"), $("#nav-signout-mobile")]) {
+  btn.addEventListener("click", async () => {
+    try { await signOut(); } finally { window.location.href = "/"; }
+  });
+}
 
 // ── Delete account ─────────────────────────────────────────────────────────
 const modal = $("#delete-modal");

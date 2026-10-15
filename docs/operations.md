@@ -48,13 +48,20 @@ Env lives in `~/characterly/.env` on the VM — **not** in the repo. Changes nee
 Supabase dashboard → SQL Editor, or `psql "$DATABASE_URL"`. The bot connects as `postgres` (bypasses RLS). Useful checks:
 
 ```sql
-SELECT * FROM schema_migrations ORDER BY version;          -- migration state (latest: 28)
+SELECT * FROM schema_migrations ORDER BY version;          -- migration state (latest: 29)
 SELECT type, count(*), max(attempts) FROM jobs
   GROUP BY type;                                         -- queue depth
 SELECT * FROM jobs WHERE attempts >= 5;                  -- dead letters
 SELECT guild_id, day, llm_calls FROM guild_usage
   ORDER BY day DESC LIMIT 20;                            -- LLM spend per guild/day
+SELECT llm_calls FROM guild_usage
+  WHERE guild_id = 'hosted:global' AND day = CURRENT_DATE; -- hosted breaker: today's fleet-wide hosted calls vs HOSTED_DAILY_LLM_CAP
 SELECT count(*) FROM web_profiles WHERE discord_user_id IS NOT NULL;  -- linked accounts
+SELECT discord_user_id, plan, credit_balance FROM web_profiles
+  WHERE discord_user_id = '<snowflake>';                 -- a user's token balance
+SELECT * FROM credit_ledger ORDER BY id DESC LIMIT 30;   -- recent grants/spends/refunds
+SELECT kind, sum(delta) FROM credit_ledger
+  WHERE created_at > now() - interval '1 day' GROUP BY kind;  -- daily credit flow
 ```
 
 ## Common failures
@@ -68,6 +75,8 @@ SELECT count(*) FROM web_profiles WHERE discord_user_id IS NOT NULL;  -- linked 
 | Guild dormant out of nowhere | `guild_keys` row undecryptable or removed | Log line `guild_keys decrypt failed` — scope goes dormant until a key is re-set |
 | Website OAuth/ magic links fail | Redirect allowlist missing the origin | Add `https://<origin>/**` under Auth → URL Configuration (see [website.md](website.md)) |
 | "Link Discord" button errors | Manual linking disabled | Auth → Sign In/Providers → allow manual linking |
+| Users get "out of tokens" / capacity notice | Credits spent or `hosted:global` breaker tripped | Balance: `credit_ledger` query above; breaker: `guild_usage` row `hosted:global` vs `HOSTED_DAILY_LLM_CAP` — raise the env var or wait for UTC midnight |
+| Companion ignores other companions | `c2c_enabled` off for the replying companion's owner | `SELECT * FROM user_bot_settings WHERE discord_user_id = '<owner snowflake>'` — owner toggles on the dashboard |
 
 ## Secrets & rotation
 

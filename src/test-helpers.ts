@@ -18,7 +18,16 @@ export function makeTestSql() {
 export async function clearData(sql: ReturnType<typeof postgres>) {
   // Truncate data tables only — schema_migrations is NOT truncated so runMigrations stays idempotent.
   // Use CASCADE to handle FK constraints; RESTART IDENTITY resets sequences.
-  await sql`TRUNCATE TABLE profile_attributes, profiles, relationships, relationship_observations, members, event_memories, event_messages, event_participants, events, behavioral_patterns, memory_history, memory_evidence, server_settings, memories, messages, guild_keys, unresolved_names, alias_candidates, jobs, guild_usage, webhook_messages, guild_companions, companion_journal, companions, link_codes RESTART IDENTITY CASCADE`;
+  await sql`TRUNCATE TABLE profile_attributes, profiles, relationships, relationship_observations, members, event_memories, event_messages, event_participants, events, behavioral_patterns, memory_history, memory_evidence, server_settings, memories, messages, guild_keys, unresolved_names, alias_candidates, jobs, guild_usage, webhook_messages, guild_companions, companion_journal, companions, link_codes, user_bot_settings RESTART IDENTITY CASCADE`;
+  // web_profiles/credit_ledger only exist where the Supabase-accounts schema
+  // was applied (prod) or where a test created the fixture — conditional.
+  const opt = await sql<Array<{ l: string | null; p: string | null }>>`
+    SELECT to_regclass('public.credit_ledger') AS l, to_regclass('public.web_profiles') AS p`;
+  if (opt[0].l && opt[0].p) {
+    await sql`TRUNCATE TABLE credit_ledger, web_profiles RESTART IDENTITY CASCADE`;
+  } else if (opt[0].p) {
+    await sql`TRUNCATE TABLE web_profiles RESTART IDENTITY CASCADE`;
+  }
 }
 
 /** Create a MemoryStore + EventStore pair backed by the given sql connection and wipe all data. */

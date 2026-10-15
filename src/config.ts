@@ -54,6 +54,18 @@ const env = z.object({
   // Where the public website lives — /link replies point users here to claim
   // their code. Override for self-hosted/front-end forks.
   SITE_URL: z.string().default("https://characterly-website.albertjemmettwaite.workers.dev"),
+  // ── Hosted-model credits (user-facing name: "tokens") ───────────────────────
+  // Lazy accrual: grants apply inside the spend tx when the marker date rolls.
+  FREE_DAILY_CREDITS: z.coerce.number().int().min(0).default(20),
+  PREMIUM_DAILY_CREDITS: z.coerce.number().int().min(0).default(30),
+  PREMIUM_WEEKLY_CREDITS: z.coerce.number().int().min(0).default(300),
+  // Circuit breaker: total hosted-lane LLM calls per UTC day, fleet-wide —
+  // bounds operator spend independent of per-user credits.
+  HOSTED_DAILY_LLM_CAP: z.coerce.number().int().min(0).default(20_000),
+  // DM the user when a post-spend balance drops to this or below (once/day).
+  LOW_CREDIT_ALERT: z.coerce.number().int().min(0).default(5),
+  // Cooldown between "link your account" prompts per unlinked user.
+  LINK_PROMPT_COOLDOWN_MS: z.coerce.number().int().min(60_000).default(14_400_000),
 }).parse(process.env);
 
 export const config = {
@@ -114,4 +126,13 @@ export const config = {
   dmLlmDailyCap: env.DM_LLM_DAILY_CAP,
   maxCompanionChainDepth: env.MAX_COMPANION_CHAIN_DEPTH,
   siteUrl: env.SITE_URL,
+  // Hosted credits — free daily grant, premium daily/weekly grants, the fleet
+  // circuit breaker, the low-balance DM threshold, and the unlinked-prompt
+  // cooldown. spendCredits applies grants lazily under the account row lock.
+  freeDailyCredits: env.FREE_DAILY_CREDITS,
+  premiumDailyCredits: env.PREMIUM_DAILY_CREDITS,
+  premiumWeeklyCredits: env.PREMIUM_WEEKLY_CREDITS,
+  hostedDailyLlmCap: env.HOSTED_DAILY_LLM_CAP,
+  lowCreditAlert: env.LOW_CREDIT_ALERT,
+  linkPromptCooldownMs: env.LINK_PROMPT_COOLDOWN_MS,
 };

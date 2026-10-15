@@ -3,53 +3,61 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Account — Characterly</title>
+  <title>Your account · Characterly</title>
   <meta name="description" content="Your Characterly account." />
-  <meta name="theme-color" content="#07070f" />
+  <meta name="theme-color" content="#0d0a0e" />
   <meta name="robots" content="noindex" />
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <script>document.documentElement.classList.add("js")</script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
-  <div class="aurora" aria-hidden="true">
-    <div class="orb orb-a"></div>
-    <div class="orb orb-b"></div>
-    <div class="orb orb-c"></div>
+  <div class="atmos" aria-hidden="true">
+    <div class="glow glow-a"></div>
+    <div class="glow glow-b"></div>
+    <div class="dust"></div>
     <div class="grain"></div>
+    <div class="vignette"></div>
   </div>
 
   <header class="nav">
     <div class="nav-inner">
       <a class="brand" href="/" aria-label="Characterly home">
-        <img src="/favicon.svg" alt="" width="28" height="28" />
+        <img src="/mark.svg" alt="" width="30" height="30" />
         <span>Characterly</span>
       </a>
-      <nav class="nav-links" aria-label="Sections">
+      <nav class="nav-links" aria-label="Site">
         <a href="/#how">How it works</a>
-        <a href="/#features">Features</a>
         <a href="/#privacy">Privacy</a>
         <a href="/#faq">FAQ</a>
       </nav>
       <div class="nav-actions">
-        <button class="btn btn-ghost btn-sm" id="nav-signout" type="button">Sign out</button>
+        <button class="nav-signout-btn" id="nav-signout" type="button">Sign out</button>
         <a class="btn btn-primary btn-sm" data-link="addToDiscord" target="_blank" rel="noopener noreferrer">Add to Discord</a>
       </div>
+      <button class="nav-toggle" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="mobile-menu">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+    <div class="mobile-menu" id="mobile-menu" hidden>
+      <a href="/#how">How it works</a>
+      <a href="/#privacy">Privacy</a>
+      <a href="/#faq">FAQ</a>
+      <button class="nav-signout-btn" id="nav-signout-mobile" type="button">Sign out</button>
+      <a class="btn btn-primary" data-link="addToDiscord" target="_blank" rel="noopener noreferrer">Add to Discord</a>
     </div>
   </header>
 
-  <main id="main" class="dash-main">
-    <div class="dash-head reveal in">
-      <p class="eyebrow"><span class="pulse-dot"></span>Account</p>
-      <h1>Hey, <span class="grad-text" id="dash-name">there</span>.</h1>
-      <p class="lede-sm">This is your Characterly account — the real-life half of the project.</p>
+  <main id="main" class="dash">
+    <div class="dash-head">
+      <p class="label rv">Your account</p>
+      <h1 class="rv" style="--d:1"><span id="dash-greeting">Hello</span>, <em id="dash-name">there</em>.</h1>
+      <p class="rv" style="--d:2">Your companion lives on Discord. This is where your account, and its link to Discord, are kept.</p>
     </div>
 
     <div class="dash-grid">
-      <!-- Profile -->
-      <section class="dash-card" aria-labelledby="profile-h">
-        <div class="dash-card-head">
-          <h2 id="profile-h">Profile</h2>
-        </div>
+      <section class="plate rv" aria-labelledby="profile-h">
+        <div class="plate-head"><h2 id="profile-h">Profile</h2></div>
         <div class="profile-row">
           <div class="avatar-xl" id="profile-avatar">?</div>
           <div>
@@ -62,18 +70,17 @@
             <span>Display name</span>
             <input class="input" type="text" name="display_name" maxlength="48" id="input-name" />
           </label>
-          <button class="btn btn-ghost btn-sm" type="submit">Save</button>
+          <button class="btn btn-ghost" type="submit">Save</button>
         </form>
         <div class="form-error" id="profile-error" role="alert" hidden></div>
       </section>
 
-      <!-- Discord link -->
-      <section class="dash-card" aria-labelledby="discord-h">
-        <div class="dash-card-head">
+      <section class="plate rv" style="--d:1" aria-labelledby="discord-h">
+        <div class="plate-head">
           <h2 id="discord-h">Discord</h2>
           <span class="badge badge-soon" id="discord-badge">Not linked</span>
         </div>
-        <p class="dash-desc">Link your Discord account so your companion, billing and perks know who you are.</p>
+        <p class="plate-desc">Linking tells Characterly which Discord account is yours, so perks and billing can follow you there.</p>
         <div class="form-error" id="discord-error" role="alert" hidden></div>
         <div id="discord-linked" hidden>
           <div class="linked-row">
@@ -84,40 +91,70 @@
             </div>
           </div>
           <button class="btn btn-ghost btn-sm" id="btn-unlink-discord" type="button" hidden>Unlink Discord</button>
-          <p class="dash-note" id="discord-unlink-note" hidden>Discord is your only sign-in method — set a password below before unlinking, or you'd lock yourself out.</p>
+          <p class="plate-note" id="discord-unlink-note" hidden>Discord is your only way to sign in. Set a password below first, or unlinking would lock you out.</p>
         </div>
         <div id="discord-unlinked">
-          <button class="btn btn-ghost" id="btn-link-discord" type="button" hidden>Link Discord account</button>
+          <button class="btn btn-ghost" id="btn-link-discord" type="button" hidden>Link with Discord</button>
           <form id="form-link-code" class="inline-form" novalidate>
             <label class="field grow">
-              <span>Link code</span>
-              <input class="input" type="text" id="input-link-code" maxlength="12" autocomplete="off" placeholder="XXXX-XXXX" />
+              <span>Or enter a link code</span>
+              <input class="input" type="text" id="input-link-code" maxlength="12" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX" />
             </label>
-            <button class="btn btn-ghost btn-sm" type="submit">Claim</button>
+            <button class="btn btn-ghost" type="submit">Claim</button>
           </form>
           <div class="form-error" id="link-code-msg" role="alert" hidden></div>
-          <p class="dash-note">Have a code? Run <code>/link</code> in Discord (a DM or any server — only you see the reply).</p>
+          <p class="plate-note">Run <code>/link</code> in Discord to get a code. It works in a DM or any server, and only you see the reply.</p>
         </div>
       </section>
 
-      <!-- Billing -->
-      <section class="dash-card" aria-labelledby="billing-h">
-        <div class="dash-card-head">
-          <h2 id="billing-h">Billing</h2>
-          <span class="badge badge-soon">Coming soon</span>
+      <section class="plate rv" aria-labelledby="tokens-h">
+        <div class="plate-head">
+          <h2 id="tokens-h">Tokens</h2>
+          <span class="badge badge-soon" id="tokens-plan">Free</span>
         </div>
-        <p class="dash-desc">Managed subscriptions and payments land here next — powered by Stripe, attached to this account.</p>
+        <p class="plate-desc">Hosted chat runs on tokens: your message costs one, your companion's reply costs one. Free tokens refresh daily.</p>
+        <div id="tokens-body" hidden>
+          <div class="token-balance"><span id="tokens-balance">—</span><small>tokens left</small></div>
+          <div class="profile-since" id="tokens-grant"></div>
+          <ul class="token-ledger" id="tokens-ledger"></ul>
+        </div>
+        <p class="plate-note" id="tokens-locked" hidden>Link Discord above to get your daily hosted tokens — then your companion chats on us.</p>
+      </section>
+
+      <section class="plate rv" style="--d:1" aria-labelledby="botset-h">
+        <div class="plate-head"><h2 id="botset-h">Companion settings</h2></div>
+        <p class="plate-desc">How your companion spends on the hosted lane. Bring your own key in Discord (<code>/companion action:key</code>) for unlimited chat.</p>
+        <div id="botset-controls" hidden>
+          <label class="toggle-row">
+            <input type="checkbox" id="set-c2c" class="toggle" />
+            <span class="toggle-copy"><strong>Reply to other companions</strong>
+            <small>When off, your companion stays quiet when other companions talk in servers — those turns spend your tokens, so this is your spend control.</small></span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="set-alerts" class="toggle" />
+            <span class="toggle-copy"><strong>Low-token alerts</strong>
+            <small>Get one Discord DM a day when your balance runs low, so your companion never silently goes quiet.</small></span>
+          </label>
+          <div class="plate-note" id="byok-status"></div>
+        </div>
+        <p class="plate-note" id="botset-locked" hidden>Link Discord above to manage companion settings.</p>
+        <div class="form-error" id="botset-msg" role="alert" hidden></div>
+      </section>
+
+      <section class="plate rv" aria-labelledby="billing-h">
+        <div class="plate-head">
+          <h2 id="billing-h">Billing</h2>
+          <span class="badge badge-soon">Not yet</span>
+        </div>
+        <p class="plate-desc">Characterly is free while it runs on your own AI key. Optional subscriptions will be managed here when they exist.</p>
         <button class="btn btn-ghost" type="button" disabled>Manage billing</button>
       </section>
 
-      <!-- Security -->
-      <section class="dash-card" aria-labelledby="security-h">
-        <div class="dash-card-head">
-          <h2 id="security-h">Security</h2>
-        </div>
+      <section class="plate rv" style="--d:1" aria-labelledby="security-h">
+        <div class="plate-head"><h2 id="security-h">Password</h2></div>
         <form id="form-password" novalidate>
           <label class="field">
-            <span>New password</span>
+            <span>New password · 8+ characters</span>
             <input class="input" type="password" name="password" autocomplete="new-password" minlength="8" />
           </label>
           <label class="field">
@@ -129,25 +166,21 @@
         <div class="form-error" id="security-msg" role="alert" hidden></div>
       </section>
 
-      <!-- Danger zone -->
-      <section class="dash-card danger" aria-labelledby="danger-h">
-        <div class="dash-card-head">
-          <h2 id="danger-h">Danger zone</h2>
-        </div>
-        <p class="dash-desc">Deletes your web account permanently. Your Discord-side data isn't touched by this (handle that with <code>/opt-out</code> in Discord).</p>
+      <section class="plate danger rv" aria-labelledby="danger-h">
+        <div class="plate-head"><h2 id="danger-h">Delete account</h2></div>
+        <p class="plate-desc">Permanently deletes this web account. Your companion and anything stored on Discord are separate; use <code>/opt-out</code> there to remove those.</p>
         <button class="btn btn-danger" id="btn-delete" type="button">Delete account</button>
       </section>
     </div>
   </main>
 
-  <!-- Delete confirmation modal -->
   <div class="modal-overlay" id="delete-modal" hidden>
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="del-h">
       <h2 id="del-h">Delete your account?</h2>
-      <p>This is permanent. Type <strong>DELETE</strong> to confirm.</p>
-      <input class="input" type="text" id="delete-confirm" autocomplete="off" placeholder="DELETE" />
+      <p>This can't be undone. Type <strong>DELETE</strong> to confirm.</p>
+      <input class="input" type="text" id="delete-confirm" autocomplete="off" spellcheck="false" placeholder="DELETE" aria-label="Type DELETE to confirm" />
       <div class="modal-actions">
-        <button class="btn btn-ghost" id="delete-cancel" type="button">Cancel</button>
+        <button class="btn btn-ghost" id="delete-cancel" type="button">Keep it</button>
         <button class="btn btn-danger" id="delete-do" type="button" disabled>Delete forever</button>
       </div>
     </div>

@@ -546,6 +546,41 @@ One-time Discord → web linking codes (v27). `/link` in Discord mints a code (`
 
 ---
 
+### `credit_ledger`
+
+Audit trail for hosted-lane credits (user-facing name: "tokens") — v29. Every grant, spend, refund, and manual adjustment appends a row with the resulting `balance_after`; `web_profiles.credit_balance` is the cached head. Lives behind the same auth-schema gate as `web_profiles`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT IDENTITY PK | |
+| `account_id` | UUID FK → `web_profiles(id)` | Cascade-deletes with the account |
+| `delta` | INT | Signed credit change |
+| `kind` | TEXT | `grant_daily` · `grant_weekly` · `spend` · `refund` · `adjust` |
+| `reason` | TEXT NULL | Spend/refund reason (`dm_turn`, `guild_turn`, `c2c`, `*_refund`) |
+| `balance_after` | INT | Running balance — written inside the spend transaction |
+| `created_at` | TIMESTAMPTZ | |
+
+**Index:** `credit_ledger_account (account_id, id DESC)`. **RLS:** enabled; `credit_ledger_select_own` lets authenticated users read their own rows (the dashboard ledger).
+
+`web_profiles` also gains (same migration): `plan` (`'free'|'premium'`, default `free`), `credit_balance`, `last_daily_grant_on`, `last_weekly_grant_on`. Grants are **lazy**: `spendCredits` applies any due daily/weekly grant under the row lock before debiting — no scheduler, downtime-safe.
+
+---
+
+### `user_bot_settings`
+
+Per-Discord-user bot toggles (v29), keyed by `discord_user_id` **outside** the auth-schema gate so the bot reads them with zero joins on any Postgres. The site writes through `upsert_my_settings`, which stamps the caller's own linked `discord_user_id` — users can't set toggles for a Discord account that isn't theirs.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `discord_user_id` | TEXT PK | |
+| `c2c_enabled` | BOOLEAN | Default true — companion replies to other companions (those turns spend the owner's tokens) |
+| `low_credit_alerts` | BOOLEAN | Default true — once-per-UTC-day DM when the balance runs low |
+| `updated_at` | TIMESTAMPTZ | |
+
+**RLS:** enabled, zero policies — the bot reads/writes via the postgres role; the site uses `my_bot_settings()` / `upsert_my_settings(patch)` / `my_byok_status()` security-definer rpcs (authenticated role only).
+
+---
+
 ### `schema_migrations`
 
 Version tracking for the migration system.
@@ -589,3 +624,4 @@ Version tracking for the migration system.
 | 26 | `v26_web_profiles` | `public.web_profiles` (RLS, own-row policies), `internal.handle_new_user` trigger on `auth.users`, `public.delete_own_account` rpc — Supabase Auth web accounts |
 | 27 | `v27_discord_link` | `link_codes` + `public.claim_link_code` rpc; `internal.sync_discord_identity` trigger on `auth.identities`; `web_profiles` update grants narrowed to `(display_name, updated_at)` — Discord ↔ web account linking |
 | 28 | `v28_link_hardening` | `public.unlink_discord` rpc (code-claimed links); `claim_link_code` rowcount guard; `handle_new_user` falls back to OAuth `full_name`/`name` metadata |
+| 29 | `v29_credits_and_bot_settings` | `plan`/`credit_balance`/lazy-grant columns on `web_profiles`; `credit_ledger` (own-row select policy); `user_bot_settings` (auth-gate-free, keyed by `discord_user_id`); `my_bot_settings`/`upsert_my_settings`/`my_byok_status` rpcs — hosted credits + per-user bot toggles |

@@ -524,6 +524,27 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         `It expires in 10 minutes and only you can see this message.`
     });
   }
+  // Link gate: hosted-lane actions (summon puts a companion on the hosted
+  // reply path; profile-build runs a hosted LLM scan) need a linked account.
+  // Everything else — reads, privacy/data, admin, key entry — stays open.
+  const gatedAction =
+    interaction.commandName === "profile-build" ||
+    (interaction.commandName === "companion" && interaction.options.getString("action") === "summon");
+  if (gatedAction && store.creditsSupported) {
+    // BYOK is exempt — a personal key means their lane never spends tokens.
+    const [account, ownKey] = await Promise.all([
+      store.accountForDiscordUser(interaction.user.id).catch(() => null),
+      store.getGuildKey(`dm:${interaction.user.id}`).catch(() => null),
+    ]);
+    if (!account && !ownKey) {
+      return interaction.reply({
+        ephemeral: true,
+        content:
+          `This action needs a linked Characterly account — create one free at ${config.siteUrl} ` +
+          `and run \`/link\` here to connect it. Takes about a minute.`,
+      });
+    }
+  }
   if (interaction.commandName === "companion") {
     const action = interaction.options.getString("action", true);
     if (action === "summon") {
@@ -714,10 +735,11 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     }
     if (action === "status") {
       const dmScope = `dm:${interaction.user.id}`;
-      const [companion, keyRow, dmUsage] = await Promise.all([
+      const [companion, keyRow, dmUsage, account] = await Promise.all([
         store.getCompanionByOwner(interaction.user.id),
         typeof store.getGuildKey === "function" ? store.getGuildKey(dmScope) : Promise.resolve(null),
         typeof store.usageToday === "function" ? store.usageToday(dmScope) : Promise.resolve(0),
+        store.creditsSupported ? store.accountForDiscordUser(interaction.user.id).catch(() => null) : Promise.resolve(null),
       ]);
       const guildIds =
         companion && typeof store.listCompanionGuilds === "function"
@@ -748,6 +770,15 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
             value: `${dmUsage.toLocaleString()} / ${config.dmLlmDailyCap.toLocaleString()} calls (resets at UTC midnight)`,
             inline: true,
           },
+          ...(store.creditsSupported
+            ? [{
+                name: "Tokens",
+                value: account
+                  ? `**${account.creditBalance.toLocaleString()}** on the **${account.plan}** plan — refreshes daily at UTC midnight. Details: ${config.siteUrl}/dashboard`
+                  : `Not linked — create an account at ${config.siteUrl} and run \`/link\` to get hosted tokens`,
+                inline: false,
+              }]
+            : []),
         );
       return interaction.reply({ ephemeral: true, embeds: [statusEmbed] });
     }

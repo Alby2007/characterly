@@ -52,6 +52,15 @@ In servers, the **Characterly** bot is invisible plumbing and a system announcer
 - A Vite site (`website/`) hosts the landing page plus **Characterly accounts** (Supabase Auth: email/password, magic link, Discord OAuth) and an account dashboard — deployed as Cloudflare Workers Static Assets.
 - `web_profiles` links the "real-life" account to the Discord user via `discord_user_id` — written only by the `auth.identities` sync trigger (OAuth/`linkIdentity`) or the `claim_link_code` rpc behind `/link`; users can never write it directly. `stripe_customer_id` is reserved for the future billing phase.
 
+### 9. Hosted Lane & Tokens (Credits)
+
+- **Two lanes:** BYOK stays the power-user lane — a personal key means unlimited chat, no account needed. Without a key, companions run on the **hosted lane** (the operator's env model) which requires a **linked Characterly account** (`/link`) and spends **tokens**.
+- **Payer-per-turn:** a human's turn costs 2 tokens (their message + the companion reply — 1 refunded if no reply lands); companion↔companion hops bill the replying companion's owner 1, gated by their c2c dashboard toggle. Nobody can burn someone else's tokens.
+- **Lazy grants:** free accounts get a daily refill; premium gets a daily top-up plus a weekly grant — applied atomically inside the spend transaction (`credit_ledger` audits every change). No scheduler.
+- **Fleet breaker:** `HOSTED_DAILY_LLM_CAP` bounds total hosted calls/day independent of credits; BYOK calls never count.
+- **Free-tier throttle:** extraction + journaling for free hosted users coalesce into hourly batches (freshness, not quality); premium and BYOK run live.
+- Dashboard plates: **Tokens** (balance/plan/ledger) and **Companion settings** (c2c, low-token alerts, BYOK status).
+
 ---
 
 ## Commands

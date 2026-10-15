@@ -108,8 +108,16 @@ export function createBrainResolver(opts: {
   /** Wraps every constructed client — the budget meter hooks in here so ALL
    * key sources pay the scope's daily cap. */
   meter?: (scopeId: string, client: LlmClient) => LlmClient;
+  /** Wraps only env-key (hosted) clients — the global hosted-spend circuit
+   *  breaker hooks in here so BYOK calls never count against it. */
+  meterHosted?: (scopeId: string, client: LlmClient) => LlmClient;
 }) {
   const cache = new Map<string, Brain | null>();
+  // Scopes whose resolved brain came from the operator env key (the "hosted
+  // lane") — credit charges and the global hosted cap apply only to these.
+  const hostedScopes = new Set<string>();
+  const hostedWrap = (scopeId: string, c: LlmClient): LlmClient =>
+    (opts.meterHosted ?? opts.meter ?? ((_s, x) => x))(scopeId, c);
   // Which key scopes each guild-scope cache entry resolved through. A dm:
   // invalidation only needs to evict guilds whose brain came from that user's
   // key — or from the env fallback, which a newly-added key could displace.
@@ -152,19 +160,22 @@ export function createBrainResolver(opts: {
     const wrap = (c: LlmClient): LlmClient => (opts.meter ? opts.meter(guildId, c) : c);
 
     let brain: Brain | null = null;
+    let hosted = false;
     if (guildId.startsWith("dm:")) {
       const userRow = await opts.getKey(guildId);
       if (userRow) {
         brain = buildFromRow(guildId, guildId, userRow);
       } else if (opts.envKey) {
+        hosted = true;
         brain = new Brain(
           opts.envKey,
           opts.envModel,
           opts.envBaseUrl,
-          wrap(new OpenAI({ apiKey: opts.envKey, ...(opts.envBaseUrl ? { baseURL: opts.envBaseUrl } : {}) })),
+          hostedWrap(guildId, new OpenAI({ apiKey: opts.envKey, ...(opts.envBaseUrl ? { baseURL: opts.envBaseUrl } : {}) })),
         );
       }
       cache.set(guildId, brain);
+      if (hosted) hostedScopes.add(guildId); else hostedScopes.delete(guildId);
       return brain;
     }
 
@@ -187,16 +198,18 @@ export function createBrainResolver(opts: {
       }
       guildProvenance.set(guildId, consulted);
       if (!brain && opts.envKey && !opts.requireGuildKeys) {
+        hosted = true;
         brain = new Brain(
           opts.envKey,
           opts.envModel,
           opts.envBaseUrl,
-          wrap(new OpenAI({ apiKey: opts.envKey, ...(opts.envBaseUrl ? { baseURL: opts.envBaseUrl } : {}) })),
+          hostedWrap(guildId, new OpenAI({ apiKey: opts.envKey, ...(opts.envBaseUrl ? { baseURL: opts.envBaseUrl } : {}) })),
         );
       }
     }
 
     cache.set(guildId, brain);
+    if (hosted) hostedScopes.add(guildId); else hostedScopes.delete(guildId);
     return brain;
   }
 
@@ -215,15 +228,36 @@ export function createBrainResolver(opts: {
     if (userRow) {
       const brain = buildFromRow(userScope, targetMeter, userRow);
       cache.set(cacheKey, brain);
+      hostedScopes.delete(cacheKey);
       return brain;
     }
     const fallback = await brainFor(targetMeter);
     cache.set(cacheKey, fallback);
+    // Mirror the meter scope's provenance — a user without a key is hosted iff
+    // the scope serving them resolved through the env key.
+    if (hostedScopes.has(targetMeter)) hostedScopes.add(cacheKey); else hostedScopes.delete(cacheKey);
     return fallback;
+  }
+
+  /** True when this scope's brain rides the operator env key — credit charges
+   *  and the global hosted cap apply to hosted lanes only. */
+  function isHostedScope(scopeId: string): boolean {
+    return hostedScopes.has(scopeId);
+  }
+
+  /** True when the brain serving userId (via brainForUser) is hosted — checks
+   *  the user: cacheKey, which brainForUser always populates (keyed user →
+   *  absent; env fallback → present iff the meter scope itself is hosted).
+   *  Deliberately does NOT consult the meter scope: a BYOK owner in a hosted
+   *  guild is still a BYOK lane. */
+  function isHostedUserBrain(userId: string, meterScopeId?: string): boolean {
+    const meter = meterScopeId ?? `dm:${userId}`;
+    return hostedScopes.has(`user:${userId}@${meter}`);
   }
 
   function invalidate(scopeId: string): void {
     cache.delete(scopeId);
+    hostedScopes.delete(scopeId);
     guildProvenance.delete(scopeId);
     for (const k of [...cache.keys()]) {
       if (!k.startsWith("user:")) continue;
@@ -231,6 +265,7 @@ export function createBrainResolver(opts: {
       // that are this user's key, or were metered against this scope.
       if ((scopeId.startsWith("dm:") && k.startsWith(`user:${scopeId.slice(3)}@`)) || k.endsWith(`@${scopeId}`)) {
         cache.delete(k);
+        hostedScopes.delete(k);
       }
     }
     if (scopeId.startsWith("dm:")) {
@@ -240,12 +275,13 @@ export function createBrainResolver(opts: {
         if (prov.size === 0 || prov.has(scopeId)) {
           guildProvenance.delete(guild);
           cache.delete(guild);
+          hostedScopes.delete(guild);
         }
       }
     }
   }
 
-  return { brainFor, brainForUser, invalidate };
+  return { brainFor, brainForUser, invalidate, isHostedScope, isHostedUserBrain };
 }
 
 export type BrainResolver = ReturnType<typeof createBrainResolver>;

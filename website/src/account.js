@@ -1,17 +1,9 @@
-import "@fontsource-variable/inter";
-import "@fontsource-variable/space-grotesk";
-import "./styles.css";
-import { LINKS, DISCORD_OAUTH_ENABLED } from "./config.js";
-import { supabase } from "./supabase.js";
+import "./base.js";
+import { DISCORD_OAUTH_ENABLED } from "./config.js";
 import {
   getSession, onAuthChange, authRedirectTarget, signIn, signUp, magicLink,
   resendVerification, signInWithDiscord, resetPassword, updatePassword,
 } from "./auth.js";
-
-for (const el of document.querySelectorAll("[data-link]")) {
-  const url = LINKS[el.dataset.link];
-  if (url) el.setAttribute("href", url);
-}
 
 const $ = sel => document.querySelector(sel);
 const forms = {
@@ -61,13 +53,13 @@ function setMode(next) {
     t.classList.toggle("active", active);
     t.setAttribute("aria-selected", String(active));
   });
-  title.textContent = { signin: "Welcome back", signup: "Create your account", magic: "Sign in with a link", forgot: "Reset your password", recovery: "Choose a new password" }[next];
+  title.textContent = { signin: "Welcome back", signup: "Create an account", magic: "Sign in by email", forgot: "Reset your password", recovery: "Choose a new password" }[next];
   sub.textContent = {
-    signin: "Your account carries your companion's premium features.",
-    signup: "One account for billing, linking and more.",
-    magic: "Enter your email and we'll send a one-click link.",
-    forgot: "Enter the email on your account.",
-    recovery: "Almost done — pick a new password.",
+    signin: "Sign in to manage your account and Discord link.",
+    signup: "One account for your Discord link, and billing later on.",
+    magic: "We'll email you a link that signs you straight in.",
+    forgot: "Enter the email on your account and we'll send a reset link.",
+    recovery: "Almost done. Pick a new password.",
   }[next];
 }
 

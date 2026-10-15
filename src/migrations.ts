@@ -1179,6 +1179,201 @@ const migrations: Migration[] = [
       `;
     },
   },
+  // ── v29: hosted-model credits + bot settings ────────────────────────────────
+  // The operator env key becomes the "hosted lane": user-facing chat on it is
+  // metered in credits (user-facing name: tokens) held on web_profiles and
+  // audited by credit_ledger. Lazy accrual grants land inside the spend tx —
+  // no scheduler. user_bot_settings is keyed by discord_user_id OUTSIDE the
+  // auth gate so the bot reads it with zero joins on any Postgres; the global
+  // hosted circuit breaker reuses guild_usage with scope 'hosted:global'.
+  {
+    version: 29,
+    name: "v29_credits_and_bot_settings",
+    up: async (sql) => {
+      await sql`
+        CREATE TABLE IF NOT EXISTS user_bot_settings (
+          discord_user_id   TEXT PRIMARY KEY,
+          c2c_enabled       BOOLEAN NOT NULL DEFAULT TRUE,
+          low_credit_alerts BOOLEAN NOT NULL DEFAULT TRUE,
+          updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `;
+      // Deny-all for Data API roles — the bot (postgres) reads/writes freely;
+      // the site writes through upsert_my_settings which stamps the caller's
+      // own linked discord_user_id.
+      await sql`ALTER TABLE user_bot_settings ENABLE ROW LEVEL SECURITY`;
+
+      await sql`
+        DO $cred$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'web_profiles') THEN
+            EXECUTE 'ALTER TABLE public.web_profiles
+              ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT ''free''
+                CHECK (plan IN (''free'',''premium'')),
+              ADD COLUMN IF NOT EXISTS credit_balance INT NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS last_daily_grant_on DATE,
+              ADD COLUMN IF NOT EXISTS last_weekly_grant_on DATE';
+
+            EXECUTE $tbl$
+              CREATE TABLE IF NOT EXISTS public.credit_ledger (
+                id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                account_id    UUID NOT NULL REFERENCES public.web_profiles(id) ON DELETE CASCADE,
+                delta         INT NOT NULL,
+                kind          TEXT NOT NULL CHECK (kind IN ('grant_daily','grant_weekly','spend','refund','adjust')),
+                reason        TEXT,
+                balance_after INT NOT NULL,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+              )
+            $tbl$;
+            EXECUTE 'CREATE INDEX IF NOT EXISTS credit_ledger_account ON public.credit_ledger(account_id, id DESC)';
+            EXECUTE 'ALTER TABLE public.credit_ledger ENABLE ROW LEVEL SECURITY';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE $pol$
+                CREATE POLICY credit_ledger_select_own ON public.credit_ledger
+                FOR SELECT TO authenticated
+                USING (account_id = auth.uid())
+              $pol$;
+            END IF;
+
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION public.my_bot_settings()
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                did text;
+                rec record;
+              BEGIN
+                IF auth.uid() IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = auth.uid();
+                IF did IS NULL THEN
+                  RETURN json_build_object('linked', false, 'c2c_enabled', true, 'low_credit_alerts', true);
+                END IF;
+                SELECT * INTO rec FROM public.user_bot_settings WHERE discord_user_id = did;
+                RETURN json_build_object(
+                  'linked', true,
+                  'c2c_enabled', coalesce(rec.c2c_enabled, true),
+                  'low_credit_alerts', coalesce(rec.low_credit_alerts, true)
+                );
+              END
+              $body$
+            $fn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.my_bot_settings() FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.my_bot_settings() FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.my_bot_settings() TO authenticated';
+            END IF;
+
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION public.upsert_my_settings(patch jsonb)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                did text;
+                v_c2c boolean;
+                v_alerts boolean;
+              BEGIN
+                IF auth.uid() IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = auth.uid();
+                IF did IS NULL THEN
+                  RAISE EXCEPTION 'not_linked: link your Discord account first';
+                END IF;
+                IF patch ? 'c2c_enabled' AND jsonb_typeof(patch->'c2c_enabled') <> 'boolean' THEN
+                  RAISE EXCEPTION 'bad_patch: c2c_enabled must be boolean';
+                END IF;
+                IF patch ? 'low_credit_alerts' AND jsonb_typeof(patch->'low_credit_alerts') <> 'boolean' THEN
+                  RAISE EXCEPTION 'bad_patch: low_credit_alerts must be boolean';
+                END IF;
+                v_c2c := coalesce((patch->>'c2c_enabled')::boolean, true);
+                v_alerts := coalesce((patch->>'low_credit_alerts')::boolean, true);
+                INSERT INTO public.user_bot_settings (discord_user_id, c2c_enabled, low_credit_alerts, updated_at)
+                VALUES (did, v_c2c, v_alerts, now())
+                ON CONFLICT (discord_user_id) DO UPDATE SET
+                  c2c_enabled = COALESCE((patch->>'c2c_enabled')::boolean, user_bot_settings.c2c_enabled),
+                  low_credit_alerts = COALESCE((patch->>'low_credit_alerts')::boolean, user_bot_settings.low_credit_alerts),
+                  updated_at = now();
+              END
+              $body$
+            $fn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.upsert_my_settings(jsonb) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.upsert_my_settings(jsonb) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.upsert_my_settings(jsonb) TO authenticated';
+            END IF;
+
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION public.my_byok_status()
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                did text;
+                rec record;
+              BEGIN
+                IF auth.uid() IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = auth.uid();
+                IF did IS NULL THEN
+                  RETURN json_build_object('linked', false, 'has_key', false);
+                END IF;
+                SELECT validated_at INTO rec FROM public.guild_keys
+                WHERE guild_id = 'dm:' || did;
+                RETURN json_build_object(
+                  'linked', true,
+                  'has_key', FOUND,
+                  'validated_at', rec.validated_at
+                );
+              END
+              $body$
+            $fn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.my_byok_status() FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.my_byok_status() FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.my_byok_status() TO authenticated';
+            END IF;
+          END IF;
+        END $cred$
+      `;
+    },
+    down: async (sql) => {
+      await sql`
+        DO $drop$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+            EXECUTE 'DROP FUNCTION IF EXISTS public.my_byok_status()';
+            EXECUTE 'DROP FUNCTION IF EXISTS public.upsert_my_settings(jsonb)';
+            EXECUTE 'DROP FUNCTION IF EXISTS public.my_bot_settings()';
+            EXECUTE 'DROP TABLE IF EXISTS public.credit_ledger';
+            EXECUTE 'ALTER TABLE public.web_profiles
+              DROP COLUMN IF EXISTS plan,
+              DROP COLUMN IF EXISTS credit_balance,
+              DROP COLUMN IF EXISTS last_daily_grant_on,
+              DROP COLUMN IF EXISTS last_weekly_grant_on';
+          END IF;
+        END $drop$
+      `;
+      await sql`DROP TABLE IF EXISTS user_bot_settings`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

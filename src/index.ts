@@ -75,7 +75,7 @@ const client = new Client({
 // Per-guild Brain resolver (BYOK): a guild's own key when /setup stored one,
 // env key otherwise, null (dormant) when REQUIRE_GUILD_KEYS blocks the fallback.
 // `store` is assigned in init() before any resolution can be requested.
-const { brainFor, brainForUser, invalidate: invalidateBrain } = createBrainResolver({
+const { brainFor, brainForUser, invalidate: invalidateBrain, isHostedScope, isHostedUserBrain } = createBrainResolver({
   getKey: scopeId => store.getGuildKey(scopeId),
   getGuildOwnerIds: async guildId => (await store.listGuildCompanions(guildId)).map(c => c.ownerUserId),
   envKey: config.groqKey, envModel: config.model, envBaseUrl: config.groqBaseUrl,
@@ -89,6 +89,17 @@ const { brainFor, brainForUser, invalidate: invalidateBrain } = createBrainResol
     getCap: async () => scopeId.startsWith("dm:")
       ? config.dmLlmDailyCap
       : (await store.settings(scopeId, config.rawMessageRetentionDays)).llmDailyCap,
+  }),
+  // Hosted lane (env key) additionally charges the fleet-wide circuit breaker —
+  // a second metered wrap on scope 'hosted:global' so BYOK calls never count.
+  meterHosted: (scopeId, c) => meteredClient(meteredClient(c, {
+    guildId: scopeId, store,
+    getCap: async () => scopeId.startsWith("dm:")
+      ? config.dmLlmDailyCap
+      : (await store.settings(scopeId, config.rawMessageRetentionDays)).llmDailyCap,
+  }), {
+    guildId: "hosted:global", store,
+    getCap: async () => config.hostedDailyLlmCap,
   }),
 });
 // Vision can live on a different provider than the main key (e.g. Gemini's
@@ -107,6 +118,43 @@ const convo = new ConversationTracker(config.engagementTtlMs);
 // against the guild's daily LLM cap (a burst is free, then ~1/refill sustained).
 const replyThrottle = new ReplyThrottle({ capacity: config.replyBurst, refillMs: config.replyRefillMs });
 
+// ── Account-link gate + hosted credits ───────────────────────────────────────
+// Unlinked users get a polite pointer once per cooldown — every other lane
+// (/link, key setup, privacy commands, admin commands) stays open. Credits
+// only charge on the hosted lane: isHostedScope/isHostedUserBrain tell BYOK
+// brains apart so power users' own keys never spend tokens.
+const linkPromptedAt = new Map<string, number>();
+function linkPromptDue(key: string): boolean {
+  const last = linkPromptedAt.get(key) ?? 0;
+  if (Date.now() - last < config.linkPromptCooldownMs) return false;
+  linkPromptedAt.set(key, Date.now());
+  return true;
+}
+const LINK_PROMPT = `To use Characterly's hosted features, create a free account at ${config.siteUrl} and run \`/link\` here to connect it to your Discord — it takes about a minute.`;
+const TOKEN_EMPTY = `You're out of tokens — they refresh daily at midnight UTC. Balance and settings: ${config.siteUrl}/dashboard`;
+const HOSTED_CAPACITY = `The hosted model is at today's capacity — it resets at midnight UTC. Bringing your own API key (\`/companion action:key\`) always works.`;
+
+// One "low tokens" DM per user per UTC day.
+const lowCreditAlertedAt = new Map<string, string>();
+async function maybeAlertLowCredit(userId: string, balance: number): Promise<void> {
+  if (balance > config.lowCreditAlert) return;
+  const today = new Date().toISOString().slice(0, 10);
+  if (lowCreditAlertedAt.get(userId) === today) return;
+  const s = await store.userBotSettings(userId).catch(() => ({ c2cEnabled: true, lowCreditAlerts: true }));
+  if (!s.lowCreditAlerts) return;
+  lowCreditAlertedAt.set(userId, today);
+  const user = await client.users.fetch(userId).catch(() => null);
+  await user?.send(`You're down to ${balance} token${balance === 1 ? "" : "s"} — they refresh daily at midnight UTC. Settings: ${config.siteUrl}/dashboard`).catch(() => {});
+  inc("credits.low_alert");
+}
+
+/** Next UTC hour boundary — free+hosted extraction/journal jobs coalesce here
+ * (hourly batches: freshness degraded, not quality). */
+function nextHourBoundary(): Date {
+  const d = new Date();
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCHours() + 1));
+}
+
 // MemoryStore.create() runs migrations; EventStore shares the same sql connection.
 let store: MemoryStore;
 let eventStore: EventStore;
@@ -115,6 +163,11 @@ let worker: { stop: () => Promise<void> } | undefined;
 
 async function init() {
   store = await MemoryStore.create();
+  await store.initCreditsSupport({
+    freeDaily: config.freeDailyCredits,
+    premiumDaily: config.premiumDailyCredits,
+    premiumWeekly: config.premiumWeeklyCredits,
+  });
   eventStore = new EventStore();
   profileStore = new ProfileStore();
   // Deferrable cognition runs here — extract jobs claimed per-guild-serial,
@@ -609,6 +662,20 @@ async function handleDmMessage(
   const userId = message.author.id;
   const dmScope = `dm:${userId}`;
   const authorName = message.author.globalName ?? message.author.username;
+  // Link gate: hosted features need a Characterly account — but a personal
+  // key is its own lane, so BYOK users work unlinked. Everyone else gets the
+  // prompt once per cooldown; nothing else (not even onboarding) runs.
+  const account = await store.accountForDiscordUser(userId);
+  if (!account && store.creditsSupported) {
+    const ownKey = await store.getGuildKey(dmScope).catch(() => null);
+    if (!ownKey) {
+      if (linkPromptDue(`dm:${userId}`)) {
+        await message.reply({ content: LINK_PROMPT, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+        inc("gate.unlinked_dm");
+      }
+      return;
+    }
+  }
   const brain = await brainFor(dmScope);
   if (!brain) {
     if (config.keyEncryptionSecret && replyThrottle.consume(dmScope, userId)) {
@@ -765,7 +832,9 @@ async function handleDmMessage(
 
   if (settings.memoryEnabled && (shouldInspectForMemory(event) || images.length)) {
     try {
-      await enqueue(sql, dmScope, "extract", { event, replyToId, replyToContent });
+      // Free+hosted memory settles in hourly batches; premium/BYOK is live.
+      const throttleMemory = account?.plan === "free" && isHostedScope(dmScope);
+      await enqueue(sql, dmScope, "extract", { event, replyToId, replyToContent }, throttleMemory ? nextHourBoundary() : undefined);
       await store.setTriageResults([{ id: event.messageId, result: "queued" }]);
       inc("jobs.enqueued");
     } catch (error) { inc("jobs.enqueue_error"); logError("DM extraction enqueue failed", error); }
@@ -773,6 +842,25 @@ async function handleDmMessage(
 
   if (!settings.replyEnabled) return;
   if (!replyThrottle.consume(dmScope, userId)) { inc("reply.cooldown"); return; }
+
+  // Hosted lane bills the turn upfront: the human pays for their message +
+  // the companion's reply (2 credits); a reply that never sends refunds 1.
+  const hostedDm = isHostedScope(dmScope);
+  let chargedDm = 0;
+  let dmBalance = 0;
+  if (hostedDm) {
+    const spend = await store.spendCredits(userId, 2, "dm_turn");
+    if (!spend.ok) {
+      inc("credits.insufficient");
+      replyThrottle.refund(dmScope, userId);
+      if (budgetNoticeOnce(message.channel.id)) {
+        await message.reply({ content: TOKEN_EMPTY, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+      }
+      return;
+    }
+    chargedDm = 2;
+    dmBalance = spend.balance;
+  }
 
   try {
     await message.channel.sendTyping();
@@ -852,7 +940,11 @@ async function handleDmMessage(
       imageContext,
     );
     const clean = text ? scrubMentions(text, lookups.names) : "";
-    if (clean && looksLikeSchemaLeak(clean)) { inc("reply.schema_leak"); replyThrottle.refund(dmScope, userId); return; }
+    if (clean && looksLikeSchemaLeak(clean)) {
+      inc("reply.schema_leak"); replyThrottle.refund(dmScope, userId);
+      if (chargedDm) store.refundCredits(userId, 1, "dm_turn_refund").catch(() => {});
+      return;
+    }
     if (clean) {
       const sent = await message.reply({ content: clean, allowedMentions: { parse: [], repliedUser: false } });
       inc("reply.sent");
@@ -869,26 +961,33 @@ async function handleDmMessage(
       await store.setTriageResults([{ id: sent.id, result: "noise" }]);
       // Deferrable first-person journaling — a failed enqueue must not lose
       // the reply that already landed; the job no-ops on empty exchanges.
+      // Free+hosted owners journal on the same hourly cadence as extraction.
+      const journalDelay = account?.plan === "free" && hostedDm ? nextHourBoundary() : undefined;
       enqueue(sql, dmScope, "journal-write", {
         companionId: companion.id, triggerMessageId: event.messageId,
         replyMessageId: sent.id, channelId: message.channel.id,
-      }).catch(() => inc("jobs.enqueue_error"));
+      }, journalDelay).catch(() => inc("jobs.enqueue_error"));
+      if (chargedDm) void maybeAlertLowCredit(userId, dmBalance);
     } else {
       inc("reply.empty");
       replyThrottle.refund(dmScope, userId);
+      if (chargedDm) store.refundCredits(userId, 1, "dm_turn_refund").catch(() => {});
     }
   } catch (error) {
     if (error instanceof BudgetExceeded) {
       inc("budget.reply_blocked");
       replyThrottle.refund(dmScope, userId);
+      if (chargedDm) store.refundCredits(userId, 1, "dm_turn_refund").catch(() => {});
       if (budgetNoticeOnce(message.channel.id)) {
-        await message.reply({ content: "We've hit today's DM message limit — it resets at midnight UTC.", allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+        const hostedOut = error.guildId === "hosted:global";
+        await message.reply({ content: hostedOut ? HOSTED_CAPACITY : "We've hit today's DM message limit — it resets at midnight UTC.", allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
       }
       return;
     }
     inc("llm.reply_error");
     logError("DM reply generation failed", error);
     replyThrottle.refund(dmScope, userId);
+    if (chargedDm) store.refundCredits(userId, 1, "dm_turn_refund").catch(() => {});
   }
 }
 
@@ -1015,7 +1114,14 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   // busy guild can't stack unbounded concurrent LLM calls inside one handler.
   if (!senderCompanion && settings.memoryEnabled && (shouldInspectForMemory(event) || images.length)) {
     try {
-      await enqueue(sql, event.guildId, "extract", { event, replyToId, replyToContent });
+      // Free-tier memory settles in hourly batches on the hosted lane;
+      // premium and BYOK-backed scopes extract live. Unlinked speakers
+      // count as free.
+      const extractAcct = isHostedScope(event.guildId)
+        ? await store.accountForDiscordUser(event.authorId).catch(() => null)
+        : null;
+      const throttleMemory = isHostedScope(event.guildId) && (!extractAcct || extractAcct.plan === "free");
+      await enqueue(sql, event.guildId, "extract", { event, replyToId, replyToContent }, throttleMemory ? nextHourBoundary() : undefined);
       await store.setTriageResults([{ id: event.messageId, result: "queued" }]);
       inc("jobs.enqueued");
     } catch (error) { inc("jobs.enqueue_error"); logError("Extraction enqueue failed", error); }
@@ -1056,11 +1162,53 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   }
 
   const chosen = selection.companion;
-  const companionBrain = (await brainForUser(chosen.ownerUserId, event.guildId)) ?? brain;
   const compSubj = MemoryStore.companionSubjectId(chosen.id);
   const engaged = selection.engaged;
+  // Companion↔companion turns bill the replying companion's owner — the c2c
+  // settings toggle is their spend-control, checked before anything burns.
+  if (senderCompanion) {
+    const s = await store.userBotSettings(chosen.ownerUserId).catch(() => null);
+    if (s && !s.c2cEnabled) return;
+  }
+  const ownerBrain = await brainForUser(chosen.ownerUserId, event.guildId);
+  const companionBrain = ownerBrain ?? brain;
+  // Hosted iff the brain actually serving this turn rides the env key — owner
+  // and guild BYOK lanes never spend tokens.
+  const hostedGuild = ownerBrain
+    ? isHostedUserBrain(chosen.ownerUserId, event.guildId)
+    : isHostedScope(event.guildId);
+  // Payer: a human covers their whole turn (2: their message + the reply); a
+  // replying companion's turn in a c2c chain bills its owner (1 — the inbound
+  // companion message was paid for when it was generated).
+  const payerId = senderCompanion ? chosen.ownerUserId : event.authorId;
+  // Unlinked human speakers get a once-per-cooldown pointer (in-channel —
+  // ephemeral isn't possible for plain messages). Unlinked c2c owners just
+  // hear silence; their DM gate already pointed them at /link.
+  if (hostedGuild && !senderCompanion && !(await store.accountForDiscordUser(payerId))) {
+    if (linkPromptDue(`${event.guildId}:${payerId}`)) {
+      await message.reply({ content: LINK_PROMPT, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+      inc("gate.unlinked_guild");
+    }
+    return;
+  }
   const throttleActor = senderCompanion ? compSubj : event.authorId;
   if (!replyThrottle.consume(event.guildId, throttleActor)) { inc("reply.cooldown"); return; }
+  let chargedGuild = 0;
+  let guildBalance = 0;
+  if (hostedGuild) {
+    const cost = senderCompanion ? 1 : 2;
+    const spend = await store.spendCredits(payerId, cost, senderCompanion ? "c2c" : "guild_turn");
+    if (!spend.ok) {
+      inc("credits.insufficient");
+      replyThrottle.refund(event.guildId, throttleActor);
+      if (!senderCompanion && budgetNoticeOnce(event.channelId)) {
+        await message.reply({ content: TOKEN_EMPTY, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+      }
+      return;
+    }
+    chargedGuild = cost;
+    guildBalance = spend.balance;
+  }
 
   try {
     await message.channel.sendTyping();
@@ -1145,11 +1293,16 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       imageContext,
     );
     const clean = text ? scrubMentions(text, lookups.names) : "";
-    if (clean && looksLikeSchemaLeak(clean)) { inc("reply.schema_leak"); replyThrottle.refund(event.guildId, throttleActor); return; }
+    if (clean && looksLikeSchemaLeak(clean)) {
+      inc("reply.schema_leak"); replyThrottle.refund(event.guildId, throttleActor);
+      if (chargedGuild) store.refundCredits(payerId, 1, "guild_turn_refund").catch(() => {});
+      return;
+    }
     if (clean) {
       const sent = await sendAsCompanion(message, chosen, clean, client.user!.id);
       if (!sent) {
         replyThrottle.refund(event.guildId, throttleActor);
+        if (chargedGuild) store.refundCredits(payerId, 1, "guild_turn_refund").catch(() => {});
         return;
       }
       convo.noteReply(selection.convoKey);
@@ -1163,13 +1316,18 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
         content: clean, createdAt: sent.createdAt, mentionsBot: false,
       }, event.messageId, false, true);
       await store.setTriageResults([{ id: sent.id, result: "noise" }]);
-      // Same deferred journaling as the DM path — fire-and-forget enqueue.
+      // Same deferred journaling as the DM path — hourly cadence for
+      // free+hosted owners, live for premium/BYOK.
+      const ownerAccount = chargedGuild ? await store.accountForDiscordUser(chosen.ownerUserId).catch(() => null) : null;
+      const journalDelay = ownerAccount?.plan === "free" ? nextHourBoundary() : undefined;
       enqueue(sql, event.guildId, "journal-write", {
         companionId: chosen.id, triggerMessageId: event.messageId,
         replyMessageId: sent.id, channelId: event.channelId,
-      }).catch(() => inc("jobs.enqueue_error"));
+      }, journalDelay).catch(() => inc("jobs.enqueue_error"));
+      if (chargedGuild && !senderCompanion) void maybeAlertLowCredit(payerId, guildBalance);
     } else {
       inc("reply.empty"); replyThrottle.refund(event.guildId, throttleActor);
+      if (chargedGuild) store.refundCredits(payerId, 1, "guild_turn_refund").catch(() => {});
     }
     if (config.replyExit && endConversation && convo.leave(selection.convoKey, event.authorId)) {
       inc("convo.leave.model");
@@ -1178,13 +1336,16 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     if (error instanceof BudgetExceeded) {
       inc("budget.reply_blocked");
       replyThrottle.refund(event.guildId, throttleActor);
+      if (chargedGuild) store.refundCredits(payerId, 1, "guild_turn_refund").catch(() => {});
       if (budgetNoticeOnce(event.channelId)) {
-        await message.reply({ content: "I've hit this server's daily LLM limit, so I can't respond right now — it resets at midnight UTC. An admin can raise it with `/limits`.", allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+        const hostedOut = error.guildId === "hosted:global";
+        await message.reply({ content: hostedOut ? HOSTED_CAPACITY : "I've hit this server's daily LLM limit, so I can't respond right now — it resets at midnight UTC. An admin can raise it with `/limits`.", allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
       }
       return;
     }
     inc("llm.reply_error"); logError("Reply generation failed", error);
     replyThrottle.refund(event.guildId, throttleActor);
+    if (chargedGuild) store.refundCredits(payerId, 1, "guild_turn_refund").catch(() => {});
   }
 }
 

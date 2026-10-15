@@ -2539,4 +2539,134 @@ export class MemoryStore {
     `;
     return code;
   }
+
+  // ── Credits & per-user bot settings ──────────────────────────────────────────
+  // Credits live on web_profiles (auth-gated table — absent on plain Postgres,
+  // where creditsSupported stays false and the whole feature no-ops). Spends
+  // are single-tx: apply due lazy grants under FOR UPDATE, then debit — the
+  // row lock makes concurrent turns serialize and the ledger a true running
+  // balance. Grants are configured at init from env so tests control them.
+
+  private creditsEnabled = false;
+  private creditGrants = { freeDaily: 20, premiumDaily: 30, premiumWeekly: 300 };
+
+  /** Detect whether the web-accounts schema exists (v26+). Called once at
+   * init; tests re-call after creating the fixture tables. */
+  async initCreditsSupport(grants?: { freeDaily: number; premiumDaily: number; premiumWeekly: number }): Promise<boolean> {
+    if (grants) this.creditGrants = grants;
+    const rows = await this.sql<Array<{ r: string | null }>>`SELECT to_regclass('public.web_profiles') AS r`;
+    this.creditsEnabled = Boolean(rows[0]?.r);
+    return this.creditsEnabled;
+  }
+  get creditsSupported(): boolean { return this.creditsEnabled; }
+
+  /** Cached discord→account resolution shared by the link gate, payer lookup,
+   * and plan checks. Negative hits cached — unlinked users can be spammy. */
+  private accountCache = new Map<string, { account: { id: string; plan: "free" | "premium"; creditBalance: number } | null; at: number }>();
+  private static readonly ACCOUNT_CACHE_MS = 60_000;
+
+  async accountForDiscordUser(discordUserId: string): Promise<{ id: string; plan: "free" | "premium"; creditBalance: number } | null> {
+    if (!this.creditsEnabled) return { id: "selfhosted", plan: "premium", creditBalance: Infinity };
+    const hit = this.accountCache.get(discordUserId);
+    if (hit && Date.now() - hit.at < MemoryStore.ACCOUNT_CACHE_MS) return hit.account;
+    const rows = await this.sql<Array<{ id: string; plan: string; credit_balance: number }>>`
+      SELECT id, plan, credit_balance FROM web_profiles WHERE discord_user_id = ${discordUserId}
+    `;
+    const account = rows[0]
+      ? { id: rows[0].id, plan: rows[0].plan as "free" | "premium", creditBalance: Number(rows[0].credit_balance) }
+      : null;
+    this.accountCache.set(discordUserId, { account, at: Date.now() });
+    return account;
+  }
+
+  private async writeLedger(tx: Sql, accountId: string, delta: number, kind: string, reason: string | null): Promise<number> {
+    const rows = await tx<Array<{ credit_balance: number }>>`
+      UPDATE public.web_profiles SET credit_balance = credit_balance + ${delta}, updated_at = now()
+      WHERE id = ${accountId} RETURNING credit_balance
+    `;
+    const balance = Number(rows[0].credit_balance);
+    await tx`
+      INSERT INTO public.credit_ledger (account_id, delta, kind, reason, balance_after)
+      VALUES (${accountId}, ${delta}, ${kind}, ${reason}, ${balance})
+    `;
+    return balance;
+  }
+
+  /** Debit n credits from the account linked to discordUserId. Applies any due
+   * lazy grants first (daily for all plans, weekly for premium) under the row
+   * lock — no scheduler, downtime-safe. ok:false when unlinked or broke. */
+  async spendCredits(
+    discordUserId: string,
+    n: number,
+    reason: string,
+  ): Promise<{ ok: boolean; balance: number }> {
+    if (!this.creditsEnabled) return { ok: true, balance: 0 };
+    return this.sql.begin(async tx => {
+      const rows = await tx<Array<{
+        id: string; plan: string; credit_balance: number;
+        last_daily_grant_on: string | Date | null; last_weekly_grant_on: string | Date | null;
+        today: string; week_start: string;
+      }>>`
+        SELECT id, plan, credit_balance, last_daily_grant_on, last_weekly_grant_on,
+               (now() AT TIME ZONE 'UTC')::date AS today,
+               (date_trunc('week', now() AT TIME ZONE 'UTC'))::date AS week_start
+        FROM public.web_profiles WHERE discord_user_id = ${discordUserId}
+        FOR UPDATE
+      `;
+      const acct = rows[0];
+      if (!acct) return { ok: false, balance: 0 };
+      // postgres.js returns computed ::date columns as strings but stored date
+      // columns as Date objects — normalize both to YYYY-MM-DD before comparing.
+      const isoDay = (v: string | Date | null): string | null =>
+        v == null ? null : v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10);
+      const day = isoDay(acct.today)!;
+      const week = isoDay(acct.week_start)!;
+      const lastDaily = isoDay(acct.last_daily_grant_on);
+      const lastWeekly = isoDay(acct.last_weekly_grant_on);
+      let balance = Number(acct.credit_balance);
+      if (lastDaily !== day) {
+        const g = acct.plan === "premium" ? this.creditGrants.premiumDaily : this.creditGrants.freeDaily;
+        if (g > 0) balance = await this.writeLedger(tx, acct.id, g, "grant_daily", null);
+        await tx`UPDATE public.web_profiles SET last_daily_grant_on = ${day} WHERE id = ${acct.id}`;
+      }
+      if (acct.plan === "premium" && lastWeekly !== week) {
+        if (this.creditGrants.premiumWeekly > 0) balance = await this.writeLedger(tx, acct.id, this.creditGrants.premiumWeekly, "grant_weekly", null);
+        await tx`UPDATE public.web_profiles SET last_weekly_grant_on = ${week} WHERE id = ${acct.id}`;
+      }
+      if (balance < n) return { ok: false, balance };
+      balance = await this.writeLedger(tx, acct.id, -n, "spend", reason);
+      this.accountCache.delete(discordUserId);
+      return { ok: true, balance };
+    });
+  }
+
+  /** Credit n back — a companion message that never sent didn't happen. */
+  async refundCredits(discordUserId: string, n: number, reason: string): Promise<{ ok: boolean; balance: number }> {
+    if (!this.creditsEnabled) return { ok: true, balance: 0 };
+    return this.sql.begin(async tx => {
+      const rows = await tx<Array<{ id: string }>>`SELECT id FROM public.web_profiles WHERE discord_user_id = ${discordUserId} FOR UPDATE`;
+      if (!rows[0]) return { ok: false, balance: 0 };
+      const balance = await this.writeLedger(tx, rows[0].id, n, "refund", reason);
+      this.accountCache.delete(discordUserId);
+      return { ok: true, balance };
+    });
+  }
+
+  /** Per-user bot toggles — the site writes via upsert_my_settings; defaults
+   * cover users who never open the settings page. */
+  private botSettingsCache = new Map<string, { value: { c2cEnabled: boolean; lowCreditAlerts: boolean }; at: number }>();
+
+  async userBotSettings(discordUserId: string): Promise<{ c2cEnabled: boolean; lowCreditAlerts: boolean }> {
+    if (!this.creditsEnabled) return { c2cEnabled: true, lowCreditAlerts: true };
+    const hit = this.botSettingsCache.get(discordUserId);
+    if (hit && Date.now() - hit.at < MemoryStore.ACCOUNT_CACHE_MS) return hit.value;
+    const rows = await this.sql<Array<{ c2c_enabled: boolean; low_credit_alerts: boolean }>>`
+      SELECT c2c_enabled, low_credit_alerts FROM user_bot_settings WHERE discord_user_id = ${discordUserId}
+    `;
+    const value = rows[0]
+      ? { c2cEnabled: Boolean(rows[0].c2c_enabled), lowCreditAlerts: Boolean(rows[0].low_credit_alerts) }
+      : { c2cEnabled: true, lowCreditAlerts: true };
+    this.botSettingsCache.set(discordUserId, { value, at: Date.now() });
+    return value;
+  }
 }
