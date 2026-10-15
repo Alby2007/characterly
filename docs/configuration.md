@@ -24,8 +24,7 @@ Characterly is configured through environment variables validated at startup by 
 | `REQUIRE_GUILD_KEYS` | `0` | Hosted BYOK mode: `1` disables the operator `GROQ_API_KEY` fallback so companions and servers run strictly on user-supplied personal keys (`dm:<userId>`) — a keyless guild goes fully dormant (no archive, no replies, no LLM spend). Self-hosters leave this off. Note this is a *key* gate, orthogonal to the consent posture: every guild also starts dormant (`memory_enabled=0`) until an admin runs `/memory-resume`. |
 | `DM_LLM_DAILY_CAP` | `250` | Per-user daily LLM call cap for 1:1 DMs (`dm:<userId>` scope, resets at UTC midnight). |
 | `FREE_DAILY_CREDITS` | `20` | Free-plan hosted accounts refill to this balance each UTC day (hosted lane only). Applied lazily inside `spendCredits` — no scheduler. A refill tops up to the floor; a balance already above it keeps its headroom (grants don't stack). |
-| `PREMIUM_DAILY_CREDITS` | `30` | Daily refill floor for premium accounts. |
-| `PREMIUM_WEEKLY_CREDITS` | `300` | Weekly refill floor for premium accounts, keyed to the ISO week. |
+| `PREMIUM_DAILY_CREDITS` | `150` | Daily refill floor for premium accounts — high enough to feel unlimited (≈75 turns/day) while remaining metered so an abusive account stays bounded. |
 | `HOSTED_DAILY_LLM_CAP` | `20000` | Fleet-wide circuit breaker: max hosted (env-key) LLM calls per UTC day across all users. BYOK calls never count. When tripped, hosted chats get the capacity notice until UTC midnight. |
 | `LOW_CREDIT_ALERT` | `5` | Balance threshold for the once-per-day low-token DM (skippable via the dashboard Companion settings toggle). |
 | `LINK_PROMPT_COOLDOWN_MS` | `14400000` | Minimum interval between "link your account" prompts to the same unlinked user (default 4h). |

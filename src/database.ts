@@ -2549,11 +2549,11 @@ export class MemoryStore {
   // balance. Grants are configured at init from env so tests control them.
 
   private creditsEnabled = false;
-  private creditGrants = { freeDaily: 20, premiumDaily: 30, premiumWeekly: 300 };
+  private creditGrants = { freeDaily: 20, premiumDaily: 150 };
 
   /** Detect whether the web-accounts schema exists (v26+). Called once at
    * init; tests re-call after creating the fixture tables. */
-  async initCreditsSupport(grants?: { freeDaily: number; premiumDaily: number; premiumWeekly: number }): Promise<boolean> {
+  async initCreditsSupport(grants?: { freeDaily: number; premiumDaily: number }): Promise<boolean> {
     if (grants) this.creditGrants = grants;
     const rows = await this.sql<Array<{ r: string | null }>>`SELECT to_regclass('public.web_profiles') AS r`;
     this.creditsEnabled = Boolean(rows[0]?.r);
@@ -2597,7 +2597,7 @@ export class MemoryStore {
   }
 
   /** Debit n credits from the account linked to discordUserId. Applies any due
-   * lazy grants first (daily for all plans, weekly for premium) under the row
+   * lazy grants first (daily for all plans — premium's floor is just higher)
    * lock — no scheduler, downtime-safe. ok:false when unlinked or broke. */
   async spendCredits(
     discordUserId: string,
@@ -2608,12 +2608,11 @@ export class MemoryStore {
     return this.sql.begin(async tx => {
       const rows = await tx<Array<{
         id: string; plan: string; credit_balance: number;
-        last_daily_grant_on: string | Date | null; last_weekly_grant_on: string | Date | null;
-        today: string; week_start: string;
+        last_daily_grant_on: string | Date | null;
+        today: string;
       }>>`
-        SELECT id, plan, credit_balance, last_daily_grant_on, last_weekly_grant_on,
-               (now() AT TIME ZONE 'UTC')::date AS today,
-               (date_trunc('week', now() AT TIME ZONE 'UTC'))::date AS week_start
+        SELECT id, plan, credit_balance, last_daily_grant_on,
+               (now() AT TIME ZONE 'UTC')::date AS today
         FROM public.web_profiles WHERE discord_user_id = ${discordUserId}
         FOR UPDATE
       `;
@@ -2626,9 +2625,7 @@ export class MemoryStore {
       const isoDay = (v: string | Date | null): string | null =>
         v == null ? null : v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10);
       const day = isoDay(acct.today)!;
-      const week = isoDay(acct.week_start)!;
       const lastDaily = isoDay(acct.last_daily_grant_on);
-      const lastWeekly = isoDay(acct.last_weekly_grant_on);
       let balance = Number(acct.credit_balance);
       // Grants REFILL to the grant amount rather than accruing — the user-facing
       // copy ("refreshes daily") is the contract, and a floor bounds how much an
@@ -2639,11 +2636,6 @@ export class MemoryStore {
         const delta = Math.max(0, g - balance);
         if (delta > 0) balance = await this.writeLedger(tx, acct.id, delta, "grant_daily", null);
         await tx`UPDATE public.web_profiles SET last_daily_grant_on = ${day} WHERE id = ${acct.id}`;
-      }
-      if (acct.plan === "premium" && lastWeekly !== week) {
-        const delta = Math.max(0, this.creditGrants.premiumWeekly - balance);
-        if (delta > 0) balance = await this.writeLedger(tx, acct.id, delta, "grant_weekly", null);
-        await tx`UPDATE public.web_profiles SET last_weekly_grant_on = ${week} WHERE id = ${acct.id}`;
       }
       if (balance < n) return { ok: false, balance };
       balance = await this.writeLedger(tx, acct.id, -n, "spend", reason);
@@ -2662,6 +2654,42 @@ export class MemoryStore {
       this.accountCache.delete(discordUserId);
       return { ok: true, balance };
     });
+  }
+
+  /** Pack purchase — credits an account by UUID (Stripe webhook path, keyed by
+   * web_profiles.id rather than a Discord snowflake). stripeRef makes retries
+   * idempotent: the ledger's unique stripe_ref index absorbs replays. */
+  async purchaseCredits(accountId: string, n: number, reason: string, stripeRef: string): Promise<{ ok: boolean; duplicate: boolean; balance: number }> {
+    if (!this.creditsEnabled) return { ok: true, duplicate: false, balance: 0 };
+    return this.sql.begin(async tx => {
+      const rows = await tx<Array<{ credit_balance: number }>>`
+        SELECT credit_balance FROM public.web_profiles WHERE id = ${accountId} FOR UPDATE
+      `;
+      if (!rows[0]) return { ok: false, duplicate: false, balance: 0 };
+      const inserted = await tx`
+        INSERT INTO public.credit_ledger (account_id, delta, kind, reason, stripe_ref, balance_after)
+        VALUES (${accountId}, ${n}, 'purchase', ${reason}, ${stripeRef}, ${Number(rows[0].credit_balance) + n})
+        ON CONFLICT (stripe_ref) WHERE stripe_ref IS NOT NULL DO NOTHING
+        RETURNING id
+      `;
+      if (!inserted[0]) return { ok: true, duplicate: true, balance: Number(rows[0].credit_balance) };
+      const updated = await tx<Array<{ credit_balance: number }>>`
+        UPDATE public.web_profiles SET credit_balance = credit_balance + ${n}, updated_at = now()
+        WHERE id = ${accountId} RETURNING credit_balance
+      `;
+      this.accountCache.clear(); // accountId is a uuid — evict broadly, cheap at pack volume
+      return { ok: true, duplicate: false, balance: Number(updated[0].credit_balance) };
+    });
+  }
+
+  /** Today's hosted:global LLM-call count — the fleet breaker's current spend.
+   * Used to shed the free lane before the hard cap trips. */
+  async hostedUsageToday(): Promise<number> {
+    const rows = await this.sql<Array<{ llm_calls: number | string | null }>>`
+      SELECT llm_calls FROM guild_usage
+      WHERE guild_id = 'hosted:global' AND day = (now() AT TIME ZONE 'UTC')::date
+    `;
+    return Number(rows[0]?.llm_calls ?? 0);
   }
 
   /** Per-user bot toggles — the site writes via upsert_my_settings; defaults

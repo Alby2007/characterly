@@ -9,7 +9,7 @@ import { MemoryStore } from "./database.js";
 // fixture so spendCredits/refundCredits/userBotSettings exercise real SQL.
 // Grants are injected via initCreditsSupport so tests don't depend on env.
 
-const GRANTS = { freeDaily: 20, premiumDaily: 30, premiumWeekly: 300 };
+const GRANTS = { freeDaily: 20, premiumDaily: 150 };
 
 // Fixture tables must not leak into other test files sharing this DB — e.g.
 // credit_ledger's FK would block migration rollback tests that drop web_profiles.
@@ -40,6 +40,7 @@ async function fixture(sql: ReturnType<typeof makeTestSql>) {
       delta         INT NOT NULL,
       kind          TEXT NOT NULL,
       reason        TEXT,
+      stripe_ref    TEXT,
       balance_after INT NOT NULL,
       created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
     )
@@ -111,18 +112,41 @@ test("the daily grant only lands once per UTC day", async () => {
   await sql.end();
 });
 
-test("premium refills to the daily floor plus the weekly floor", async () => {
+test("premium refills to the 150/day floor — single grant, no weekly bucket", async () => {
   const sql = makeTestSql();
   const store = await fixture(sql);
   await addAccount(sql, "u-vip", "premium");
   const r = await store.spendCredits("u-vip", 2, "dm_turn");
-  // Refill semantics: weekly floor (300) dominates — the balance lands on
-  // 300, not 30+300, then the 2-credit spend debits.
-  assert.equal(r.balance, GRANTS.premiumWeekly - 2);
+  assert.equal(r.balance, GRANTS.premiumDaily - 2);
   const ledger = await sql`SELECT kind, delta FROM credit_ledger ORDER BY id`;
-  assert.deepEqual(ledger.map(l => l.kind), ["grant_daily", "grant_weekly", "spend"]);
+  assert.deepEqual(ledger.map(l => l.kind), ["grant_daily", "spend"]);
   assert.equal(Number(ledger[0].delta), GRANTS.premiumDaily);
-  assert.equal(Number(ledger[1].delta), GRANTS.premiumWeekly - GRANTS.premiumDaily);
+  await sql.end();
+});
+
+test("purchaseCredits adds pack tokens idempotently on stripe_ref", async () => {
+  const sql = makeTestSql();
+  const store = await fixture(sql);
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS credit_ledger_stripe_ref ON credit_ledger (stripe_ref) WHERE stripe_ref IS NOT NULL`;
+  const accountId = await addAccount(sql, "u-buyer", "free", 10);
+  const r = await store.purchaseCredits(accountId, 500, "pack_500", "cs_test_1");
+  assert.deepEqual(r, { ok: true, duplicate: false, balance: 510 });
+  // Webhook redelivery lands on the unique stripe_ref — no double grant.
+  const dup = await store.purchaseCredits(accountId, 500, "pack_500", "cs_test_1");
+  assert.deepEqual(dup, { ok: true, duplicate: true, balance: 510 });
+  const rows = await sql`SELECT count(*)::int AS n FROM credit_ledger WHERE kind = 'purchase'`;
+  assert.equal(rows[0].n, 1);
+  await sql.end();
+});
+
+test("hostedUsageToday reads the hosted:global counter for today only", async () => {
+  const sql = makeTestSql();
+  const store = await fixture(sql);
+  assert.equal(await store.hostedUsageToday(), 0);
+  await sql`INSERT INTO guild_usage (guild_id, day, llm_calls) VALUES ('hosted:global', (now() AT TIME ZONE 'UTC')::date, 42)`;
+  assert.equal(await store.hostedUsageToday(), 42);
+  await sql`INSERT INTO guild_usage (guild_id, day, llm_calls) VALUES ('hosted:global', (now() AT TIME ZONE 'UTC')::date - 1, 999) ON CONFLICT DO NOTHING`;
+  assert.equal(await store.hostedUsageToday(), 42, "yesterday's row doesn't count");
   await sql.end();
 });
 

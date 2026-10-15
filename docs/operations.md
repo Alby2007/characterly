@@ -48,7 +48,7 @@ Env lives in `~/characterly/.env` on the VM — **not** in the repo. Changes nee
 Supabase dashboard → SQL Editor, or `psql "$DATABASE_URL"`. The bot connects as `postgres` (bypasses RLS). Useful checks:
 
 ```sql
-SELECT * FROM schema_migrations ORDER BY version;          -- migration state (latest: 30)
+SELECT * FROM schema_migrations ORDER BY version;          -- migration state (latest: 31)
 SELECT type, count(*), max(attempts) FROM jobs
   GROUP BY type;                                         -- queue depth
 SELECT * FROM jobs WHERE attempts >= 5;                  -- dead letters
@@ -77,6 +77,17 @@ SELECT kind, sum(delta) FROM credit_ledger
 | "Link Discord" button errors | Manual linking disabled | Auth → Sign In/Providers → allow manual linking |
 | Users get "out of tokens" / capacity notice | Credits spent or `hosted:global` breaker tripped | Balance: `credit_ledger` query above; breaker: `guild_usage` row `hosted:global` vs `HOSTED_DAILY_LLM_CAP` — raise the env var or wait for UTC midnight |
 | Companion ignores other companions | `c2c_enabled` off for the replying companion's owner | `SELECT * FROM user_bot_settings WHERE discord_user_id = '<owner snowflake>'` — owner toggles on the dashboard |
+| Paid, no tokens/plan | `stripe-webhook` edge fn missing `STRIPE_WEBHOOK_SECRET`, or `grant_pack` rejected | Check Stripe → Developers → Webhooks `we_…` delivery log for the session id; replay the event there. Pack grants dedupe on `credit_ledger.stripe_ref`, so replays are safe. |
+| Free users blocked while premium works | `hosted:global` past ~90% of `HOSTED_DAILY_LLM_CAP` | Intended shedding — free lane pauses under fleet pressure. Raise the cap or wait for UTC midnight. |
+
+## Billing (Stripe)
+
+- **Catalog** (live account): `prod_VRhdA8UQOkzj2r` Premium $7.99/mo (`price_1UQoE5GAOUmNDfnhulTyoL1o`); `prod_VRhdvPYT4YwrPt` Token Pack — 500/$4.99 (`price_1UQoE5GAOUmNDfnhwHI9mwm7`), 1,500/$9.99 (`price_1UQoE6GAOUmNDfnh2W16RjDr`), 5,000/$24.99 (`price_1UQoE6GAOUmNDfnh0egnY8GD`). Both carry `txcd_10000000` (SaaS) for Managed Payments.
+- **Checkout** is Stripe Payment Links — zero backend for purchase. Dashboard appends `?client_reference_id=<web_profiles.id>&prefilled_email=<email>`.
+- **Fulfillment** is the `stripe-webhook` edge function (`supabase/functions/stripe-webhook`, source in repo): verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET` (WebCrypto HMAC-SHA256, 5-min tolerance), then service-role writes `plan`/pack grants. Endpoint `we_1UQoI5GAOUmNDfnhTp1AGDEn` listens for `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `customer.subscription.updated`, `customer.subscription.deleted`.
+- **Secret setup**: `STRIPE_WEBHOOK_SECRET` must be set on the edge function — Dashboard → Edge Functions → Secrets, or `npx supabase secrets set STRIPE_WEBHOOK_SECRET=whsec_… --project-ref tfukkoektmsrolykliop`. The function returns 500 ("not configured") until then, and Stripe retries.
+- **Pack→link map** is hardcoded in the function (`PACK_LINKS`) — new packs need a new link + map entry + redeploy.
+- **Plan transitions**: `active`/`trialing` → premium; `canceled`/`deleted` → free; `past_due`/`unpaid` leave plan alone during Stripe's retry window.
 
 ## Secrets & rotation
 

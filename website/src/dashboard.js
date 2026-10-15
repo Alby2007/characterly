@@ -154,13 +154,47 @@ $("#form-link-code").addEventListener("submit", async e => {
 });
 
 await renderDiscordCard();
+renderBilling();
 
+// Back from Stripe checkout — the webhook does the crediting (seconds, not
+// instant); surface a heads-up rather than pretending the balance moved.
+if (new URLSearchParams(location.search).get("checkout")) {
+  $("#billing-note").textContent = "Payment complete — your account updates in a few seconds. Refresh if it hasn't yet.";
+  history.replaceState(null, "", location.pathname);
+}
 // ── Tokens + companion settings ──────────────────────────────────────────────
 // Tokens are the user-facing name for hosted-lane credits. Balance/plan live
 // on the profile row; settings + BYOK state come from rpcs that stamp the
 // caller's own discord_user_id server-side.
-const LEDGER_LABELS = { grant_daily: "Daily refill", grant_weekly: "Weekly refill", refund: "Refund", adjust: "Adjustment" };
+const LEDGER_LABELS = { grant_daily: "Daily refill", grant_weekly: "Weekly refill", purchase: "Token pack", refund: "Refund", adjust: "Adjustment" };
 const REASON_LABELS = { dm_turn: "DM chat", guild_turn: "Server chat", c2c: "Companion chat", dm_turn_refund: "Chat refund", guild_turn_refund: "Chat refund" };
+
+// Stripe payment links — checkout attributes the session to this account via
+// ?client_reference_id (the webhook credits whoever it names). Pack↔token
+// mapping lives in supabase/functions/stripe-webhook — keep in sync there.
+const PAY_LINKS = {
+  premium: "https://buy.stripe.com/cNicN5cpC8WT1QS4crgrS00",
+  pack500: "https://buy.stripe.com/6oUcN53T6gpl534aAPgrS01",
+  pack1500: "https://buy.stripe.com/00w14nbly1ur534bETgrS02",
+  pack5000: "https://buy.stripe.com/6oU9AT61e6OL67810fgrS03",
+};
+function payUrl(base) {
+  const u = new URL(base);
+  u.searchParams.set("client_reference_id", user.id);
+  if (user.email) u.searchParams.set("prefilled_email", user.email);
+  return u.toString();
+}
+
+function renderBilling() {
+  $("#billing-plan").textContent = profile?.plan === "premium" ? "Premium" : "Free";
+  $("#billing-plan").className = profile?.plan === "premium" ? "badge badge-ok" : "badge badge-soon";
+  $("#btn-subscribe").href = payUrl(PAY_LINKS.premium);
+  $("#btn-subscribe").textContent = profile?.plan === "premium" ? "Premium — active" : "Go Premium — $7.99/mo";
+  $("#btn-subscribe").classList.toggle("btn-ghost", profile?.plan === "premium");
+  $("#btn-pack-500").href = payUrl(PAY_LINKS.pack500);
+  $("#btn-pack-1500").href = payUrl(PAY_LINKS.pack1500);
+  $("#btn-pack-5000").href = payUrl(PAY_LINKS.pack5000);
+}
 
 async function renderTokens() {
   const linked = Boolean(profile?.discord_user_id);
@@ -172,7 +206,7 @@ async function renderTokens() {
   $("#tokens-plan").className = premium ? "badge badge-ok" : "badge badge-soon";
   $("#tokens-balance").textContent = Number(profile.credit_balance ?? 0).toLocaleString();
   $("#tokens-grant").textContent = premium
-    ? "Daily top-up plus a weekly refill — applied automatically as you chat."
+    ? "Premium refills to 150 tokens each UTC day — practically unlimited."
     : "Your free allowance refills each UTC day — applied automatically as you chat.";
   const ul = $("#tokens-ledger");
   ul.innerHTML = "";

@@ -1499,6 +1499,105 @@ const migrations: Migration[] = [
       `;
     },
   },
+  // ── v31: Stripe plumbing for premium + token packs ─────────────────────────
+  // web_profiles gains stripe_customer_id/stripe_subscription_id so webhook
+  // events map customer → account. credit_ledger gains 'purchase' as a kind
+  // and a stripe_ref column with a unique index — pack fulfillment is
+  // idempotent because webhook redelivery lands on the constraint, not the
+  // balance. Both halves stay inside the auth-schema gate like v29.
+  {
+    version: 31,
+    name: "v31_stripe_packs",
+    up: async (sql) => {
+      await sql`
+        DO $mig$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'web_profiles') THEN
+            EXECUTE 'ALTER TABLE public.web_profiles
+              ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT,
+              ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT';
+            EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS web_profiles_stripe_customer
+              ON public.web_profiles (stripe_customer_id) WHERE stripe_customer_id IS NOT NULL';
+          END IF;
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'credit_ledger') THEN
+            EXECUTE 'ALTER TABLE public.credit_ledger DROP CONSTRAINT IF EXISTS credit_ledger_kind_check';
+            EXECUTE 'ALTER TABLE public.credit_ledger
+              ADD CONSTRAINT credit_ledger_kind_check
+              CHECK (kind IN (''grant_daily'',''grant_weekly'',''spend'',''refund'',''adjust'',''purchase''))';
+            EXECUTE 'ALTER TABLE public.credit_ledger ADD COLUMN IF NOT EXISTS stripe_ref TEXT';
+            EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS credit_ledger_stripe_ref
+              ON public.credit_ledger (stripe_ref) WHERE stripe_ref IS NOT NULL';
+
+            -- Pack grant for the Stripe webhook edge function. service_role
+            -- only — users can't self-grant. Idempotent: a redelivered webhook
+            -- hits the stripe_ref unique index and returns duplicate=true
+            -- without touching the balance. balance_after is written under the
+            -- account row lock so the audit row is truthful.
+            EXECUTE $rpc$
+              CREATE OR REPLACE FUNCTION public.grant_pack(
+                p_account uuid, p_tokens int, p_ref text
+              ) RETURNS jsonb
+              LANGUAGE plpgsql SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                bal integer;
+                dup boolean := false;
+              BEGIN
+                PERFORM 1 FROM public.web_profiles WHERE id = p_account FOR UPDATE;
+                IF NOT FOUND THEN
+                  RETURN jsonb_build_object('ok', false, 'reason', 'no_account');
+                END IF;
+                INSERT INTO public.credit_ledger (account_id, delta, kind, reason, stripe_ref, balance_after)
+                SELECT p_account, p_tokens, 'purchase', 'pack_' || p_tokens, p_ref,
+                       w.credit_balance + p_tokens
+                FROM public.web_profiles w WHERE w.id = p_account
+                ON CONFLICT (stripe_ref) WHERE stripe_ref IS NOT NULL DO NOTHING;
+                IF NOT FOUND THEN
+                  dup := true;
+                ELSE
+                  UPDATE public.web_profiles
+                  SET credit_balance = credit_balance + p_tokens, updated_at = now()
+                  WHERE id = p_account
+                  RETURNING credit_balance INTO bal;
+                END IF;
+                SELECT credit_balance INTO bal FROM public.web_profiles WHERE id = p_account;
+                RETURN jsonb_build_object('ok', true, 'duplicate', dup, 'balance', bal);
+              END
+              $body$
+            $rpc$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.grant_pack(uuid, int, text) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.grant_pack(uuid, int, text) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.grant_pack(uuid, int, text) FROM authenticated';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.grant_pack(uuid, int, text) TO service_role';
+            END IF;
+          END IF;
+        END $mig$
+      `;
+    },
+    down: async (sql) => {
+      await sql`
+        DO $undo$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+            EXECUTE 'DROP INDEX IF EXISTS public.credit_ledger_stripe_ref';
+            EXECUTE 'ALTER TABLE public.credit_ledger DROP COLUMN IF EXISTS stripe_ref';
+            EXECUTE 'DROP INDEX IF EXISTS public.web_profiles_stripe_customer';
+            EXECUTE 'ALTER TABLE public.web_profiles
+              DROP COLUMN IF EXISTS stripe_customer_id,
+              DROP COLUMN IF EXISTS stripe_subscription_id';
+          END IF;
+        END $undo$
+      `;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

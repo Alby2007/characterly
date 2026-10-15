@@ -177,7 +177,6 @@ async function init() {
   await store.initCreditsSupport({
     freeDaily: config.freeDailyCredits,
     premiumDaily: config.premiumDailyCredits,
-    premiumWeekly: config.premiumWeeklyCredits,
   });
   eventStore = new EventStore();
   profileStore = new ProfileStore();
@@ -867,6 +866,17 @@ async function handleDmMessage(
   let dmBalance = 0;
   let dmReplied = false;
   if (hostedDm) {
+    // Premium priority under fleet pressure: past ~90% of the hosted:global
+    // cap the free lane sheds first — premium keeps spending until the hard
+    // cap trips inside the metered wrap.
+    if (account?.plan !== "premium" && (await store.hostedUsageToday()) >= config.hostedDailyLlmCap * 0.9) {
+      inc("gate.hosted_pressure");
+      replyThrottle.refund(dmScope, userId);
+      if (budgetNoticeOnce(message.channel.id)) {
+        await message.reply({ content: HOSTED_CAPACITY, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+      }
+      return;
+    }
     const spend = await store.spendCredits(userId, 2, "dm_turn");
     if (!spend.ok) {
       inc("credits.insufficient");
@@ -949,7 +959,9 @@ async function handleDmMessage(
       guildId: dmScope, store, eventStore, profileStore,
       resolveName: n => lookups.map.get(n.trim().toLowerCase()),
     };
-    const toolsOn = config.replyTools && toolCues(event.content);
+    // Tools (compound web_search etc.) are premium-only on the hosted lane —
+    // per-call tool billing can run ~5x a plain reply. BYOK lanes keep tools.
+    const toolsOn = config.replyTools && toolCues(event.content) && (!hostedDm || account?.plan === "premium");
     const { text } = await brain.reply(
       { ...event, authorName: freshOwnerName },
       context,
@@ -1224,7 +1236,29 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   let chargedGuild = 0;
   let guildBalance = 0;
   let guildReplied = false;
+  let payerPremium = false;
   if (hostedGuild) {
+    // Resolve the payer's plan once — drives the pressure shed below and the
+    // tools gate on the reply. Cached-hit for humans (gate looked them up).
+    const payerAccount = await store.accountForDiscordUser(payerId).catch(() => null);
+    if (!payerAccount) {
+      replyThrottle.refund(event.guildId, throttleActor);
+      if (!senderCompanion && linkPromptDue(`${event.guildId}:${payerId}`)) {
+        await message.reply({ content: LINK_PROMPT, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+        inc("gate.unlinked_guild");
+      }
+      return;
+    }
+    payerPremium = payerAccount.plan === "premium";
+    // Free lane sheds first when the fleet breaker is nearly tripped.
+    if (!payerPremium && (await store.hostedUsageToday()) >= config.hostedDailyLlmCap * 0.9) {
+      inc("gate.hosted_pressure");
+      replyThrottle.refund(event.guildId, throttleActor);
+      if (!senderCompanion && budgetNoticeOnce(event.channelId)) {
+        await message.reply({ content: HOSTED_CAPACITY, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+      }
+      return;
+    }
     const cost = senderCompanion ? 1 : 2;
     const spend = await store.spendCredits(payerId, cost, senderCompanion ? "c2c" : "guild_turn");
     if (!spend.ok) {
@@ -1310,7 +1344,8 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       guildId: event.guildId, store, eventStore, profileStore,
       resolveName: n => lookups.map.get(n.trim().toLowerCase()),
     };
-    const toolsOn = config.replyTools && (toolCues(event.content) || selection.isAddressed || engaged);
+    // Same premium gate as DMs — hosted free lanes get plain replies.
+    const toolsOn = config.replyTools && (toolCues(event.content) || selection.isAddressed || engaged) && (!hostedGuild || payerPremium);
     const { text, endConversation } = await companionBrain.reply(
       { ...event, authorName },
       context,

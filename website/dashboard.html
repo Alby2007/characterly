@@ -144,10 +144,18 @@
       <section class="plate rv" aria-labelledby="billing-h">
         <div class="plate-head">
           <h2 id="billing-h">Billing</h2>
-          <span class="badge badge-soon">Not yet</span>
+          <span class="badge badge-soon" id="billing-plan">Free</span>
         </div>
-        <p class="plate-desc">Characterly is free while it runs on your own AI key. Optional subscriptions will be managed here when they exist.</p>
-        <button class="btn btn-ghost" type="button" disabled>Manage billing</button>
+        <p class="plate-desc">Premium refills to 150 tokens daily, unthrottled memory, live journaling, reply tools, and priority when the fleet is busy. Or top up once — packs never expire. BYOK stays free and unlimited.</p>
+        <div id="billing-body">
+          <a class="btn btn-primary" id="btn-subscribe" target="_blank" rel="noopener noreferrer">Go Premium — $7.99/mo</a>
+          <div class="pack-row">
+            <a class="btn btn-ghost btn-sm" id="btn-pack-500" target="_blank" rel="noopener noreferrer">500 tokens · $4.99</a>
+            <a class="btn btn-ghost btn-sm" id="btn-pack-1500" target="_blank" rel="noopener noreferrer">1,500 · $9.99</a>
+            <a class="btn btn-ghost btn-sm" id="btn-pack-5000" target="_blank" rel="noopener noreferrer">5,000 · $24.99</a>
+          </div>
+          <p class="plate-note" id="billing-note">Payments open in Stripe's secure checkout. Manage or cancel your subscription any time from your Stripe receipt email.</p>
+        </div>
       </section>
 
       <section class="plate rv" style="--d:1" aria-labelledby="security-h">

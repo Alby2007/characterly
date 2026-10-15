@@ -803,6 +803,7 @@ code, .cmd {
 .token-ledger li:first-child { border-top: 0; }
 .token-ledger .pos { color: var(--ghost); font-family: var(--mono); font-size: 12px; }
 .token-ledger .neg { color: var(--paper-4); font-family: var(--mono); font-size: 12px; }
+.pack-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 
 .toggle-row { display: flex; align-items: flex-start; gap: 14px; padding: 12px 0; border-top: 1px solid var(--hair); cursor: pointer; }
 .toggle-row:first-child { border-top: 0; }
