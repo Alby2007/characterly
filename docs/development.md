@@ -53,7 +53,7 @@ One-shot operational scripts. They import `src/*.ts` sources directly, so run th
 | `contest-sweep.mjs` | Retroactively applies bot-addressed denials/corrections as contest evidence on archived messages. |
 | `backfill-relationships.mjs` | One-off: re-extracts relationship observations over the archive, verifies, recomputes edges, rebuilds profiles. |
 | `purge-nonopted.mjs` | Hard-deletes all derived data (memories, evidence, attributes, profiles, relationships) for non-consenting members. Requires `PURGE_CONFIRM=1` — irreversible. See README privacy section. |
-| `dev/` | Quarantined one-offs and diagnostics (`migrate-sqlite`, `check-db`, `list-models`, `audit-filter`) — kept for reference, not maintained. |
+| `dev/` | Quarantined one-offs and diagnostics (`check-db`, `list-models`, `audit-filter`) — kept for reference, not maintained. |
 
 ---
 
