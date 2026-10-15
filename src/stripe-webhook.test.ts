@@ -106,6 +106,49 @@ test("classifyCheckout: a foreign subscription checkout does not grant premium",
   assert.equal(a.kind, "ignore");
 });
 
+// API-minted sessions (create-checkout) carry metadata.checkout_kind instead
+// of a payment_link — the public links are deactivated, so this is the live path.
+const PACK_META = { pack_500: 500, pack_1500: 1500 };
+const OPTS = { packLinks: PACK_LINKS, premiumLink: PREMIUM_LINK, packMeta: PACK_META };
+
+test("classifyCheckout: metadata-minted pack sessions grant like payment-link ones", () => {
+  const a = classifyCheckout(
+    { id: "cs_m1", payment_status: "paid", payment_link: null, metadata: { checkout_kind: "pack_500" } },
+    OPTS,
+  );
+  assert.deepEqual(a, { kind: "pack", tokens: 500, ref: "cs_m1", customer: null });
+  const unpaid = classifyCheckout(
+    { id: "cs_m2", payment_status: "unpaid", payment_link: null, metadata: { checkout_kind: "pack_1500" } },
+    OPTS,
+  );
+  assert.equal(unpaid.kind, "ignore", "async pack waits for payment");
+});
+
+test("classifyCheckout: metadata premium session grants plan once paid", () => {
+  const a = classifyCheckout(
+    { id: "cs_m3", payment_status: "paid", payment_link: null, customer: "cus_9", subscription: "sub_9", metadata: { checkout_kind: "premium" } },
+    OPTS,
+  );
+  assert.deepEqual(a, { kind: "premium", grantPlan: true, customer: "cus_9", subscriptionId: "sub_9" });
+});
+
+test("classifyCheckout: unknown/empty metadata never grants", () => {
+  for (const metadata of [null, {}, { checkout_kind: "pack_9999" }, { checkout_kind: "premium2" }] as Array<Record<string, string> | null>) {
+    const a = classifyCheckout(
+      { id: "cs_m4", payment_status: "paid", payment_link: null, metadata },
+      OPTS,
+    );
+    assert.equal(a.kind, "ignore", JSON.stringify(metadata));
+  }
+  // Metadata classifies before the legacy link map — a session spoofing both
+  // can't double-credit: it takes the metadata branch only.
+  const both = classifyCheckout(
+    { id: "cs_m5", payment_status: "paid", payment_link: "plink_pack500", metadata: { checkout_kind: "pack_500" } },
+    OPTS,
+  );
+  assert.equal((both as { tokens?: number }).tokens, 500, "metadata path wins; ref still dedupes the grant");
+});
+
 const premiumSub = (status: string, over: Partial<SubscriptionLike> = {}): SubscriptionLike => ({
   id: "sub_1",
   customer: "cus_1",

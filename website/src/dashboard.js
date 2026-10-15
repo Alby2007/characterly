@@ -169,20 +169,31 @@ if (new URLSearchParams(location.search).get("checkout")) {
 const LEDGER_LABELS = { grant_daily: "Daily refill", grant_weekly: "Weekly refill", purchase: "Token pack", refund: "Refund", adjust: "Adjustment" };
 const REASON_LABELS = { dm_turn: "DM chat", guild_turn: "Server chat", c2c: "Companion chat", dm_turn_refund: "Chat refund", guild_turn_refund: "Chat refund" };
 
-// Stripe payment links — checkout attributes the session to this account via
-// ?client_reference_id (the webhook credits whoever it names). Pack↔token
-// mapping lives in supabase/functions/stripe-webhook — keep in sync there.
-const PAY_LINKS = {
-  premium: "https://buy.stripe.com/cNicN5cpC8WT1QS4crgrS00",
-  pack500: "https://buy.stripe.com/6oUcN53T6gpl534aAPgrS01",
-  pack1500: "https://buy.stripe.com/00w14nbly1ur534bETgrS02",
-  pack5000: "https://buy.stripe.com/6oU9AT61e6OL67810fgrS03",
-};
-function payUrl(base) {
-  const u = new URL(base);
-  u.searchParams.set("client_reference_id", user.id);
-  if (user.email) u.searchParams.set("prefilled_email", user.email);
-  return u.toString();
+// Checkout sessions are minted by the create-checkout edge function — it
+// checks plan server-side and forces client_reference_id to the caller's own
+// account. The old public payment links are deactivated: they couldn't gate
+// packs behind Premium or stop a premium user buying a second subscription.
+// Product↔token mapping lives in supabase/functions/stripe-webhook — keep in
+// sync there.
+async function openCheckout(product, btn) {
+  const msg = $("#billing-msg");
+  msg.hidden = true;
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = "Opening checkout…";
+  try {
+    const { data, error } = await supabase.functions.invoke("create-checkout", { body: { product } });
+    if (error || !data?.url) throw new Error(data?.error ?? error?.message ?? "checkout failed");
+    window.location.href = data.url;
+  } catch (e) {
+    msg.textContent = `Couldn't start checkout — ${e.message}. Try again in a moment.`;
+    msg.hidden = false;
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+for (const [sel, product] of [["#btn-subscribe", "premium"], ["#btn-pack-500", "pack_500"], ["#btn-pack-1500", "pack_1500"], ["#btn-pack-5000", "pack_5000"]]) {
+  $(sel).addEventListener("click", () => { if (!$(sel).disabled) openCheckout(product, $(sel)); });
 }
 
 function renderBilling() {
@@ -191,31 +202,13 @@ function renderBilling() {
   $("#billing-plan").className = premium ? "badge badge-ok" : "badge badge-soon";
   const btn = $("#btn-subscribe");
   btn.classList.toggle("btn-ghost", premium);
-  // Payment links happily sell a second concurrent subscription — a premium
-  // user must NOT get a live checkout link (double-billing + a stale sub
-  // ending can strip the live plan). Disabled anchor, not an href.
-  if (premium) {
-    btn.removeAttribute("href");
-    btn.setAttribute("aria-disabled", "true");
-    btn.textContent = "Premium — active";
-  } else {
-    btn.href = payUrl(PAY_LINKS.premium);
-    btn.removeAttribute("aria-disabled");
-    btn.textContent = "Go Premium — $7.99/mo";
-  }
-  // Packs are a Premium perk — free accounts get dead buttons, not checkout
-  // links (same double-purchase reasoning as the subscribe button above).
-  const packs = [["#btn-pack-500", PAY_LINKS.pack500], ["#btn-pack-1500", PAY_LINKS.pack1500], ["#btn-pack-5000", PAY_LINKS.pack5000]];
-  for (const [sel, link] of packs) {
-    const b = $(sel);
-    if (premium) {
-      b.href = payUrl(link);
-      b.removeAttribute("aria-disabled");
-    } else {
-      b.removeAttribute("href");
-      b.setAttribute("aria-disabled", "true");
-    }
-  }
+  // A premium user must NOT get another subscription checkout — create-checkout
+  // 409s on one anyway, but the button stays visibly off.
+  btn.disabled = premium;
+  btn.textContent = premium ? "Premium — active" : "Go Premium — $7.99/mo";
+  // Packs are a Premium perk — free accounts get dead buttons, and the
+  // function 403s them even if they call it directly.
+  for (const sel of ["#btn-pack-500", "#btn-pack-1500", "#btn-pack-5000"]) $(sel).disabled = !premium;
   $("#pack-note").hidden = premium;
 }
 

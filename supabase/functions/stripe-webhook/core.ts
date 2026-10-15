@@ -54,6 +54,7 @@ export interface CheckoutSessionLike {
   subscription?: string | null;
   client_reference_id?: string | null;
   customer_details?: { email?: string | null } | null;
+  metadata?: Record<string, string> | null;
 }
 
 export type CheckoutAction =
@@ -68,19 +69,30 @@ export type CheckoutAction =
 
 export function classifyCheckout(
   s: CheckoutSessionLike,
-  opts: { packLinks: Record<string, number>; premiumLink: string },
+  opts: { packLinks: Record<string, number>; premiumLink: string; packMeta?: Record<string, number> },
 ): CheckoutAction {
-  // Keyed on payment_link only — never mode alone. A future subscription
-  // product in the same Stripe account must not leak premium.
+  const paid = s.payment_status === "paid" || s.payment_status === "no_payment_required";
+  // Sessions minted by the create-checkout function carry their product in
+  // metadata set server-side inside a JWT-authenticated function — it can't
+  // be smuggled in by a forwarded link, and payment_link is null on these.
+  const meta = s.metadata?.checkout_kind;
+  if (meta === "premium") {
+    return { kind: "premium", grantPlan: paid, customer: s.customer ?? null, subscriptionId: s.subscription ?? null };
+  }
+  const metaTokens = opts.packMeta?.[meta ?? ""];
+  if (metaTokens !== undefined) {
+    if (!paid) return { kind: "ignore", why: `checkout ${s.id} not yet paid` };
+    return { kind: "pack", tokens: metaTokens, ref: s.id, customer: s.customer ?? null };
+  }
+  // Legacy public payment links — kept so deliveries created before the links
+  // were deactivated still classify. Keyed on payment_link only — never mode
+  // alone. A future subscription product in the account must not leak premium.
   if (s.payment_link === opts.premiumLink) {
-    const paid = s.payment_status === "paid" || s.payment_status === "no_payment_required";
     return { kind: "premium", grantPlan: paid, customer: s.customer ?? null, subscriptionId: s.subscription ?? null };
   }
   const tokens = opts.packLinks[s.payment_link ?? ""];
   if (tokens === undefined) return { kind: "ignore", why: `unrelated checkout ${s.id}` };
-  if (s.payment_status !== "paid" && s.payment_status !== "no_payment_required") {
-    return { kind: "ignore", why: `checkout ${s.id} not yet paid` };
-  }
+  if (!paid) return { kind: "ignore", why: `checkout ${s.id} not yet paid` };
   return { kind: "pack", tokens, ref: s.id, customer: s.customer ?? null };
 }
 

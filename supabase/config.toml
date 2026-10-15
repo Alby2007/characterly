@@ -6,3 +6,9 @@ project_id = "tfukkoektmsrolykliop"
 # and silently 401ing every billing event.
 [functions.stripe-webhook]
 verify_jwt = false
+
+# create-checkout must stay JWT-gated — it mints Stripe Checkout Sessions and
+# trusts the caller's identity to set plan gates + client_reference_id. Pinning
+# `true` keeps a careless `deploy --no-verify-jwt` from opening it.
+[functions.create-checkout]
+verify_jwt = true

@@ -148,14 +148,15 @@
         </div>
         <p class="plate-desc">Premium refills to 150 tokens daily, unthrottled memory, live journaling, reply tools, and priority when the fleet is busy. Or top up once — packs never expire. BYOK stays free and unlimited.</p>
         <div id="billing-body">
-          <a class="btn btn-primary" id="btn-subscribe" target="_blank" rel="noopener noreferrer">Go Premium — $7.99/mo</a>
+          <button class="btn btn-primary" id="btn-subscribe" type="button">Go Premium — $7.99/mo</button>
           <div class="pack-row">
-            <a class="btn btn-ghost btn-sm" id="btn-pack-500" target="_blank" rel="noopener noreferrer">500 tokens · $4.99</a>
-            <a class="btn btn-ghost btn-sm" id="btn-pack-1500" target="_blank" rel="noopener noreferrer">1,500 · $9.99</a>
-            <a class="btn btn-ghost btn-sm" id="btn-pack-5000" target="_blank" rel="noopener noreferrer">5,000 · $24.99</a>
+            <button class="btn btn-ghost btn-sm" id="btn-pack-500" type="button">500 tokens · $4.99</button>
+            <button class="btn btn-ghost btn-sm" id="btn-pack-1500" type="button">1,500 · $9.99</button>
+            <button class="btn btn-ghost btn-sm" id="btn-pack-5000" type="button">5,000 · $24.99</button>
           </div>
           <p class="plate-note" id="pack-note" hidden>Token packs are a Premium perk — subscribe above to unlock one-off top-ups.</p>
           <p class="plate-note" id="billing-note">Payments open in Stripe's secure checkout. Manage or cancel your subscription any time from your Stripe receipt email.</p>
+          <div class="form-error" id="billing-msg" role="alert" hidden></div>
         </div>
       </section>
 

@@ -83,11 +83,12 @@ SELECT kind, sum(delta) FROM credit_ledger
 ## Billing (Stripe)
 
 - **Catalog** (live account): `prod_VRhdA8UQOkzj2r` Premium $7.99/mo (`price_1UQoE5GAOUmNDfnhulTyoL1o`); `prod_VRhdvPYT4YwrPt` Token Pack — 500/$4.99 (`price_1UQoE5GAOUmNDfnhwHI9mwm7`), 1,500/$9.99 (`price_1UQoE6GAOUmNDfnh2W16RjDr`), 5,000/$24.99 (`price_1UQoE6GAOUmNDfnh0egnY8GD`). Both carry `txcd_10000000` (SaaS) for Managed Payments.
-- **Checkout** is Stripe Payment Links — zero backend for purchase. Dashboard appends `?client_reference_id=<web_profiles.id>&prefilled_email=<email>`.
+- **Checkout** is minted by the `create-checkout` edge function (`supabase/functions/create-checkout`) — the dashboard calls it with the user's JWT, it checks `plan` server-side (packs require premium; subscribe requires non-premium) and creates a Checkout Session with `client_reference_id` forced to the caller's account plus `metadata.checkout_kind`. Public payment links are deactivated: they were unguessable-but-forwardable URLs that couldn't gate anything.
+- **Secrets**: `create-checkout` needs `STRIPE_SECRET_KEY` (use a **restricted key** scoped to Checkout Sessions write — `rk_live_…`) and `SITE_URL` (the site's origin, used for success/cancel URLs and the CORS allow-origin). `npx supabase secrets set STRIPE_SECRET_KEY=rk_live_… SITE_URL=https://<site> --project-ref tfukkoektmsrolykliop`, then `npx supabase functions deploy create-checkout`. JWT verification stays ON for this function (default; pinned in `supabase/config.toml`).
 - **Fulfillment** is the `stripe-webhook` edge function (`supabase/functions/stripe-webhook`, source in repo): verifies `Stripe-Signature` with `STRIPE_WEBHOOK_SECRET` (WebCrypto HMAC-SHA256, 5-min tolerance), then service-role writes `plan`/pack grants. Endpoint `we_1UQoI5GAOUmNDfnhTp1AGDEn` listens for `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `customer.subscription.updated`, `customer.subscription.deleted` — add `charge.refunded` (audit rows) and optionally `checkout.session.async_payment_failed` (logged) for full coverage.
 - **Secret setup**: `STRIPE_WEBHOOK_SECRET` must be set on the edge function — Dashboard → Edge Functions → Secrets, or `npx supabase secrets set STRIPE_WEBHOOK_SECRET=whsec_… --project-ref tfukkoektmsrolykliop`. The function returns 500 ("not configured") until then, and Stripe retries.
-- **`verify_jwt=false`** is pinned in `supabase/config.toml` — Stripe sends no bearer token. Deploys must keep it disabled or every event 401s.
-- **Pack→link map** is hardcoded in the function (`PACK_LINKS`) — new packs need a new link + map entry + redeploy. Pack/plan attribution is `client_reference_id` (the dashboard appends it) with a `customer_details.email` → `account_id_for_email` fallback for bare links; unresolvable sessions log `no account` and ack.
+- **`verify_jwt=false`** is pinned in `supabase/config.toml` for `stripe-webhook` — Stripe sends no bearer token. `create-checkout` keeps the default `verify_jwt=true`; don't deploy it with `--no-verify-jwt`.
+- **Pack map** is hardcoded twice, keyed differently per function: `create-checkout` maps product name → catalog `price_…`, `stripe-webhook` maps `metadata.checkout_kind` (`PACK_META`) → tokens, with the legacy `PACK_LINKS` payment-link map kept so sessions minted before the switch still classify. New packs need all three + a dashboard button.
 - **Error contract**: PostgREST/RPC errors throw → 500 → Stripe retries; only unresolvable or duplicate events ack quietly (and log). supabase-js never throws on DB errors itself — every call goes through `must()`.
 - **Plan transitions**: `active`/`trialing` → premium; `canceled`/`unpaid`/`paused`/`incomplete_expired`/deleted → free; `past_due`/`incomplete` keep perks during Stripe's retry window. Deactivation matches only the stored `stripe_subscription_id` — a stale/duplicate sub ending can't strip a plan another sub pays for.
 
@@ -100,6 +101,9 @@ SELECT kind, sum(delta) FROM credit_ledger
 | `GROQ_API_KEY` | VM `.env` | Operator fallback key only — BYOK users unaffected. |
 | `KEY_ENCRYPTION_SECRET` | VM `.env` | **Rotating orphans every `guild_keys` row** — users must re-run `/companion action:key`. |
 | Supabase service-role key | nowhere in the repo/site | Publishable key only in `website/src/config.js` (safe by design — RLS enforces). |
+| `STRIPE_WEBHOOK_SECRET` | Supabase fn secrets | Missing → webhook 500s, Stripe retries; rotating = update endpoint + secret together. |
+| `STRIPE_SECRET_KEY` | Supabase fn secrets | Restricted key (`rk_live_…`, Checkout Sessions write only). Rotate in Stripe → Developers → API keys; no session flow works until re-set. |
+| `SITE_URL` | Supabase fn secrets | Checkout return URLs + CORS origin for `create-checkout`. |
 | GitHub deploy secrets | repo settings | `ORACLE_SSH_KEY` rotation = update the secret; `ORACLE_HOST_KEY` must be refreshed if the VM is rebuilt. |
 
 ## Scheduled work (in-process)

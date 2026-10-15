@@ -32,6 +32,10 @@ const PACK_LINKS: Record<string, number> = {
 };
 // The premium subscription link — sessions from it get mode === "subscription".
 const PREMIUM_LINK = "plink_1UQoEiGAOUmNDfnh04xXiYkf";
+// checkout_kind metadata → tokens, for sessions minted by create-checkout
+// (payment_link is null on API-created sessions). Values mirror PACK_LINKS —
+// keep the three in sync with dashboard.js PRODUCTS.
+const PACK_META: Record<string, number> = { pack_500: 500, pack_1500: 1500, pack_5000: 5000 };
 // The premium price on prod_VRhdA8UQOkzj2r — subscription events are only
 // ours if the sub carries this item; foreign products can't touch `plan`.
 const PREMIUM_PRICE_ID = "price_1UQoE5GAOUmNDfnhulTyoL1o";
@@ -82,7 +86,7 @@ Deno.serve(async (request) => {
       case "checkout.session.completed":
       case "checkout.session.async_payment_succeeded": {
         const s = event.data.object;
-        const action = classifyCheckout(s as never, { packLinks: PACK_LINKS, premiumLink: PREMIUM_LINK });
+        const action = classifyCheckout(s as never, { packLinks: PACK_LINKS, premiumLink: PREMIUM_LINK, packMeta: PACK_META });
         if (action.kind === "ignore") break;
         const accountId = await accountForSession(s);
         if (!accountId) {
