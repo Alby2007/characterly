@@ -1,8 +1,8 @@
 # Website & Web Accounts
 
-The `website/` directory is a self-contained Vite multi-page app — the public face of Companionly and the "real-life user" half of the product (accounts, billing). It shares the Supabase Postgres database with the bot but is otherwise independent: no build step touches `src/`, and the bot never serves it.
+The `website/` directory is a self-contained Vite multi-page app — the public face of Characterly and the "real-life user" half of the product (accounts, billing). It shares the Supabase Postgres database with the bot but is otherwise independent: no build step touches `src/`, and the bot never serves it.
 
-Production: **https://companionly-website.albertjemmettwaite.workers.dev** (Cloudflare Workers Static Assets).
+Production: **https://characterly-website.albertjemmettwaite.workers.dev** (Cloudflare Workers Static Assets).
 
 ---
 
@@ -44,7 +44,7 @@ cd website
 npm run deploy   # vite build (Cloudflare plugin emits the Build Output Spec) + cf deploy
 ```
 
-`cloudflare.config.ts` declares the `companionly-website` Worker (static assets only, SPA-style not-found handling, observability on). First deploy requires `cf login`. Deploys are manual — the site is not part of CI.
+`cloudflare.config.ts` declares the `characterly-website` Worker (static assets only, SPA-style not-found handling, observability on). First deploy requires `cf login`. Deploys are manual — the site is not part of CI.
 
 To attach a real domain later: register/buy the domain, add it to the Worker in the Cloudflare dashboard, **then add `https://<domain>/**` to the Supabase redirect allowlist** (below) or OAuth/magic links on the new origin will fail.
 
@@ -58,8 +58,8 @@ These live in the Supabase dashboard, not the repo. Project: `tfukkoektmsrolykli
 
 | Setting | Value |
 |---------|-------|
-| Site URL | `https://companionly-website.albertjemmettwaite.workers.dev` |
-| Redirect URLs | `https://companionly-website.albertjemmettwaite.workers.dev/**` and `http://localhost:5173/**` |
+| Site URL | `https://characterly-website.albertjemmettwaite.workers.dev` |
+| Redirect URLs | `https://characterly-website.albertjemmettwaite.workers.dev/**` and `http://localhost:5173/**` |
 
 The `/**` glob covers verification emails, magic links, password recovery, and OAuth callbacks on each origin. Add a new origin's `/**` pattern here whenever the site's hostname changes (custom domain, preview deploys).
 

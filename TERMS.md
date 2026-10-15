@@ -1,8 +1,8 @@
-# Companionly Terms of Service
+# Characterly Terms of Service
 
 _Last updated: 2026-10-14_
 
-By inviting or interacting with Companionly ("the bot"), you agree to these terms.
+By inviting or interacting with Characterly ("the bot"), you agree to these terms.
 
 ## The service
 
@@ -41,4 +41,4 @@ These terms may be updated at any time; continued use after an update constitute
 
 ## Contact
 
-[Alby2007](https://github.com/Alby2007) via the [project repository](https://github.com/Alby2007/companionly/issues).
+[Alby2007](https://github.com/Alby2007) via the [project repository](https://github.com/Alby2007/characterly/issues).

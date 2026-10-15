@@ -53,7 +53,7 @@ const env = z.object({
   MAX_COMPANION_CHAIN_DEPTH: z.coerce.number().int().min(0).max(5).default(2),
   // Where the public website lives — /link replies point users here to claim
   // their code. Override for self-hosted/front-end forks.
-  SITE_URL: z.string().default("https://companionly-website.albertjemmettwaite.workers.dev"),
+  SITE_URL: z.string().default("https://characterly-website.albertjemmettwaite.workers.dev"),
   // ── Hosted-model credits (user-facing name: "tokens") ───────────────────────
   // Lazy refill: grants apply inside the spend tx when the marker date rolls.
   // Premium is a single 150/day floor — "practically unlimited" for humans but

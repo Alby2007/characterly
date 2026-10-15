@@ -2,7 +2,7 @@ import { defineConfig } from "cf/config";
 
 export default defineConfig({
   worker: {
-    name: "companionly-website",
+    name: "characterly-website",
     compatibilityDate: "2026-10-06",
     observability: { enabled: true },
     assets: {

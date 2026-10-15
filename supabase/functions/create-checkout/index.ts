@@ -1,4 +1,4 @@
-// Authenticated checkout minting for Companionly billing.
+// Authenticated checkout minting for Characterly billing.
 //
 // Payment links are public URLs — anyone holding one can check out, so they
 // can't enforce "packs are a Premium perk" (or stop a premium user buying a

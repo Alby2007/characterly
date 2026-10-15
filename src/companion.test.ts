@@ -224,11 +224,11 @@ test("selectCompanionForTurn routes by wake-word name, webhook reply, owner affi
     null,
   );
 
-  // @-mentioning the Companionly system bot (mentionsBot: true) NEVER triggers a companion,
+  // @-mentioning the Characterly system bot (mentionsBot: true) NEVER triggers a companion,
   // even when only 1 companion is summoned in the guild.
   assert.equal(
     selectCompanionForTurn(
-      { event: msg("hey @Companionly", { mentionsBot: true }), companions: [nyx] },
+      { event: msg("hey @Characterly", { mentionsBot: true }), companions: [nyx] },
       convo,
       baseOpts,
     ),
@@ -407,7 +407,7 @@ test("/companion commands and cross-context bridges enforce privacy boundaries a
   );
   assert.equal(whResult, null);
   assert.equal(webhookNotices.length, 1);
-  assert.match(webhookNotices[0].content, /System: Companionly needs the \*\*Manage Webhooks\*\* permission/);
+  assert.match(webhookNotices[0].content, /System: Characterly needs the \*\*Manage Webhooks\*\* permission/);
   assert.doesNotMatch(webhookNotices[0].content, /in-character line/);
 
   // /companion action:list shows active summoned companions in the server
@@ -725,7 +725,7 @@ test("onboarding UX: bare greeting guard, welcome/draft/awakened cards, proactiv
   assert.match(keyEditReplies[0]?.content ?? "", /OpenRouter auto-detected/i);
   assert.equal(keyEditReplies[0]?.embeds?.length, 1, "immediately attaches the Companion Welcome Card after key setup");
 
-  // 8. 1-click server:enable button unpauses Companionly for server admins without needing a server key.
+  // 8. 1-click server:enable button unpauses Characterly for server admins without needing a server key.
   const enableReplies: any[] = [];
   await handleMemoryButton(
     {
@@ -739,7 +739,7 @@ test("onboarding UX: bare greeting guard, welcome/draft/awakened cards, proactiv
     keyStore,
   );
   assert.equal(pausedState, false, "server:enable unpaused the guild");
-  assert.match(enableReplies[0]?.content ?? "", /Companionly is now \*\*enabled\*\*/i);
+  assert.match(enableReplies[0]?.content ?? "", /Characterly is now \*\*enabled\*\*/i);
 });
 
 // ── DB-backed integration tests ───────────────────────────────────────────────

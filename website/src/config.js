@@ -5,10 +5,10 @@ export const LINKS = {
   addToDiscord:
     "https://discord.com/oauth2/authorize?client_id=1549171765056639048&scope=bot%20applications.commands&permissions=536988736",
   discord: "https://discord.gg/vCjQ9v3md",
-  github: "https://github.com/Alby2007/companionly",
-  privacy: "https://github.com/Alby2007/companionly/blob/main/PRIVACY.md",
-  terms: "https://github.com/Alby2007/companionly/blob/main/TERMS.md",
-  security: "https://github.com/Alby2007/companionly/blob/main/SECURITY.md",
+  github: "https://github.com/Alby2007/characterly",
+  privacy: "https://github.com/Alby2007/characterly/blob/main/PRIVACY.md",
+  terms: "https://github.com/Alby2007/characterly/blob/main/TERMS.md",
+  security: "https://github.com/Alby2007/characterly/blob/main/SECURITY.md",
 };
 
 // Supabase client config. The publishable key is public by design — access is

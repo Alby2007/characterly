@@ -1,12 +1,12 @@
 {
-  "name": "companionly",
+  "name": "characterly",
   "version": "0.1.0",
   "description": "A Discord bot where each member awakens a permanent personal AI companion in DMs and summons them into shared servers.",
   "license": "MIT",
   "private": true,
   "repository": {
     "type": "git",
-    "url": "https://github.com/Alby2007/companionly.git"
+    "url": "https://github.com/Alby2007/characterly.git"
   },
   "engines": {
     "node": ">=20"

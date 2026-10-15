@@ -1,6 +1,6 @@
 # Operations Runbook
 
-How production Companionly runs, deploys, and gets un-stuck.
+How production Characterly runs, deploys, and gets un-stuck.
 
 ---
 
@@ -8,9 +8,9 @@ How production Companionly runs, deploys, and gets un-stuck.
 
 | Piece | Where | Notes |
 |-------|-------|-------|
-| Bot process | Oracle Cloud VM (Oracle Linux 9, aarch64) | systemd unit `companionly`; code lives at `~/companionly` |
+| Bot process | Oracle Cloud VM (Oracle Linux 9, aarch64) | systemd unit `characterly`; code lives at `~/characterly` |
 | Database | Supabase Postgres (`tfukkoektmsrolykliop`) | Session pooler connection string in the service's env |
-| Website | Cloudflare Workers (`companionly-website`) | Static assets; see [website.md](website.md) |
+| Website | Cloudflare Workers (`characterly-website`) | Static assets; see [website.md](website.md) |
 | CI/CD | GitHub Actions → `.github/workflows/test.yml` | Test → gated deploy |
 
 The bot is a single Node process — Discord gateway, live message loop, job-queue worker, and nightly maintenance all in one. There is no separate worker fleet; "scale" means the queue's per-guild serialization, not more processes.
@@ -21,8 +21,8 @@ The bot is a single Node process — Discord gateway, live message loop, job-que
 push to main
   └─ test job: npm ci → npm run check → npm test (postgres:16 service)
        └─ green → deploy job (environment: production, concurrency group, no cancel)
-            └─ SSH to the VM: cd ~/companionly && git pull --ff-only && npm ci
-               && sudo systemctl restart companionly
+            └─ SSH to the VM: cd ~/characterly && git pull --ff-only && npm ci
+               && sudo systemctl restart characterly
 ```
 
 - Red builds never deploy — `deploy` has `needs: test`.
@@ -34,14 +34,14 @@ push to main
 ## Day-2 commands on the VM
 
 ```bash
-sudo systemctl status companionly     # service state
-journalctl -u companionly -f          # live logs
-journalctl -u companionly --since "1 hour ago" --no-pager | tail -200
-sudo systemctl restart companionly    # restart (e.g. after manual env change)
-cd ~/companionly && git log --oneline -3   # what's deployed
+sudo systemctl status characterly     # service state
+journalctl -u characterly -f          # live logs
+journalctl -u characterly --since "1 hour ago" --no-pager | tail -200
+sudo systemctl restart characterly    # restart (e.g. after manual env change)
+cd ~/characterly && git log --oneline -3   # what's deployed
 ```
 
-Env lives in `~/companionly/.env` on the VM — **not** in the repo. Changes need a `systemctl restart`.
+Env lives in `~/characterly/.env` on the VM — **not** in the repo. Changes need a `systemctl restart`.
 
 ## Database access
 
@@ -68,7 +68,7 @@ SELECT kind, sum(delta) FROM credit_ledger
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| Bot offline after deploy | Bad env, failed migration, or bad token | `journalctl -u companionly -n 100` — crash-loop reason is printed at boot |
+| Bot offline after deploy | Bad env, failed migration, or bad token | `journalctl -u characterly -n 100` — crash-loop reason is printed at boot |
 | `ECONNRESET` to Supabase | Session-pooler hiccup / idle drop | Usually transient — postgres.js reconnects; if persistent, check Supabase status and pooler mode |
 | Messages not extracted | `jobs` backing up or dead-lettered | `SELECT * FROM jobs WHERE attempts >= 5`, then `npx tsx scripts/requeue-dead-jobs.mjs` (`GUILD_ID` optional) after fixing the cause |
 | Companion silent in a guild | LLM budget exhausted | `/status` shows today's usage vs `llm_daily_cap`; BudgetExceeded reschedules jobs to UTC midnight |
@@ -117,7 +117,7 @@ Ops utilities (run via `npx tsx scripts/<name>.mjs` with env loaded): `maintain.
 ## Rollback
 
 ```bash
-cd ~/companionly
+cd ~/characterly
 git revert HEAD && git push          # or: git reset --hard <good-sha> && git push --force-with-lease
 ```
 

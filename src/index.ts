@@ -132,7 +132,7 @@ function linkPromptDue(key: string): boolean {
   linkPromptedAt.set(key, Date.now());
   return true;
 }
-const LINK_PROMPT = `To use Companionly's hosted features, create a free account at ${config.siteUrl} and run \`/link\` here to connect it to your Discord — it takes about a minute.`;
+const LINK_PROMPT = `To use Characterly's hosted features, create a free account at ${config.siteUrl} and run \`/link\` here to connect it to your Discord — it takes about a minute.`;
 const TOKEN_EMPTY = `You're out of tokens — they refresh daily at midnight UTC. Premium refills to 150/day: ${config.siteUrl}/dashboard#billing`;
 const HOSTED_CAPACITY = `The hosted model is at today's capacity — it resets at midnight UTC. Bringing your own API key (\`/companion action:key\`) always works.`;
 
@@ -198,7 +198,7 @@ async function init() {
     sql,
     handle: job => {
       if (job.type === "proactive-fire") {
-        // Legacy proactive-fire jobs are a no-op: the Companionly bot is pure
+        // Legacy proactive-fire jobs are a no-op: the Characterly bot is pure
         // server plumbing and never speaks on its own.
         return Promise.resolve();
       }
@@ -239,7 +239,7 @@ client.once(Events.ClientReady, async ready => {
   applyRetention().catch(error => { inc("maintenance.error"); logError("Retention run failed", error); });
   sweepMissedSignals(24 * 60 * 60_000).catch(error => { inc("sweep.error"); logError("Boot sweep failed", error); }); // wide window on boot to cover downtime
   if (!config.visionModel) console.warn("[vision] VISION_MODEL unset — image attachments will be ignored");
-  console.log(`Companionly online as ${ready.user.tag}`);
+  console.log(`Characterly online as ${ready.user.tag}`);
 });
 
 // ── Guild lifecycle (announce / kick-purge) ─────────────────────────────────
@@ -690,7 +690,7 @@ async function handleDmMessage(
   const userId = message.author.id;
   const dmScope = `dm:${userId}`;
   const authorName = message.author.globalName ?? message.author.username;
-  // Link gate: hosted features need a Companionly account — but a personal
+  // Link gate: hosted features need a Characterly account — but a personal
   // key is its own lane, so BYOK users work unlinked. Everyone else gets the
   // prompt once per cooldown; nothing else (not even onboarding) runs.
   const account = await store.accountForDiscordUser(userId);
@@ -1092,8 +1092,8 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     authorId: senderCompanion ? MemoryStore.companionSubjectId(senderCompanion.id) : message.author.id,
     authorName: senderCompanion ? senderCompanion.name : (message.member?.displayName ?? message.author.username),
     content: message.content, createdAt: message.createdAt,
-    // Direct @-mention or reply to the Companionly system bot (only triggers a
-    // system status card — Companionly itself never speaks as a character).
+    // Direct @-mention or reply to the Characterly system bot (only triggers a
+    // system status card — Characterly itself never speaks as a character).
     mentionsBot: message.mentions.has(client.user!) || message.mentions.repliedUser?.id === client.user!.id,
     imageAttachments: images.length ? images : undefined,
   };
@@ -1119,7 +1119,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       ? `Active companions here: ${guildCompanions.map(c => `**${c.name}**`).join(", ")}. Say a companion's name in chat (or reply to their message) to talk to them!`
       : "No companions have been summoned to this server yet! Click below (or send me a DM) to awaken your personal companion, then summon them here with `/companion action:summon`.";
     await message.reply({
-      content: `*System — Companionly Host:* ${activeList}`,
+      content: `*System — Characterly Host:* ${activeList}`,
       components: [row],
       allowedMentions: { parse: [], repliedUser: false },
     }).catch(() => {});

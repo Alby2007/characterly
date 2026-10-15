@@ -1,4 +1,4 @@
-// Stripe → Supabase webhook for Companionly billing.
+// Stripe → Supabase webhook for Characterly billing.
 //
 // Fulfillment ONLY happens here (never on the success page): payment links
 // redirect to the dashboard, but this function is what actually grants tokens
