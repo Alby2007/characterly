@@ -153,7 +153,7 @@ npm run check   # typecheck (tsc --noEmit, strict)
 npm test        # node:test suite — DB tests use TEST_DATABASE_URL
 ```
 
-Docs: [Architecture](docs/architecture.md) · [Database Schema](docs/schema.md) · [Event Pipeline](docs/event-pipeline.md) · [Configuration](docs/configuration.md) · [Developer Guide](docs/development.md)
+Docs: [Architecture](docs/architecture.md) · [Database Schema](docs/schema.md) · [Event Pipeline](docs/event-pipeline.md) · [Configuration](docs/configuration.md) · [Website & Accounts](docs/website.md) · [Operations](docs/operations.md) · [Developer Guide](docs/development.md)
 
 ### Layout
 

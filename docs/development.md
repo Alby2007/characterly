@@ -277,6 +277,8 @@ characterly/
 │   ├── schema.md             # Database schema reference (through v27)
 │   ├── event-pipeline.md     # Event detection explainer
 │   ├── configuration.md      # Env var + website config reference
+│   ├── website.md            # Web stack: pages, Supabase Auth setup, linking, deploy
+│   ├── operations.md         # Runbook: deploys, VM/systemd, DB access, failure modes, secrets
 │   ├── development.md        # This file
 │   └── phase-*.md            # Historical phase reports (point-in-time, Sep 2026)
 ├── .env.example              # Template for environment variables
