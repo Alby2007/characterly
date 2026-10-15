@@ -1,6 +1,8 @@
 # Database Schema
 
-Characterly stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts` (`v1`–`v21`).
+Characterly stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts` (`v1`–`v27`).
+
+**Supabase lockdown (v23+):** every `public`-schema table has `ENABLE ROW LEVEL SECURITY` with zero Data-API policies — deny-all for `anon`/`authenticated`, while the bot's `postgres` role bypasses RLS. The exceptions are the web-account tables (`web_profiles`, `link_codes`), which have their own policy/grant design documented below. All Supabase-specific DDL is conditional on the `auth` schema existing, so plain-Postgres test/local databases run every migration unchanged.
 
 ---
 
@@ -72,8 +74,9 @@ Raw Discord message archive. Purged on a rolling retention window.
 | `author_name` | TEXT | Display name at time of message |
 | `content` | TEXT | Full message text |
 | `created_at` | TEXT | ISO-8601 timestamp |
-| `triage_result` | TEXT \| NULL | Durability/extraction state (v6): `'regex'` passed the regex gate, `'durable'` flagged by LLM triage, `'noise'` rejected, `'extracted'` extraction ran (terminal — never re-selected, even with zero evidence rows). NULL = not yet triaged |
+| `triage_result` | TEXT \| NULL | Durability/extraction state (v6): `'regex'` passed the regex gate, `'durable'` flagged by LLM triage, `'noise'` rejected, `'queued'` has a live extract job (v17), `'dead'` its only job dead-lettered (terminal for the sweep, still reachable by `/profile-build`), `'extracted'` extraction ran (terminal — never re-selected, even with zero evidence rows). NULL = not yet triaged |
 | `reply_to_id` | TEXT \| NULL | Discord ID of the message this one replies to (v7) |
+| `author_is_bot` | INTEGER | `1` when the author was another bot (v18) — archive-only context so other bots' messages can be recalled but excluded from extraction, profiles, and the interaction graph |
 
 **Index:** `messages_context (guild_id, channel_id, created_at DESC)` — used by `recentContext()`.
 
@@ -188,19 +191,19 @@ One row per guild. Controls pause state and retention.
 | `guild_id` | TEXT PK | Discord server ID |
 | `memory_enabled` | INTEGER | 0 = paused; 1 = active |
 | `reply_enabled` | INTEGER | 0 = silent; 1 = replies allowed |
-| `proactive_enabled` | INTEGER | 0 = off (default); 1 = server opted in to proactive answers — requires the global `PROACTIVE=1` env flag too |
+| `proactive_enabled` | INTEGER | **Legacy/inert (v13).** The proactive-speaking feature was removed when the bot became pure plumbing; the column remains for schema compatibility but nothing reads it to send a message |
 | `raw_retention_days` | INTEGER | Rolling window for raw message purge |
 | `announced_at` | TIMESTAMPTZ NULL | Set once the join disclosure card posts — the idempotency marker for `announceIfNeeded` |
 | `ignored_channels` | TEXT[] | Channels excluded from archiving, replies, member writes, and historical ingest — managed via `/ignore-channel` / `/unignore-channel` |
 | `llm_daily_cap` | INTEGER | Per-guild LLM call budget per UTC day (default 1000; 0 = all calls blocked) — set via `/limits` |
 
-Row is created with dormant defaults (`memory_enabled=0`, `reply_enabled=0`) on first sight of a guild — an admin enables observation via `/memory-resume`. Administrators can override via `/memory-pause`, `/memory-resume`, `/proactive enabled:<bool>`, and the `RAW_MESSAGE_RETENTION_DAYS` env variable.
+Row is created with dormant defaults (`memory_enabled=0`, `reply_enabled=0`) on first sight of a guild — an admin enables observation via `/memory-resume`. Administrators can override via `/memory-pause`, `/memory-resume`, and the `RAW_MESSAGE_RETENTION_DAYS` env variable.
 
 ---
 
 ### `jobs`
 
-The deferred-cognition queue (v17). One row per pending unit of background work — currently only `extract` jobs, carrying a `message_id` payload.
+The deferred-cognition queue (v17). One row per pending unit of background work — `extract` (a `message_id` payload), `journal-write` (companion journal entries after a reply), and `pair-analysis` (holistic relationship reads). A legacy `proactive-fire` type survives as an inert no-op.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -242,6 +245,7 @@ Encrypted LLM API keys (BYOK), written by `/companion action:key`, `/setup`, or 
 | `key_enc` | BYTEA | AES-256-GCM ciphertext (`iv ‖ ciphertext ‖ tag`, `src/secrets.ts`) — there is no plaintext key column |
 | `key_hint` | TEXT | Last 4 chars of the key, for masked display (`…abcd`) |
 | `base_url` | TEXT NULL | Custom OpenAI-compatible endpoint; NULL = auto-detected from key prefix (`gsk_`, `sk-or-`, `sk-`, `xai-`) or env default |
+| `model` | TEXT NULL | Per-key model override (v22) — required for custom base URLs (a self-hosted server won't serve the detected default), optional otherwise |
 | `validated_at` | TIMESTAMPTZ NULL | NULL = stored but never verified live (provider unreachable at setup time) |
 | `created_at` / `updated_at` | TIMESTAMPTZ | Upsert timestamps |
 
@@ -287,6 +291,7 @@ One row per detected server incident.
 | `occurred_at` | TEXT | Timestamp of the first message in the event |
 | `closed_at` | TEXT | ISO-8601 when the event window was closed (null = still open) |
 | `reference_count` | INTEGER | Number of times the event was referenced after closing |
+| `classifications` | INTEGER | Number of LLM classification passes run on this event (v18) — caps re-scoring at 3 so a stuck candidate can't burn calls forever |
 | `created_at` | TEXT | ISO-8601 |
 | `updated_at` | TEXT | ISO-8601 |
 
@@ -371,6 +376,8 @@ Raw LLM relationship assertions. One row per (subject, other, message) — idemp
 | `valence` | REAL \| NULL | −1 hostile … 0 neutral … +1 close |
 | `reason` | TEXT | LLM-supplied explanation |
 | `verdict` | TEXT \| NULL | Sincerity verdict (v8): `'literal'` counts toward edges; `'joke'`/`'unclear'`/NULL never do. NULL = not yet verified |
+| `author_id` | TEXT \| NULL | The assertor — who made the claim (v19, backfilled from the source message). Drives opt-out deletion of authored claims and party-authored weighting in edge aggregation; NULL on `pair_window` rows (the system is the assertor) |
+| `source` | TEXT | `'message'` (single-message extraction) or `'pair_window'` (pair-analysis job write) — provenance for the two write paths (v20) |
 | `created_at` | TEXT | ISO-8601 |
 
 **Unique constraint:** `(subject_id, other_id, message_id)`. **Index:** `relationship_obs_lookup (guild_id, subject_id, other_id)`.
@@ -387,9 +394,13 @@ Durable relationship edges — fully derived. `recomputeEdges()` deletes and reb
 | `guild_id` | TEXT | Server scope |
 | `subject_id` | TEXT | Discord user ID |
 | `other_id` | TEXT | Discord user ID |
-| `summary` | TEXT | Latest nature among literal-verdicted observations |
-| `valence` | REAL \| NULL | Average valence over literal-verdicted observations |
+| `summary` | TEXT | *Modal* nature over the five most recent literal-verdicted observations (`MODE() WITHIN GROUP`) — a contradictory flip can't rewrite history on one claim (v20) |
+| `valence` | REAL \| NULL | *Weighted* average over the same recent-5 window — observations authored by an edge party count double a third party's (v20) |
 | `observation_count` | INTEGER | Count of literal-verdicted observations; `/profile` and profile synthesis surface edges at ≥2 |
+| `behavioral_count` | INTEGER | Contact count in the deterministic interaction graph (90-day mention/name-ref frequency), stamped onto claimed edges (v20) |
+| `party_count` | INTEGER | How many of the recent-5 observations were self-reported by an edge party — zero renders as "all secondhand" (v20) |
+| `trend` | TEXT \| NULL | `'warming'`/`'cooling'` when the recent-5 weighted valence diverges ±0.2 from the prior window (v20) |
+| `inferred` | INTEGER | `1` = behavioral-only edge (≥5 contacts in 90d, zero claims) — renders strictly as contact frequency, never a relationship claim (v20) |
 | `last_observed_at` | TEXT | ISO-8601 |
 | `updated_at` | TEXT | ISO-8601 |
 
