@@ -184,7 +184,13 @@ async function openCheckout(product, btn) {
   btn.textContent = "Opening checkout…";
   try {
     const { data, error } = await supabase.functions.invoke("create-checkout", { body: { product } });
-    if (error || !data?.url) throw new Error(data?.error ?? error?.message ?? "checkout failed");
+    if (error || !data?.url) {
+      // Non-2xx bodies carry the real reason — FunctionsHttpError parks the
+      // raw Response on .context; parse it before falling back.
+      let detail = error?.message ?? "checkout failed";
+      try { detail = (await error?.context?.json())?.error ?? detail; } catch { /* keep generic */ }
+      throw new Error(detail);
+    }
     window.location.href = data.url;
   } catch (e) {
     msg.textContent = `Couldn't start checkout — ${e.message}. Try again in a moment.`;

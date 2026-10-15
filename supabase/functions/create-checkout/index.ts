@@ -41,8 +41,10 @@ Deno.serve(async (request) => {
   if (request.method === "OPTIONS") return new Response("ok", { headers: CORS });
   if (request.method !== "POST") return json({ error: "POST only" }, 405);
 
-  const stripeKey = Deno.env.get("STRIPE_SECRET_KEY");
-  const site = Deno.env.get("SITE_URL");
+  // Secrets paste in with stray whitespace more often than you'd think — a
+  // newline in the key makes the Authorization header throw inside fetch().
+  const stripeKey = Deno.env.get("STRIPE_SECRET_KEY")?.trim();
+  const site = Deno.env.get("SITE_URL")?.trim().replace(/\/+$/, "");
   if (!stripeKey || !site) return json({ error: "not configured" }, 500);
 
   const jwt = (request.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
@@ -93,11 +95,17 @@ Deno.serve(async (request) => {
       : { ...(user.email ? { customer_email: user.email } : {}), ...(p.mode === "payment" ? { customer_creation: "always" } : {}) }),
   });
 
-  const res = await fetch("https://api.stripe.com/v1/checkout/sessions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${stripeKey}`, "Content-Type": "application/x-www-form-urlencoded" },
-    body: params,
-  });
+  let res: Response;
+  try {
+    res = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${stripeKey}`, "Content-Type": "application/x-www-form-urlencoded" },
+      body: params,
+    });
+  } catch (e) {
+    console.error(`checkout create threw for ${user.id}: ${e}`);
+    return json({ error: `checkout unavailable — ${e instanceof Error ? e.message : e}` }, 502);
+  }
   const body = await res.json().catch(() => null);
   if (!res.ok || !body?.url) {
     const why = body?.error?.message ?? `stripe ${res.status}`;
