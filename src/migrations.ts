@@ -914,7 +914,7 @@ const migrations: Migration[] = [
                     SELECT 1 FROM public.web_profiles
                     WHERE discord_user_id = new.provider_id AND id <> new.user_id
                   ) THEN
-                    RAISE EXCEPTION 'discord_already_linked: this Discord account is already linked to a different Characterly account';
+                    RAISE EXCEPTION 'discord_already_linked: this Discord account is already linked to a different Companionly account';
                   END IF;
                   UPDATE public.web_profiles
                   SET discord_user_id = new.provider_id, updated_at = now()
@@ -987,7 +987,7 @@ const migrations: Migration[] = [
                   SELECT 1 FROM public.web_profiles
                   WHERE discord_user_id = rec.discord_user_id AND id <> uid
                 ) THEN
-                  RAISE EXCEPTION 'discord_already_linked: this Discord account is already linked to a different Characterly account';
+                  RAISE EXCEPTION 'discord_already_linked: this Discord account is already linked to a different Companionly account';
                 END IF;
                 UPDATE public.web_profiles
                 SET discord_user_id = rec.discord_user_id, updated_at = now()
@@ -1099,7 +1099,7 @@ const migrations: Migration[] = [
                   SELECT 1 FROM public.web_profiles
                   WHERE discord_user_id = rec.discord_user_id AND id <> uid
                 ) THEN
-                  RAISE EXCEPTION 'discord_already_linked: this Discord account is already linked to a different Characterly account';
+                  RAISE EXCEPTION 'discord_already_linked: this Discord account is already linked to a different Companionly account';
                 END IF;
                 UPDATE public.web_profiles
                 SET discord_user_id = rec.discord_user_id, updated_at = now()
@@ -1451,7 +1451,7 @@ const migrations: Migration[] = [
                   SELECT 1 FROM public.web_profiles
                   WHERE discord_user_id = rec.discord_user_id AND id <> uid
                 ) THEN
-                  RAISE EXCEPTION 'discord_already_linked: this Discord account is already linked to a different Characterly account';
+                  RAISE EXCEPTION 'discord_already_linked: this Discord account is already linked to a different Companionly account';
                 END IF;
                 UPDATE public.web_profiles
                 SET discord_user_id = rec.discord_user_id, updated_at = now()

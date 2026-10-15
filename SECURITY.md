@@ -6,7 +6,7 @@
 
 Report vulnerabilities via:
 
-- [GitHub private vulnerability reporting](https://github.com/Alby2007/characterly/security/advisories/new) on this repository, or
+- [GitHub private vulnerability reporting](https://github.com/Alby2007/companionly/security/advisories/new) on this repository, or
 - A direct message to [Alby2007](https://github.com/Alby2007) on GitHub.
 
 Include: what you found, how to reproduce it, and what data or capability it exposes. A proof of concept helps but isn't required — describe the impact honestly.

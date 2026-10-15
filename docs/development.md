@@ -1,6 +1,6 @@
 # Developer Guide
 
-Everything you need to work on Characterly locally.
+Everything you need to work on Companionly locally.
 
 ---
 
@@ -17,8 +17,8 @@ Everything you need to work on Characterly locally.
 ## First-time setup
 
 ```bash
-git clone https://github.com/Alby2007/characterly.git
-cd characterly
+git clone https://github.com/Alby2007/companionly.git
+cd companionly
 npm install
 cp .env.example .env
 # Edit .env and fill in DISCORD_TOKEN, GROQ_API_KEY, KEY_ENCRYPTION_SECRET, and DATABASE_URL
@@ -216,7 +216,7 @@ All errors must be resolved before committing. The project uses `strict: true`.
 ## Project structure reference
 
 ```
-characterly/
+companionly/
 ├── src/
 │   ├── index.ts              # Entry point — Discord client, 1:1 DM onboarding/chat, server message loop, job worker, daily maintenance
 │   ├── scene-router.ts       # Multi-companion scene router & chain-depth loop guard
@@ -269,7 +269,7 @@ characterly/
 │   ├── 404.html              # Not-found page (Worker 404-page handling)
 │   ├── public/               # favicon.svg, mark.svg (brand mark), seal.svg (wax seal)
 │   ├── src/                  # base.js (shared entry), main.js, account.js, dashboard.js, auth.js, config.js, supabase.js, styles.css
-│   ├── cloudflare.config.ts  # characterly-website Worker (static assets)
+│   ├── cloudflare.config.ts  # companionly-website Worker (static assets)
 │   └── vite.config.js        # Multi-page inputs + @cloudflare/vite-plugin
 ├── .github/workflows/
 │   └── test.yml              # CI: check + tests on Postgres service; gated deploy to Oracle
@@ -302,7 +302,7 @@ npm run build    # production bundle → dist/
 npm run deploy   # cf deploy → Cloudflare Workers static assets
 ```
 
-`npm run deploy` uses the [cf CLI](https://developers.cloudflare.com/workers/ci-cd/) — `@cloudflare/vite-plugin` emits the Build Output Spec at build time and `cloudflare.config.ts` declares the `characterly-website` worker (assets-only, 404-page handling). First deploy requires `cf login` (or an API token). The publishable Supabase key in `src/config.js` is public by design — RLS enforces access. Discord OAuth must be configured in Supabase Auth (Discord provider client id/secret from the bot's Discord application, callback URL registered in the Discord developer portal) before `DISCORD_OAUTH_ENABLED` is flipped on.
+`npm run deploy` uses the [cf CLI](https://developers.cloudflare.com/workers/ci-cd/) — `@cloudflare/vite-plugin` emits the Build Output Spec at build time and `cloudflare.config.ts` declares the `companionly-website` worker (assets-only, 404-page handling). First deploy requires `cf login` (or an API token). The publishable Supabase key in `src/config.js` is public by design — RLS enforces access. Discord OAuth must be configured in Supabase Auth (Discord provider client id/secret from the bot's Discord application, callback URL registered in the Discord developer portal) before `DISCORD_OAUTH_ENABLED` is flipped on.
 
 ---
 
@@ -311,6 +311,6 @@ npm run deploy   # cf deploy → Cloudflare Workers static assets
 `.github/workflows/test.yml` runs on every push and PR:
 
 1. **test** — `npm ci`, `npm run check` (tsc), then `npm test` against a Postgres 16 service (`TEST_DATABASE_URL` pointed at the service container).
-2. **deploy** — only on green pushes to `main`, gated by `environment: production` (attach required reviewers in repo settings so a push alone can't ship). SSHes to the Oracle host and runs `cd ~/characterly && git pull --ff-only && npm ci && sudo systemctl restart characterly`. Required secrets: `ORACLE_SSH_KEY`, `ORACLE_HOST_KEY` (`ssh-keyscan` output — pinned host key, fails closed), `ORACLE_SSH_HOST` (`user@ip`).
+2. **deploy** — only on green pushes to `main`, gated by `environment: production` (attach required reviewers in repo settings so a push alone can't ship). SSHes to the Oracle host and runs `cd ~/companionly && git pull --ff-only && npm ci && sudo systemctl restart companionly`. Required secrets: `ORACLE_SSH_KEY`, `ORACLE_HOST_KEY` (`ssh-keyscan` output — pinned host key, fails closed), `ORACLE_SSH_HOST` (`user@ip`).
 
 The website deploys separately — `npm run deploy` inside `website/` — and is not part of CI.

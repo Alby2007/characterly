@@ -1,6 +1,6 @@
-# Characterly website
+# Companionly website
 
-Marketing/landing page for Characterly — a standalone Vite + vanilla site.
+Marketing/landing page for Companionly — a standalone Vite + vanilla site.
 
 ```bash
 cd website

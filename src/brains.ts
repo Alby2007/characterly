@@ -80,7 +80,7 @@ export function detectProviderFromKey(
 /**
  * Brain resolver (User-first BYOK).
  *
- * In Characterly, API keys belong to users (`dm:<userId>` in `guild_keys`),
+ * In Companionly, API keys belong to users (`dm:<userId>` in `guild_keys`),
  * while the bot in a Discord server acts as the shared plumbing:
  *   1. For `dm:<userId>` (or `brainForUser(userId, meterScope)`):
  *      - User's personal key (`dm:<userId>`) -> decrypt + auto-detect provider/model

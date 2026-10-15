@@ -1,6 +1,6 @@
 # Database Schema
 
-Characterly stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts` (`v1`–`v28`).
+Companionly stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts` (`v1`–`v28`).
 
 **Supabase lockdown (v23+):** every `public`-schema table has `ENABLE ROW LEVEL SECURITY` with zero Data-API policies — deny-all for `anon`/`authenticated`, while the bot's `postgres` role bypasses RLS. The exceptions are the web-account tables (`web_profiles`, `link_codes`), which have their own policy/grant design documented below. All Supabase-specific DDL is conditional on the `auth` schema existing, so plain-Postgres test/local databases run every migration unchanged.
 
@@ -242,7 +242,7 @@ Encrypted LLM API keys (BYOK), written by `/companion action:key`, `/setup`, or 
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `guild_id` | TEXT PK | Scope ID: `dm:<userId>` for personal user keys (primary in Characterly) or Discord server ID |
+| `guild_id` | TEXT PK | Scope ID: `dm:<userId>` for personal user keys (primary in Companionly) or Discord server ID |
 | `key_enc` | BYTEA | AES-256-GCM ciphertext (`iv ‖ ciphertext ‖ tag`, `src/secrets.ts`) — there is no plaintext key column |
 | `key_hint` | TEXT | Last 4 chars of the key, for masked display (`…abcd`) |
 | `base_url` | TEXT NULL | Custom OpenAI-compatible endpoint; NULL = auto-detected from key prefix (`gsk_`, `sk-or-`, `sk-`, `xai-`) or env default |

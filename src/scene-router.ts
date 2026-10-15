@@ -104,7 +104,7 @@ export function selectCompanionForTurn(
 
     const cKey = companionConvoKey(event.guildId, event.channelId, c.id);
     // Companions are addressed ONLY by their own name or by replying to their
-    // webhook message — never by @-mentioning the Characterly system bot.
+    // webhook message — never by @-mentioning the Companionly system bot.
     const isAddressed =
       namedIds.has(c.id) ||
       input.repliedToCompanionId === c.id;

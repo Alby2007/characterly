@@ -2,7 +2,7 @@ import { ChannelType, type Message, type TextChannel, type Webhook } from "disco
 import type { Companion } from "./types.js";
 import { inc } from "./metrics.js";
 
-const WEBHOOK_NAME = "Characterly Companions";
+const WEBHOOK_NAME = "Companionly Companions";
 const webhookCache = new Map<string, Webhook>();
 const webhookPermissionNotices = new Set<string>();
 // Keys carry a date suffix so they never expire — cap the set and evict
@@ -47,7 +47,7 @@ async function getOrCreateChannelWebhook(host: TextChannel, botUserId: string): 
     }
     const created = await host.createWebhook({
       name: WEBHOOK_NAME,
-      reason: "Per-companion identity for Characterly companions",
+      reason: "Per-companion identity for Companionly companions",
     });
     webhookCache.set(host.id, created);
     return created;
@@ -59,7 +59,7 @@ async function getOrCreateChannelWebhook(host: TextChannel, botUserId: string): 
 
 /**
  * Send a reply in a guild channel disguised with the speaking companion's name
- * and avatar via a Discord channel webhook. Characterly itself never roleplays
+ * and avatar via a Discord channel webhook. Companionly itself never roleplays
  * or speaks a companion's dialogue — if ManageWebhooks permission is missing,
  * it posts a one-time system notice and returns null.
  */
@@ -100,7 +100,7 @@ export async function sendAsCompanion(
   if (webhookNoticeOnce(triggerMessage.channelId)) {
     await triggerMessage
       .reply({
-        content: `*System: Characterly needs the **Manage Webhooks** permission in this channel so **${companion.name}** can speak here.*`,
+        content: `*System: Companionly needs the **Manage Webhooks** permission in this channel so **${companion.name}** can speak here.*`,
         allowedMentions: { parse: [], repliedUser: false },
       })
       .catch(() => {});
