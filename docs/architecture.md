@@ -1,6 +1,8 @@
 # Architecture
 
-Characterly is a single TypeScript/Node process that connects to Discord, lets each user awaken a permanent personal AI companion in 1:1 DMs (`dm:<userId>`), and acts as the shared server host ("plumbing") where summoned companions speak through Discord channel webhooks, banter with humans and each other, form durable provenance-backed memories and relationship edges, and detect notable server events. All state is stored in Postgres (Supabase in production; any Postgres via `DATABASE_URL`).
+Characterly is a single TypeScript/Node process that connects to Discord, lets each user awaken a permanent personal AI companion in 1:1 DMs (`dm:<userId>`), and acts as the shared server host ("plumbing") where summoned companions speak through Discord channel webhooks, banter with humans and each other, form durable provenance-backed memories and relationship edges, keep first-person journals, and detect notable server events. All state is stored in Postgres (Supabase in production; any Postgres via `DATABASE_URL`).
+
+Alongside the bot, `website/` is a Vite multi-page site (landing page, account sign-in, dashboard) deployed as Cloudflare Workers static assets. Web accounts use Supabase Auth against the same Postgres project, so a web identity links to a Discord account with a row update rather than a federation problem.
 
 ---
 
@@ -30,7 +32,7 @@ Characterly is a single TypeScript/Node process that connects to Discord, lets e
 | `src/types.ts` | `Companion`, `CompanionPersona`, `GuildCompanion`, `MessageEvent`, … | Shared TypeScript types across modules |
 | `src/database.ts` | `MemoryStore` | Postgres persistence: companions, guild summons, webhook attribution, memory CRUD, lifecycle, conflict resolution, episode consolidation |
 | `src/events.ts` | `EventStore` | Postgres persistence: event CRUD, participants, message/memory attachments |
-| `src/migrations.ts` | `runMigrations`, `getMigrationVersion`, `LATEST_MIGRATION_VERSION` | Versioned schema migrations (v1–v21) with rollback support |
+| `src/migrations.ts` | `runMigrations`, `getMigrationVersion`, `LATEST_MIGRATION_VERSION` | Versioned schema migrations (v1–v27) with rollback support |
 | `src/confidence.ts` | `calculateInitialConfidence`, `updateConfidence`, `calculateDefaultImportance`, `calculateDefaultExplicitness` | Deterministic numeric formulas; no LLM involvement |
 | `src/perception.ts` | `shouldInspectForMemory`, `detectNamingRequest`, `detectSelfNaming`, `detectWakeWord`, `detectDismissal`, `contestCue`, `botMemoryCue`, `toolCues` | Cheap pre-filter: prevents LLM calls for ordinary chat; detects naming requests, self-naming, wake words, and dismissal cues |
 | `src/event-detection.ts` | `EventPipeline` | Heuristic + LLM continuity decisions; nightly maintenance |
@@ -45,6 +47,11 @@ Characterly is a single TypeScript/Node process that connects to Discord, lets e
 | `src/reply-format.ts` | `formatReplyProfile`, `formatPairContext` | Pure formatters shared by the reply prompt and tool outputs |
 | `src/vision.ts` | `qualifyingImages`, `formatImageContext` | Pure image-attachment gate (image/*, byte cap, ≤3/message) + observation-framed label |
 | `src/conversation.ts` | `ConversationTracker` | Per-channel and per-companion conversation objects: opens on addressed messages, closes when the last participant leaves; share-of-voice pacing is channel-level |
+| `src/journal-job.ts` | `runJournalJob`, `JournalJobPayload` | Deferred `journal-write` jobs: after a companion replies, writes 0–2 first-person journal entries origin-tagged to that scope, consent-gated like extraction |
+| `src/contest.ts` | `runContestCheck` | Bot-addressed denial/correction detection — `contestCue` gate → `Brain.detectContest` → `contradict`/`support` evidence |
+| `src/metrics.ts` | `inc`, `metricsSnapshot` | In-process operational counters (uptime + named counts), surfaced to admins via `/status` |
+| `src/retry.ts` | `withRetry` | Shared retry helper for LLM calls — honors Groq's `x-ratelimit-reset` headers, exponential backoff on transient failures |
+| `src/db.ts` | `sql` | Shared postgres.js connection singleton |
 
 ---
 
@@ -85,6 +92,16 @@ In Discord servers, Characterly acts as the shared host ("plumbing"):
 - **Cross-Context Consciousness (`src/cross-context.ts`):**
   - **DM → Server (`gatherOwnerSubtextForServer`):** Pulls active memories and attributes from `dm:<ownerUserId>` and injects them into the companion's server reply prompt under the **VAULT RULE** — used strictly for subtext, loyalty, and inside jokes with the owner, never disclosed to other server members.
   - **Server → DM (`gatherServerDigestForDm`):** Summarizes recent events, relationship edges (`companion:<id>` and owner dynamics), and active memories from the servers where the companion is summoned so the companion can gossip and debrief with its owner in 1:1 DMs.
+
+## Companion journal — first-person episodic memory (v25)
+
+Companions keep a private journal of what *they themselves* experienced — moments, opinions, inside jokes, promises — written first-person after each reply. This is an additive companion-native layer on top of the shared third-person memory system (which stays unchanged):
+
+- **Write path:** After a companion replies (DM or server), a deferred `journal-write` job (`src/journal-job.ts`) re-reads the archived trigger + reply rows, asks `Brain.writeJournal` for 0–2 entries, and persists via `store.saveJournalEntries`. Journaling is deferred off the live reply path so a slow LLM call never delays the reply itself. Deleted trigger/reply rows or an inactive companion drop the job (`jobs.dropped_stale`); a dormant scope drops it (`jobs.dropped_dormant`).
+- **Origin-scoped recall:** Every entry is tagged `origin_scope` (`<guildId>` or `dm:<userId>`). `store.journalFor` surfaces entries **only in the scope where they formed** — a companion dismissed from a server keeps its entries dormant until re-summoned, and entries from the owner's DM additionally reach servers through the existing confidential vault subtext (`ownerSubtext`), never as disclosed facts.
+- **Kinds:** `moment`, `opinion`, `inside_joke`, `promise` (anything else normalizes to `moment`). Entries carry `about_subject_ids`, an `importance` score, and optional `source_message_id` provenance.
+- **Consent rules mirror extraction:** entries about a non-consenting human are dropped at write time (`isConsented` gate — `unknown`/`server`/bot/`companion:<id>` subjects exempt); read-time recall filters entries about subjects who have since opted out; `/opt-out` hard-deletes them via `forgetJournalAbout`; `journalAboutSubject` feeds `/memory-export` so the journal is never invisible to the person it describes. Guild purge, member opt-out, and the zombie-guild sweep all cover `companion_journal`.
+- **Dedup & bounds:** insert-time trgm near-duplicate suppression (similarity ≥ 0.75 against the companion's live entries in that scope) plus a `UNIQUE(companion_id, origin_scope, source_message_id, kind, content)` key for crash-retry idempotency. Nightly `pruneJournal` caps at 200 active entries per (companion, scope), evicting least-important stale rows first (importance decayed 30-day half-life by last recall).
 
 ---
 
@@ -188,9 +205,9 @@ Discord MessageCreate
 
 ## Deferred extraction — the job queue (v17)
 
-Every durable message used to run 3+ sequential LLM calls inside `handleMessage`, so a busy guild stacked unbounded concurrent extractions. Now the live path enqueues one `extract` job per durable message and returns; the worker drains `jobs` (Postgres, `FOR UPDATE SKIP LOCKED`).
+Every durable message used to run 3+ sequential LLM calls inside `handleMessage`, so a busy guild stacked unbounded concurrent extractions. Now the live path enqueues one `extract` job per durable message and returns; the worker drains `jobs` (Postgres, `FOR UPDATE SKIP LOCKED`). Three job types run today: `extract` (memory extraction per message), `journal-write` (first-person companion journal after a reply), and `pair-analysis` (holistic relationship reads — see Profiles). A fourth, `proactive-fire`, survives as an inert no-op for legacy rows.
 
-- **Fairness:** `extract` jobs are per-guild serial (`maxPerGuild = 1`) — pipeline/event ordering is preserved — inside a global in-flight cap of 8.
+- **Fairness:** jobs are per-guild serial (`maxPerGuild = 1`) — pipeline/event ordering is preserved — inside a global in-flight cap of 8.
 - **Claims lease** the row (`attempts+1`, `run_after = now()+10min`) so a row is never double-claimed; completion deletes it, failure reschedules with exponential backoff, and a crashed worker's job becomes claimable again when the lease expires. `attempts ≥ 5` dead-letters (row kept for inspection, never claimed); the final failure fires `jobs.dead_letter`. `FatalJobError` dead-letters immediately for permanent failure (unknown `type`, malformed payload) instead of burning retries. Re-drive dead letters with `scripts/requeue-dead-jobs.mjs` (`GUILD_ID` optional).
 - **Wake:** `pg_notify('jobs', …)` on enqueue + `LISTEN` in the worker; a 3s poll is the resilient baseline so a missed notification costs one poll.
 - **Sweep integration:** the 15-min missed-signal sweep keeps its `triageBatch` role but enqueues durable verdicts into the same queue (marking `queued`) rather than extracting inline — one extraction path, one set of semantics. Each pass first runs `repairQueuedMarks`, which reconciles marks against job rows: extraction-marked messages with a live job canonicalize to `queued` (deduping the enqueue-succeeded/mark-write-failed window), `queued` whose only job is dead-lettered goes `dead` (terminal for the sweep, still reachable by `/profile-build`, overwritten by `extracted` on a successful requeue), and `queued` with no job at all resets to `durable`. `listUninspectedMessages` reads `durable`/`regex` marks at any age — the 2h window only bounds *untriaged* messages — so an orphaned mark always re-enqueues.
@@ -209,55 +226,9 @@ Every durable message used to run 3+ sequential LLM calls inside `handleMessage`
 
 `isolation.test.ts` is the dedicated proof: every store read path and every command surface is invoked as guild A against a seeded guild B and must return A's rows only (or a refusal) — including `jobs`/`guild_usage`/`guild_keys` and `purgeGuild` scoping.
 
-## Proactive speaking (v1: stranded questions)
+## No proactive speaking
 
-Exactly one unprompted trigger, self-limiting by construction: **an unanswered
-question the bot has a grounded answer to, after a real silence.** Everything
-else (banter, corrections, volunteering personal facts) is out of scope.
-
-```
-message ends in "?" && bot chose silence (!shouldSpeak)
-        │
-        ▼
-  proactive.ts: arm(key, messageId) — enqueues a 'proactive-fire' job whose
-  run_after IS the debounce timer (PROACTIVE_DELAY_MS, ~75s): armed questions
-  survive restarts and past-due rows claim immediately on boot
-  • any human follow-up message cancels the pending entry (room isn't silent)
-  • a reaction ON the question cancels (room engaged with it)
-  • deleting the question cancels; a newer arm replaces the old
-  • the job row can't be cancelled — it fires later and release() no-ops on
-    it; the in-memory pending map is the "still armed" truth, the row the clock
-        │ run_after reaches now
-        ▼
-  worker claim → release(key, messageId) → fireProactive() re-verifies at send time
-  • PROACTIVE=1 global AND server_settings.proactive_enabled — double opt-in,
-    either switch alone kills it (v13 migration, default off)
-  • re-fetch the question: deleted → gone, edited → re-check "?"
-  • daily cap (PROACTIVE_DAILY_CAP, default 3/channel, in-memory)
-  • backoff floor: an ignored prior attempt (no reply-edge or reaction within
-    PROACTIVE_RESPONSE_WINDOW_MS) raises the LLM gate's confidence floor until
-    PROACTIVE_BACKOFF_MS cools down or engagement resets the streak
-        │
-        ▼
-  Cheap gate: questionKeywords() → searchMemories(kinds=['server_lore'])
-  + searchEvents() — person_fact/person_preference excluded AT THE QUERY
-  LAYER: opting out of storage never consented to unprompted public
-  surfacing. Zero hits → zero LLM calls (the feature's cost bound)
-        │
-        ▼
-  brain.proposeGroundedAnswer(): one classifier call — does the context
-  actually answer, is volunteering appropriate, produce a one-liner +
-  confidence; null under the caller's floor
-        │
-        ▼
-  question.reply() (no pings) → archived like any reply → noteReply()
-  (share-of-voice accounting stays honest) → noteSent() tracks the outcome
-```
-
-Reactions are **observable signals only** — the bot never places them
-(GatewayIntentBits.GuildMessageReactions + partials; MessageReactionAdd
-resolves partials before interpreting). A reply-edge or reaction on a
-proactive message marks it engaged — it never feeds the ignored streak.
+The Characterly bot is pure plumbing — it **never speaks unprompted** and only summoned companions reply, always triggered by a human message. An earlier proactive-answers feature was removed: any surviving `proactive-fire` job rows are a no-op in the worker, and the `PROACTIVE*` env vars plus `server_settings.proactive_enabled` (v13) are inert leftovers kept for schema/env compatibility — nothing reads them to send a message.
 
 ---
 
@@ -332,7 +303,7 @@ Dedup runs at two tiers. The **hot path** uses the pg_trgm fallback in `saveMemo
 
 **Paste/quote attribution.** Extraction instructs the model not to attribute quoted, pasted, or persona text to the poster ("I am \<other person\>", reposted bios, copied bot output) — it should attribute to the named person via `subjectName` or skip it. A deterministic guard (`detectSelfNaming`) flags "I am \<Capitalized Name\>" patterns where the name isn't one of the author's `known_names` and annotates the extraction input.
 
-**Contest detection.** Messages that address the bot and carry denial/correction cues (`contestCue`) are checked by `Brain.detectContest` against the author's stored memories. `contests` relations attach `contradict` evidence (status → `contested`, confidence frozen, `resolveContested` arbitrates via `net_score`); `confirms` attach `support` evidence that can resolve a contested memory back to `active`. Runs live in `MessageCreate` and as a sweep at the end of ingest.
+**Contest detection.** Messages that address the bot and carry denial/correction cues (`contestCue`) are checked by `Brain.detectContest` (in `src/contest.ts`) against the author's stored memories. `contests` relations attach `contradict` evidence (status → `contested`, confidence frozen, `resolveContested` arbitrates via `net_score`); `confirms` attach `support` evidence that can resolve a contested memory back to `active`. Runs live in `MessageCreate` and as a sweep at the end of ingest.
 
 ---
 
@@ -395,6 +366,21 @@ Back-references to a closed candidate can retroactively promote it to `event` ti
 
 ---
 
+## Web accounts & the website (v26–v27)
+
+`website/` is a standalone Vite multi-page app — `index.html` (landing), `account.html` (sign in / sign up / magic link / password recovery), and `dashboard.html` (profile, Discord link card, password change, account deletion) — served as Cloudflare Workers static assets (`website/cloudflare.config.ts`, `npm run deploy` → `cf deploy`; live at `SITE_URL`). It talks directly to Supabase with the publishable key in `website/src/config.js`; there is no app server — the Data API is the backend, and row-level security is the access control.
+
+- **Auth (Supabase Auth):** email+password (signup stores `display_name` in user metadata), magic link, password recovery, and Discord OAuth (`signInWithOAuth`/`linkIdentity`, gated by `DISCORD_OAUTH_ENABLED`). Each new `auth.users` row gets a `public.web_profiles` row via the `internal.handle_new_user` trigger — the "real life user" counterpart to the Discord-side `members` registry.
+- **RLS posture (v23/v26):** every `public` table has RLS enabled with zero Data-API policies — deny-all for `anon`/`authenticated`; the bot's postgres role bypasses RLS. `web_profiles` is the deliberate exception: own-row select/insert policies, and `UPDATE` granted only on `(display_name, updated_at)` so users can never write `discord_user_id` or `stripe_customer_id` on their own row (a forged snowflake would steal another user's perks).
+- **Discord ↔ web linking, two paths:**
+  - **OAuth:** signing up/in with Discord, or `linkIdentity` from the dashboard, writes a `discord` row in `auth.identities`; the `on_identity_sync` trigger (`internal.sync_discord_identity`) copies `provider_id` into `web_profiles.discord_user_id` — covering OAuth signup, manual link, auto-merged identities, and unlink/deletion (which NULLs it back out). A duplicate Discord link raises `discord_already_linked`.
+  - **`/link` code flow (Discord-first users):** the bot's `/link` command mints a one-time `XXXX-XXXX` code (`link_codes`, 10-min expiry, one active code per Discord user). Entering it on the dashboard calls the security-definer `claim_link_code` rpc, which validates and stamps `discord_user_id` — the only non-trigger path that can write the column.
+- **Unlink rules:** the dashboard offers unlink only when the user has ≥2 identities (Supabase refuses to orphan the last one); password users get a set-password escape hatch. Account deletion goes through the `delete_own_account` rpc (`DELETE FROM auth.users`, cascades to `web_profiles`).
+
+All Supabase-facing DDL (auth triggers, `web_profiles`, `claim_link_code`) is conditional on the `auth` schema existing, so plain-Postgres test and self-hosted databases skip it unchanged — `link_codes` itself lives outside that gate so the bot can mint codes anywhere.
+
+---
+
 ## Key design principles
 
 1. **LLM provides language interpretation only.** `brain.ts` extracts `subjectId`, `kind`, `content`, `reason`, `evidenceType`, and `effect`. All numeric values (confidence, importance, explicitness, significance) are calculated deterministically by `confidence.ts` and `event-significance.ts`.
@@ -412,4 +398,5 @@ Back-references to a closed candidate can retroactively promote it to `event` ti
 - [`docs/schema.md`](schema.md) — all tables, columns, and indexes
 - [`docs/event-pipeline.md`](event-pipeline.md) — event detection in detail
 - [`docs/configuration.md`](configuration.md) — all environment variables
-- [`docs/development.md`](development.md) — scripts, tests, and contributor guide
+- [`docs/development.md`](development.md) — scripts, tests, website, deployment, and contributor guide
+- [`website/README.md`](../website/README.md) — site quick-start
