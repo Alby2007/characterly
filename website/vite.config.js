@@ -1,7 +1,9 @@
 import { defineConfig } from "vite";
 import { fileURLToPath } from "node:url";
+import { cloudflare } from "@cloudflare/vite-plugin";
 
 export default defineConfig({
+  plugins: [cloudflare()],
   server: { port: 5173, host: "localhost" },
   build: {
     outDir: "dist",
