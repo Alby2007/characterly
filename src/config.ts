@@ -74,6 +74,7 @@ const env = z.object({
   // adoption cap (premium is uncapped), and reports needed to auto-flag.
   ADOPTION_COOLDOWN_MS: z.coerce.number().int().min(3_600_000).default(43_200_000),
   FREE_ADOPTION_SLOTS: z.coerce.number().int().min(0).default(1),
+  FREE_LISTING_SLOTS: z.coerce.number().int().min(0).default(2),
   MARKETPLACE_REPORT_FLAG_THRESHOLD: z.coerce.number().int().min(1).default(3),
 }).parse(process.env);
 
@@ -147,5 +148,6 @@ export const config = {
   marketplaceModChannelId: env.MARKETPLACE_MOD_CHANNEL_ID,
   adoptionCooldownMs: env.ADOPTION_COOLDOWN_MS,
   freeAdoptionSlots: env.FREE_ADOPTION_SLOTS,
+  freeListingSlots: env.FREE_LISTING_SLOTS,
   marketplaceReportFlagThreshold: env.MARKETPLACE_REPORT_FLAG_THRESHOLD,
 };

@@ -1822,6 +1822,23 @@ const migrations: Migration[] = [
       await sql`ALTER TABLE companions ADD CONSTRAINT companions_owner_user_id_key UNIQUE (owner_user_id)`;
     },
   },
+
+  // ── v35: freehand marketplace listings ────────────────────────────────────
+  // Listings no longer have to project an awakened companion — creators can
+  // author additional characters directly (free accounts get a couple of live
+  // listings, premium uncapped). A NULL source_companion_id marks freehand
+  // listings; the UNIQUE(source_companion_id) still dedupes awakened publishes
+  // since NULLs are distinct in Postgres.
+  {
+    version: 35,
+    name: "v35_listing_source_nullable",
+    up: async (sql) => {
+      await sql`ALTER TABLE companion_listings ALTER COLUMN source_companion_id DROP NOT NULL`;
+    },
+    down: async (sql) => {
+      await sql`ALTER TABLE companion_listings ALTER COLUMN source_companion_id SET NOT NULL`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

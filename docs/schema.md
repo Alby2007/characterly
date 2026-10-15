@@ -597,7 +597,7 @@ The marketplace's publishable persona (v34): a creator's awakened companion proj
 |--------|------|-------|
 | `id` | BIGINT PK | Referenced by `market:add:<id>` / `market:report:<id>` button custom IDs |
 | `creator_user_id` | TEXT | Discord user ID of the publisher (must hold a linked web account) |
-| `source_companion_id` | BIGINT UNIQUE | FK → `companions.id` — the awakened companion the listing projects |
+| `source_companion_id` | BIGINT UNIQUE NULL | FK → `companions.id` — the awakened companion the listing projects; **NULL** for freehand creator-authored characters (v35 — nullable, and Postgres treats NULLs as distinct so awakened publishes still dedupe) |
 | `name` / `tagline` | TEXT | Display name + listing-card blurb |
 | `voice_persona` / `core_traits` / `owner_dynamic` / `backstory` | — | Persona fields cloned into adopters' `companions` rows |
 | `greeting` | TEXT | First DM the character sends on adoption — stamps `dm_introduced_at` on successful send |
@@ -711,3 +711,4 @@ Version tracking for the migration system.
 | 32 | `v32_stripe_webhook_hardening` | `grant_pack` gains a positive-amount guard; `account_id_for_email` rpc (service_role only) resolves checkout emails → `web_profiles.id` for bare payment links |
 | 33 | `v33_message_image_context` | `messages.image_context` — cached vision description shared by the extract job and reply paths |
 | 34 | `v34_companion_marketplace` | Companion marketplace: `companions.kind`/`adopted_from_listing_id`/`listing_version`, partial unique index `companions_one_awakened` replaces the blanket owner uniqueness, `companion_listings`/`companion_persona_versions`/`companion_adoptions`/`listing_reports` tables, `user_bot_settings.active_dm_companion_id` |
+| 35 | `v35_listing_source_nullable` | `companion_listings.source_companion_id` drops `NOT NULL` — freehand creator-authored listings (`/companion action:create`) have no awakened source |

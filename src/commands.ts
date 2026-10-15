@@ -466,6 +466,67 @@ export function buildListingComponents(listingId: number): ActionRowBuilder<Butt
   );
 }
 
+export function buildCreateModal(): ModalBuilder {
+  const modal = new ModalBuilder()
+    .setCustomId("market_create")
+    .setTitle("Create a Marketplace Character");
+  const nameInput = new TextInputBuilder()
+    .setCustomId("listing-name").setLabel("Name").setStyle(TextInputStyle.Short)
+    .setRequired(true).setMaxLength(64).setPlaceholder("e.g. Count Dracula, Moth, Nyx");
+  const taglineInput = new TextInputBuilder()
+    .setCustomId("listing-tagline").setLabel("Tagline (shown on the listing card)").setStyle(TextInputStyle.Short)
+    .setRequired(true).setMaxLength(120).setPlaceholder("e.g. A vampire who remembers every reader");
+  const greetingInput = new TextInputBuilder()
+    .setCustomId("listing-greeting").setLabel("Greeting — first DM they send").setStyle(TextInputStyle.Paragraph)
+    .setRequired(true).setMaxLength(1000).setPlaceholder("The character opens the conversation, in their voice");
+  const vibeInput = new TextInputBuilder()
+    .setCustomId("listing-voice").setLabel("Voice & Vibe").setStyle(TextInputStyle.Paragraph)
+    .setRequired(true).setMaxLength(500).setPlaceholder("e.g. Archaic, theatrical, quietly menacing but oddly polite");
+  const backstoryInput = new TextInputBuilder()
+    .setCustomId("listing-backstory").setLabel("Backstory / Lore (optional)").setStyle(TextInputStyle.Paragraph)
+    .setRequired(false).setMaxLength(600).setPlaceholder("Any background or lore");
+  modal.addComponents(
+    new ActionRowBuilder<TextInputBuilder>().addComponents(nameInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(taglineInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(greetingInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(vibeInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(backstoryInput),
+  );
+  return modal;
+}
+
+/** Returns an error message if the user is at their live-listing cap, else
+ *  null. Republishes of existing listings bypass this (they add nothing new).
+ *  Premium and self-host (unmetered) lanes are uncapped. */
+async function listingSlotError(
+  store: MemoryStore,
+  userId: string,
+  account: { plan: string } | null,
+): Promise<string | null> {
+  const cap = !store.creditsSupported || account?.plan === "premium"
+    ? Number.MAX_SAFE_INTEGER
+    : config.freeListingSlots;
+  const count = await store.activeListingCount(userId);
+  if (count < cap) return null;
+  return `You can run **${config.freeListingSlots} live listing${config.freeListingSlots === 1 ? "" : "s"}** on the free plan — \`/companion action:unpublish\` one first, or go Premium for unlimited: ${config.siteUrl}/dashboard#billing`;
+}
+
+async function unlistListing(interaction: ChatInputCommandInteraction | ButtonInteraction, listing: CompanionListing, store: MemoryStore) {
+  await store.delistListing(listing.id);
+  if (listing.forumThreadId && config.marketplaceChannelId) {
+    const channel = await interaction.client.channels.fetch(config.marketplaceChannelId).catch(() => null);
+    const thread = channel && channel.type === ChannelType.GuildForum
+      ? await channel.threads.fetch(listing.forumThreadId).catch(() => null)
+      : null;
+    if (thread) await thread.setLocked(true).then(() => thread.setArchived(true)).catch(() => {});
+  }
+  const content = `**${listing.name}** has been removed from the marketplace.`;
+  if (typeof (interaction as ButtonInteraction).isButton === "function" && (interaction as ButtonInteraction).isButton()) {
+    return (interaction as ButtonInteraction).update({ content, components: [] });
+  }
+  return interaction.reply({ content, ephemeral: true });
+}
+
 /** DM the adopted companion's greeting; returns whether it actually landed —
  *  server summoning unlocks only on a successful send. */
 export async function sendAdoptionGreeting(user: { createDM(): Promise<{ send(o: object): Promise<unknown> }> }, companion: Companion, greeting: string): Promise<boolean> {
@@ -640,6 +701,7 @@ export const commandDefinitions = [
       { name: "status — Check your personal API key, DM usage, and active servers", value: "status" },
       { name: "avatar — Set your companion's avatar URL", value: "avatar" },
       { name: "publish — List your companion in the hub server's marketplace", value: "publish" },
+      { name: "create — Author an extra marketplace character (counts toward listing slots)", value: "create" },
       { name: "unpublish — Remove your companion from the marketplace", value: "unpublish" },
       { name: "switch — Choose which companion answers in your DMs", value: "switch" },
       { name: "drop — Give up an adopted companion (12h re-adopt cooldown)", value: "drop" },
@@ -1010,23 +1072,49 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         return interaction.reply({ content: "Publishing requires modal support.", ephemeral: true });
       }
       const listing = await store.listingForCompanion(companion.id);
+      if (!listing) {
+        const slotError = await listingSlotError(store, interaction.user.id, account);
+        if (slotError) return interaction.reply({ content: slotError, ephemeral: true });
+      }
       return interaction.showModal(buildPublishModal(companion, listing));
     }
+    if (action === "create") {
+      if (!config.marketplaceChannelId) {
+        return interaction.reply({ content: "The marketplace isn't configured yet — check back soon.", ephemeral: true });
+      }
+      const account = await store.accountForDiscordUser(interaction.user.id).catch(() => null);
+      if (!account) {
+        return interaction.reply({
+          content: `Creating marketplace characters requires a linked Characterly account — create one at ${config.siteUrl} and run \`/link\` first.`,
+          ephemeral: true,
+        });
+      }
+      const slotError = await listingSlotError(store, interaction.user.id, account);
+      if (slotError) return interaction.reply({ content: slotError, ephemeral: true });
+      if (typeof interaction.showModal !== "function") {
+        return interaction.reply({ content: "Creating characters requires modal support.", ephemeral: true });
+      }
+      return interaction.showModal(buildCreateModal());
+    }
     if (action === "unpublish") {
-      const companion = await store.getCompanionByOwner(interaction.user.id);
-      const listing = companion ? await store.listingForCompanion(companion.id) : null;
-      if (!listing) {
-        return interaction.reply({ content: "You don't have a published listing.", ephemeral: true });
+      const listings = await store.listMyListings(interaction.user.id);
+      if (!listings.length) {
+        return interaction.reply({ content: "You don't have any live listings.", ephemeral: true });
       }
-      await store.delistListing(listing.id);
-      if (listing.forumThreadId) {
-        const channel = await interaction.client.channels.fetch(config.marketplaceChannelId!).catch(() => null);
-        const thread = channel && channel.isTextBased() && "threads" in channel
-          ? await (channel as { threads: { fetch: (id: string) => Promise<{ setLocked(b: boolean): Promise<unknown>; setArchived(b: boolean): Promise<unknown> } | null> } }).threads.fetch(listing.forumThreadId).catch(() => null)
-          : null;
-        if (thread) await thread.setLocked(true).then(() => thread.setArchived(true)).catch(() => {});
+      if (listings.length > 1) {
+        const buttons = listings.slice(0, 5).map((l, i) =>
+          new ButtonBuilder()
+            .setCustomId(`market:unlist:${l.id}`)
+            .setLabel(l.name || `Listing ${i + 1}`)
+            .setStyle(ButtonStyle.Danger),
+        );
+        return interaction.reply({
+          ephemeral: true,
+          content: "Which listing do you want to take down?",
+          components: [new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons)],
+        });
       }
-      return interaction.reply({ content: `**${listing.name}** has been removed from the marketplace.`, ephemeral: true });
+      return unlistListing(interaction, listings[0], store);
     }
     if (action === "switch") {
       const roster = await store.listCompanionsForUser(interaction.user.id);
@@ -1557,6 +1645,59 @@ export async function handleCompanionModal(
   store: MemoryStore,
   invalidateLookups?: (scopeId: string) => void,
 ) {
+  // market_create — author a freehand marketplace character (no awakened
+  // companion backs it). Listing cap applies here at submit time too — the
+  // action-level check alone could be raced past.
+  if (interaction.customId === "market_create") {
+    const userId = interaction.user.id;
+    const account = await store.accountForDiscordUser(userId).catch(() => null);
+    if (!account) {
+      return interaction.reply({ content: `Creating marketplace characters requires a linked account — create one at ${config.siteUrl} and run \`/link\`.`, ephemeral: true });
+    }
+    const channel = await interaction.client.channels.fetch(config.marketplaceChannelId!).catch(() => null);
+    if (!channel || channel.type !== ChannelType.GuildForum) {
+      return interaction.reply({ content: "The marketplace channel isn't reachable — tell a moderator to check MARKETPLACE_CHANNEL_ID.", ephemeral: true });
+    }
+    const slotError = await listingSlotError(store, userId, account);
+    if (slotError) return interaction.reply({ content: slotError, ephemeral: true });
+    const name = interaction.fields.getTextInputValue("listing-name").trim().slice(0, 64);
+    const tagline = interaction.fields.getTextInputValue("listing-tagline").trim().slice(0, 120);
+    const greeting = interaction.fields.getTextInputValue("listing-greeting").trim().slice(0, 1000);
+    const voicePersona = interaction.fields.getTextInputValue("listing-voice").trim().slice(0, 500);
+    const backstory = interaction.fields.getTextInputValue("listing-backstory").trim().slice(0, 600);
+    if (!name || !tagline || !greeting || !voicePersona) {
+      return interaction.reply({ content: "Name, tagline, greeting, and voice are all required.", ephemeral: true });
+    }
+    const listing = await store.createListing(userId, {
+      name, tagline, greeting, voicePersona,
+      coreTraits: [], ownerDynamic: "a companion who met you here", backstory,
+      avatarUrl: null,
+    });
+    const creatorName =
+      (interaction.user as { globalName?: string }).globalName ?? interaction.user.username ?? "a creator";
+    const thread = await channel.threads.create({
+      name: `${listing.name} — ${listing.tagline}`.slice(0, 100),
+      message: {
+        embeds: [buildListingCard(listing, creatorName)],
+        components: [buildListingComponents(listing.id)],
+      },
+    }).catch(() => null);
+    if (!thread) {
+      await store.delistListing(listing.id);
+      return interaction.reply({ content: "I couldn't create the forum post — check my permissions in the marketplace channel.", ephemeral: true });
+    }
+    await store.setListingThread(listing.id, thread.id);
+    inc("market.published");
+    const manageRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(`market:editmodal:${listing.id}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
+    );
+    return interaction.reply({
+      ephemeral: true,
+      content: `**${listing.name}** is live in <#${config.marketplaceChannelId}>! Use **Edit persona** below to set traits and their bond with adopters.`,
+      components: [manageRow],
+    });
+  }
+
   // market_publish:<companionId> — create/republish the listing, then the bot
   // posts the forum card itself so listings can't be faked.
   if (interaction.customId.startsWith("market_publish:")) {
@@ -1581,6 +1722,10 @@ export async function handleCompanionModal(
       return interaction.reply({ content: "Tagline and greeting are both required.", ephemeral: true });
     }
     const existing = await store.listingForCompanion(companion.id);
+    if (!existing) {
+      const slotError = await listingSlotError(store, userId, account);
+      if (slotError) return interaction.reply({ content: slotError, ephemeral: true });
+    }
     const listing = await store.upsertListing(userId, companion.id, {
       name,
       tagline,
@@ -1638,10 +1783,13 @@ export async function handleCompanionModal(
     if (!name || !voicePersona || !ownerDynamic) {
       return interaction.reply({ content: "Name, Voice & Vibe, and Dynamic are all required.", ephemeral: true });
     }
-    const updated = await store.upsertListing(userId, listing.sourceCompanionId, {
+    const updated = await store.updateListing(listing.id, userId, {
       name, tagline: listing.tagline, voicePersona, coreTraits, ownerDynamic,
       backstory, greeting: listing.greeting, avatarUrl: listing.avatarUrl,
     });
+    if (!updated) {
+      return interaction.reply({ content: "That's not your listing.", ephemeral: true });
+    }
     inc("market.republished");
     return interaction.reply({
       ephemeral: true,
@@ -1827,6 +1975,14 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         content: `Dropped — you can't re-adopt this companion until <t:${Math.floor(new Date(dropped.cooldownUntil!).getTime() / 1000)}:R>. Your history with them is kept if you come back.`,
         components: [],
       });
+    }
+
+    if (sub === "unlist") {
+      const listing = await store.listingById(id);
+      if (!listing || listing.creatorUserId !== userId) {
+        return interaction.reply({ content: "That's not your listing.", ephemeral: true });
+      }
+      return unlistListing(interaction, listing, store);
     }
 
     if (sub === "editmodal") {

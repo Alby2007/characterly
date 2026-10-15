@@ -267,6 +267,93 @@ test("reports dedupe per user, count up, flag blocks new adds; delist blocks add
   assert.equal((await store.listingById(listing.id))!.status, "delisted");
 });
 
+test("freehand listings: createListing works without an awakened source, adopts cleanly", async () => {
+  const { store } = await freshStore();
+  const listing = await store.createListing("u-freehand", {
+    name: "Standalone",
+    tagline: "no awakened backing",
+    voicePersona: "oddly polite",
+    coreTraits: ["polite"],
+    ownerDynamic: "a companion who met you here",
+    backstory: "made for the shelf",
+    greeting: "hello, adopter.",
+    avatarUrl: null,
+  });
+  assert.equal(listing.sourceCompanionId, null);
+  assert.equal(listing.version, 1);
+
+  const adopt = await store.adoptListing("u-freehand-adopter", listing.id, 1, COOLDOWN);
+  assert.equal(adopt.ok, true);
+  if (adopt.ok) {
+    assert.equal(adopt.companion.kind, "adopted");
+    assert.equal(adopt.companion.ownerUserId, "u-freehand-adopter");
+    assert.equal(adopt.companion.name, "Standalone");
+  }
+});
+
+test("activeListingCount/listMyListings drive the publish cap; delist frees the slot", async () => {
+  const { store } = await freshStore();
+  const awakened = await awakenedCompanion(store, "u-author", "Backed");
+  assert.equal(await store.activeListingCount("u-author"), 0);
+
+  await makeListing(store, "u-author", awakened.id, "Backed");
+  await store.createListing("u-author", {
+    name: "Extra", tagline: "t", voicePersona: "v", coreTraits: [],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+  });
+  assert.equal(await store.activeListingCount("u-author"), 2);
+  assert.equal((await store.listMyListings("u-author")).length, 2);
+
+  // Delisting frees a slot.
+  const mine = await store.listMyListings("u-author");
+  await store.delistListing(mine[0].id);
+  assert.equal(await store.activeListingCount("u-author"), 1);
+  assert.equal((await store.listMyListings("u-author")).length, 1);
+});
+
+test("updateListing edits a freehand listing, bumps version, propagates to clones", async () => {
+  const { store } = await freshStore();
+  const listing = await store.createListing("u-editor", {
+    name: "Before", tagline: "t", voicePersona: "v1", coreTraits: [],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+  });
+  const adopt = await store.adoptListing("u-ad-editor", listing.id, 1, COOLDOWN);
+  assert.equal(adopt.ok, true);
+  if (!adopt.ok) return;
+
+  const updated = await store.updateListing(listing.id, "u-editor", {
+    name: "After", tagline: "t2", voicePersona: "v2", coreTraits: ["new"],
+    ownerDynamic: "d2", backstory: "b2", greeting: "g2", avatarUrl: null,
+  });
+  assert.equal(updated!.version, 2);
+
+  const clone = await store.getCompanionById(adopt.companion.id);
+  assert.equal(clone!.name, "After");
+  assert.equal(clone!.voicePersona, "v2");
+
+  // Another creator's id can't update someone else's listing.
+  const foreign = await store.updateListing(listing.id, "u-other", {
+    name: "Hijack", tagline: "t", voicePersona: "v", coreTraits: [],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+  });
+  assert.equal(foreign, null);
+  assert.equal((await store.listingById(listing.id))!.name, "After");
+});
+
+test("republish revives a delisted listing but never clears a moderation flag", async () => {
+  const { store } = await freshStore();
+  const awakened = await awakenedCompanion(store, "u-flagged", "Flaggy");
+  const listing = await makeListing(store, "u-flagged", awakened.id, "Flaggy");
+
+  await store.flagListing(listing.id);
+  const republished = await makeListing(store, "u-flagged", awakened.id, "Flaggy");
+  assert.equal(republished.status, "flagged", "republish must not launder a flag");
+
+  await store.delistListing(listing.id);
+  const revived = await makeListing(store, "u-flagged", awakened.id, "Flaggy");
+  assert.equal(revived.status, "active", "republish revives a delisted listing");
+});
+
 test("markDmIntroduced stamps the adoption; roster lists awakened then adopted", async () => {
   const { store } = await freshStore();
   const awakened = await awakenedCompanion(store, "u-i", "Main");

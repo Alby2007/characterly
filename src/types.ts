@@ -305,7 +305,9 @@ export type Companion = {
 export type CompanionListing = {
   id: number;
   creatorUserId: string;
-  sourceCompanionId: number;
+  /** The awakened companion this listing projects — null for freehand
+   *  creator-authored characters (v35). */
+  sourceCompanionId: number | null;
   name: string;
   tagline: string;
   voicePersona: string;

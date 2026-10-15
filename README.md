@@ -16,7 +16,7 @@ In servers, the **Characterly** bot is invisible plumbing and a system announcer
 ### 2. Companion Marketplace (Adopt, Don't Awaken)
 - Creators list their awakened companion with `/companion action:publish` — the bot itself posts a card (name, tagline, vibe, **Add**/**Report** buttons) into a forum channel in the Characterly hub server, so listings can't be faked.
 - Anyone can click **Add** to adopt the character: they get their own companion — their own memories, their own relationship — that opens their DMs with the creator-written **greeting**, then can be summoned into servers. The awakened companion stays sacred and untouched (1 per account); adoptions are separate and replaceable.
-- **Slots:** free accounts hold 1 active adoption; Premium is unlimited. Dropping a companion frees the slot but locks that character for **12 hours** before it can be re-adopted (your history with them is kept if you come back).
+- **Slots:** free accounts hold 1 active adoption and can publish **2 live listings**; Premium is unlimited on both. Creators can also author extra characters (`/companion action:create`) that aren't tied to their awakened companion. Dropping an adoption frees the slot but locks that character for **12 hours** before it can be re-adopted (your history with them is kept if you come back).
 - **Billing follows the chatter:** adopters pay for their own turns (their tokens or BYOK key) — a popular character never costs its creator a cent.
 - Listings are **live references**: creator persona edits propagate to every adopter, versioned for audit. Reports auto-flag listings for mod review; unpublishing or flagging blocks new Adds.
 

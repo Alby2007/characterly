@@ -2447,7 +2447,7 @@ export class MemoryStore {
     return {
       id: Number(r.id),
       creatorUserId: r.creator_user_id,
-      sourceCompanionId: Number(r.source_companion_id),
+      sourceCompanionId: r.source_companion_id != null ? Number(r.source_companion_id) : null,
       name: r.name,
       tagline: r.tagline,
       voicePersona: r.voice_persona,
@@ -2522,7 +2522,9 @@ export class MemoryStore {
         avatar_url     = EXCLUDED.avatar_url,
         forum_thread_id = COALESCE(EXCLUDED.forum_thread_id, companion_listings.forum_thread_id),
         version        = companion_listings.version + 1,
-        status         = 'active',
+        -- Republishing revives a delisted listing but must NOT clear a
+        -- moderation flag — flagged stays flagged until a human reviews it.
+        status         = CASE WHEN companion_listings.status = 'delisted' THEN 'active' ELSE companion_listings.status END,
         updated_at     = NOW()
       RETURNING *
     `;
@@ -2534,6 +2536,85 @@ export class MemoryStore {
     `;
     if (listing.version > 1) await this.propagateListingVersion(listing.id);
     return listing;
+  }
+
+  /** A freehand listing (v35): the persona lives entirely on the listing —
+   *  no awakened companion backs it. source_companion_id stays NULL. */
+  async createListing(
+    creatorUserId: string,
+    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
+  ): Promise<CompanionListing> {
+    const rows = await this.sql<Array<any>>`
+      INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, avatar_url, version, status, created_at, updated_at)
+      VALUES (
+        ${creatorUserId}, NULL,
+        ${spec.name}, ${spec.tagline}, ${spec.voicePersona}, ${spec.coreTraits},
+        ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${spec.avatarUrl},
+        1, 'active', NOW(), NOW()
+      )
+      RETURNING *
+    `;
+    const listing = this.rowToListing(rows[0]);
+    await this.sql`
+      INSERT INTO companion_persona_versions (listing_id, version, persona_json)
+      VALUES (${listing.id}, 1, ${JSON.stringify({
+        name: spec.name, tagline: spec.tagline, voicePersona: spec.voicePersona,
+        coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
+        backstory: spec.backstory, greeting: spec.greeting, avatarUrl: spec.avatarUrl,
+      })})
+      ON CONFLICT (listing_id, version) DO NOTHING
+    `;
+    return listing;
+  }
+
+  /** Update any listing (awakened-backed or freehand) by id: bumps the
+   *  version, snapshots the persona, and propagates to adopted clones. */
+  async updateListing(
+    listingId: number,
+    creatorUserId: string,
+    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
+  ): Promise<CompanionListing | null> {
+    const rows = await this.sql<Array<any>>`
+      UPDATE companion_listings SET
+        name = ${spec.name}, tagline = ${spec.tagline}, voice_persona = ${spec.voicePersona},
+        core_traits = ${spec.coreTraits}, owner_dynamic = ${spec.ownerDynamic},
+        backstory = ${spec.backstory}, greeting = ${spec.greeting}, avatar_url = ${spec.avatarUrl},
+        version = version + 1, updated_at = NOW()
+      WHERE id = ${listingId} AND creator_user_id = ${creatorUserId}
+      RETURNING *
+    `;
+    if (!rows[0]) return null;
+    const listing = this.rowToListing(rows[0]);
+    await this.sql`
+      INSERT INTO companion_persona_versions (listing_id, version, persona_json)
+      VALUES (${listing.id}, ${listing.version}, ${JSON.stringify({
+        name: spec.name, tagline: spec.tagline, voicePersona: spec.voicePersona,
+        coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
+        backstory: spec.backstory, greeting: spec.greeting, avatarUrl: spec.avatarUrl,
+      })})
+      ON CONFLICT (listing_id, version) DO NOTHING
+    `;
+    await this.propagateListingVersion(listing.id);
+    return listing;
+  }
+
+  /** Live listings a creator is holding — counts toward the plan's
+   *  publish cap. Delisted rows free the slot. */
+  async activeListingCount(creatorUserId: string): Promise<number> {
+    const rows = await this.sql<[{ n: number | string }]>`
+      SELECT COUNT(*) AS n FROM companion_listings
+      WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted'
+    `;
+    return Number(rows[0].n);
+  }
+
+  async listMyListings(creatorUserId: string): Promise<CompanionListing[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM companion_listings
+      WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted'
+      ORDER BY created_at ASC
+    `;
+    return rows.map(r => this.rowToListing(r));
   }
 
   /** Push a listing's current persona into every adopted clone. Only persona
