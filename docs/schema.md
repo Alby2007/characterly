@@ -562,7 +562,7 @@ Audit trail for hosted-lane credits (user-facing name: "tokens") — v29. Every 
 
 **Index:** `credit_ledger_account (account_id, id DESC)`. **RLS:** enabled; `credit_ledger_select_own` lets authenticated users read their own rows (the dashboard ledger).
 
-`web_profiles` also gains (same migration): `plan` (`'free'|'premium'`, default `free`), `credit_balance`, `last_daily_grant_on`, `last_weekly_grant_on`. Grants are **lazy**: `spendCredits` applies any due daily/weekly grant under the row lock before debiting — no scheduler, downtime-safe.
+`web_profiles` also gains (same migration): `plan` (`'free'|'premium'`, default `free`), `credit_balance`, `last_daily_grant_on`, `last_weekly_grant_on`. Grants are **lazy refills**: `spendCredits` tops the balance up to the daily/weekly floor (whichever applies) under the row lock before debiting — no scheduler, downtime-safe, and a refill can't bank beyond the floor.
 
 ---
 
@@ -625,3 +625,4 @@ Version tracking for the migration system.
 | 27 | `v27_discord_link` | `link_codes` + `public.claim_link_code` rpc; `internal.sync_discord_identity` trigger on `auth.identities`; `web_profiles` update grants narrowed to `(display_name, updated_at)` — Discord ↔ web account linking |
 | 28 | `v28_link_hardening` | `public.unlink_discord` rpc (code-claimed links); `claim_link_code` rowcount guard; `handle_new_user` falls back to OAuth `full_name`/`name` metadata |
 | 29 | `v29_credits_and_bot_settings` | `plan`/`credit_balance`/lazy-grant columns on `web_profiles`; `credit_ledger` (own-row select policy); `user_bot_settings` (auth-gate-free, keyed by `discord_user_id`); `my_bot_settings`/`upsert_my_settings`/`my_byok_status` rpcs — hosted credits + per-user bot toggles |
+| 30 | `v30_account_credits_hardening` | Revokes `authenticated INSERT` on `web_profiles` (trigger is the only row creator) + backfills missing profiles from `auth.users`; `claim_link_code` locks the code row `FOR UPDATE` and normalizes dashless input; `credit_ledger` policy uses `(select auth.uid())` |

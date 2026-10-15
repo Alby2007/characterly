@@ -1891,8 +1891,9 @@ export class MemoryStore {
     const events = await this.sql`DELETE FROM events WHERE id IN (${staleEvents})`;
     // guild_usage is operational state, not derived data — 30 days of history
     // is enough for /status-style review; without this it grows ~365
-    // rows/guild/year forever.
-    const usage = await this.sql`DELETE FROM guild_usage WHERE guild_id = ${guildId} AND day < (now() AT TIME ZONE 'UTC')::date - 30`;
+    // rows/guild/year forever. The 'hosted:global' fleet-breaker row isn't a
+    // real guild so it rides this same prune via whichever guild runs first.
+    const usage = await this.sql`DELETE FROM guild_usage WHERE guild_id IN (${guildId}, 'hosted:global') AND day < (now() AT TIME ZONE 'UTC')::date - 30`;
     // Two classes of dead observation: a NULL-verdict row whose source message
     // is gone can never be verified (listUnverifiedObservations JOINs
     // messages), and a non-literal verdict never feeds an edge. Both are
@@ -2561,9 +2562,12 @@ export class MemoryStore {
   get creditsSupported(): boolean { return this.creditsEnabled; }
 
   /** Cached discord→account resolution shared by the link gate, payer lookup,
-   * and plan checks. Negative hits cached — unlinked users can be spammy. */
-  private accountCache = new Map<string, { account: { id: string; plan: "free" | "premium"; creditBalance: number } | null; at: number }>();
+   * and plan checks. Only positive hits are cached — a negative entry would
+   * mask a fresh /link claim for up to a minute, and a miss is one indexed
+   * lookup anyway. */
+  private accountCache = new Map<string, { account: { id: string; plan: "free" | "premium"; creditBalance: number }; at: number }>();
   private static readonly ACCOUNT_CACHE_MS = 60_000;
+  private static readonly RESOLUTION_CACHE_MAX = 10_000;
 
   async accountForDiscordUser(discordUserId: string): Promise<{ id: string; plan: "free" | "premium"; creditBalance: number } | null> {
     if (!this.creditsEnabled) return { id: "selfhosted", plan: "premium", creditBalance: Infinity };
@@ -2572,9 +2576,9 @@ export class MemoryStore {
     const rows = await this.sql<Array<{ id: string; plan: string; credit_balance: number }>>`
       SELECT id, plan, credit_balance FROM web_profiles WHERE discord_user_id = ${discordUserId}
     `;
-    const account = rows[0]
-      ? { id: rows[0].id, plan: rows[0].plan as "free" | "premium", creditBalance: Number(rows[0].credit_balance) }
-      : null;
+    if (!rows[0]) return null;
+    const account = { id: rows[0].id, plan: rows[0].plan as "free" | "premium", creditBalance: Number(rows[0].credit_balance) };
+    if (this.accountCache.size >= MemoryStore.RESOLUTION_CACHE_MAX) this.accountCache.clear();
     this.accountCache.set(discordUserId, { account, at: Date.now() });
     return account;
   }
@@ -2614,7 +2618,9 @@ export class MemoryStore {
         FOR UPDATE
       `;
       const acct = rows[0];
-      if (!acct) return { ok: false, balance: 0 };
+      // Live miss evicts any cached positive — a just-unlinked user must fail
+      // the gate on their next turn, not ride the stale entry.
+      if (!acct) { this.accountCache.delete(discordUserId); return { ok: false, balance: 0 }; }
       // postgres.js returns computed ::date columns as strings but stored date
       // columns as Date objects — normalize both to YYYY-MM-DD before comparing.
       const isoDay = (v: string | Date | null): string | null =>
@@ -2624,13 +2630,19 @@ export class MemoryStore {
       const lastDaily = isoDay(acct.last_daily_grant_on);
       const lastWeekly = isoDay(acct.last_weekly_grant_on);
       let balance = Number(acct.credit_balance);
+      // Grants REFILL to the grant amount rather than accruing — the user-facing
+      // copy ("refreshes daily") is the contract, and a floor bounds how much an
+      // idle account can bank toward a burst. Delta is what it took to reach the
+      // floor; nothing is written when the balance already exceeds it.
       if (lastDaily !== day) {
         const g = acct.plan === "premium" ? this.creditGrants.premiumDaily : this.creditGrants.freeDaily;
-        if (g > 0) balance = await this.writeLedger(tx, acct.id, g, "grant_daily", null);
+        const delta = Math.max(0, g - balance);
+        if (delta > 0) balance = await this.writeLedger(tx, acct.id, delta, "grant_daily", null);
         await tx`UPDATE public.web_profiles SET last_daily_grant_on = ${day} WHERE id = ${acct.id}`;
       }
       if (acct.plan === "premium" && lastWeekly !== week) {
-        if (this.creditGrants.premiumWeekly > 0) balance = await this.writeLedger(tx, acct.id, this.creditGrants.premiumWeekly, "grant_weekly", null);
+        const delta = Math.max(0, this.creditGrants.premiumWeekly - balance);
+        if (delta > 0) balance = await this.writeLedger(tx, acct.id, delta, "grant_weekly", null);
         await tx`UPDATE public.web_profiles SET last_weekly_grant_on = ${week} WHERE id = ${acct.id}`;
       }
       if (balance < n) return { ok: false, balance };
@@ -2666,6 +2678,7 @@ export class MemoryStore {
     const value = rows[0]
       ? { c2cEnabled: Boolean(rows[0].c2c_enabled), lowCreditAlerts: Boolean(rows[0].low_credit_alerts) }
       : { c2cEnabled: true, lowCreditAlerts: true };
+    if (this.botSettingsCache.size >= MemoryStore.RESOLUTION_CACHE_MAX) this.botSettingsCache.clear();
     this.botSettingsCache.set(discordUserId, { value, at: Date.now() });
     return value;
   }

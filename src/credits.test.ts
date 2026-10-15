@@ -111,14 +111,33 @@ test("the daily grant only lands once per UTC day", async () => {
   await sql.end();
 });
 
-test("premium gets the daily top-up plus the weekly grant", async () => {
+test("premium refills to the daily floor plus the weekly floor", async () => {
   const sql = makeTestSql();
   const store = await fixture(sql);
   await addAccount(sql, "u-vip", "premium");
   const r = await store.spendCredits("u-vip", 2, "dm_turn");
-  assert.equal(r.balance, GRANTS.premiumDaily + GRANTS.premiumWeekly - 2);
-  const kinds = (await sql`SELECT kind FROM credit_ledger ORDER BY id`).map(r2 => r2.kind);
-  assert.deepEqual(kinds, ["grant_daily", "grant_weekly", "spend"]);
+  // Refill semantics: weekly floor (300) dominates — the balance lands on
+  // 300, not 30+300, then the 2-credit spend debits.
+  assert.equal(r.balance, GRANTS.premiumWeekly - 2);
+  const ledger = await sql`SELECT kind, delta FROM credit_ledger ORDER BY id`;
+  assert.deepEqual(ledger.map(l => l.kind), ["grant_daily", "grant_weekly", "spend"]);
+  assert.equal(Number(ledger[0].delta), GRANTS.premiumDaily);
+  assert.equal(Number(ledger[1].delta), GRANTS.premiumWeekly - GRANTS.premiumDaily);
+  await sql.end();
+});
+
+test("refill never pushes a balance past the grant floor", async () => {
+  const sql = makeTestSql();
+  const store = await fixture(sql);
+  await addAccount(sql, "u-alice", "free", 100);
+  // Balance already above the daily grant — no grant row lands, spend debits only.
+  const r = await store.spendCredits("u-alice", 2, "dm_turn");
+  assert.equal(r.balance, 98);
+  const ledger = await sql`SELECT kind FROM credit_ledger ORDER BY id`;
+  assert.deepEqual(ledger.map(l => l.kind), ["spend"]);
+  // But the day's grant is still marked consumed.
+  const rows = await sql`SELECT last_daily_grant_on FROM web_profiles WHERE discord_user_id = 'u-alice'`;
+  assert.ok(rows[0].last_daily_grant_on);
   await sql.end();
 });
 

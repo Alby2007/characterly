@@ -1454,6 +1454,24 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       );
     }
 
+    // Link gate — same rule as the DM/message path: hosted features need a
+    // linked account or a personal key. Buttons bypass the message handler, so
+    // the check lives here; `onboard:key` above stays open (it IS the BYOK lane).
+    if (store.creditsSupported) {
+      const [account, ownKey] = await Promise.all([
+        store.accountForDiscordUser(userId).catch(() => null),
+        store.getGuildKey(`dm:${userId}`).catch(() => null),
+      ]);
+      if (!account && !ownKey) {
+        return interaction.reply({
+          content:
+            `This needs a linked Characterly account — create one free at ${config.siteUrl} ` +
+            `and run \`/link\` here, or connect your own key with **Paste API Key**.`,
+          ephemeral: true,
+        });
+      }
+    }
+
     if (sub === "start") {
       const existing = await store.getCompanionByOwner(userId);
       if (existing?.onboardingState === "active") {

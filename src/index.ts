@@ -127,6 +127,8 @@ const linkPromptedAt = new Map<string, number>();
 function linkPromptDue(key: string): boolean {
   const last = linkPromptedAt.get(key) ?? 0;
   if (Date.now() - last < config.linkPromptCooldownMs) return false;
+  // Cap-and-clear: an unbounded map grows forever on a busy fleet.
+  if (linkPromptedAt.size > 10_000) linkPromptedAt.clear();
   linkPromptedAt.set(key, Date.now());
   return true;
 }
@@ -142,6 +144,7 @@ async function maybeAlertLowCredit(userId: string, balance: number): Promise<voi
   if (lowCreditAlertedAt.get(userId) === today) return;
   const s = await store.userBotSettings(userId).catch(() => ({ c2cEnabled: true, lowCreditAlerts: true }));
   if (!s.lowCreditAlerts) return;
+  if (lowCreditAlertedAt.size > 10_000) lowCreditAlertedAt.clear();
   lowCreditAlertedAt.set(userId, today);
   const user = await client.users.fetch(userId).catch(() => null);
   await user?.send(`You're down to ${balance} token${balance === 1 ? "" : "s"} — they refresh daily at midnight UTC. Settings: ${config.siteUrl}/dashboard`).catch(() => {});
@@ -154,6 +157,14 @@ function nextHourBoundary(): Date {
   const d = new Date();
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCHours() + 1));
 }
+
+// Refunds are fire-and-forget on the reply path but never silent — a failed
+// refund is real money to the user, so a drop gets logged + counted.
+const refundTurn = (payerId: string, n: number, reason: string) =>
+  store.refundCredits(payerId, n, reason).catch(e => {
+    inc("credits.refund_error");
+    logError(`credit refund failed for ${payerId} (${reason})`, e);
+  });
 
 // MemoryStore.create() runs migrations; EventStore shares the same sql connection.
 let store: MemoryStore;
@@ -503,6 +514,9 @@ async function sweepMissedSignals(windowMs: number) {
       // and budget-aware rescheduling for free. A failed enqueue leaves the
       // durable mark in place so the next pass retries.
       const queuedMarks: Array<{ id: string; result: string }> = [];
+      // Same free+hosted hourly coalescing as the live path — swept authors
+      // are carried on each event; brainFor above already warmed hostedScopes.
+      const hostedScope = isHostedScope(guild.id);
       for (const item of toEnqueue) {
         let replyToContent: string | undefined;
         if (item.replyToId) {
@@ -510,7 +524,9 @@ async function sweepMissedSignals(windowMs: number) {
           if (ref) replyToContent = `${ref.authorName}: ${ref.content}`;
         }
         try {
-          await enqueue(sql, guild.id, "extract", { event: item.event, replyToId: item.replyToId, replyToContent });
+          const acct = hostedScope ? await store.accountForDiscordUser(item.event.authorId).catch(() => null) : null;
+          const throttleMemory = hostedScope && (!acct || acct.plan === "free");
+          await enqueue(sql, guild.id, "extract", { event: item.event, replyToId: item.replyToId, replyToContent }, throttleMemory ? nextHourBoundary() : undefined);
           queuedMarks.push({ id: item.event.messageId, result: "queued" });
         } catch (error) { inc("jobs.enqueue_error"); logError("Sweep enqueue failed", error); }
       }
@@ -627,6 +643,7 @@ const extractDeps = {
   get contestModel() { return config.contestModel; },
   get imageMaxBytes() { return config.imageMaxBytes; },
   get dmLlmDailyCap() { return config.dmLlmDailyCap; },
+  get hostedDailyCap() { return config.hostedDailyLlmCap; },
   getAliases: (guildId: string) => guildLookups(guildId).then(e => e.map),
   invalidateLookups: (guildId: string) => { lookupCache.delete(guildId); },
 };
@@ -848,13 +865,17 @@ async function handleDmMessage(
   const hostedDm = isHostedScope(dmScope);
   let chargedDm = 0;
   let dmBalance = 0;
+  let dmReplied = false;
   if (hostedDm) {
     const spend = await store.spendCredits(userId, 2, "dm_turn");
     if (!spend.ok) {
       inc("credits.insufficient");
       replyThrottle.refund(dmScope, userId);
       if (budgetNoticeOnce(message.channel.id)) {
-        await message.reply({ content: TOKEN_EMPTY, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+        // A cached account can outlive a dashboard unlink by a minute — the
+        // live miss above evicted it, so a re-check says which notice fits.
+        const stillLinked = await store.accountForDiscordUser(userId).catch(() => null);
+        await message.reply({ content: stillLinked ? TOKEN_EMPTY : LINK_PROMPT, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
       }
       return;
     }
@@ -904,8 +925,11 @@ async function handleDmMessage(
       journal,
     };
 
+    // visionClient is always operator-key spend (BYOK users' images run on it
+    // too) — so it counts against the hosted:global breaker, not just the
+    // scope cap.
     const meteredVision = visionClient
-      ? meteredClient(visionClient, { guildId: dmScope, store, getCap: async () => config.dmLlmDailyCap })
+      ? meteredClient(meteredClient(visionClient, { guildId: dmScope, store, getCap: async () => config.dmLlmDailyCap }), { guildId: "hosted:global", store, getCap: async () => config.hostedDailyLlmCap })
       : undefined;
     const imgDescs = images.length && config.visionModel
       ? (await Promise.all(images.map(async a => {
@@ -942,11 +966,12 @@ async function handleDmMessage(
     const clean = text ? scrubMentions(text, lookups.names) : "";
     if (clean && looksLikeSchemaLeak(clean)) {
       inc("reply.schema_leak"); replyThrottle.refund(dmScope, userId);
-      if (chargedDm) store.refundCredits(userId, 1, "dm_turn_refund").catch(() => {});
+      if (chargedDm) refundTurn(userId, 1, "dm_turn_refund");
       return;
     }
     if (clean) {
       const sent = await message.reply({ content: clean, allowedMentions: { parse: [], repliedUser: false } });
+      dmReplied = true;
       inc("reply.sent");
       await store.recordMessage({
         guildId: dmScope,
@@ -971,13 +996,15 @@ async function handleDmMessage(
     } else {
       inc("reply.empty");
       replyThrottle.refund(dmScope, userId);
-      if (chargedDm) store.refundCredits(userId, 1, "dm_turn_refund").catch(() => {});
+      if (chargedDm) refundTurn(userId, 1, "dm_turn_refund");
     }
   } catch (error) {
     if (error instanceof BudgetExceeded) {
       inc("budget.reply_blocked");
       replyThrottle.refund(dmScope, userId);
-      if (chargedDm) store.refundCredits(userId, 1, "dm_turn_refund").catch(() => {});
+      // Only refund the reply-leg if no reply actually landed — a bookkeeping
+      // throw after send shouldn't claw back a delivered turn.
+      if (chargedDm && !dmReplied) refundTurn(userId, 1, "dm_turn_refund");
       if (budgetNoticeOnce(message.channel.id)) {
         const hostedOut = error.guildId === "hosted:global";
         await message.reply({ content: hostedOut ? HOSTED_CAPACITY : "We've hit today's DM message limit — it resets at midnight UTC.", allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
@@ -987,7 +1014,7 @@ async function handleDmMessage(
     inc("llm.reply_error");
     logError("DM reply generation failed", error);
     replyThrottle.refund(dmScope, userId);
-    if (chargedDm) store.refundCredits(userId, 1, "dm_turn_refund").catch(() => {});
+    if (chargedDm && !dmReplied) refundTurn(userId, 1, "dm_turn_refund");
   }
 }
 
@@ -1094,7 +1121,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   // client is operator spend but still counts against this guild's daily cap —
   // metered here (undefined → describeImage uses the brain's metered client).
   const meteredVision = visionClient
-    ? meteredClient(visionClient, { guildId: event.guildId, store, getCap: async () => (await store.settings(event.guildId, config.rawMessageRetentionDays)).llmDailyCap })
+    ? meteredClient(meteredClient(visionClient, { guildId: event.guildId, store, getCap: async () => (await store.settings(event.guildId, config.rawMessageRetentionDays)).llmDailyCap }), { guildId: "hosted:global", store, getCap: async () => config.hostedDailyLlmCap })
     : undefined;
   const describeImages = (list: Array<AttachmentMeta & { contentType: string }>, activeBrain: Brain) =>
     Promise.all(list.map(async a => {
@@ -1109,6 +1136,10 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     })).then(list => list.filter((d): d is string => !!d));
   let imageDescs: Promise<string[]> | undefined;
   const getImageDescriptions = (activeBrain: Brain) => (imageDescs ??= describeImages(images, activeBrain));
+  // Resolve the scope brain BEFORE the throttle check — hostedScopes only
+  // populates on resolution, so checking isHostedScope before brainFor would
+  // read a cold cache as non-hosted and skip the free-tier throttle.
+  const brain = await brainFor(event.guildId);
   // Extraction, contest detection, and the event pipeline all defer to the
   // 'extract' job — the live path keeps only recordMessage/decide/reply so a
   // busy guild can't stack unbounded concurrent LLM calls inside one handler.
@@ -1130,10 +1161,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   // Replies need summoned companions AND a resolvable brain — but archiving
   // and extraction above do not, so an enabled guild with zero companions
   // still builds memory (and /privacy's "Observing" status stays honest).
-  if (!settings.replyEnabled || !guildCompanions.length) return;
-  // Server plumbing resolves a Brain from summoned companions' owners (or env fallback).
-  const brain = await brainFor(event.guildId);
-  if (!brain) return;
+  if (!settings.replyEnabled || !guildCompanions.length || !brain) return;
 
   const selection = selectCompanionForTurn(
     {
@@ -1195,14 +1223,18 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   if (!replyThrottle.consume(event.guildId, throttleActor)) { inc("reply.cooldown"); return; }
   let chargedGuild = 0;
   let guildBalance = 0;
+  let guildReplied = false;
   if (hostedGuild) {
     const cost = senderCompanion ? 1 : 2;
     const spend = await store.spendCredits(payerId, cost, senderCompanion ? "c2c" : "guild_turn");
     if (!spend.ok) {
       inc("credits.insufficient");
       replyThrottle.refund(event.guildId, throttleActor);
+      // A cached account can outlive a dashboard unlink — re-check which
+      // notice fits (c2c owners get silence either way).
       if (!senderCompanion && budgetNoticeOnce(event.channelId)) {
-        await message.reply({ content: TOKEN_EMPTY, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+        const stillLinked = await store.accountForDiscordUser(payerId).catch(() => null);
+        await message.reply({ content: stillLinked ? TOKEN_EMPTY : LINK_PROMPT, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
       }
       return;
     }
@@ -1295,16 +1327,17 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     const clean = text ? scrubMentions(text, lookups.names) : "";
     if (clean && looksLikeSchemaLeak(clean)) {
       inc("reply.schema_leak"); replyThrottle.refund(event.guildId, throttleActor);
-      if (chargedGuild) store.refundCredits(payerId, 1, "guild_turn_refund").catch(() => {});
+      if (chargedGuild) refundTurn(payerId, 1, "guild_turn_refund");
       return;
     }
     if (clean) {
       const sent = await sendAsCompanion(message, chosen, clean, client.user!.id);
       if (!sent) {
         replyThrottle.refund(event.guildId, throttleActor);
-        if (chargedGuild) store.refundCredits(payerId, 1, "guild_turn_refund").catch(() => {});
+        if (chargedGuild) refundTurn(payerId, 1, "guild_turn_refund");
         return;
       }
+      guildReplied = true;
       convo.noteReply(selection.convoKey);
       convo.noteReply(selection.floorKey);
       inc("reply.sent");
@@ -1324,10 +1357,12 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
         companionId: chosen.id, triggerMessageId: event.messageId,
         replyMessageId: sent.id, channelId: event.channelId,
       }, journalDelay).catch(() => inc("jobs.enqueue_error"));
-      if (chargedGuild && !senderCompanion) void maybeAlertLowCredit(payerId, guildBalance);
+      // c2c hops spend the owner's tokens too — the alert is their spend
+      // control, not just the human-payer path's.
+      if (chargedGuild) void maybeAlertLowCredit(payerId, guildBalance);
     } else {
       inc("reply.empty"); replyThrottle.refund(event.guildId, throttleActor);
-      if (chargedGuild) store.refundCredits(payerId, 1, "guild_turn_refund").catch(() => {});
+      if (chargedGuild) refundTurn(payerId, 1, "guild_turn_refund");
     }
     if (config.replyExit && endConversation && convo.leave(selection.convoKey, event.authorId)) {
       inc("convo.leave.model");
@@ -1336,7 +1371,9 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     if (error instanceof BudgetExceeded) {
       inc("budget.reply_blocked");
       replyThrottle.refund(event.guildId, throttleActor);
-      if (chargedGuild) store.refundCredits(payerId, 1, "guild_turn_refund").catch(() => {});
+      // Only refund the reply-leg when no reply landed — a bookkeeping throw
+      // after send shouldn't claw back a delivered turn.
+      if (chargedGuild && !guildReplied) refundTurn(payerId, 1, "guild_turn_refund");
       if (budgetNoticeOnce(event.channelId)) {
         const hostedOut = error.guildId === "hosted:global";
         await message.reply({ content: hostedOut ? HOSTED_CAPACITY : "I've hit this server's daily LLM limit, so I can't respond right now — it resets at midnight UTC. An admin can raise it with `/limits`.", allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
@@ -1345,7 +1382,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     }
     inc("llm.reply_error"); logError("Reply generation failed", error);
     replyThrottle.refund(event.guildId, throttleActor);
-    if (chargedGuild) store.refundCredits(payerId, 1, "guild_turn_refund").catch(() => {});
+    if (chargedGuild && !guildReplied) refundTurn(payerId, 1, "guild_turn_refund");
   }
 }
 

@@ -1374,6 +1374,131 @@ const migrations: Migration[] = [
       await sql`DROP TABLE IF EXISTS user_bot_settings`;
     },
   },
+  // ── v30: account + credits hardening ────────────────────────────────────────
+  // Review fixes: v26 granted authenticated a table-level INSERT on
+  // web_profiles that v27 never revoked — a user with no profile row could
+  // forge plan/credits/discord_user_id. The handle_new_user trigger is the
+  // only legitimate row creator, so INSERT is revoked entirely; the pre-v26
+  // users who motivated the exploit get a backfill here (sign-in never
+  // re-fires an INSERT trigger, so they'd otherwise stay row-less forever).
+  // claim_link_code locks its code row (concurrent claims raced the
+  // claimed_by check) and normalizes input (dash optional). credit_ledger's
+  // policy uses (select auth.uid()) for per-statement evaluation like the
+  // other v26-v29 policies.
+  {
+    version: 30,
+    name: "v30_account_credits_hardening",
+    up: async (sql) => {
+      await sql`
+        DO $fix$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'web_profiles') THEN
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'REVOKE INSERT ON public.web_profiles FROM authenticated';
+            END IF;
+            EXECUTE $back$
+              INSERT INTO public.web_profiles (id, display_name)
+              SELECT u.id, coalesce(
+                nullif(u.raw_user_meta_data->>'display_name', ''),
+                nullif(u.raw_user_meta_data->>'full_name', ''),
+                nullif(u.raw_user_meta_data->>'name', ''),
+                split_part(u.email, '@', 1)
+              )
+              FROM auth.users u
+              WHERE NOT EXISTS (SELECT 1 FROM public.web_profiles w WHERE w.id = u.id)
+              ON CONFLICT (id) DO NOTHING
+            $back$;
+
+            EXECUTE $rpc$
+              CREATE OR REPLACE FUNCTION public.claim_link_code(p_code text)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                rec record;
+                n integer;
+                norm text := upper(regexp_replace(coalesce(p_code, ''), '[^0-9A-Za-z]', '', 'g'));
+              BEGIN
+                IF uid IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                -- Codes are XXXX-XXXX but users drop the dash — normalize to
+                -- the stored form before lookup.
+                IF length(norm) <> 8 THEN
+                  RAISE EXCEPTION 'invalid_code: that code does not exist — check it and try again';
+                END IF;
+                norm := substr(norm, 1, 4) || '-' || substr(norm, 5, 4);
+                -- FOR UPDATE serializes concurrent claims of the same code —
+                -- the second claimant sees the first's claimed_by, not a
+                -- duplicate-key error.
+                SELECT * INTO rec FROM public.link_codes
+                WHERE code = norm
+                FOR UPDATE;
+                IF NOT FOUND THEN
+                  RAISE EXCEPTION 'invalid_code: that code does not exist — check it and try again';
+                END IF;
+                IF rec.claimed_by IS NOT NULL THEN
+                  RAISE EXCEPTION 'code_used: that code was already claimed — run /link again for a fresh one';
+                END IF;
+                IF rec.expires_at < now() THEN
+                  RAISE EXCEPTION 'code_expired: that code expired — run /link again for a fresh one';
+                END IF;
+                IF EXISTS (
+                  SELECT 1 FROM public.web_profiles
+                  WHERE discord_user_id = rec.discord_user_id AND id <> uid
+                ) THEN
+                  RAISE EXCEPTION 'discord_already_linked: this Discord account is already linked to a different Characterly account';
+                END IF;
+                UPDATE public.web_profiles
+                SET discord_user_id = rec.discord_user_id, updated_at = now()
+                WHERE id = uid;
+                GET DIAGNOSTICS n = ROW_COUNT;
+                IF n = 0 THEN
+                  RAISE EXCEPTION 'no_profile: account row missing — contact support';
+                END IF;
+                UPDATE public.link_codes SET claimed_by = uid WHERE code = rec.code;
+              END
+              $body$
+            $rpc$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.claim_link_code(text) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.claim_link_code(text) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.claim_link_code(text) TO authenticated';
+            END IF;
+
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated')
+               AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'credit_ledger') THEN
+              EXECUTE 'DROP POLICY IF EXISTS credit_ledger_select_own ON public.credit_ledger';
+              EXECUTE 'CREATE POLICY credit_ledger_select_own ON public.credit_ledger
+                FOR SELECT TO authenticated
+                USING (account_id = (select auth.uid()))';
+            END IF;
+          END IF;
+        END $fix$
+      `;
+    },
+    down: async (sql) => {
+      await sql`
+        DO $undo$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+            EXECUTE 'GRANT INSERT ON public.web_profiles TO authenticated';
+            EXECUTE 'DROP POLICY IF EXISTS credit_ledger_select_own ON public.credit_ledger';
+            EXECUTE 'CREATE POLICY credit_ledger_select_own ON public.credit_ledger
+              FOR SELECT TO authenticated
+              USING (account_id = auth.uid())';
+          END IF;
+        END $undo$
+      `;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

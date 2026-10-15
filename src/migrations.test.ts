@@ -476,3 +476,37 @@ test("migration v21 creates companions, guild_companions, and webhook_messages t
     assert.equal(gone.length, 0, "rollback should drop all v21 tables");
   } finally { await sql.end(); }
 });
+
+test("migration v29 creates user_bot_settings outside the auth gate and rolls back", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any);
+
+    // Ungated half of v29 — the bot reads settings on plain Postgres too.
+    const cols = await sql<Array<{ column_name: string }>>`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'user_bot_settings'
+    `;
+    assert.deepEqual(
+      cols.map(c => c.column_name).sort(),
+      ["c2c_enabled", "discord_user_id", "low_credit_alerts", "updated_at"],
+    );
+    const rls = await sql<Array<{ relrowsecurity: boolean }>>`
+      SELECT relrowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relname = 'user_bot_settings'
+    `;
+    assert.equal(rls[0]?.relrowsecurity, true, "user_bot_settings must have RLS enabled");
+
+    // Auth-gated objects correctly stay absent on plain Postgres.
+    const gated = await sql<Array<{ t: string | null; c: string | null }>>`
+      SELECT to_regclass('public.credit_ledger') AS t, to_regclass('public.web_profiles') AS c
+    `;
+    assert.equal(gated[0].t, null);
+    assert.equal(gated[0].c, null);
+
+    await runMigrations(sql as any, 28);
+    const gone = await sql`SELECT to_regclass('public.user_bot_settings') AS t`;
+    assert.equal(gone[0].t, null, "rollback should drop user_bot_settings");
+  } finally { await sql.end(); }
+});

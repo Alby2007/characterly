@@ -44,6 +44,10 @@ export interface ExtractJobDeps {
    * inside a dm:<id> job meter against this instead of the auto-created
    * default, matching the live DM path's DM_LLM_DAILY_CAP. */
   dmLlmDailyCap?: number;
+  /** The fleet-wide hosted breaker (scope 'hosted:global') — a separate
+   * vision client is operator spend regardless of who's BYOK, so vision calls
+   * count against it. */
+  hostedDailyCap?: number;
   /** Alias/name lookups — index.ts serves these from its TTL cache; tests can
    * return a static map. */
   getAliases: (guildId: string) => Promise<AliasMap>;
@@ -96,12 +100,15 @@ export async function runExtractJob(payload: ExtractJobPayload, deps: ExtractJob
   // undefined, describeImage falls back to the brain's already-metered client.
   let imageContext: string | undefined;
   if (images.length && deps.visionModel) {
-    const vision = deps.visionClient
+    const scopeMetered = deps.visionClient
       ? meteredClient(deps.visionClient, { guildId, store: deps.store, getCap: async () =>
           guildId.startsWith("dm:") && deps.dmLlmDailyCap !== undefined
             ? deps.dmLlmDailyCap
             : (await deps.store.settings(guildId)).llmDailyCap })
       : undefined;
+    const vision = scopeMetered && deps.hostedDailyCap !== undefined
+      ? meteredClient(scopeMetered, { guildId: "hosted:global", store: deps.store, getCap: async () => deps.hostedDailyCap! })
+      : scopeMetered;
     const descs = await Promise.all(images.map(async a => {
       try {
         const d = await brain.describeImage({ url: a.url, contextText: event.content, maxBytes: deps.imageMaxBytes }, deps.visionModel!, vision);
