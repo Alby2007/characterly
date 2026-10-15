@@ -12,3 +12,4 @@ keys/
 # website build output
 website/dist/
 website/.cloudflare/
+supabase/.temp/
