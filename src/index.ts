@@ -291,6 +291,19 @@ client.once(Events.ClientReady, async ready => {
       await opsAlert(opsDeps, `🟢 Characterly online — sha \`${opsDeps.gitSha ?? "?"}\` · migrations applied · host watchdog armed`);
     } catch (error) { inc("ops.init_error"); logError("house ops init failed", error); }
   }
+  // Backfill Discord display fields for code-linked accounts predating v38 —
+  // their claims only stamped discord_user_id. One user fetch per gap, once
+  // per boot; afterwards the snapshot rides on web_profiles like OAuth links.
+  if (store.creditsSupported) {
+    const missing = await store.linkedProfilesMissingDiscordIdentity()
+      .catch(e => { inc("ops.init_error"); logError("discord identity backfill scan failed", e); return [] as string[]; });
+    for (const discordUserId of missing) {
+      const u = await client.users.fetch(discordUserId).catch(() => null);
+      if (!u) continue;
+      await store.syncDiscordIdentity(discordUserId, u.globalName ?? u.username, u.displayAvatarURL({ size: 64 }))
+        .catch(e => { inc("ops.init_error"); logError("discord identity backfill failed", e); });
+    }
+  }
   console.log(`Characterly online as ${ready.user.tag}`);
 });
 

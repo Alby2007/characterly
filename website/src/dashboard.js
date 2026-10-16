@@ -87,10 +87,23 @@ async function renderDiscordCard() {
         $("#discord-avatar").textContent = $("#discord-name").textContent.charAt(0).toUpperCase();
       }
     } else {
-      $("#discord-name").textContent = "Discord account";
+      // Code-linked lane: the bot snapshots username/avatar onto the code at
+      // /link time and claim_link_code stamps them onto web_profiles. Rows
+      // linked before v38 stay blank until the bot's boot backfill heals them.
+      const name = typeof profile?.discord_username === "string" && profile.discord_username
+        ? profile.discord_username : "Discord account";
+      $("#discord-name").textContent = name;
       $("#discord-sub").textContent = `Linked via code — ID ${codeLinkedId}`;
       $("#discord-avatar").innerHTML = "";
-      $("#discord-avatar").textContent = "#";
+      const av = profile?.discord_avatar_url;
+      if (typeof av === "string" && av.startsWith("https://")) {
+        const img = document.createElement("img");
+        img.src = av;
+        img.alt = "";
+        $("#discord-avatar").append(img);
+      } else {
+        $("#discord-avatar").textContent = (name || "#").charAt(0).toUpperCase();
+      }
     }
     const doUnlink = discordIdentity
       ? async () => {

@@ -52,3 +52,52 @@ test("different users get different codes", async () => {
   assert.equal((await sql`SELECT count(*)::int AS n FROM link_codes`)[0].n, 2);
   await sql.end();
 });
+
+test("createLinkCode carries the Discord profile snapshot for the claim to copy", async () => {
+  const sql = makeTestSql();
+  const { store } = await makeStore(sql);
+  const code = await store.createLinkCode("u-alice", 10, {
+    username: "Alice W.",
+    avatarUrl: "https://cdn.discordapp.com/avatars/u-alice/abc.png",
+  });
+  const rows = await sql`SELECT discord_username, discord_avatar_url FROM link_codes WHERE code = ${code}`;
+  assert.equal(rows[0].discord_username, "Alice W.");
+  assert.equal(rows[0].discord_avatar_url, "https://cdn.discordapp.com/avatars/u-alice/abc.png");
+  // No profile passed → snapshot columns stay NULL (claim copies NULLs harmlessly).
+  const bare = await store.createLinkCode("u-bob");
+  const bareRow = await sql`SELECT discord_username FROM link_codes WHERE code = ${bare}`;
+  assert.equal(bareRow[0].discord_username, null);
+  await sql.end();
+});
+
+test("syncDiscordIdentity fills the snapshot; missing-scan only lists the gaps", async () => {
+  const sql = makeTestSql();
+  // web_profiles is auth-gated — recreate the minimal fixture columns v38 adds.
+  await sql`
+    CREATE TABLE IF NOT EXISTS web_profiles (
+      id UUID PRIMARY KEY, discord_user_id TEXT UNIQUE,
+      discord_username TEXT, discord_avatar_url TEXT,
+      plan TEXT NOT NULL DEFAULT 'free', credit_balance INT NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  const { store } = await makeStore(sql);
+  assert.equal(await store.initCreditsSupport(), true);
+  try {
+    await sql`INSERT INTO web_profiles (id, discord_user_id) VALUES (gen_random_uuid(), 'u-old'), (gen_random_uuid(), NULL)`;
+    await sql`INSERT INTO web_profiles (id, discord_user_id, discord_username) VALUES (gen_random_uuid(), 'u-has', 'Already')`;
+    assert.deepEqual((await store.linkedProfilesMissingDiscordIdentity()).sort(), ["u-old"]);
+
+    await store.syncDiscordIdentity("u-old", "OldUser", "https://cdn.discordapp.com/avatars/u-old/x.png");
+    assert.equal((await store.linkedProfilesMissingDiscordIdentity()).length, 0);
+    const row = await sql`SELECT discord_username, discord_avatar_url FROM web_profiles WHERE discord_user_id = 'u-old'`;
+    assert.equal(row[0].discord_username, "OldUser");
+    assert.equal(row[0].discord_avatar_url, "https://cdn.discordapp.com/avatars/u-old/x.png");
+    // An unlinked account row is never listed or touched.
+    const none = await sql`SELECT discord_username FROM web_profiles WHERE discord_user_id IS NULL`;
+    assert.equal(none[0].discord_username, null);
+  } finally {
+    await sql`DROP TABLE IF EXISTS web_profiles`;
+    await sql.end();
+  }
+});

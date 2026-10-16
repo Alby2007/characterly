@@ -3429,18 +3429,25 @@ export class MemoryStore {
   // ── Account linking ──────────────────────────────────────────────────────
 
   /** Mint a one-time link code for /link — the web account claims it via
-   * claim_link_code(), which stamps web_profiles.discord_user_id. One active
-   * code per Discord user; issuing a new one sweeps stale/expired rows.
+   * claim_link_code(), which stamps web_profiles.discord_user_id plus the
+   * profile snapshot carried on the code row (username + avatar URL), so a
+   * code-linked account renders the same as an OAuth one. One active code
+   * per Discord user; issuing a new one sweeps stale/expired rows.
    * Alphabet avoids ambiguous glyphs (0/O, 1/I) since users retype it. */
-  async createLinkCode(discordUserId: string, ttlMinutes = 10): Promise<string> {
+  async createLinkCode(
+    discordUserId: string,
+    ttlMinutes = 10,
+    profile?: { username?: string | null; avatarUrl?: string | null },
+  ): Promise<string> {
     const alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
     let code = "";
     for (let i = 0; i < 8; i++) code += alphabet[randomInt(alphabet.length)];
     code = `${code.slice(0, 4)}-${code.slice(4)}`;
     await this.sql`DELETE FROM link_codes WHERE discord_user_id = ${discordUserId} OR expires_at < NOW()`;
     await this.sql`
-      INSERT INTO link_codes (code, discord_user_id, expires_at)
-      VALUES (${code}, ${discordUserId}, NOW() + (${ttlMinutes} || ' minutes')::interval)
+      INSERT INTO link_codes (code, discord_user_id, expires_at, discord_username, discord_avatar_url)
+      VALUES (${code}, ${discordUserId}, NOW() + (${ttlMinutes} || ' minutes')::interval,
+              ${profile?.username ?? null}, ${profile?.avatarUrl ?? null})
     `;
     return code;
   }
@@ -3485,6 +3492,30 @@ export class MemoryStore {
     if (this.accountCache.size >= MemoryStore.RESOLUTION_CACHE_MAX) this.accountCache.clear();
     this.accountCache.set(discordUserId, { account, at: Date.now() });
     return account;
+  }
+
+  /** Linked accounts still missing the Discord display snapshot — code-links
+   *  claimed before v38 only stamped discord_user_id. The boot backfill walks
+   *  these and re-fetches each profile from Discord. */
+  async linkedProfilesMissingDiscordIdentity(): Promise<string[]> {
+    if (!this.creditsEnabled) return [];
+    const rows = await this.sql<Array<{ discord_user_id: string }>>`
+      SELECT discord_user_id FROM web_profiles
+      WHERE discord_user_id IS NOT NULL AND (discord_username IS NULL OR discord_username = '')
+    `;
+    return rows.map(r => r.discord_user_id);
+  }
+
+  /** Stamp the Discord display fields on a linked web account. Bot-only —
+   *  postgres bypasses the column-level grants that keep authenticated
+   *  clients from writing these (same guarantee as discord_user_id). */
+  async syncDiscordIdentity(discordUserId: string, username: string, avatarUrl: string): Promise<void> {
+    if (!this.creditsEnabled) return;
+    await this.sql`
+      UPDATE web_profiles
+      SET discord_username = ${username}, discord_avatar_url = ${avatarUrl}, updated_at = NOW()
+      WHERE discord_user_id = ${discordUserId}
+    `;
   }
 
   private async writeLedger(tx: Sql, accountId: string, delta: number, kind: string, reason: string | null): Promise<number> {

@@ -643,3 +643,33 @@ test("migration v37 creates listing_ratings + comment_reports with constraints, 
     assert.ok(gone.every(r => r.t === null), "rollback should drop both v37 tables");
   } finally { await sql.end(); }
 });
+
+test("migration v38 adds the Discord profile snapshot columns to link_codes", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any);
+
+    const cols = await sql<Array<{ column_name: string; is_nullable: string }>>`
+      SELECT column_name, is_nullable FROM information_schema.columns
+      WHERE table_name = 'link_codes' AND column_name IN ('discord_username', 'discord_avatar_url')`;
+    assert.equal(cols.length, 2, "link_codes needs both snapshot columns");
+    assert.ok(cols.every(c => c.is_nullable === "YES"), "snapshot columns must be nullable — bare mints and old rows");
+
+    // web_profiles discord_* are auth-gated: no auth schema in test Postgres
+    // → the columns must NOT appear here (they're created inside the gate).
+    const gated = await sql<Array<{ t: string | null }>>`SELECT to_regclass('public.web_profiles') AS t`;
+    assert.equal(gated[0].t, null, "web_profiles shouldn't exist outside Supabase auth");
+
+    // Rollback drops the link_codes columns; the code row keeps working.
+    await sql`INSERT INTO link_codes (code, discord_user_id, expires_at, discord_username)
+              VALUES ('AAAA-AAAA', 'u-x', NOW() + INTERVAL '5 minutes', 'Alice')`;
+    await runMigrations(sql as any, 37);
+    const gone = await sql<Array<{ column_name: string }>>`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'link_codes' AND column_name IN ('discord_username', 'discord_avatar_url')`;
+    assert.equal(gone.length, 0, "rollback should drop the snapshot columns");
+    const row = await sql`SELECT code FROM link_codes WHERE code = 'AAAA-AAAA'`;
+    assert.equal(row.length, 1, "the code row itself survives the column drop");
+  } finally { await sql.end(); }
+});

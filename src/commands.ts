@@ -946,7 +946,13 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
   }
   const guildId = interaction.guildId ?? `dm:${interaction.user.id}`;
   if (interaction.commandName === "link") {
-    const code = await store.createLinkCode(interaction.user.id);
+    // The bot already knows the Discord profile — snapshot it onto the code so
+    // claim_link_code can stamp web_profiles.discord_username/avatar_url and a
+    // code-linked account renders identically to an OAuth one.
+    const code = await store.createLinkCode(interaction.user.id, 10, {
+      username: interaction.user.globalName ?? interaction.user.username,
+      avatarUrl: interaction.user.displayAvatarURL({ size: 64 }),
+    });
     return interaction.reply({
       ephemeral: true,
       content:

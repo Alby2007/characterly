@@ -25,6 +25,8 @@ async function fixture(sql: ReturnType<typeof makeTestSql>) {
       id                  UUID PRIMARY KEY,
       display_name        TEXT,
       discord_user_id     TEXT UNIQUE,
+      discord_username    TEXT,
+      discord_avatar_url  TEXT,
       plan                TEXT NOT NULL DEFAULT 'free' CHECK (plan IN ('free','premium')),
       credit_balance      INT NOT NULL DEFAULT 0,
       last_daily_grant_on DATE,

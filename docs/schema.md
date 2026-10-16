@@ -521,6 +521,8 @@ Web account profiles for Supabase Auth users (v26) — the "real life user" half
 | `id` | UUID PK | FK → `auth.users.id ON DELETE CASCADE` — the Supabase Auth user |
 | `display_name` | TEXT | Editable display name (seeded from `raw_user_meta_data`) |
 | `discord_user_id` | TEXT UNIQUE NULL | Linked Discord snowflake — **server-managed** (v27): written only by the `on_identity_sync` trigger or the `claim_link_code` rpc; not user-writable |
+| `discord_username` | TEXT NULL | Display snapshot of the linked Discord account (v38) — stamped by the trigger/`claim_link_code` like `discord_user_id`; display-only, never an auth key |
+| `discord_avatar_url` | TEXT NULL | Same snapshot — the avatar URL the dashboard renders |
 | `stripe_customer_id` | TEXT UNIQUE NULL | Reserved for billing — server-managed, not user-writable |
 | `created_at` / `updated_at` | TIMESTAMPTZ | |
 
@@ -529,9 +531,9 @@ Web account profiles for Supabase Auth users (v26) — the "real life user" half
 **Supporting functions & triggers** (all under the auth-schema gate, `SECURITY DEFINER`, `search_path = ''`, revoked from PUBLIC/anon):
 
 - `internal.handle_new_user()` + `on_auth_user_created` (v26; metadata fallbacks `display_name`/`full_name`/`name` from v28) — inserts a `web_profiles` row for each new `auth.users` row.
-- `internal.sync_discord_identity()` + `on_identity_sync` on `auth.identities` (v27) — on `INSERT`/`DELETE` of a `discord` identity, copies `provider_id` into `web_profiles.discord_user_id` (or NULLs it back out, guarded on the exact provider_id). Covers OAuth signup, `linkIdentity`, auto-merged identities, unlink, and account deletion; a duplicate link raises `discord_already_linked`. v27 also backfilled pre-existing Discord sign-ins.
-- `public.claim_link_code(p_code)` (v27; v28 adds a rowcount check so a missing `web_profiles` row raises `no_profile` instead of silently consuming the code) — `EXECUTE` granted to `authenticated`; validates a `/link` code (exists, unclaimed, unexpired, Discord account not already linked elsewhere) and stamps `discord_user_id`. Errors are `tag: message` strings (`invalid_code`, `code_used`, `code_expired`, `discord_already_linked`, `no_profile`).
-- `public.unlink_discord()` (v28) — `EXECUTE` granted to `authenticated`; clears the caller's `discord_user_id`. Needed because code-claimed links have no `auth.identities` row for `unlinkIdentity` to remove (identity-backed links should unlink via `unlinkIdentity`, which the trigger mirrors).
+- `internal.sync_discord_identity()` + `on_identity_sync` on `auth.identities` (v27) — on `INSERT`/`DELETE` of a `discord` identity, copies `provider_id` into `web_profiles.discord_user_id` (or NULLs it back out, guarded on the exact provider_id). Covers OAuth signup, `linkIdentity`, auto-merged identities, unlink, and account deletion; a duplicate link raises `discord_already_linked`. v27 also backfilled pre-existing Discord sign-ins. v38 extended it to stamp `discord_username`/`discord_avatar_url` from `identity_data` (`full_name` → `name` → `custom_claims.global_name`, plus `avatar_url`), so OAuth-linked profiles carry the same display snapshot as code-linked ones.
+- `public.claim_link_code(p_code)` (v27; v28 adds a rowcount check so a missing `web_profiles` row raises `no_profile` instead of silently consuming the code) — `EXECUTE` granted to `authenticated`; validates a `/link` code (exists, unclaimed, unexpired, Discord account not already linked elsewhere) and stamps `discord_user_id` plus — since v38 — the `discord_username`/`discord_avatar_url` snapshot the bot stored on the code at mint. Errors are `tag: message` strings (`invalid_code`, `code_used`, `code_expired`, `discord_already_linked`, `no_profile`).
+- `public.unlink_discord()` (v28) — `EXECUTE` granted to `authenticated`; clears the caller's `discord_user_id` and, since v38, the display snapshot too. Needed because code-claimed links have no `auth.identities` row for `unlinkIdentity` to remove (identity-backed links should unlink via `unlinkIdentity`, which the trigger mirrors).
 - `public.delete_own_account()` (v26) — `EXECUTE` granted to `authenticated`; deletes the caller's `auth.users` row (cascades to `web_profiles`).
 
 ---
@@ -547,6 +549,7 @@ One-time Discord → web linking codes (v27). `/link` in Discord mints a code (`
 | `created_at` | TIMESTAMPTZ | |
 | `expires_at` | TIMESTAMPTZ | 10-minute lifetime; minting a new code deletes prior/expired rows for the user |
 | `claimed_by` | UUID NULL | `auth.users.id` that claimed it — set exactly once |
+| `discord_username` / `discord_avatar_url` | TEXT NULL | Display snapshot of the Discord user at mint time (v38) — `claim_link_code` copies it onto `web_profiles` |
 
 **Index:** `link_codes_user (discord_user_id, expires_at)`. **RLS:** enabled with zero policies — only the bot (postgres role) reads/writes; web claims funnel through the security-definer rpc. Lives outside the auth-schema gate so `/link` works on any database.
 
@@ -781,3 +784,4 @@ Version tracking for the migration system.
 | 35 | `v35_listing_source_nullable` | `companion_listings.source_companion_id` drops `NOT NULL` — freehand creator-authored listings (`/companion action:create`) have no awakened source |
 | 36 | `v36_moderation_surface` | `listing_reports.category`, `marketplace_bans`, `moderation_events`, and the per-day rate-limit indexes (`reporter_user_id`/`creator_user_id`/`user_id` + timestamps) |
 | 37 | `v37_ratings_and_comment_reports` | `listing_ratings` (upsert-per-rater, `stars` 1–5 CHECK) + `comment_reports` (dedupe per `(message_id, reporter_user_id)`, shared daily report budget) — listing threads become the comment + rating surface |
+| 38 | `v38_discord_profile_snapshot` | `link_codes` + `web_profiles` gain `discord_username`/`discord_avatar_url`; `claim_link_code` copies the mint-time snapshot, the identity trigger stamps it from `identity_data`, `unlink_discord` clears it; OAuth rows backfilled — code-linked accounts render name/avatar like OAuth ones |

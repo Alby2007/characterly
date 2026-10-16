@@ -1958,6 +1958,326 @@ const migrations: Migration[] = [
       await sql`DROP TABLE IF EXISTS listing_ratings`;
     },
   },
+  // ── v38: Discord display snapshot on code links ────────────────────────────
+  // The OAuth lane renders name + avatar from auth.identities.identity_data;
+  // a /link code claim only stamped discord_user_id, so the dashboard showed a
+  // bare "#". The fix: the bot snapshots the Discord profile onto the code at
+  // mint (it knows the user already — no extra API call), claim_link_code
+  // copies it onto web_profiles, the identity trigger stamps the same columns
+  // for OAuth links (keeping the two lanes identical in web_profiles), and
+  // unlink_discord clears them. Existing code-linked rows backfill at boot —
+  // index.ts walks linked rows missing discord_username and re-fetches them.
+  {
+    version: 38,
+    name: "v38_discord_profile_snapshot",
+    up: async (sql) => {
+      // link_codes is created unconditionally in v27 (the bot needs it without
+      // Supabase auth), so its columns are unconditional too.
+      await sql`ALTER TABLE link_codes ADD COLUMN IF NOT EXISTS discord_username TEXT`;
+      await sql`ALTER TABLE link_codes ADD COLUMN IF NOT EXISTS discord_avatar_url TEXT`;
+      await sql`
+        DO $mig$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+            EXECUTE 'ALTER TABLE public.web_profiles ADD COLUMN IF NOT EXISTS discord_username TEXT';
+            EXECUTE 'ALTER TABLE public.web_profiles ADD COLUMN IF NOT EXISTS discord_avatar_url TEXT';
+
+            -- OAuth lane: stamp the same display fields from identity_data so
+            -- web_profiles alone describes either link kind. Delete clears all.
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION internal.sync_discord_identity()
+              RETURNS trigger
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              BEGIN
+                IF TG_OP = 'INSERT' AND new.provider = 'discord' THEN
+                  IF EXISTS (
+                    SELECT 1 FROM public.web_profiles
+                    WHERE discord_user_id = new.provider_id AND id <> new.user_id
+                  ) THEN
+                    RAISE EXCEPTION 'discord_already_linked: this Discord account is already linked to a different Characterly account';
+                  END IF;
+                  UPDATE public.web_profiles
+                  SET discord_user_id = new.provider_id,
+                      discord_username = coalesce(
+                        nullif(new.identity_data->>'full_name', ''),
+                        nullif(new.identity_data->>'name', ''),
+                        nullif(new.identity_data->'custom_claims'->>'global_name', '')
+                      ),
+                      discord_avatar_url = nullif(new.identity_data->>'avatar_url', ''),
+                      updated_at = now()
+                  WHERE id = new.user_id;
+                  RETURN new;
+                END IF;
+                IF TG_OP = 'DELETE' AND old.provider = 'discord' THEN
+                  -- Guard on the exact provider_id so a re-link to a different
+                  -- Discord account isn't clobbered by the old row's delete.
+                  UPDATE public.web_profiles
+                  SET discord_user_id = NULL, discord_username = NULL,
+                      discord_avatar_url = NULL, updated_at = now()
+                  WHERE id = old.user_id AND discord_user_id = old.provider_id;
+                  RETURN old;
+                END IF;
+                RETURN coalesce(new, old);
+              END
+              $body$
+            $fn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION internal.sync_discord_identity() FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION internal.sync_discord_identity() FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION internal.sync_discord_identity() FROM authenticated';
+            END IF;
+
+            -- Code lane: copy the profile snapshot the bot stored on the code.
+            -- Body identical to v30's hardened claim — only the UPDATE gained
+            -- the two snapshot columns.
+            EXECUTE $rpc$
+              CREATE OR REPLACE FUNCTION public.claim_link_code(p_code text)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                rec record;
+                n integer;
+                norm text := upper(regexp_replace(coalesce(p_code, ''), '[^0-9A-Za-z]', '', 'g'));
+              BEGIN
+                IF uid IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                -- Codes are XXXX-XXXX but users drop the dash — normalize to
+                -- the stored form before lookup.
+                IF length(norm) <> 8 THEN
+                  RAISE EXCEPTION 'invalid_code: that code does not exist — check it and try again';
+                END IF;
+                norm := substr(norm, 1, 4) || '-' || substr(norm, 5, 4);
+                -- FOR UPDATE serializes concurrent claims of the same code —
+                -- the second claimant sees the first's claimed_by, not a
+                -- duplicate-key error.
+                SELECT * INTO rec FROM public.link_codes
+                WHERE code = norm
+                FOR UPDATE;
+                IF NOT FOUND THEN
+                  RAISE EXCEPTION 'invalid_code: that code does not exist — check it and try again';
+                END IF;
+                IF rec.claimed_by IS NOT NULL THEN
+                  RAISE EXCEPTION 'code_used: that code was already claimed — run /link again for a fresh one';
+                END IF;
+                IF rec.expires_at < now() THEN
+                  RAISE EXCEPTION 'code_expired: that code expired — run /link again for a fresh one';
+                END IF;
+                IF EXISTS (
+                  SELECT 1 FROM public.web_profiles
+                  WHERE discord_user_id = rec.discord_user_id AND id <> uid
+                ) THEN
+                  RAISE EXCEPTION 'discord_already_linked: this Discord account is already linked to a different Characterly account';
+                END IF;
+                UPDATE public.web_profiles
+                SET discord_user_id = rec.discord_user_id,
+                    discord_username = rec.discord_username,
+                    discord_avatar_url = rec.discord_avatar_url,
+                    updated_at = now()
+                WHERE id = uid;
+                GET DIAGNOSTICS n = ROW_COUNT;
+                IF n = 0 THEN
+                  RAISE EXCEPTION 'no_profile: account row missing — contact support';
+                END IF;
+                UPDATE public.link_codes SET claimed_by = uid WHERE code = rec.code;
+              END
+              $body$
+            $rpc$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.claim_link_code(text) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.claim_link_code(text) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.claim_link_code(text) TO authenticated';
+            END IF;
+
+            -- Unlink must clear the snapshot too, or a code-linked profile
+            -- would keep wearing the Discord name/avatar after disconnecting.
+            EXECUTE $rpc$
+              CREATE OR REPLACE FUNCTION public.unlink_discord()
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+              BEGIN
+                IF uid IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                UPDATE public.web_profiles
+                SET discord_user_id = NULL, discord_username = NULL,
+                    discord_avatar_url = NULL, updated_at = now()
+                WHERE id = uid;
+                IF NOT FOUND THEN
+                  RAISE EXCEPTION 'no_profile: account row missing';
+                END IF;
+              END
+              $body$
+            $rpc$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.unlink_discord() FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.unlink_discord() FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.unlink_discord() TO authenticated';
+            END IF;
+
+            -- Backfill OAuth-linked profiles missing the new fields (the
+            -- trigger predates the columns). Code-linked rows without a
+            -- snapshot stay NULL — the bot heals those at boot.
+            EXECUTE $bf$
+              UPDATE public.web_profiles wp
+              SET discord_username = coalesce(
+                    nullif(i.identity_data->>'full_name', ''),
+                    nullif(i.identity_data->>'name', ''),
+                    nullif(i.identity_data->'custom_claims'->>'global_name', '')),
+                  discord_avatar_url = nullif(i.identity_data->>'avatar_url', ''),
+                  updated_at = now()
+              FROM auth.identities i
+              WHERE i.user_id = wp.id AND i.provider = 'discord'
+                AND wp.discord_user_id = i.provider_id AND wp.discord_username IS NULL
+            $bf$;
+          END IF;
+        END $mig$
+      `;
+    },
+    down: async (sql) => {
+      await sql`
+        DO $undo$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+            -- Restore the pre-v38 function bodies verbatim.
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION internal.sync_discord_identity()
+              RETURNS trigger
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              BEGIN
+                IF TG_OP = 'INSERT' AND new.provider = 'discord' THEN
+                  IF EXISTS (
+                    SELECT 1 FROM public.web_profiles
+                    WHERE discord_user_id = new.provider_id AND id <> new.user_id
+                  ) THEN
+                    RAISE EXCEPTION 'discord_already_linked: this Discord account is already linked to a different Characterly account';
+                  END IF;
+                  UPDATE public.web_profiles
+                  SET discord_user_id = new.provider_id, updated_at = now()
+                  WHERE id = new.user_id;
+                  RETURN new;
+                END IF;
+                IF TG_OP = 'DELETE' AND old.provider = 'discord' THEN
+                  UPDATE public.web_profiles
+                  SET discord_user_id = NULL, updated_at = now()
+                  WHERE id = old.user_id AND discord_user_id = old.provider_id;
+                  RETURN old;
+                END IF;
+                RETURN coalesce(new, old);
+              END
+              $body$
+            $fn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION internal.sync_discord_identity() FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION internal.sync_discord_identity() FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION internal.sync_discord_identity() FROM authenticated';
+            END IF;
+
+            EXECUTE $rpc$
+              CREATE OR REPLACE FUNCTION public.claim_link_code(p_code text)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                rec record;
+                n integer;
+                norm text := upper(regexp_replace(coalesce(p_code, ''), '[^0-9A-Za-z]', '', 'g'));
+              BEGIN
+                IF uid IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                IF length(norm) <> 8 THEN
+                  RAISE EXCEPTION 'invalid_code: that code does not exist — check it and try again';
+                END IF;
+                norm := substr(norm, 1, 4) || '-' || substr(norm, 5, 4);
+                SELECT * INTO rec FROM public.link_codes
+                WHERE code = norm
+                FOR UPDATE;
+                IF NOT FOUND THEN
+                  RAISE EXCEPTION 'invalid_code: that code does not exist — check it and try again';
+                END IF;
+                IF rec.claimed_by IS NOT NULL THEN
+                  RAISE EXCEPTION 'code_used: that code was already claimed — run /link again for a fresh one';
+                END IF;
+                IF rec.expires_at < now() THEN
+                  RAISE EXCEPTION 'code_expired: that code expired — run /link again for a fresh one';
+                END IF;
+                IF EXISTS (
+                  SELECT 1 FROM public.web_profiles
+                  WHERE discord_user_id = rec.discord_user_id AND id <> uid
+                ) THEN
+                  RAISE EXCEPTION 'discord_already_linked: this Discord account is already linked to a different Characterly account';
+                END IF;
+                UPDATE public.web_profiles
+                SET discord_user_id = rec.discord_user_id, updated_at = now()
+                WHERE id = uid;
+                GET DIAGNOSTICS n = ROW_COUNT;
+                IF n = 0 THEN
+                  RAISE EXCEPTION 'no_profile: account row missing — contact support';
+                END IF;
+                UPDATE public.link_codes SET claimed_by = uid WHERE code = rec.code;
+              END
+              $body$
+            $rpc$;
+
+            EXECUTE $rpc$
+              CREATE OR REPLACE FUNCTION public.unlink_discord()
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+              BEGIN
+                IF uid IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                UPDATE public.web_profiles
+                SET discord_user_id = NULL, updated_at = now()
+                WHERE id = uid;
+                IF NOT FOUND THEN
+                  RAISE EXCEPTION 'no_profile: account row missing';
+                END IF;
+              END
+              $body$
+            $rpc$;
+
+            EXECUTE 'ALTER TABLE public.web_profiles DROP COLUMN IF EXISTS discord_username';
+            EXECUTE 'ALTER TABLE public.web_profiles DROP COLUMN IF EXISTS discord_avatar_url';
+          END IF;
+        END $undo$
+      `;
+      await sql`ALTER TABLE link_codes DROP COLUMN IF EXISTS discord_username`;
+      await sql`ALTER TABLE link_codes DROP COLUMN IF EXISTS discord_avatar_url`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a
