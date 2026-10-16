@@ -755,6 +755,45 @@ test("onboarding UX: bare greeting guard, welcome/draft/awakened cards, proactiv
   );
   assert.equal(pausedState, false, "server:enable unpaused the guild");
   assert.match(enableReplies[0]?.content ?? "", /Characterly is now \*\*enabled\*\*/i);
+
+  // 9. server:decline — admins leave the guild (GuildDelete purges every row);
+  //    non-admins are refused and the bot stays.
+  let leftGuild = false;
+  const declineUpdates: any[] = [];
+  const declineReplies: any[] = [];
+  await handleMemoryButton(
+    {
+      customId: "server:decline",
+      guildId: "g1",
+      guild: { leave: async () => { leftGuild = true; } },
+      user: { id: "u-admin", username: "Admin" },
+      memberPermissions: { has: () => true },
+      reply: async (r: any) => { declineReplies.push(r); return r; },
+      update: async (r: any) => { declineUpdates.push(r); return r; },
+    } as any,
+    keyStore,
+  );
+  assert.equal(leftGuild, true, "server:decline left the guild");
+  assert.equal(declineUpdates.length, 1, "card updated before leaving");
+  assert.match(declineUpdates[0]?.content ?? "", /leaving this server/i);
+  assert.deepEqual(declineUpdates[0]?.components, []);
+
+  let leftGuildDenied = false;
+  const deniedReplies: any[] = [];
+  await handleMemoryButton(
+    {
+      customId: "server:decline",
+      guildId: "g1",
+      guild: { leave: async () => { leftGuildDenied = true; } },
+      user: { id: "u-member", username: "Member" },
+      memberPermissions: { has: () => false },
+      reply: async (r: any) => { deniedReplies.push(r); return r; },
+      update: async () => {},
+    } as any,
+    keyStore,
+  );
+  assert.equal(leftGuildDenied, false, "non-admin decline never leaves");
+  assert.match(deniedReplies[0]?.content ?? "", /administrators/i);
 });
 
 // ── DB-backed integration tests ───────────────────────────────────────────────

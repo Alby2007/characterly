@@ -2461,6 +2461,35 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
     });
   }
 
+  // server:decline — the card's one-click opt-out. Leaving the guild fires
+  // GuildDelete → purgeGuild, so the disclosure's "kick deletes every row"
+  // promise is literally what the button does. Reply BEFORE leaving — the
+  // bot can't send anything once it's gone.
+  if (parts[0] === "server" && parts[1] === "decline") {
+    if (!interaction.guildId || !interaction.guild) {
+      return interaction.reply({ content: "This button can only be used inside a Discord server.", ephemeral: true });
+    }
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+      return interaction.reply({
+        content: "Only server administrators (`Manage Server`) can remove Characterly from this server.",
+        ephemeral: true,
+      });
+    }
+    await interaction.update({
+      content: "Characterly is leaving this server — every row it stored here is being deleted. Re-invite anytime.",
+      components: [],
+    });
+    await interaction.guild.leave().catch(error => {
+      inc("server.decline_error");
+      logError("Decline-and-leave failed", error);
+      return interaction.followUp({
+        content: "I couldn't remove myself — kick me manually and I'll still delete every stored row.",
+        ephemeral: true,
+      }).catch(() => {});
+    });
+    return;
+  }
+
   if (parts[0] === "onboard") {
     const sub = parts[1];
     const userId = interaction.user.id;

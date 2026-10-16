@@ -50,6 +50,10 @@ export async function announceIfNeeded(guild: Guild, store: MemoryStore): Promis
       .setCustomId("onboard:start")
       .setLabel("Awaken Your Companion")
       .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId("server:decline")
+      .setLabel("Remove Characterly (Admins)")
+      .setStyle(ButtonStyle.Danger),
   );
   await channel.send({ embeds: [embed], components: [row], allowedMentions: { parse: [] } });
   return store.markAnnounced(guild.id);
