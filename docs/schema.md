@@ -555,6 +555,24 @@ One-time Discord → web linking codes (v27). `/link` in Discord mints a code (`
 
 ---
 
+### `consent_events`
+
+Append-only clickwrap audit trail (v39) — every Terms/Privacy acceptance is a row; the max `version` per `(discord_user_id, document)` is the current state and older rows stay as evidence. Written by the house verify gate (`source='discord_verify'`); the schema is surface-agnostic so a later website signup checkbox writes `source='web_signup'` rows to the same table.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGSERIAL PK | |
+| `discord_user_id` | TEXT | The Discord user who clicked accept |
+| `account_id` | TEXT NULL | `web_profiles.id` (or `'selfhosted'`) — loose TEXT, no FK: `web_profiles` only exists under Supabase auth while this table is plain-Postgres |
+| `document` | TEXT | Which document set — `'terms'` covers the ToS+Privacy pair today |
+| `version` | INT | The version stamped on the button they clicked (`house:consent:<v>`) — what they actually saw, not "current at click time" |
+| `source` | TEXT | Where the acceptance happened — `discord_verify`, later `web_signup` |
+| `accepted_at` | TIMESTAMPTZ | Defaults `now()` |
+
+**Index:** `consent_events_user_doc (discord_user_id, document, version DESC)`. No RLS/grants — bot-only writes via the postgres role; a web-side writer needs an explicit policy when it's built.
+
+---
+
 ### `credit_ledger`
 
 Audit trail for hosted-lane credits (user-facing name: "tokens") — v29. Every grant, spend, refund, and manual adjustment appends a row with the resulting `balance_after`; `web_profiles.credit_balance` is the cached head. Lives behind the same auth-schema gate as `web_profiles`.
@@ -785,3 +803,4 @@ Version tracking for the migration system.
 | 36 | `v36_moderation_surface` | `listing_reports.category`, `marketplace_bans`, `moderation_events`, and the per-day rate-limit indexes (`reporter_user_id`/`creator_user_id`/`user_id` + timestamps) |
 | 37 | `v37_ratings_and_comment_reports` | `listing_ratings` (upsert-per-rater, `stars` 1–5 CHECK) + `comment_reports` (dedupe per `(message_id, reporter_user_id)`, shared daily report budget) — listing threads become the comment + rating surface |
 | 38 | `v38_discord_profile_snapshot` | `link_codes` + `web_profiles` gain `discord_username`/`discord_avatar_url`; `claim_link_code` copies the mint-time snapshot, the identity trigger stamps it from `identity_data`, `unlink_discord` clears it; OAuth rows backfilled — code-linked accounts render name/avatar like OAuth ones |
+| 39 | `v39_consent_events` | `consent_events` — append-only Terms/Privacy clickwrap log (`discord_user_id`, `account_id`, `document`, `version`, `source`, `accepted_at`) backing the verify-gate acceptance step and the sweep's unconsented-member revocation |

@@ -86,6 +86,23 @@ test("accountForDiscordUser returns null for unlinked and the row for linked", a
   await sql.end();
 });
 
+test("tosAcceptance/recordTosAcceptance round-trip; highest version wins", async () => {
+  const sql = makeTestSql();
+  const { store } = await makeStore(sql);
+  assert.equal(await store.tosAcceptance("u-nobody"), null, "no rows ⇒ null");
+  await store.recordTosAcceptance("u-alice", null, 1, "discord_verify");
+  assert.equal((await store.tosAcceptance("u-alice"))?.version, 1);
+  // A newer acceptance is a second row — the audit trail keeps both, the
+  // lookup returns the highest version.
+  await store.recordTosAcceptance("u-alice", "acc-uuid", 2, "web_signup");
+  const latest = await store.tosAcceptance("u-alice");
+  assert.equal(latest?.version, 2);
+  assert.ok(latest?.acceptedAt);
+  const rows = await sql`SELECT count(*)::int AS n FROM consent_events WHERE discord_user_id = 'u-alice'`;
+  assert.equal(rows[0].n, 2, "both acceptances stay on the audit trail");
+  await sql.end();
+});
+
 test("first spend applies the daily grant lazily, then debits", async () => {
   const sql = makeTestSql();
   const store = await fixture(sql);

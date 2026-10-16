@@ -5,6 +5,7 @@ import {
   handleHouseMemberRemove, ensureHouseLayout, collectHostHealth,
   runWatchdogTick, handleOpsCommand, initOps, resetOpsState, WANTED_LAYOUT,
   ensureVerifyGate, handleHouseButton, runMemberLinkSweep, runTagSweep, ensureResourcePosts,
+  TERMS_VERSION,
   type OpsDeps, type AutomodMessage, type MemberLike,
 } from "./ops.js";
 import { PermissionFlagsBits } from "discord.js";
@@ -62,6 +63,8 @@ function makeDeps(over: Partial<OpsDeps> = {}): OpsDeps & { sent: Array<{ id: st
       queueStats: async () => ({ pending: 2, dead: 1, oldestPendingAt: null }),
       creditsSupported: true,
       accountForDiscordUser: async () => null,
+      tosAcceptance: async () => null,
+      recordTosAcceptance: async () => {},
     } as unknown as MemoryStore,
     fetchChannel: async id => ({ send: async (p: unknown) => { sent.push({ id, payload: p }); } }),
     fetchGuild: async () => null,
@@ -279,18 +282,22 @@ const makeButtonIx = (over: any = {}) => {
   };
 };
 
+const consentedStore = (account: object | null = { id: "acc-1", plan: "free", creditBalance: 0 }) => ({
+  creditsSupported: true,
+  accountForDiscordUser: async () => account,
+  tosAcceptance: async () => ({ version: TERMS_VERSION, acceptedAt: "2026-01-01T00:00:00Z" }),
+  recordTosAcceptance: async () => {},
+}) as unknown as MemoryStore;
+
 test("house:verify — linked account grants Member; unlinked gets the signup pointer", async () => {
   const linked = makeMember();
   initOps(makeDeps({
     fetchMember: async () => linked,
-    store: {
-      creditsSupported: true,
-      accountForDiscordUser: async () => ({ id: "acc-1", plan: "free", creditBalance: 0 }),
-    } as unknown as MemoryStore,
+    store: consentedStore(),
   }));
   const ix = makeButtonIx();
   await handleHouseButton(ix as any);
-  assert.deepEqual(linked.added, ["r-member"], "linked account ⇒ Member granted");
+  assert.deepEqual(linked.added, ["r-member"], "linked+consented account ⇒ Member granted");
   assert.match(ix.replies[0].content, /Verified/);
 
   const unlinked = makeMember();
@@ -313,7 +320,7 @@ test("house:verify — pending members are told to accept rules; non-house + alr
   await handleHouseButton(foreign as any);
   assert.match(foreign.replies[0].content, /community server/);
 
-  initOps(makeDeps({ fetchMember: async () => makeMember({ hasRole: true }) }));
+  initOps(makeDeps({ fetchMember: async () => makeMember({ hasRole: true }), store: consentedStore() }));
   const done = makeButtonIx();
   await handleHouseButton(done as any);
   assert.match(done.replies[0].content, /Already verified/);
@@ -335,6 +342,153 @@ test("house:verify — a lookup error says retry, not 'no account'", async () =>
   assert.doesNotMatch(ix.replies[0].content, /No linked/);
 });
 
+test("house:verify — linked but unconsented gets the accept prompt, not the role", async () => {
+  const member = makeMember();
+  const store = {
+    creditsSupported: true,
+    accountForDiscordUser: async () => ({ id: "acc-1", plan: "free", creditBalance: 0 }),
+    tosAcceptance: async () => null,           // never accepted
+    recordTosAcceptance: async () => {},
+  } as unknown as MemoryStore;
+  initOps(makeDeps({ fetchMember: async () => member, store }));
+  const ix = makeButtonIx();
+  await handleHouseButton(ix as any);
+  assert.equal(member.added.length, 0, "no consent ⇒ no role");
+  assert.match(ix.replies[0].content, /Terms of Service/);
+  assert.match(ix.replies[0].content, /Privacy Policy/);
+  assert.match(JSON.stringify(ix.replies[0].components), new RegExp(`house:consent:${TERMS_VERSION}`));
+
+  // A stale acceptance (pre-bump) re-prompts instead of granting.
+  const stale = makeMember();
+  initOps(makeDeps({
+    fetchMember: async () => stale,
+    store: {
+      creditsSupported: true,
+      accountForDiscordUser: async () => ({ id: "acc-1", plan: "free", creditBalance: 0 }),
+      tosAcceptance: async () => ({ version: TERMS_VERSION - 1, acceptedAt: "2025-01-01T00:00:00Z" }),
+      recordTosAcceptance: async () => {},
+    } as unknown as MemoryStore,
+  }));
+  const ix2 = makeButtonIx();
+  await handleHouseButton(ix2 as any);
+  assert.equal(stale.added.length, 0, "an older version doesn't satisfy the current one");
+  assert.match(ix2.replies[0].content, /Terms of Service/);
+});
+
+test("house:consent — accept records the stamped version, then grants Member", async () => {
+  const member = makeMember();
+  const recorded: Array<{ user: string; account: string | null; version: number; source: string }> = [];
+  let acceptedVersion = 0;
+  initOps(makeDeps({
+    fetchMember: async () => member,
+    store: {
+      creditsSupported: true,
+      accountForDiscordUser: async () => ({ id: "acc-1", plan: "free", creditBalance: 0 }),
+      tosAcceptance: async () => acceptedVersion ? { version: acceptedVersion, acceptedAt: "2026-01-01T00:00:00Z" } : null,
+      recordTosAcceptance: async (u: string, a: string | null, v: number, s: string) => {
+        recorded.push({ user: u, account: a, version: v, source: s });
+        acceptedVersion = v;
+      },
+    } as unknown as MemoryStore,
+  }));
+  const ix = makeButtonIx({ customId: `house:consent:${TERMS_VERSION}` });
+  await handleHouseButton(ix as any);
+  assert.deepEqual(recorded, [{ user: "u1", account: "acc-1", version: TERMS_VERSION, source: "discord_verify" }]);
+  assert.deepEqual(member.added, ["r-member"], "accepted ⇒ Member granted");
+  assert.match(ix.replies[0].content, /Verified/);
+});
+
+test("house:consent — record failure grants nothing; pending/unlinked refuse", async () => {
+  // Record throws → no role.
+  const member = makeMember();
+  initOps(makeDeps({
+    fetchMember: async () => member,
+    store: {
+      creditsSupported: true,
+      accountForDiscordUser: async () => ({ id: "acc-1", plan: "free", creditBalance: 0 }),
+      tosAcceptance: async () => null,
+      recordTosAcceptance: async () => { throw new Error("db is down"); },
+    } as unknown as MemoryStore,
+  }));
+  const ix = makeButtonIx({ customId: `house:consent:${TERMS_VERSION}` });
+  await handleHouseButton(ix as any);
+  assert.equal(member.added.length, 0, "a failed record never grants");
+  assert.match(ix.replies[0].content, /again in a moment/i);
+
+  // Pending member clicking a forged/stale accept button → refused, no record.
+  let recordCalls = 0;
+  initOps(makeDeps({
+    fetchMember: async () => makeMember({ pending: true }),
+    store: {
+      creditsSupported: true,
+      accountForDiscordUser: async () => ({ id: "acc-1", plan: "free", creditBalance: 0 }),
+      tosAcceptance: async () => null,
+      recordTosAcceptance: async () => { recordCalls++; },
+    } as unknown as MemoryStore,
+  }));
+  const pending = makeButtonIx({ customId: `house:consent:${TERMS_VERSION}` });
+  await handleHouseButton(pending as any);
+  assert.match(pending.replies[0].content, /rules first/i);
+  assert.equal(recordCalls, 0, "pending member's click records nothing");
+
+  // Unlinked user clicking accept → signup pointer, no record.
+  initOps(makeDeps({
+    fetchMember: async () => makeMember(),
+    store: {
+      creditsSupported: true,
+      accountForDiscordUser: async () => null,
+      recordTosAcceptance: async () => { recordCalls++; },
+    } as unknown as MemoryStore,
+  }));
+  const unlinked = makeButtonIx({ customId: `house:consent:${TERMS_VERSION}` });
+  await handleHouseButton(unlinked as any);
+  assert.match(unlinked.replies[0].content, /No linked Characterly account/);
+  assert.equal(recordCalls, 0, "unlinked click records nothing");
+});
+
+test("house:consent — already-Member clicking accept records and confirms", async () => {
+  const member = makeMember({ hasRole: true });
+  const recorded: number[] = [];
+  initOps(makeDeps({
+    fetchMember: async () => member,
+    store: {
+      creditsSupported: true,
+      accountForDiscordUser: async () => ({ id: "acc-1", plan: "free", creditBalance: 0 }),
+      tosAcceptance: async () => ({ version: TERMS_VERSION, acceptedAt: "2026-01-01T00:00:00Z" }),
+      recordTosAcceptance: async (_u: string, _a: string | null, v: number) => { recorded.push(v); },
+    } as unknown as MemoryStore,
+  }));
+  const ix = makeButtonIx({ customId: `house:consent:${TERMS_VERSION}` });
+  await handleHouseButton(ix as any);
+  assert.deepEqual(recorded, [TERMS_VERSION], "re-acceptance still records (self-heal path)");
+  assert.equal(member.added.length, 0, "no double role grant");
+  assert.match(ix.replies[0].content, /Already verified/);
+});
+
+test("member link sweep: unconsented holder is revoked; consent error keeps the role", async () => {
+  const consented = makeMember({ id: "u-ok", hasRole: true });
+  const unconsented = makeMember({ id: "u-no", hasRole: true });
+  const errored = makeMember({ id: "u-err", hasRole: true });
+  const deps = makeDeps({
+    listMembers: async () => [consented, unconsented, errored],
+    store: {
+      creditsSupported: true,
+      accountForDiscordUser: async () => ({ id: "acc", plan: "free", creditBalance: 0 }),
+      tosAcceptance: async (id: string) => {
+        if (id === "u-err") throw new Error("db is down");
+        return id === "u-ok" ? { version: TERMS_VERSION, acceptedAt: "2026-01-01T00:00:00Z" } : null;
+      },
+      recordTosAcceptance: async () => {},
+    } as unknown as MemoryStore,
+  });
+  const revoked = await runMemberLinkSweep(deps);
+  assert.equal(revoked, 1);
+  assert.equal(consented.removed.length, 0, "current consent ⇒ role kept");
+  assert.deepEqual(unconsented.removed, ["r-member"], "no consent ⇒ revoked");
+  assert.equal(errored.removed.length, 0, "a consent lookup error must not revoke");
+  assert.match(opsAlertText(deps), /u-no.*Terms.*Privacy/s);
+});
+
 test("member link sweep: unlinked holder loses Member, linked keeps it", async () => {
   const unlinked = makeMember({ id: "u-gone", hasRole: true });
   const linked = makeMember({ id: "u-stay", hasRole: true });
@@ -345,6 +499,8 @@ test("member link sweep: unlinked holder loses Member, linked keeps it", async (
     store: {
       creditsSupported: true,
       accountForDiscordUser: async (id: string) => linkedIds.has(id) ? { id: "acc", plan: "free", creditBalance: 0 } : null,
+      tosAcceptance: async () => ({ version: TERMS_VERSION, acceptedAt: "2026-01-01T00:00:00Z" }),
+      recordTosAcceptance: async () => {},
     } as unknown as MemoryStore,
   });
   const revoked = await runMemberLinkSweep(deps);

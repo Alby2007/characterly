@@ -3494,6 +3494,29 @@ export class MemoryStore {
     return account;
   }
 
+  /** Latest recorded Terms/Privacy acceptance for a Discord user — null when
+   *  they've never accepted. Append-only rows; the highest version wins.
+   *  Uncached: a stale cache would let a just-bumped policy slip through. */
+  async tosAcceptance(discordUserId: string): Promise<{ version: number; acceptedAt: string } | null> {
+    const rows = await this.sql<Array<{ version: number; accepted_at: string }>>`
+      SELECT version, accepted_at FROM consent_events
+      WHERE discord_user_id = ${discordUserId} AND document = 'terms'
+      ORDER BY version DESC, accepted_at DESC LIMIT 1
+    `;
+    return rows[0] ? { version: Number(rows[0].version), acceptedAt: rows[0].accepted_at } : null;
+  }
+
+  /** Append a clickwrap acceptance. account_id is the web_profiles.id when the
+   *  user has a linked account (or 'selfhosted'); document/version/source let
+   *  one table serve every consent surface — 'terms'/'discord_verify' today,
+   *  'web_signup' when the site adds a signup checkbox. */
+  async recordTosAcceptance(discordUserId: string, accountId: string | null, version: number, source: string): Promise<void> {
+    await this.sql`
+      INSERT INTO consent_events (discord_user_id, account_id, document, version, source)
+      VALUES (${discordUserId}, ${accountId}, 'terms', ${version}, ${source})
+    `;
+  }
+
   /** Linked accounts still missing the Discord display snapshot — code-links
    *  claimed before v38 only stamped discord_user_id. The boot backfill walks
    *  these and re-fetches each profile from Discord. */

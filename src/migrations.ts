@@ -2278,6 +2278,37 @@ const migrations: Migration[] = [
       await sql`ALTER TABLE link_codes DROP COLUMN IF EXISTS discord_avatar_url`;
     },
   },
+
+  // ── v39: Terms/Privacy acceptance events ───────────────────────────────────
+  // Clickwrap audit trail for the house verify gate (and later the website
+  // signup checkbox). Each acceptance is an append-only row — the max version
+  // per (user, document) is the current state, older rows stay as evidence.
+  // Plain-Postgres safe: no FK to web_profiles (that table only exists under
+  // Supabase auth), account_id is stored loosely.
+  {
+    version: 39,
+    name: "v39_consent_events",
+    up: async (sql) => {
+      await sql`
+        CREATE TABLE IF NOT EXISTS consent_events (
+          id              BIGSERIAL PRIMARY KEY,
+          discord_user_id TEXT NOT NULL,
+          account_id      TEXT,
+          document        TEXT NOT NULL DEFAULT 'terms',
+          version         INTEGER NOT NULL,
+          source          TEXT NOT NULL,
+          accepted_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+      await sql`
+        CREATE INDEX IF NOT EXISTS consent_events_user_doc
+          ON consent_events (discord_user_id, document, version DESC)
+      `;
+    },
+    down: async (sql) => {
+      await sql`DROP TABLE IF EXISTS consent_events`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

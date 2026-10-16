@@ -240,6 +240,16 @@ export async function handleHouseMemberRemove(member: MemberLike, deps: OpsDeps)
 
 const VERIFY_CUSTOM_ID = "house:verify";
 
+// Clickwrap consent — bump TERMS_VERSION in the same commit that edits the
+// documents: an acceptance is only valid for the version the user saw, and the
+// button customId carries it (house:consent:<v>) so the recorded version is
+// honest even if a stale ephemeral survives a doc update. URLs mirror
+// website/src/config.js LINKS — keep them in step.
+export const TERMS_VERSION = 1;
+export const TERMS_URL = "https://github.com/Alby2007/characterly/blob/main/TERMS.md";
+export const PRIVACY_URL = "https://github.com/Alby2007/characterly/blob/main/PRIVACY.md";
+const CONSENT_CUSTOM_ID = "house:consent";
+
 /** Post the verify card if the gate channel doesn't already carry one —
  *  and delete duplicate copies of it while we're looking. */
 export async function ensureVerifyGate(deps: OpsDeps): Promise<boolean> {
@@ -265,7 +275,8 @@ export async function ensureVerifyGate(deps: OpsDeps): Promise<boolean> {
       .setDescription(
         "This server is members-only past this point — link your free Characterly account to unlock it.\n\n" +
         "**How:** create an account at " + config.siteUrl + ", run `/link` in the bot's DMs, then click below.\n" +
-        "_Just joined? Accept the rules first — the button unlocks once you have._",
+        "_Just joined? Accept the rules first — the button unlocks once you have._\n" +
+        "_Verifying asks you to accept our Terms & Privacy Policy._",
       )],
     components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId(VERIFY_CUSTOM_ID).setLabel("Verify — I'm a Characterly member").setStyle(ButtonStyle.Success),
@@ -275,11 +286,16 @@ export async function ensureVerifyGate(deps: OpsDeps): Promise<boolean> {
   return true;
 }
 
-/** house:* buttons — routed from handleMemoryButton; deps are module-init'd. */
+/** house:* buttons — routed from handleMemoryButton; deps are module-init'd.
+ *  house:verify starts the gate; house:consent:<v> is the clickwrap "I accept"
+ *  inside the ephemeral prompt. Both share the same gate chain — customIds are
+ *  forgeable and member/account state moves between clicks, so the consent
+ *  click re-checks everything before recording + granting. */
 export async function handleHouseButton(interaction: ButtonInteraction): Promise<unknown> {
   const deps = opsDeps;
   if (!deps) return interaction.reply({ content: "Ops isn't initialized yet — the bot is still starting.", ephemeral: true });
-  if (interaction.customId !== VERIFY_CUSTOM_ID) return;
+  const consentClick = interaction.customId.startsWith(CONSENT_CUSTOM_ID + ":");
+  if (interaction.customId !== VERIFY_CUSTOM_ID && !consentClick) return;
   if (!isHouse(interaction.guildId)) {
     return interaction.reply({ content: "That button only works in our community server.", ephemeral: true });
   }
@@ -290,9 +306,6 @@ export async function handleHouseButton(interaction: ButtonInteraction): Promise
   if (!member) return interaction.reply({ content: "Couldn't find you in this server — try rejoining.", ephemeral: true });
   if (member.pending === true) {
     return interaction.reply({ content: "Accept the server rules first — then click again.", ephemeral: true });
-  }
-  if (member.roles.cache?.has(config.houseMemberRoleId)) {
-    return interaction.reply({ content: "Already verified — you're in.", ephemeral: true });
   }
   // null = definitively unlinked; a throw = the lookup broke — tell them to
   // retry rather than confidently claiming "no account" during an outage.
@@ -305,6 +318,48 @@ export async function handleHouseButton(interaction: ButtonInteraction): Promise
       content: `No linked Characterly account found — create one free at ${config.siteUrl}, run \`/link\` in the bot's DMs, then click **Verify** again.`,
       ephemeral: true,
     });
+  }
+
+  if (consentClick) {
+    // Record the version stamped on THIS button — it's the one the user saw.
+    // A stale button still records honestly, but the version check below will
+    // re-prompt rather than granting on superseded terms.
+    const consentVersion = Number(interaction.customId.slice(CONSENT_CUSTOM_ID.length + 1));
+    if (Number.isInteger(consentVersion) && consentVersion >= 1) {
+      const recorded = await deps.store.recordTosAcceptance(
+        interaction.user.id, account.id, consentVersion, "discord_verify",
+      ).then(() => true).catch(e => {
+        inc("ops.consent_error");
+        logError("consent record failed", e);
+        return false;
+      });
+      if (!recorded) {
+        return interaction.reply({ content: "Couldn't record your acceptance — click **I accept** again in a moment.", ephemeral: true });
+      }
+      inc("ops.consent_accepted");
+    }
+  }
+
+  // Consent gate — applies to verify clicks AND post-record consent clicks.
+  const acceptance = await deps.store.tosAcceptance(interaction.user.id).catch(() => undefined);
+  if (acceptance === undefined) {
+    return interaction.reply({ content: "Couldn't check your acceptance status — try again in a moment.", ephemeral: true });
+  }
+  if (!acceptance || acceptance.version < TERMS_VERSION) {
+    inc("ops.consent_prompted");
+    return interaction.reply({
+      content:
+        `Before you're in, please read and accept the **[Terms of Service](${TERMS_URL})** and **[Privacy Policy](${PRIVACY_URL})**.\n\n` +
+        `Clicking **I accept** means you've read and agree to both — it's recorded against your account (v${TERMS_VERSION}).`,
+      components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId(`${CONSENT_CUSTOM_ID}:${TERMS_VERSION}`).setLabel("I accept the Terms & Privacy Policy").setStyle(ButtonStyle.Primary),
+      )],
+      ephemeral: true,
+    });
+  }
+
+  if (member.roles.cache?.has(config.houseMemberRoleId)) {
+    return interaction.reply({ content: "Already verified — you're in.", ephemeral: true });
   }
   const granted = await member.roles.add(config.houseMemberRoleId).then(() => true).catch(e => {
     inc("ops.verify_error");
@@ -344,7 +399,25 @@ export async function runMemberLinkSweep(deps: OpsDeps): Promise<number> {
       logError("member link check failed", e);
       return undefined;
     });
-    if (account === undefined || account) continue;
+    if (account === undefined) continue;
+    if (account) {
+      // Linked but unconsented — the verify gate only admits accounts that have
+      // accepted the current Terms/Privacy version, so Members without one are
+      // out of policy (e.g. verified before the gate existed, or the docs
+      // bumped). Same fail-safe as the link check: a lookup error keeps the
+      // role — only a definitive missing/stale acceptance revokes.
+      const acceptance = await deps.store.tosAcceptance(m.user.id).catch(e => {
+        inc("ops.sweep_error");
+        logError("member consent check failed", e);
+        return undefined;
+      });
+      if (acceptance === undefined || (acceptance && acceptance.version >= TERMS_VERSION)) continue;
+      await m.roles.remove(roleId).catch(e => logError("member role revoke failed", e));
+      revoked++;
+      inc("ops.consent_revoked");
+      await opsAlert(deps, `🔻 <@${m.user.id}> hasn't accepted Terms & Privacy Policy v${TERMS_VERSION} — Member role removed (re-verify in the gate channel).`);
+      continue;
+    }
     await m.roles.remove(roleId).catch(e => logError("member role revoke failed", e));
     revoked++;
     inc("ops.verify_revoked");
