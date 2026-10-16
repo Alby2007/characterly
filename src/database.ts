@@ -1382,7 +1382,12 @@ export class MemoryStore {
       const matchedId = existing[0] ? Number(existing[0].id) : trigramMatch?.id ?? null;
       if (!matchedId) {
         const initialConfidence = calculateInitialConfidence(evidenceType);
-        const importance = memory.importance ?? calculateDefaultImportance(memory.kind);
+        // The extractor's salience judgment is authoritative when present —
+        // clamped into [0.05, 1] so a degenerate value can't zero out or
+        // max out the ranking; the kind-map is the fallback when it's absent.
+        const importance = memory.importance != null && Number.isFinite(Number(memory.importance))
+          ? Math.max(0.05, Math.min(1, Number(memory.importance)))
+          : calculateDefaultImportance(memory.kind);
         const explicitness = memory.explicitness ?? calculateDefaultExplicitness(evidenceType);
         // Persist the extracted name even when the subject couldn't be resolved to an ID —
         // it enables later re-attribution of `unknown` memories.
@@ -1551,6 +1556,25 @@ export class MemoryStore {
         AND (status = 'active' OR (status = 'candidate' AND primary_evidence_type IN ('explicit_fact', 'clear_preference', 'correction')))
         AND (subject_id = 'server' OR (subject_id = ${subjectId}
           AND subject_id IN (SELECT user_id FROM members WHERE guild_id = ${guildId} AND opted_in = 1 AND opted_out = 0)))
+      ORDER BY importance * confidence DESC, last_confirmed_at DESC LIMIT ${limit}
+    `;
+    return rows.map(rowToMemory);
+  }
+
+  /** Turn-aware recall: memories whose content matches any of the turn's
+   * salient terms (recallTerms — proper nouns first). This is the contextual
+   * half of prompt recall alongside relevantMemories' static spine — a fact
+   * ranked below the spine cap still surfaces when the conversation is about
+   * it. Same consent + candidate gates as relevantMemories. */
+  async contextualMemories(guildId: string, subjectId: string, terms: string[], limit = 6): Promise<Memory[]> {
+    if (!terms.length) return [];
+    const patterns = terms.slice(0, 10).map(t => `%${escapeLike(t)}%`);
+    const rows = await this.sql<MemoryRow[]>`
+      SELECT * FROM memories WHERE guild_id = ${guildId}
+        AND (status = 'active' OR (status = 'candidate' AND primary_evidence_type IN ('explicit_fact', 'clear_preference', 'correction')))
+        AND (subject_id = 'server' OR (subject_id = ${subjectId}
+          AND subject_id IN (SELECT user_id FROM members WHERE guild_id = ${guildId} AND opted_in = 1 AND opted_out = 0)))
+        AND content ILIKE ANY(${patterns})
       ORDER BY importance * confidence DESC, last_confirmed_at DESC LIMIT ${limit}
     `;
     return rows.map(rowToMemory);
@@ -3292,7 +3316,9 @@ export class MemoryStore {
         LIMIT 1
       `;
       if (dup.length) continue;
-      const importance = Math.max(0, Math.min(1, Number(c.importance ?? 0.5)));
+      const importance = Number.isFinite(Number(c.importance))
+        ? Math.max(0, Math.min(1, Number(c.importance)))
+        : 0.5;
       const res = await this.sql`
         INSERT INTO companion_journal (companion_id, origin_scope, kind, content, about_subject_ids, importance, source_message_id)
         VALUES (${companionId}, ${scope}, ${kind}, ${content}, ${aboutIds}, ${importance}, ${sourceMessageId})

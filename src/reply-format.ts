@@ -14,6 +14,21 @@ export function monthYear(iso: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString("en-US", { month: "short", year: "numeric" });
 }
 
+/** Relative age bucket for prompt annotations — "~2w ago" gives the model
+ * temporal grounding an ISO date never does: it can hedge fresh disclosures
+ * differently from old history. Returns "" for unparseable input. */
+export function formatAge(iso: string): string {
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "";
+  const days = Math.floor((Date.now() - t) / 86_400_000);
+  if (days <= 0) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 7) return `~${days}d ago`;
+  if (days < 60) return `~${Math.round(days / 7)}w ago`;
+  if (days < 365) return `~${Math.round(days / 30)}mo ago`;
+  return `~${Math.round(days / 365)}y ago`;
+}
+
 /** Render one pair's relationship context as a single prompt line. Direction
  * is preserved explicitly — "A says about B" means A is the asserting side.
  * Claims are attributed ("B claimed about A"), never stated as facts. Depth

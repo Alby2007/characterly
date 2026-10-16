@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { detectDismissal, detectNamingRequest, detectSelfNaming, detectWakeWord, looksLikeSchemaLeak, questionKeywords, roomAddressCue, shouldInspectForMemory } from "./perception.js";
+import { detectDismissal, detectNamingRequest, detectSelfNaming, detectWakeWord, looksLikeSchemaLeak, questionKeywords, recallTerms, roomAddressCue, shouldInspectForMemory } from "./perception.js";
+import { formatAge } from "./reply-format.js";
 import type { MessageEvent } from "./types.js";
 
 function msg(content: string, overrides: Partial<MessageEvent> = {}): MessageEvent {
@@ -192,4 +193,34 @@ test("containsPrivateSubtext catches a verbatim echo of private DM subtext", asy
   assert.equal(containsPrivateSubtext("surprise trip? nice", subtext), false);
   assert.equal(containsPrivateSubtext("anything", undefined), false);
   assert.equal(containsPrivateSubtext("anything", ""), false);
+});
+
+// ── recallTerms / formatAge ───────────────────────────────────────────────────
+
+test("recallTerms surfaces proper nouns first and strips chat stopwords", () => {
+  const terms = recallTerms("i'm really nervous about Biscuit's vet visit tomorrow, and work has been rough");
+  assert.equal(terms[0], "Biscuit's", "capitalized terms lead — names are the strongest recall hooks");
+  assert.ok(terms.includes("nervous"));
+  assert.ok(terms.includes("work"), "topical words like 'work' are valid recall hooks");
+  assert.ok(!terms.includes("tomorrow"), "temporal stopwords stripped");
+  assert.ok(!terms.includes("really"), "adverb stopwords stripped");
+});
+
+test("recallTerms dedupes, floors length, and caps the term list", () => {
+  const terms = recallTerms("Biscuit biscuit BISCUIT — abc xy my my my longwords everywhere longwords");
+  assert.deepEqual([...new Set(terms.map(t => t.toLowerCase()))].length, terms.length, "case-insensitive dedup");
+  assert.ok(!terms.includes("abc"), "below the 4-char floor");
+  assert.ok(terms.length <= 8);
+  assert.deepEqual(recallTerms("hi ok lol"), [], "pure chatter yields no recall hooks");
+});
+
+test("formatAge renders relative buckets the model can reason about", () => {
+  const day = 86_400_000;
+  assert.equal(formatAge(new Date().toISOString()), "today");
+  assert.equal(formatAge(new Date(Date.now() - day).toISOString()), "yesterday");
+  assert.equal(formatAge(new Date(Date.now() - 4 * day).toISOString()), "~4d ago");
+  assert.equal(formatAge(new Date(Date.now() - 14 * day).toISOString()), "~2w ago");
+  assert.equal(formatAge(new Date(Date.now() - 150 * day).toISOString()), "~5mo ago");
+  assert.equal(formatAge(new Date(Date.now() - 800 * day).toISOString()), "~2y ago");
+  assert.equal(formatAge("not-a-date"), "", "unparseable input degrades to empty, not NaN");
 });

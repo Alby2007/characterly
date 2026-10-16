@@ -223,6 +223,45 @@ test("searchMemories hides active memories for non-consenting subjects", async (
   } finally { await sql.end(); }
 });
 
+test("contextualMemories matches any term, honors consent, and admits promotable candidates", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    await store.setMemberOptIn("g1", "u1", true);
+    const dog = await store.saveMemory(msg("x", { authorId: "u1" }), { subjectId: "u1", kind: "person_fact", content: "Has a dog named Biscuit", reason: "t", evidenceType: "explicit_fact", effect: "support" });
+    await store.saveMemory(msg("y", { authorId: "u1" }), { subjectId: "u1", kind: "person_fact", content: "Works at a bakery", reason: "t", evidenceType: "explicit_fact", effect: "support" });
+    // Unconfirmed candidate with promotable evidence — same read gate as relevantMemories.
+    await store.saveMemory(msg("z", { authorId: "u1" }), { subjectId: "u1", kind: "person_preference", content: "Biscuit hates thunderstorms", reason: "t", evidenceType: "explicit_fact", effect: "support" });
+    // Below-promotable candidate (a joke) must never surface even on a term hit.
+    await store.saveMemory(msg("w", { authorId: "u1" }), { subjectId: "u1", kind: "person_fact", content: "Biscuit runs the local council", reason: "t", evidenceType: "sarcasm_or_joke", effect: "support" });
+
+    const hits = await store.contextualMemories("g1", "u1", ["Biscuit"]);
+    assert.equal(hits.length, 2, "active + promotable candidate match; the joke stays gated");
+    assert.ok(hits.some(h => h.id === dog.id));
+    assert.ok(hits.every(h => !/council/.test(h.content)), "sarcasm-typed evidence can't surface");
+
+    assert.equal((await store.contextualMemories("g1", "u1", ["leeds"])).length, 0, "no term hit ⇒ nothing surfaces");
+    assert.deepEqual(await store.contextualMemories("g1", "u1", []), [], "no terms ⇒ no query");
+
+    await store.setMemberOptIn("g1", "u1", false);
+    assert.equal((await store.contextualMemories("g1", "u1", ["Biscuit"])).length, 0, "opt-out hides subject rows");
+  } finally { await sql.end(); }
+});
+
+test("saveMemory clamps extractor importance into [0.05, 1] and falls back to the kind default", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    await store.setMemberOptIn("g1", "u1", true);
+    const hi = await store.saveMemory(msg("a", { authorId: "u1" }), { subjectId: "u1", kind: "person_fact", content: "A child named Lily", reason: "t", evidenceType: "explicit_fact", effect: "support", importance: 1.8 });
+    const lo = await store.saveMemory(msg("b", { authorId: "u1" }), { subjectId: "u1", kind: "person_fact", content: "Likes red socks", reason: "t", evidenceType: "explicit_fact", effect: "support", importance: -3 });
+    const def = await store.saveMemory(msg("c", { authorId: "u1" }), { subjectId: "u1", kind: "person_preference", content: "Prefers tea over coffee", reason: "t", evidenceType: "explicit_fact", effect: "support" });
+    assert.equal(hi.importance, 1, "absurd high scores clamp");
+    assert.equal(lo.importance, 0.05, "negative scores clamp to the floor");
+    assert.equal(def.importance, 0.6, "no extractor score ⇒ kind-map default");
+  } finally { await sql.end(); }
+});
+
 test("searchMemories kinds filter excludes person facts at the query level", async () => {
   const sql = makeTestSql();
   try {

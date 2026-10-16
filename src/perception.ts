@@ -15,6 +15,46 @@ export function shouldInspectForMemory(event: MessageEvent) {
   return event.mentionsBot || durableSignals.test(text);
 }
 
+/** Turn-aware recall terms — the salient words in a message worth matching
+ * stored memories against. Capitalized words (names, places, pets) sort first
+ * since they're the strongest recall hooks; common chat words are stripped so
+ * "how was work" queries on "work" not "how". Bounded — every term costs a
+ * pattern slot in the contextual-recall query. */
+const RECALL_STOPWORDS = new Set([
+  "this", "that", "these", "those", "what", "when", "where", "which", "while", "with",
+  "your", "yours", "mine", "ours", "theirs", "they", "them", "their", "there", "here",
+  "have", "has", "had", "been", "being", "were", "was", "are", "will", "would", "could",
+  "should", "shall", "must", "might", "does", "did", "done", "doing", "dont", "cant",
+  "wont", "isnt", "arent", "wasnt", "werent", "about", "into", "from", "just", "only",
+  "also", "very", "really", "much", "many", "some", "any", "more", "most", "than",
+  "then", "again", "still", "even", "ever", "never", "always", "today",
+  "tomorrow", "yesterday", "tonight", "morning", "afternoon", "evening", "night",
+  "yeah", "okay", "sure", "well", "like", "know", "think", "want", "need", "feel",
+  "going", "gonna", "wanna", "gotta", "lets", "thing", "things", "stuff", "something",
+  "anything", "everything", "nothing", "someone", "anyone", "everyone", "people",
+  "time", "times", "week", "weeks", "month", "months", "year", "years", "days",
+  "good", "great", "nice", "cool", "love", "hate", "tell", "told", "talk", "talking",
+  "said", "says", "saying", "ask", "asked", "make", "made", "take", "took", "come",
+  "came", "back", "went", "getting", "wait", "hope", "wish", "thank", "thanks",
+  "hello", "hey", "sorry", "please", "https", "http", "www", "com", "lol", "haha",
+]);
+
+export function recallTerms(content: string, limit = 8): string[] {
+  const terms: string[] = [];
+  const seen = new Set<string>();
+  for (const m of content.matchAll(/\b[A-Za-z][A-Za-z'-]{3,}\b/g)) {
+    const w = m[0].replace(/^'+|'+$/g, "");
+    const norm = w.toLowerCase();
+    if (w.length < 4 || RECALL_STOPWORDS.has(norm) || seen.has(norm)) continue;
+    seen.add(norm);
+    terms.push(w);
+  }
+  // Capitalized terms first — proper nouns are the strongest recall hooks.
+  // Sort is stable so message order is preserved within each tier.
+  terms.sort((a, b) => Number(/^[A-Z]/.test(b)) - Number(/^[A-Z]/.test(a)));
+  return terms.slice(0, limit);
+}
+
 // Wake words: saying a companion's name counts as addressing it, same as an
 // @-mention. Word-boundary matching keeps "kai" from firing inside "kaiser";
 // names shorter than 3 chars are rejected so a terse nickname can't become a

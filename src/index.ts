@@ -2,7 +2,7 @@ import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events, GatewayIn
 import OpenAI from "openai";
 import { config } from "./config.js";
 import { sql } from "./db.js";
-import { MemoryStore } from "./database.js";
+import { MemoryStore, type Memory } from "./database.js";
 import { createBrainResolver, guardedLlmFetch } from "./brains.js";
 import type { Brain } from "./brain.js";
 import {
@@ -19,7 +19,7 @@ import {
   handleSetupModal,
   sendAdoptionGreeting,
 } from "./commands.js";
-import { containsPrivateSubtext, looksLikeSchemaLeak, shouldInspectForMemory, toolCues } from "./perception.js";
+import { containsPrivateSubtext, looksLikeSchemaLeak, recallTerms, shouldInspectForMemory, toolCues } from "./perception.js";
 import { ConversationTracker } from "./conversation.js";
 import { ReplyThrottle } from "./reply-throttle.js";
 import { EventStore } from "./events.js";
@@ -803,6 +803,28 @@ const opsDeps: OpsDeps = {
   gitSha: null,
 };
 
+/** Prompt memory recall: the static spine (relevantMemories — top-N by
+ * importance×confidence) merged with turn-aware contextual hits — a memory
+ * below the spine cap still surfaces when the current message is about it.
+ * The same consent/candidate gates apply on both legs. */
+async function promptMemories(scope: string, subjectId: string, text: string): Promise<Memory[]> {
+  const spine = await store.relevantMemories(scope, subjectId);
+  const terms = recallTerms(text);
+  let contextual: Memory[] = [];
+  if (terms.length) {
+    // try/catch (not .catch) — stubbed stores in tests may lack the method
+    // entirely, which throws synchronously at the call site.
+    try {
+      contextual = await store.contextualMemories(scope, subjectId, terms);
+    } catch (e) {
+      inc("recall.context_error");
+      logError("contextual memory recall failed", e);
+    }
+  }
+  const seen = new Set(spine.map(m => m.id));
+  return [...spine, ...contextual.filter(m => !seen.has(m.id))];
+}
+
 async function handleDmMessage(
   message: OmitPartialGroupDMChannel<Message>,
   images: Array<AttachmentMeta & { contentType: string }>,
@@ -1137,7 +1159,7 @@ async function handleDmMessage(
     const { text } = await brain.reply(
       { ...event, authorName: freshOwnerName },
       context,
-      await store.relevantMemories(dmScope, userId),
+      await promptMemories(dmScope, userId, `${event.content} ${replyToContent ?? ""}`),
       profiles,
       relationships,
       config.replyModel,
@@ -1576,7 +1598,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     const { text, endConversation } = await companionBrain.reply(
       { ...event, authorName },
       context,
-      await store.relevantMemories(event.guildId, event.authorId),
+      await promptMemories(event.guildId, event.authorId, `${event.content} ${replyToContent ?? ""}`),
       profiles,
       relationships,
       config.replyModel,

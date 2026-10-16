@@ -45,7 +45,7 @@ Alongside the bot, `website/` is a Vite multi-page site (landing page, account s
 | `src/commands.ts` | `commandDefinitions`, `handleMemoryCommand`, `handleMemoryButton`, `handleSetupModal`, `handleCompanionModal` | Discord slash command schemas, onboarding card/modal builders, and interaction handlers |
 | `src/tools.ts` | `replyToolDefs`, `executeTool` | Never-throw tool dispatcher: SSRF-hardened web fetch + internal lookup routing |
 | `src/lookup-tools.ts` | `ToolCtx`, `executeLookupTool`, `buildPairContext` | Read-only internal lookup tools (person/relationship/memories/event) over the existing stores |
-| `src/reply-format.ts` | `formatReplyProfile`, `formatPairContext` | Pure formatters shared by the reply prompt and tool outputs |
+| `src/reply-format.ts` | `formatReplyProfile`, `formatPairContext`, `formatAge` | Pure formatters shared by the reply prompt and tool outputs; `formatAge` renders relative timestamps ("~2w ago") for injected memories/journal |
 | `src/vision.ts` | `qualifyingImages`, `formatImageContext` | Pure image-attachment gate (image/*, byte cap, ≤3/message) + observation-framed label |
 | `src/conversation.ts` | `ConversationTracker` | Per-channel and per-companion conversation objects: opens on addressed messages, closes when the last participant leaves; share-of-voice pacing is channel-level |
 | `src/journal-job.ts` | `runJournalJob`, `JournalJobPayload` | Deferred `journal-write` jobs: after a companion replies, writes 0–2 first-person journal entries origin-tagged to that scope, consent-gated like extraction |
@@ -175,8 +175,17 @@ Discord MessageCreate
   cap. Suppression is silent — a notice would spend the budget it protects.
         ▼
   brain.ts: reply()
-  • recent channel context (<@id> tokens demangled to @names) + relevant
-    memories: active plus candidates with promotable primary evidence types
+  • recent channel context (<@id> tokens demangled to @names) + prompt
+    memories on two legs (promptMemories): the static spine
+    (relevantMemories — top-N by importance×confidence) merged with
+    contextualMemories — turn-aware lexical recall that surfaces
+    below-the-cap rows when the current message names them. Both legs share
+    the same gates: active plus candidates with promotable primary evidence
+    types, consent-scoped subjects
+  • memory and journal entries carry bracketed age annotations (formatAge —
+    "today", "~2w ago") so the model can hedge stale claims and weigh
+    recency; extraction supplies an importance 0–1 salience judgment that
+    saveMemory clamps into [0.05, 1], with the kind-map as fallback
   • per-person structured attributes (active only) with confidence buckets —
     high/medium/low annotations let the model hedge weak facets instead of
     stating every trait as fact; legacy flat traits are the fallback
