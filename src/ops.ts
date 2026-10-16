@@ -24,11 +24,29 @@ export const isMarketplaceThread = (channel: { isThread?(): boolean; parentId?: 
   !!channel?.isThread?.() && channel.parentId === config.marketplaceChannelId;
 
 // Narrow structural shapes — tests hand fakes, index.ts casts the real objects.
+interface ForumTagLike {
+  id: string;
+  name: string;
+  moderated?: boolean | null;
+}
+
+interface ThreadLike {
+  id: string;
+  appliedTags?: string[];
+  createdTimestamp?: number | null;
+  setAppliedTags?(tags: string[]): Promise<unknown>;
+}
+
 interface SendableChannel {
   send(payload: unknown): Promise<unknown>;
   /** Present on real text channels — the verify-gate idempotency probe. */
   messages?: {
     fetch(opts: { limit: number }): Promise<Iterable<{ author?: { id?: string }; components?: unknown[] }>>;
+  };
+  /** Forum channels only — the tag taxonomy the marketplace sweep manages. */
+  availableTags?: ForumTagLike[];
+  threads?: {
+    fetchActive(): Promise<{ threads: Map<string, ThreadLike> | Iterable<[string, ThreadLike]> | Iterable<ThreadLike> }>;
   };
 }
 
@@ -246,7 +264,12 @@ export async function handleHouseButton(interaction: ButtonInteraction): Promise
   if (member.roles.cache?.has(config.houseMemberRoleId)) {
     return interaction.reply({ content: "Already verified — you're in.", ephemeral: true });
   }
-  const account = await deps.store.accountForDiscordUser(interaction.user.id).catch(() => null);
+  // null = definitively unlinked; a throw = the lookup broke — tell them to
+  // retry rather than confidently claiming "no account" during an outage.
+  const account = await deps.store.accountForDiscordUser(interaction.user.id).catch(() => undefined);
+  if (account === undefined) {
+    return interaction.reply({ content: "Couldn't check your account right now — try again in a moment.", ephemeral: true });
+  }
   if (!account) {
     return interaction.reply({
       content: `No linked Characterly account found — create one free at ${config.siteUrl}, run \`/link\` in the bot's DMs, then click **Verify** again.`,
@@ -283,8 +306,15 @@ export async function runMemberLinkSweep(deps: OpsDeps): Promise<number> {
   let revoked = 0;
   for (const m of members) {
     if (m.user.bot || !m.roles.cache?.has(roleId) || !m.roles.remove) continue;
-    const account = await deps.store.accountForDiscordUser(m.user.id).catch(() => null);
-    if (account) continue;
+    // null means definitively unlinked; a THROW means "unknown" — a transient
+    // DB hiccup must never masquerade as unlinking, or an outage mass-revokes
+    // every Member role. Fail-safe is keep-the-role.
+    const account = await deps.store.accountForDiscordUser(m.user.id).catch(e => {
+      inc("ops.sweep_error");
+      logError("member link check failed", e);
+      return undefined;
+    });
+    if (account === undefined || account) continue;
     await m.roles.remove(roleId).catch(e => logError("member role revoke failed", e));
     revoked++;
     inc("ops.verify_revoked");
@@ -296,6 +326,92 @@ export async function runMemberLinkSweep(deps: OpsDeps): Promise<number> {
 export function startLinkSweep(deps: OpsDeps): { stop: () => void } {
   const timer = setInterval(() => {
     runMemberLinkSweep(deps).catch(e => { inc("ops.sweep_error"); logError("member link sweep failed", e); });
+  }, config.hostHealthIntervalMs);
+  timer.unref?.();
+  return { stop: () => clearInterval(timer) };
+}
+
+// ── Marketplace tag sweep ────────────────────────────────────────────────────
+// The forum's moderated badges are earned, not set once — a listing stops
+// being new, ratings climb past the threshold, velocity spikes. This sweep
+// recomputes the managed tags against live stats on the watchdog cadence and
+// only writes when the applied set differs. Tag state lives on the threads
+// (appliedTags); a badge only exists while the listing is active.
+//
+// Tag NAMES are the contract between Discord-side config and this code —
+// matched case-insensitively; a missing name skips its rule silently.
+
+export const CURATED_TAGS = {
+  new: "New",
+  topRated: "Top Rated",
+  trending: "Trending",
+  staffPick: "Staff Pick",
+} as const;
+
+export async function runTagSweep(deps: OpsDeps): Promise<number> {
+  if (!config.marketplaceChannelId) return 0;
+  const channel = await deps.fetchChannel(config.marketplaceChannelId).catch(() => null);
+  const available = channel?.availableTags ?? [];
+  const threadsApi = channel?.threads;
+  if (!available.length || !threadsApi?.fetchActive) return 0;
+
+  const tagId = (name: string) => available.find(t => t.name.toLowerCase() === name.toLowerCase())?.id;
+  const newId = tagId(CURATED_TAGS.new);
+  const topId = tagId(CURATED_TAGS.topRated);
+  const trendId = tagId(CURATED_TAGS.trending);
+  const managed = new Set([newId, topId, trendId].filter((t): t is string => !!t));
+  // Only Staff Pick exists (it's manual — the sweep never manages it) or the
+  // forum has no curated tags at all: nothing to compute.
+  if (!managed.size) return 0;
+
+  const fetched = await threadsApi.fetchActive().catch(() => null);
+  if (!fetched) return 0;
+  const rawThreads = (fetched as { threads: Map<string, ThreadLike> | Iterable<[string, ThreadLike]> | Iterable<ThreadLike> }).threads;
+  const threads: ThreadLike[] = [...(rawThreads instanceof Map ? rawThreads.values() : rawThreads)]
+    .map(t => Array.isArray(t) ? (t as [string, ThreadLike])[1] : (t as ThreadLike));
+
+  // Bulk inputs — three queries per sweep regardless of thread count.
+  const listings = await deps.store.listActiveListingsWithThreads().catch(() => [] as Awaited<ReturnType<MemoryStore["listActiveListingsWithThreads"]>>);
+  const byThread = new Map(listings.filter(l => l.forumThreadId).map(l => [l.forumThreadId!, l] as const));
+  const stats = topId ? await deps.store.ratingStatsByListing().catch(() => new Map<number, { avg: number; count: number }>()) : new Map<number, { avg: number; count: number }>();
+  const velocity = trendId ? await deps.store.recentAdoptionCounts(config.marketTrendingWindowH * 3_600_000).catch(() => new Map<number, number>()) : new Map<number, number>();
+
+  const now = Date.now();
+  const newCutoffMs = config.marketNewTagDays * 86_400_000;
+  let changed = 0;
+  for (const thread of threads) {
+    const applied = new Set(thread.appliedTags ?? []);
+    const target = new Set(applied);
+    const listing = byThread.get(thread.id);
+    if (newId) {
+      const age = thread.createdTimestamp ? now - thread.createdTimestamp : Number.POSITIVE_INFINITY;
+      if (listing && age <= newCutoffMs) target.add(newId); else target.delete(newId);
+    }
+    if (topId) {
+      const s = listing ? stats.get(listing.id) : undefined;
+      if (listing && s && s.count >= config.marketTopRatingMin && s.avg >= config.marketTopRatingAvg) target.add(topId);
+      else target.delete(topId);
+    }
+    if (trendId) {
+      const n = listing ? velocity.get(listing.id) ?? 0 : 0;
+      if (listing && n >= config.marketTrendingCount) target.add(trendId);
+      else target.delete(trendId);
+    }
+    if (target.size === applied.size && [...target].every(t => applied.has(t))) continue;
+    // Cap at Discord's 5-tag limit — managed badges first, creator tags fill
+    // what's left. Staff Pick and creator tags are never removed here.
+    const managedWanted = [newId, topId, trendId].filter((t): t is string => !!t && target.has(t));
+    const rest = [...target].filter(t => !managed.has(t));
+    const ok = await thread.setAppliedTags?.([...managedWanted, ...rest].slice(0, 5))
+      .then(() => true).catch(() => false);
+    if (ok) { changed++; inc("ops.tag_sweep"); }
+  }
+  return changed;
+}
+
+export function startTagSweep(deps: OpsDeps): { stop: () => void } {
+  const timer = setInterval(() => {
+    runTagSweep(deps).catch(e => { inc("ops.sweep_error"); logError("marketplace tag sweep failed", e); });
   }, config.hostHealthIntervalMs);
   timer.unref?.();
   return { stop: () => clearInterval(timer) };

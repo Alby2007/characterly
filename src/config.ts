@@ -82,6 +82,13 @@ const env = z.object({
   MARKET_PUBLISH_DAILY_CAP: z.coerce.number().int().min(1).default(5),
   MARKET_REPORT_DAILY_CAP: z.coerce.number().int().min(1).default(20),
   MARKET_ADOPT_DAILY_CAP: z.coerce.number().int().min(1).default(20),
+  // Curated forum tags — the bot-managed badges on listing threads. Names are
+  // fixed constants in ops.ts; these are the thresholds that earn them.
+  MARKET_NEW_TAG_DAYS: z.coerce.number().int().min(1).default(7),
+  MARKET_TOP_RATING_AVG: z.coerce.number().min(1).max(5).default(4.5),
+  MARKET_TOP_RATING_MIN: z.coerce.number().int().min(1).default(5),
+  MARKET_TRENDING_COUNT: z.coerce.number().int().min(1).default(5),
+  MARKET_TRENDING_WINDOW_H: z.coerce.number().int().min(1).default(72),
   // Safety classifier model — defaults to the hosted reply model; a small
   // fast model is fine (the verdict schema is tiny).
   SAFETY_MODEL: z.string().optional(),
@@ -195,6 +202,11 @@ export const config = {
   marketPublishDailyCap: env.MARKET_PUBLISH_DAILY_CAP,
   marketReportDailyCap: env.MARKET_REPORT_DAILY_CAP,
   marketAdoptDailyCap: env.MARKET_ADOPT_DAILY_CAP,
+  marketNewTagDays: env.MARKET_NEW_TAG_DAYS,
+  marketTopRatingAvg: env.MARKET_TOP_RATING_AVG,
+  marketTopRatingMin: env.MARKET_TOP_RATING_MIN,
+  marketTrendingCount: env.MARKET_TRENDING_COUNT,
+  marketTrendingWindowH: env.MARKET_TRENDING_WINDOW_H,
   safetyModel: env.SAFETY_MODEL ?? env.GROQ_MODEL,
   // House ops — see ops.ts. houseGuildId unset disables the whole layer
   // (intents, listeners, watchdog never activate).

@@ -138,6 +138,10 @@ listing-report one:
   button's author id.
 - **Daily cap is shared** with listing reports — one `report:<userId>`
   budget across both lanes, enforced inside the transaction.
+- **Staff pick** (message context-menu command, mods only) toggles the
+  curated `Staff Pick` forum tag on a listing's thread — an editorial
+  badge, not a moderation action, so it writes no `moderation_events` row
+  and the tag sweep never overrides it.
 
 ### Rate limits (per UTC day, derived from table rows)
 

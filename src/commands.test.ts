@@ -1,9 +1,11 @@
 import "dotenv/config";
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ButtonInteraction, ChatInputCommandInteraction, MessageContextMenuCommandInteraction, ModalSubmitInteraction } from "discord.js";
-import { handleMemoryButton, handleMemoryCommand, handleReportMessageCommand, handleSetupModal } from "./commands.js";
+import { ChannelType } from "discord.js";
+import type { ButtonInteraction, ChatInputCommandInteraction, MessageContextMenuCommandInteraction, ModalSubmitInteraction, StringSelectMenuInteraction } from "discord.js";
+import { handleMemoryButton, handleMemoryCommand, handleMarketplaceContext, handleMarketSelect, handleSetupModal } from "./commands.js";
 import { ProfileStore } from "./profiles.js";
+import type { MemoryStore } from "./database.js";
 import { makeTestSql, makeStore } from "./test-helpers.js";
 import type { Brain } from "./brain.js";
 import type { EventStore } from "./events.js";
@@ -722,11 +724,12 @@ test("market:commentcat files the report and pings mods with quoted content + mo
     const modSent: Array<{ content?: string; components?: unknown[]; allowedMentions?: unknown }> = [];
     const target = { author: { id: "u-author" }, content: "@everyone free robux" };
     const channels = {
-      "t-1": { messages: { fetch: async () => target } },
+      "t-1": { isThread: () => true, parentId: "c-forum", messages: { fetch: async () => target } },
       "c-mods": { isTextBased: () => true, send: async (p: (typeof modSent)[number]) => { modSent.push(p); } },
     };
-    const saved = { m: config.marketplaceModChannelId };
+    const saved = { m: config.marketplaceModChannelId, f: config.marketplaceChannelId };
     config.marketplaceModChannelId = "c-mods";
+    config.marketplaceChannelId = "c-forum";
     try {
       const ix = stubButton({ customId: `market:commentcat:t-1:m-1:spam`, userId: "u-reporter", channels });
       await handleMemoryButton(ix.interaction, store);
@@ -757,8 +760,10 @@ test("market:commentcat refuses self-reports and sanitizes forged categories", a
     const listing = await makeListingRow(store, "u-creator4");
     await store.setListingThread(listing.id, "t-2");
     const channels = {
-      "t-2": { messages: { fetch: async () => ({ author: { id: "u-me" }, content: "hi" }) } },
+      "t-2": { isThread: () => true, parentId: "c-forum", messages: { fetch: async () => ({ author: { id: "u-me" }, content: "hi" }) } },
     };
+    const savedF = config.marketplaceChannelId;
+    config.marketplaceChannelId = "c-forum";
     const self = stubButton({ customId: `market:commentcat:t-2:m-2:spam`, userId: "u-me", channels });
     await handleMemoryButton(self.interaction, store);
     assert.match(updates_content(self.updates), /own comment/i);
@@ -766,7 +771,7 @@ test("market:commentcat refuses self-reports and sanitizes forged categories", a
     // Forged category string — allowlisted down to 'other' before any write.
     const modSent2: Array<{ content?: string }> = [];
     const channels2 = {
-      "t-2": { messages: { fetch: async () => ({ author: { id: "u-author2" }, content: "ok" }) } },
+      "t-2": { isThread: () => true, parentId: "c-forum", messages: { fetch: async () => ({ author: { id: "u-author2" }, content: "ok" }) } },
       "c-mods": { isTextBased: () => true, send: async (p: { content?: string }) => { modSent2.push(p); } },
     };
     const saved = config.marketplaceModChannelId;
@@ -778,9 +783,38 @@ test("market:commentcat refuses self-reports and sanitizes forged categories", a
       assert.equal(modSent2.length, 1);
       assert.match(modSent2[0].content ?? "", /Something else/);
       assert.doesNotMatch(modSent2[0].content ?? "", /@everyone/);
-    } finally { config.marketplaceModChannelId = saved; }
+    } finally { config.marketplaceModChannelId = saved; config.marketplaceChannelId = savedF; }
     const rows = await sql<Array<{ category: string }>>`SELECT category FROM comment_reports WHERE message_id = 'm-3'`;
     assert.equal(rows[0]?.category, "other");
+  } finally { await sql.end(); }
+});
+
+test("market:commentcat refuses forged channel ids — non-marketplace messages aren't reportable", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const modSent: Array<{ content?: string }> = [];
+    const saved = { m: config.marketplaceModChannelId, f: config.marketplaceChannelId };
+    config.marketplaceModChannelId = "c-mods";
+    config.marketplaceChannelId = "c-forum";
+    try {
+      // A forged button pointing at a message in a regular channel — the
+      // context-menu entry can't produce this, but customIds are forgeable.
+      const channels = {
+        "c-chat": { isThread: () => false, parentId: null, messages: { fetch: async () => ({ author: { id: "u-victim" }, content: "hi" }) } },
+        "t-else": { isThread: () => true, parentId: "c-other-forum", messages: { fetch: async () => ({ author: { id: "u-victim" }, content: "hi" }) } },
+        "c-mods": { isTextBased: () => true, send: async (p: { content?: string }) => { modSent.push(p); } },
+      };
+      const plain = stubButton({ customId: `market:commentcat:c-chat:m-x:spam`, userId: "u-r", channels });
+      await handleMemoryButton(plain.interaction, store);
+      assert.match(updates_content(plain.updates), /only works inside marketplace/i);
+      const wrongParent = stubButton({ customId: `market:commentcat:t-else:m-x:spam`, userId: "u-r", channels });
+      await handleMemoryButton(wrongParent.interaction, store);
+      assert.match(updates_content(wrongParent.updates), /only works inside marketplace/i);
+    } finally { Object.assign(config, saved); }
+    assert.equal(modSent.length, 0, "forged reports must never ping mods");
+    const rows = await sql`SELECT COUNT(*)::int AS n FROM comment_reports`;
+    assert.equal(rows[0].n, 0, "forged reports must never reach the table");
   } finally { await sql.end(); }
 });
 
@@ -828,16 +862,23 @@ test("market:modmsg — mod gate, keep/del/timeout actions resolve the report ro
 
 // ── "Report message" context command ─────────────────────────────────────────
 
+// The report path never touches the store — the dispatcher only needs it for
+// Staff pick, which these tests stub separately.
+const nullCtxStore = { listingByThreadId: async () => null } as unknown as MemoryStore;
+
 function stubCtxMenu(opts: {
-  userId?: string; guildId?: string;
-  target: { id: string; author: { id: string; bot?: boolean }; channel: { id: string; parentId?: string | null; isThread?: () => boolean }; content?: string };
+  userId?: string; guildId?: string; admin?: boolean; commandName?: string; channels?: Record<string, unknown>;
+  target: { id: string; author: { id: string; bot?: boolean }; channel: { id: string; parentId?: string | null; isThread?: () => boolean; appliedTags?: string[]; setAppliedTags?: (t: string[]) => Promise<unknown> }; content?: string };
 }): { interaction: MessageContextMenuCommandInteraction; replies: Replies } {
   const replies: Replies = [];
   const channel = { isThread: () => true, ...opts.target.channel };
   const interaction = {
     guildId: opts.guildId ?? "g1",
     user: { id: opts.userId ?? "u-user" },
-    commandName: "Report message",
+    commandName: opts.commandName ?? "Report message",
+    memberPermissions: { has: () => !!opts.admin },
+    member: { roles: { cache: { has: () => false } } },
+    client: { channels: { fetch: async (id: string) => opts.channels?.[id] ?? null } },
     targetMessage: { id: opts.target.id, author: opts.target.author, content: opts.target.content ?? "hi", channel },
     channel,
     reply: async (r: (typeof replies)[number]) => { replies.push(r); return r; },
@@ -852,32 +893,187 @@ test("Report message: only marketplace-thread comments are reportable", async ()
   try {
     // Outside the house guild entirely.
     const foreign = stubCtxMenu({ guildId: "g-other", target: { id: "m1", author: { id: "u-a" }, channel: { id: "t-x", parentId: "c-forum" } } });
-    await handleReportMessageCommand(foreign.interaction);
+    await handleMarketplaceContext(foreign.interaction, nullCtxStore);
     assert.match(foreign.replies[0]?.content ?? "", /only works on comments inside marketplace/i);
 
     // A regular (non-thread, or other-parent) channel in the house.
     const channelMsg = stubCtxMenu({ target: { id: "m1", author: { id: "u-a" }, channel: { id: "c-chat", parentId: null, isThread: () => false } } });
-    await handleReportMessageCommand(channelMsg.interaction);
+    await handleMarketplaceContext(channelMsg.interaction, nullCtxStore);
     assert.match(channelMsg.replies[0]?.content ?? "", /only works/i);
 
     // A thread in some other forum.
     const otherThread = stubCtxMenu({ target: { id: "m1", author: { id: "u-a" }, channel: { id: "t-y", parentId: "c-elsewhere" } } });
-    await handleReportMessageCommand(otherThread.interaction);
+    await handleMarketplaceContext(otherThread.interaction, nullCtxStore);
     assert.match(otherThread.replies[0]?.content ?? "", /only works/i);
 
     // Own comment + bot messages refused.
     const self = stubCtxMenu({ userId: "u-a", target: { id: "m1", author: { id: "u-a" }, channel: { id: "t-1", parentId: "c-forum" } } });
-    await handleReportMessageCommand(self.interaction);
+    await handleMarketplaceContext(self.interaction, nullCtxStore);
     assert.match(self.replies[0]?.content ?? "", /own comment/i);
     const bot = stubCtxMenu({ target: { id: "m1", author: { id: "b-1", bot: true }, channel: { id: "t-1", parentId: "c-forum" } } });
-    await handleReportMessageCommand(bot.interaction);
+    await handleMarketplaceContext(bot.interaction, nullCtxStore);
     assert.match(bot.replies[0]?.content ?? "", /system message/i);
 
     // A real comment in a listing thread → ephemeral category picker carrying
     // the thread + message ids forward to market:commentcat.
     const ok = stubCtxMenu({ target: { id: "m-77", author: { id: "u-author" }, channel: { id: "t-1", parentId: "c-forum" } } });
-    await handleReportMessageCommand(ok.interaction);
+    await handleMarketplaceContext(ok.interaction, nullCtxStore);
     assert.equal(ok.replies[0]?.ephemeral, true);
     assert.match(JSON.stringify(ok.replies[0]?.components), /market:commentcat:t-1:m-77:/);
+  } finally { Object.assign(config, saved); }
+});
+
+// ── Marketplace listing tags ─────────────────────────────────────────────────
+
+const FORUM_TAGS = [
+  { id: "tag-new", name: "New", moderated: true },
+  { id: "tag-top", name: "Top Rated", moderated: true },
+  { id: "tag-staff", name: "Staff Pick", moderated: true },
+  { id: "tag-genre", name: "Slice of Life" },
+  { id: "tag-genre2", name: "Horror" },
+];
+
+function fakeForum(threads: Record<string, unknown> = {}) {
+  return {
+    type: ChannelType.GuildForum,
+    availableTags: FORUM_TAGS,
+    threads: { fetch: async (id: string) => threads[id] ?? null },
+  };
+}
+
+function fakeTagThread(id: string, appliedTags: string[] = []) {
+  const calls: string[][] = [];
+  return { id, appliedTags: [...appliedTags], calls, setAppliedTags: async (tags: string[]) => { calls.push(tags); } };
+}
+
+test("market:tags — creator gets the picker; non-creator refused; only non-moderated tags offered", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const res = await store.createListing("u-creator", {
+      name: "TagMe", tagline: "t", voicePersona: "v", coreTraits: [],
+      ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+    });
+    assert.ok(res.ok);
+    const listing = res.listing;
+
+    const stranger = stubButton({ customId: `market:tags:${listing.id}`, userId: "u-nope" });
+    await handleMemoryButton(stranger.interaction, store);
+    assert.match(stranger.replies[0]?.content ?? "", /not your listing/i);
+
+    const saved = config.marketplaceChannelId;
+    config.marketplaceChannelId = "c-forum";
+    try {
+      const creator = stubButton({ customId: `market:tags:${listing.id}`, userId: "u-creator", channels: { "c-forum": fakeForum() } });
+      await handleMemoryButton(creator.interaction, store);
+      const row = JSON.stringify(creator.replies[0]?.components);
+      assert.match(row, /market:tagsel:/);
+      assert.match(row, /Slice of Life/);
+      assert.match(row, /Horror/);
+      assert.doesNotMatch(row, /Staff Pick|tag-new|tag-top|tag-staff/, "moderated curated tags are never offered to creators");
+    } finally { config.marketplaceChannelId = saved; }
+  } finally { await sql.end(); }
+});
+
+test("market:tagsel — forged ids dropped, curated badges preserved, non-owner refused", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const res = await store.createListing("u-creator", {
+      name: "TagMe", tagline: "t", voicePersona: "v", coreTraits: [],
+      ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+    });
+    assert.ok(res.ok);
+    const listing = res.listing;
+    await store.setListingThread(listing.id, "t-1");
+
+    const saved = config.marketplaceChannelId;
+    config.marketplaceChannelId = "c-forum";
+    try {
+      const thread = fakeTagThread("t-1", ["tag-new", "tag-genre2"]);
+      const updates: Replies = [];
+      const interaction = {
+        customId: `market:tagsel:${listing.id}`,
+        user: { id: "u-creator" },
+        // tag-forged isn't on the forum; tag-new is moderated — both must be
+        // rejected as creator picks. genre2 was the previous pick and is
+        // replaced by the new selection.
+        values: ["tag-genre", "tag-forged", "tag-new"],
+        client: { channels: { fetch: async () => fakeForum({ "t-1": thread }) } },
+        update: async (r: (typeof updates)[number]) => { updates.push(r); return r; },
+      };
+      await handleMarketSelect(interaction as unknown as StringSelectMenuInteraction, store);
+      assert.deepEqual(thread.calls[0], ["tag-new", "tag-genre"], "moderated badge kept + only the valid pick applied");
+      assert.match(updates[0]?.content ?? "", /Slice of Life/);
+
+      // Non-owner re-tag refused — no write.
+      const thread2 = fakeTagThread("t-1", ["tag-new"]);
+      const denied: Replies = [];
+      await handleMarketSelect({
+        customId: `market:tagsel:${listing.id}`,
+        user: { id: "u-nope" },
+        values: ["tag-genre"],
+        client: { channels: { fetch: async () => fakeForum({ "t-1": thread2 }) } },
+        update: async (r: (typeof denied)[number]) => { denied.push(r); return r; },
+      } as unknown as StringSelectMenuInteraction, store);
+      assert.equal(thread2.calls.length, 0);
+      assert.match(denied[0]?.content ?? "", /not your listing/i);
+    } finally { config.marketplaceChannelId = saved; }
+  } finally { await sql.end(); }
+});
+
+test("Staff pick — mod toggles the badge on/off; non-mod and non-marketplace refused", async () => {
+  const saved = { g: config.houseGuildId, f: config.marketplaceChannelId };
+  config.houseGuildId = "g1";
+  config.marketplaceChannelId = "c-forum";
+  try {
+    const sql = makeTestSql();
+    try {
+      const { store } = await makeStore(sql);
+      const res = await store.createListing("u-creator", {
+        name: "Picked", tagline: "t", voicePersona: "v", coreTraits: [],
+        ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+      });
+      assert.ok(res.ok);
+      await store.setListingThread(res.listing.id, "t-1");
+
+      // Non-mod refused.
+      const noMod = stubCtxMenu({
+        commandName: "Staff pick",
+        target: { id: "m1", author: { id: "u-a" }, channel: { id: "t-1", parentId: "c-forum" } },
+      });
+      await handleMarketplaceContext(noMod.interaction, store);
+      assert.match(noMod.replies[0]?.content ?? "", /Moderator role required/i);
+
+      // Outside the forum entirely — even an admin is refused.
+      const foreign = stubCtxMenu({
+        commandName: "Staff pick", admin: true,
+        target: { id: "m1", author: { id: "u-a" }, channel: { id: "c-chat", parentId: null, isThread: () => false } },
+      });
+      await handleMarketplaceContext(foreign.interaction, store);
+      assert.match(foreign.replies[0]?.content ?? "", /only works inside marketplace/i);
+
+      // Mod applies the badge.
+      const on = fakeTagThread("t-1", []);
+      const mod = stubCtxMenu({
+        commandName: "Staff pick", admin: true,
+        channels: { "c-forum": fakeForum() },
+        target: { id: "m1", author: { id: "u-a" }, channel: { id: "t-1", parentId: "c-forum", appliedTags: on.appliedTags, setAppliedTags: on.setAppliedTags } },
+      });
+      await handleMarketplaceContext(mod.interaction, store);
+      assert.deepEqual(on.calls[0], ["tag-staff"]);
+      assert.match(mod.replies[0]?.content ?? "", /Staff Pick/i);
+
+      // Second thread already carrying it — toggles off.
+      const off = fakeTagThread("t-1", ["tag-staff", "tag-genre"]);
+      const mod2 = stubCtxMenu({
+        commandName: "Staff pick", admin: true,
+        channels: { "c-forum": fakeForum() },
+        target: { id: "m1", author: { id: "u-a" }, channel: { id: "t-1", parentId: "c-forum", appliedTags: off.appliedTags, setAppliedTags: off.setAppliedTags } },
+      });
+      await handleMarketplaceContext(mod2.interaction, store);
+      assert.deepEqual(off.calls[0], ["tag-genre"]);
+      assert.match(mod2.replies[0]?.content ?? "", /Removed/i);
+    } finally { await sql.end(); }
   } finally { Object.assign(config, saved); }
 });

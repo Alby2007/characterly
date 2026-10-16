@@ -891,3 +891,40 @@ test("parallel comment reports can't both slip under the daily cap", async () =>
   assert.equal([r1, r2].filter(r => r.ok).length, 1);
   assert.equal([r1, r2].filter(r => !r.ok && r.reason === "daily_cap").length, 1);
 });
+
+test("tag sweep feeds: thread-scoped listings, bulk rating stats, adoption velocity window", async () => {
+  const { store } = await freshStore();
+  const c1 = await awakenedCompanion(store, "u-tag1", "One");
+  const l1 = await makeListing(store, "u-tag1", c1.id, "One");
+  const c2 = await awakenedCompanion(store, "u-tag2", "Two");
+  const l2 = await makeListing(store, "u-tag2", c2.id, "Two");
+  const c3 = await awakenedCompanion(store, "u-tag3", "Three");
+  const l3 = await makeListing(store, "u-tag3", c3.id, "Three");
+
+  // Only active listings WITH a thread qualify — l3 stays threadless, l2 delists.
+  await store.setListingThread(l1.id, "t-1");
+  await store.setListingThread(l2.id, "t-2");
+  await store.delistListing(l2.id);
+
+  const withThreads = await store.listActiveListingsWithThreads();
+  assert.deepEqual(withThreads.map(l => l.id), [l1.id]);
+
+  // Ratings: l1 gets four 5s + two 4s (avg 4.67, count 6); l2 a lone 2.
+  for (const [u, s] of [["r1",5],["r2",5],["r3",5],["r4",5],["r5",4],["r6",4]] as const) {
+    await store.rateListing(l1.id, u, s);
+  }
+  await store.rateListing(l2.id, "r9", 2);
+  const stats = await store.ratingStatsByListing();
+  assert.equal(stats.get(l1.id)!.count, 6);
+  assert.ok(Math.abs(stats.get(l1.id)!.avg - 28 / 6) < 0.001);
+  assert.equal(stats.get(l2.id)!.count, 1);
+
+  // Velocity: 3 adoptions on l1, but one backdated outside the 72h window.
+  for (const u of ["u-a1", "u-a2", "u-a3"]) await store.adoptListing(u, l1.id, { maxSlots: 10 });
+  await sql`UPDATE companion_adoptions SET adopted_at = NOW() - INTERVAL '5 days' WHERE user_id = 'u-a3'`;
+  const counts = await store.recentAdoptionCounts(72 * HOUR);
+  assert.equal(counts.get(l1.id), 2);
+  assert.equal(counts.get(l3.id) ?? 0, 0);
+  const wide = await store.recentAdoptionCounts(30 * 24 * HOUR);
+  assert.equal(wide.get(l1.id), 3);
+});

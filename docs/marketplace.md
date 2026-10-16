@@ -107,6 +107,40 @@ deliberate:
    clone. Adopter-owned state (memories, journal, guild rows, introduction
    flag) is never touched.
 
+## Listing tags — creator picks + curated badges
+
+Forum tags are the browse surface. Two lanes, both resolved against the
+forum channel's `availableTags` **live by name** — no ids are stored, so a
+tag renamed or deleted in Discord self-heals (a deleted id just drops out of
+the next `setAppliedTags` write):
+
+- **Creator tags** — every *non-moderated* tag on the forum is pickable.
+  Publishing, republishing, and relisting attach an ephemeral multi-select
+  (`market:tagsel:<listingId>`) to the success reply, and the card's **Tags**
+  button (`market:tags:<id>`, creator-only) reopens it for re-tagging later.
+  The submit handler re-checks ownership, drops forged tag ids against the
+  live forum list, and merges the thread's moderated badges back in — a
+  re-tag replaces only the creator's own picks.
+- **Curated badges** — four *moderated* tags the bot manages. The tag
+  **names are the contract**: `New`, `Top Rated`, `Trending`, `Staff Pick`,
+  matched case-insensitively (`CURATED_TAGS` in `ops.ts`); a missing name
+  skips its rule silently.
+  - `New` — applied at thread creation; the tag sweep strips it once the
+    thread is older than `MARKET_NEW_TAG_DAYS`.
+  - `Top Rated` — `avg ≥ MARKET_TOP_RATING_AVG` (default 4.5) with at least
+    `MARKET_TOP_RATING_MIN` (5) ratings, from `listing_ratings`.
+  - `Trending` — `MARKET_TRENDING_COUNT` (5) adoptions inside the last
+    `MARKET_TRENDING_WINDOW_H` (72h), from `companion_adoptions.adopted_at`.
+  - `Staff Pick` — manual editorial badge toggled by marketplace mods via
+    right-click → **Apps → Staff pick** on any message in the listing thread.
+    The sweep never touches it.
+
+The sweep (`runTagSweep`, on the host-health cadence) recomputes only the
+three *automated* badges for active threads, writes only when the applied
+set differs, and caps the merged set at Discord's five-tag maximum with
+managed badges first. Badges belong to *active* listings — a delisted or
+banned row maps to no thread and its curated tags strip on the next pass.
+
 ## Adopting
 
 Forum card → **Add** → `store.adoptListing` in one transaction:
@@ -214,6 +248,11 @@ The mechanics in one paragraph:
 | `MARKET_PUBLISH_DAILY_CAP` | 5 | New listings per creator per day |
 | `MARKET_REPORT_DAILY_CAP` | 20 | Reports per user per day |
 | `MARKET_ADOPT_DAILY_CAP` | 20 | Adoptions per user per day |
+| `MARKET_NEW_TAG_DAYS` | 7 | How long a fresh listing keeps the `New` tag |
+| `MARKET_TOP_RATING_AVG` | 4.5 | `Top Rated` minimum average |
+| `MARKET_TOP_RATING_MIN` | 5 | `Top Rated` minimum rating count |
+| `MARKET_TRENDING_COUNT` | 5 | `Trending` adoptions inside the window |
+| `MARKET_TRENDING_WINDOW_H` | 72 | `Trending` window in hours |
 | `SAFETY_MODEL` | `GROQ_MODEL` | Classifier model for listing/reply screens |
 
 Bot needs **Create Public Threads** (+ **Manage Threads** for clean archiving)
@@ -229,8 +268,6 @@ in the forum channel.
 - Deleting a listing *row* (only possible via SQL today) orphans its adopted
   clone `companions` rows — `adopted_from_listing_id` deliberately has no FK
   yet; hard removal of clones is a moderation-phase decision.
-- Forum tags aren't applied (Discord needs the forum's tag IDs) — add
-  `MARKETPLACE_TAG_MAP` or a tag picklist for browsability.
 - Flagged listings keep their thread visible (Adds are blocked at the button);
   auto-archiving on flag is a small change if wanted.
 - Delisting is soft by design; `banned` freezes clones but keeps the rows —

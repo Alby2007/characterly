@@ -2898,6 +2898,40 @@ export class MemoryStore {
     return rows[0] ? { authorUserId: rows[0].author_user_id } : null;
   }
 
+  /** Active listings that have a live forum thread — the tag sweep's universe:
+   *  badges only mean anything on threads that exist and aren't taken down. */
+  async listActiveListingsWithThreads(): Promise<CompanionListing[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM companion_listings
+      WHERE status = 'active' AND forum_thread_id IS NOT NULL
+      ORDER BY id ASC
+    `;
+    return rows.map(r => this.rowToListing(r));
+  }
+
+  /** Bulk rating stats keyed by listing id — the tag sweep reads this once
+   *  rather than one query per thread. */
+  async ratingStatsByListing(): Promise<Map<number, { avg: number; count: number }>> {
+    const rows = await this.sql<Array<{ listing_id: number; avg: number | string | null; n: number | string }>>`
+      SELECT listing_id, AVG(stars) AS avg, COUNT(*) AS n
+      FROM listing_ratings GROUP BY listing_id
+    `;
+    return new Map(rows.map(r => [Number(r.listing_id), { avg: r.avg == null ? 0 : Number(r.avg), count: Number(r.n) }]));
+  }
+
+  /** Adoptions per listing within the window — the "Trending" velocity feed.
+   *  adopted_at is the timestamped column; drops/re-adopts don't inflate it
+   *  (a re-adopt rewrites adopted_at, which is legitimately fresh activity). */
+  async recentAdoptionCounts(windowMs: number): Promise<Map<number, number>> {
+    const seconds = Math.max(1, Math.floor(windowMs / 1000));
+    const rows = await this.sql<Array<{ listing_id: number; n: number | string }>>`
+      SELECT listing_id, COUNT(*) AS n FROM companion_adoptions
+      WHERE adopted_at > NOW() - make_interval(secs => ${seconds})
+      GROUP BY listing_id
+    `;
+    return new Map(rows.map(r => [Number(r.listing_id), Number(r.n)]));
+  }
+
   async flagListing(listingId: number): Promise<boolean> {
     const result = await this.sql`UPDATE companion_listings SET status = 'flagged', updated_at = NOW() WHERE id = ${listingId} AND status = 'active'`;
     return result.count > 0;

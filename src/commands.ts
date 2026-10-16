@@ -1,4 +1,4 @@
-import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonInteraction, ButtonStyle, ChannelType, ChatInputCommandInteraction, EmbedBuilder, escapeMarkdown, ModalBuilder, ModalSubmitInteraction, PermissionFlagsBits, TextInputBuilder, TextInputStyle, type Client, type MessageContextMenuCommandInteraction, type TextChannel } from "discord.js";
+import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonInteraction, ButtonStyle, ChannelType, ChatInputCommandInteraction, EmbedBuilder, escapeMarkdown, ModalBuilder, ModalSubmitInteraction, PermissionFlagsBits, StringSelectMenuBuilder, TextInputBuilder, TextInputStyle, type Client, type MessageContextMenuCommandInteraction, type StringSelectMenuInteraction, type TextChannel } from "discord.js";
 import type { Brain } from "./brain.js";
 import { MemoryStore, type Memory } from "./database.js";
 import { EventStore } from "./events.js";
@@ -14,7 +14,7 @@ import { inc, metricsSnapshot } from "./metrics.js";
 import type { Companion, CompanionListing, CompanionSpec, MessageEvent } from "./types.js";
 import { config } from "./config.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
-import { handleOpsCommand, handleHouseButton, isHouse, isMarketplaceThread } from "./ops.js";
+import { CURATED_TAGS, handleOpsCommand, handleHouseButton, isHouse, isMarketplaceThread } from "./ops.js";
 
 export const ONBOARDING_ARCHETYPES: Record<
   string,
@@ -466,7 +466,28 @@ export function buildListingComponents(listingId: number): ActionRowBuilder<Butt
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`market:add:${listingId}`).setLabel("Add to your companions").setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(`market:rate:${listingId}`).setLabel("Rate").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`market:tags:${listingId}`).setLabel("Tags").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`market:report:${listingId}`).setLabel("Report").setStyle(ButtonStyle.Secondary),
+  );
+}
+
+/** Ephemeral multi-select of the forum's creator-pickable (non-moderated)
+ *  tags — the curated badges never appear here. Returns null when the forum
+ *  has none so callers can simply omit the row. Options carry forum tag ids;
+ *  `market:tagsel:{listingId}` re-checks ownership at submit time. */
+export async function tagPickerRow(client: Client, listingId: number): Promise<ActionRowBuilder<StringSelectMenuBuilder> | null> {
+  if (!config.marketplaceChannelId) return null;
+  const channel = await client.channels.fetch(config.marketplaceChannelId).catch(() => null);
+  if (!channel || channel.type !== ChannelType.GuildForum) return null;
+  const pickable = (channel.availableTags ?? []).filter(t => !t.moderated).slice(0, 25);
+  if (!pickable.length) return null;
+  return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`market:tagsel:${listingId}`)
+      .setPlaceholder("Tag this listing")
+      .setMinValues(0)
+      .setMaxValues(Math.min(5, pickable.length))
+      .setOptions(pickable.map(t => ({ label: t.name, value: t.id }))),
   );
 }
 
@@ -562,8 +583,9 @@ async function screenListingFields(fields: {
 }
 
 /** Mod-action gate: a configured marketplace role id, or ManageGuild (server
- *  admins can always act). Handles both GuildMember and raw API member shapes. */
-function isMarketplaceMod(interaction: ButtonInteraction): boolean {
+ *  admins can always act). Handles both GuildMember and raw API member shapes.
+ *  Structural param type — button and context-menu interactions both fit. */
+function isMarketplaceMod(interaction: { member?: unknown; memberPermissions?: { has?(f: bigint): boolean } | null }): boolean {
   const raw = (interaction.member as { roles?: unknown } | null)?.roles;
   const hasRole = config.marketplaceModRoleIds.length > 0 && (
     Array.isArray(raw)
@@ -600,8 +622,12 @@ async function postListingThread(
   if (!channel || channel.type !== ChannelType.GuildForum) return null;
   const creatorName = interaction.user.globalName ?? interaction.user.username ?? "a creator";
   const stats = await store.listingRatingStats(listing.id).catch(() => undefined);
+  // Every fresh thread earns the curated "New" badge — the tag sweep strips
+  // it once the thread ages past MARKET_NEW_TAG_DAYS.
+  const newTag = channel.availableTags?.find(t => t.name.toLowerCase() === CURATED_TAGS.new.toLowerCase());
   const thread = await channel.threads.create({
     name: `${listing.name} — ${listing.tagline}`.slice(0, 100),
+    appliedTags: newTag ? [newTag.id] : undefined,
     message: {
       embeds: [buildListingCard(listing, creatorName, stats)],
       components: [buildListingComponents(listing.id)],
@@ -679,8 +705,8 @@ async function doRelist(
   account: { plan: string } | null,
 ) {
   const isButton = typeof (interaction as ButtonInteraction).isButton === "function" && (interaction as ButtonInteraction).isButton();
-  const reply = (content: string) =>
-    isButton ? (interaction as ButtonInteraction).update({ content, components: [] }) : interaction.reply({ content, ephemeral: true });
+  const reply = (content: string, components: ActionRowBuilder<StringSelectMenuBuilder>[] = []) =>
+    isButton ? (interaction as ButtonInteraction).update({ content, components }) : interaction.reply({ content, ephemeral: true, components });
 
   // A stale/forged relist button must not outlive a creator ban — enforce it
   // here in the shared path, not only in the command that renders the picker.
@@ -703,7 +729,12 @@ async function doRelist(
   }
   await store.setListingThread(res.listing.id, threadId);
   inc("market.relisted");
-  return reply(`**${res.listing.name}** is back on the shelf in <#${config.marketplaceChannelId}>!`);
+  const tagRow = await tagPickerRow(interaction.client, res.listing.id);
+  return reply(
+    `**${res.listing.name}** is back on the shelf in <#${config.marketplaceChannelId}>!` +
+    (tagRow ? " Pick the tags that fit it below." : ""),
+    tagRow ? [tagRow] : [],
+  );
 }
 
 /** DM the adopted companion's greeting; returns whether it actually landed —
@@ -921,6 +952,8 @@ export const commandDefinitions = [
   // inside a marketplace listing thread. Validated to that surface in the
   // handler; everywhere else it replies "not reportable".
   { name: "Report message", type: 3 },
+  // "Staff pick" — marketplace-mod toggle for the curated forum badge.
+  { name: "Staff pick", type: 3 },
 ];
 
 const confidence = (value: number | undefined) => {
@@ -1958,10 +1991,13 @@ export async function handleCompanionModal(
     const manageRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId(`market:editmodal:${listing.id}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
     );
+    const tagRow = await tagPickerRow(interaction.client, listing.id);
     return interaction.reply({
       ephemeral: true,
-      content: `**${listing.name}** is live in <#${config.marketplaceChannelId}>! Use **Edit persona** below to set traits and their bond with adopters.`,
-      components: [manageRow],
+      content:
+        `**${listing.name}** is live in <#${config.marketplaceChannelId}>! Use **Edit persona** below to set traits and their bond with adopters.` +
+        (tagRow ? " Pick the tags that fit it below." : ""),
+      components: [manageRow, ...(tagRow ? [tagRow] : [])],
     });
   }
 
@@ -2048,10 +2084,13 @@ export async function handleCompanionModal(
     const manageRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId(`market:editmodal:${listing.id}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
     );
+    const tagRow = await tagPickerRow(interaction.client, listing.id);
     return interaction.reply({
       ephemeral: true,
-      content: `**${listing.name}** is live in <#${config.marketplaceChannelId}>! (v${listing.version}) — anyone can adopt them from the post.`,
-      components: [manageRow],
+      content:
+        `**${listing.name}** is live in <#${config.marketplaceChannelId}>! (v${listing.version}) — anyone can adopt them from the post.` +
+        (tagRow ? " Pick the tags that fit it below." : ""),
+      components: [manageRow, ...(tagRow ? [tagRow] : [])],
     });
   }
 
@@ -2273,16 +2312,26 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
     }
 
     // Comment report category picked — `market:commentcat:{channelId}:{messageId}:{category}`.
+    // The context-command entry checks the thread + author, but customIds are
+    // forgeable — the button must re-verify both, or a forged id files a
+    // "comment report" on any message anywhere and aims a Timeout button at
+    // an innocent user.
     if (sub === "commentcat") {
       const channelId = parts[2];
       const messageId = parts[3];
       const category = COMMENT_REPORT_CATEGORIES.some(([c]) => c === parts[4]) ? parts[4] : "other";
       const channel = await interaction.client.channels.fetch(channelId).catch(() => null);
-      const target = channel && "messages" in channel
+      if (!channel || !isMarketplaceThread(channel)) {
+        return interaction.update({ content: "That button only works inside marketplace listing threads.", components: [] });
+      }
+      const target = "messages" in channel
         ? await (channel as TextChannel).messages.fetch(messageId).catch(() => null)
         : null;
       if (!target) {
         return interaction.update({ content: "That comment is already gone.", components: [] });
+      }
+      if (target.author.bot) {
+        return interaction.update({ content: "That's a system message — use **Report** on the listing card for listing issues.", components: [] });
       }
       if (target.author.id === userId) {
         return interaction.update({ content: "You can't report your own comment.", components: [] });
@@ -2353,6 +2402,25 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
             new ButtonBuilder().setCustomId(`market:rateval:${id}:${n}`).setLabel("★".repeat(n)).setStyle(ButtonStyle.Primary),
           ),
         )],
+      });
+    }
+
+    // Creator tag picker — `market:tags:{id}` opens the ephemeral select of
+    // the forum's non-moderated tags. The `market:tagsel` select (dispatched
+    // to handleMarketSelect) does the write.
+    if (sub === "tags") {
+      const listing = await store.listingById(id);
+      if (!listing || listing.creatorUserId !== userId) {
+        return interaction.reply({ content: "That's not your listing to tag.", ephemeral: true });
+      }
+      const row = await tagPickerRow(interaction.client, id);
+      if (!row) {
+        return interaction.reply({ content: "This marketplace doesn't have any pickable tags yet — moderated badges like New and Top Rated stay automatic.", ephemeral: true });
+      }
+      return interaction.reply({
+        ephemeral: true,
+        content: `Pick the tags for **${listing.name}** — curated badges (New, Top Rated…) stay automatic either way.`,
+        components: [row],
       });
     }
 
@@ -3055,10 +3123,51 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
 // a comment can't steal a character; that one's listing-only.
 const COMMENT_REPORT_CATEGORIES = REPORT_CATEGORIES.filter(([c]) => c !== "theft");
 
+/** Creator tag select — `market:tagsel:{listingId}`. Re-checks ownership at
+ *  submit (picks can arrive long after the ephemeral reply rendered), drops
+ *  forged tag ids against the forum's live non-moderated tags, and merges the
+ *  moderated curated badges back in so a re-tag can't strip them. */
+export async function handleMarketSelect(interaction: StringSelectMenuInteraction, store: MemoryStore) {
+  const parts = interaction.customId.split(":");
+  if (parts[0] !== "market" || parts[1] !== "tagsel") return;
+  const listingId = Number(parts[2]);
+  const listing = Number.isFinite(listingId) ? await store.listingById(listingId).catch(() => null) : null;
+  if (!listing || listing.creatorUserId !== interaction.user.id) {
+    return interaction.update({ content: "That's not your listing to tag.", components: [] });
+  }
+  const channel = config.marketplaceChannelId
+    ? await interaction.client.channels.fetch(config.marketplaceChannelId).catch(() => null)
+    : null;
+  const thread = channel && channel.type === ChannelType.GuildForum && listing.forumThreadId
+    ? await channel.threads.fetch(listing.forumThreadId).catch(() => null)
+    : null;
+  if (!thread) {
+    return interaction.update({ content: "That listing's thread isn't reachable.", components: [] });
+  }
+  const available = channel && channel.type === ChannelType.GuildForum ? channel.availableTags ?? [] : [];
+  const pickable = new Set(available.filter(t => !t.moderated).map(t => t.id));
+  const moderated = new Set(available.filter(t => t.moderated).map(t => t.id));
+  const picks = interaction.values.filter(v => pickable.has(v)).slice(0, 5);
+  // Curated badges are preserved across a re-tag — only the creator's own
+  // selections are replaced by `picks`.
+  const keep = (thread.appliedTags ?? []).filter(t => moderated.has(t));
+  const ok = await thread.setAppliedTags([...keep, ...picks].slice(0, 5))
+    .then(() => true).catch(() => false);
+  if (!ok) {
+    return interaction.update({ content: "I couldn't update the tags — check my permissions on the forum.", components: [] });
+  }
+  inc("market.tagged");
+  return interaction.update({
+    content: picks.length
+      ? `Tags saved — ${picks.map(id => available.find(t => t.id === id)?.name ?? id).join(", ")} on **${listing.name}**.`
+      : `Tags cleared on **${listing.name}**.`,
+    components: [],
+  });
+}
 /** "Report message" context-menu entry. Only meaningful on a comment inside
  *  a marketplace listing thread — everywhere else it declines. Shows the
  *  ephemeral category picker; the `market:commentcat` button does the write. */
-export async function handleReportMessageCommand(interaction: MessageContextMenuCommandInteraction) {
+async function handleReportMessageCommand(interaction: MessageContextMenuCommandInteraction) {
   const target = interaction.targetMessage;
   const channel = target.channel ?? interaction.channel;
   if (!isHouse(interaction.guildId) || !isMarketplaceThread(channel)) {
@@ -3085,4 +3194,47 @@ export async function handleReportMessageCommand(interaction: MessageContextMenu
     content: "What's wrong with this comment? Pick the closest reason:",
     components: catRows,
   });
+}
+
+/** "Staff pick" context command — marketplace mods toggle the curated badge
+ *  on a listing's thread. The tag is name-matched against the forum's
+ *  available tags; it must exist (and should be moderated) in Discord. The
+ *  sweep never touches it — this is a manual editorial pick. */
+async function handleStaffPickCommand(interaction: MessageContextMenuCommandInteraction, store: MemoryStore) {
+  const channel = interaction.targetMessage.channel ?? interaction.channel;
+  if (!isHouse(interaction.guildId) || !isMarketplaceThread(channel)) {
+    return interaction.reply({ content: "This only works inside marketplace listing threads.", ephemeral: true });
+  }
+  if (!isMarketplaceMod(interaction)) {
+    return interaction.reply({ content: "Moderator role required.", ephemeral: true });
+  }
+  const forum = await interaction.client.channels.fetch(config.marketplaceChannelId!).catch(() => null);
+  const tag = forum && forum.type === ChannelType.GuildForum
+    ? forum.availableTags?.find(t => t.name.toLowerCase() === CURATED_TAGS.staffPick.toLowerCase())
+    : null;
+  if (!tag) {
+    return interaction.reply({ content: `There's no "${CURATED_TAGS.staffPick}" tag on the marketplace forum — create it (marked moderated) first.`, ephemeral: true });
+  }
+  const thread = channel as unknown as { id: string; appliedTags?: string[]; setAppliedTags(t: string[]): Promise<unknown> };
+  const applied = thread.appliedTags ?? [];
+  const has = applied.includes(tag.id);
+  // The badge goes first so it survives the 5-tag cap.
+  const next = has ? applied.filter(t => t !== tag.id) : [tag.id, ...applied].slice(0, 5);
+  const ok = await thread.setAppliedTags(next).then(() => true).catch(() => false);
+  if (!ok) return interaction.reply({ content: "Couldn't update the thread's tags — check my permissions.", ephemeral: true });
+  const listing = await store.listingByThreadId(channel.id).catch(() => null);
+  inc("market.staffpick");
+  return interaction.reply({
+    content: has
+      ? `Removed **${CURATED_TAGS.staffPick}** from **${listing?.name ?? "this listing"}**.`
+      : `**${listing?.name ?? "This listing"}** is now a ⭐ ${CURATED_TAGS.staffPick}!`,
+    ephemeral: true,
+  });
+}
+
+/** Message context-menu dispatcher — "Report message" files a comment
+ *  report, "Staff pick" toggles the curated badge. */
+export async function handleMarketplaceContext(interaction: MessageContextMenuCommandInteraction, store: MemoryStore) {
+  if (interaction.commandName === "Staff pick") return handleStaffPickCommand(interaction, store);
+  return handleReportMessageCommand(interaction);
 }

@@ -14,7 +14,7 @@ import {
   commandDefinitions,
   findMutualGuilds,
   handleCompanionModal,
-  handleMemoryButton, handleReportMessageCommand,
+  handleMemoryButton, handleMarketplaceContext, handleMarketSelect,
   handleMemoryCommand,
   handleSetupModal,
   sendAdoptionGreeting,
@@ -45,6 +45,7 @@ import {
   initOps, automodMessage, isHouse, isMarketplaceThread, opsAlert,
   handleHouseMemberAdd, handleHouseMemberUpdate, handleHouseMemberRemove,
   ensureHouseLayout, startHostWatchdog, ensureVerifyGate, startLinkSweep,
+  startTagSweep,
   type OpsDeps, type GuildLike,
 } from "./ops.js";
 import { exec as cpExec } from "node:child_process";
@@ -206,6 +207,7 @@ let profileStore: ProfileStore;
 let worker: { stop: () => Promise<void> } | undefined;
 let watchdog: { stop: () => void } | undefined;
 let linkSweep: { stop: () => void } | undefined;
+let tagSweep: { stop: () => void } | undefined;
 
 async function init() {
   store = await MemoryStore.create();
@@ -285,6 +287,7 @@ client.once(Events.ClientReady, async ready => {
       }
       watchdog = startHostWatchdog(opsDeps);
       linkSweep = startLinkSweep(opsDeps); // Member role ↔ account-link reconciliation
+      tagSweep = startTagSweep(opsDeps);   // Curated marketplace badges ↔ live stats
       await opsAlert(opsDeps, `🟢 Characterly online — sha \`${opsDeps.gitSha ?? "?"}\` · migrations applied · host watchdog armed`);
     } catch (error) { inc("ops.init_error"); logError("house ops init failed", error); }
   }
@@ -620,7 +623,8 @@ async function sweepMissedSignals(windowMs: number) {
 client.on(Events.InteractionCreate, async interaction => {
   try {
     if (interaction.isChatInputCommand()) await handleMemoryCommand(interaction, store, brainFor, eventStore, profileStore);
-    if (interaction.isMessageContextMenuCommand()) await handleReportMessageCommand(interaction);
+    if (interaction.isMessageContextMenuCommand()) await handleMarketplaceContext(interaction, store);
+    if (interaction.isStringSelectMenu()) await handleMarketSelect(interaction, store);
     if (interaction.isModalSubmit()) {
       await handleSetupModal(interaction, store, invalidateBrain);
       await handleCompanionModal(interaction, store, scopeId => lookupCache.delete(scopeId));

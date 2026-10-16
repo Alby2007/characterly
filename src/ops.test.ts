@@ -4,7 +4,7 @@ import {
   isHouse, isMarketplaceThread, automodMessage, handleHouseMemberAdd, handleHouseMemberUpdate,
   handleHouseMemberRemove, ensureHouseLayout, collectHostHealth,
   runWatchdogTick, handleOpsCommand, initOps, resetOpsState, WANTED_LAYOUT,
-  ensureVerifyGate, handleHouseButton, runMemberLinkSweep,
+  ensureVerifyGate, handleHouseButton, runMemberLinkSweep, runTagSweep,
   type OpsDeps, type AutomodMessage, type MemberLike,
 } from "./ops.js";
 import { config } from "./config.js";
@@ -269,6 +269,22 @@ test("house:verify — pending members are told to accept rules; non-house + alr
   assert.match(done.replies[0].content, /Already verified/);
 });
 
+test("house:verify — a lookup error says retry, not 'no account'", async () => {
+  const member = makeMember();
+  initOps(makeDeps({
+    fetchMember: async () => member,
+    store: {
+      creditsSupported: true,
+      accountForDiscordUser: async () => { throw new Error("db is down"); },
+    } as unknown as MemoryStore,
+  }));
+  const ix = makeButtonIx();
+  await handleHouseButton(ix as any);
+  assert.equal(member.added.length, 0, "an errored lookup never grants the role");
+  assert.match(ix.replies[0].content, /try again/i);
+  assert.doesNotMatch(ix.replies[0].content, /No linked/);
+});
+
 test("member link sweep: unlinked holder loses Member, linked keeps it", async () => {
   const unlinked = makeMember({ id: "u-gone", hasRole: true });
   const linked = makeMember({ id: "u-stay", hasRole: true });
@@ -287,6 +303,21 @@ test("member link sweep: unlinked holder loses Member, linked keeps it", async (
   assert.equal(linked.removed.length, 0, "linked ⇒ role kept");
   assert.equal(noRole.removed.length, 0, "non-holders aren't touched");
   assert.match(opsAlertText(deps), /u-gone.*Member role removed/);
+});
+
+test("member link sweep: a lookup error keeps the role — outages must not mass-revoke", async () => {
+  const holder = makeMember({ id: "u-h", hasRole: true });
+  const deps = makeDeps({
+    listMembers: async () => [holder],
+    store: {
+      creditsSupported: true,
+      accountForDiscordUser: async () => { throw new Error("db is down"); },
+    } as unknown as MemoryStore,
+  });
+  const revoked = await runMemberLinkSweep(deps);
+  assert.equal(revoked, 0);
+  assert.equal(holder.removed.length, 0, "a DB hiccup is not an unlink — keep the role");
+  assert.doesNotMatch(opsAlertText(deps), /Member role removed/);
 });
 
 // ── Automod ──────────────────────────────────────────────────────────────────
@@ -640,4 +671,93 @@ test("/ops announce posts to the announce channel; missing text refused", async 
   const post = deps.sent.find(s => s.id === "c-announce");
   assert.equal(post?.payload.content, "Marketplace is open!");
   assert.match(ix.replies[0].content, /Posted/);
+});
+
+// ── Marketplace tag sweep ────────────────────────────────────────────────────
+
+const TAGS = [
+  { id: "tag-new", name: "New", moderated: true },
+  { id: "tag-top", name: "Top Rated", moderated: true },
+  { id: "tag-trend", name: "Trending", moderated: true },
+  { id: "tag-staff", name: "Staff Pick", moderated: true },
+  { id: "tag-genre", name: "Slice of Life" },
+];
+
+function makeThread(id: string, over: { appliedTags?: string[]; createdTimestamp?: number } = {}) {
+  const calls: string[][] = [];
+  return {
+    id,
+    appliedTags: over.appliedTags ?? [],
+    createdTimestamp: over.createdTimestamp ?? Date.now(),
+    calls,
+    setAppliedTags: async (tags: string[]) => { calls.push(tags); },
+  };
+}
+
+function forumDeps(threads: ReturnType<typeof makeThread>[], over: {
+  listings?: unknown[]; stats?: Map<number, { avg: number; count: number }>; velocity?: Map<number, number>; tags?: typeof TAGS;
+}) {
+  return makeDeps({
+    store: {
+      listActiveListingsWithThreads: async () => over.listings ?? [],
+      ratingStatsByListing: async () => over.stats ?? new Map(),
+      recentAdoptionCounts: async () => over.velocity ?? new Map(),
+    } as unknown as MemoryStore,
+    fetchChannel: async () => ({
+      send: async () => {},
+      availableTags: over.tags ?? TAGS,
+      threads: { fetchActive: async () => ({ threads: new Map(threads.map(t => [t.id, t])) }) },
+    }),
+  });
+}
+
+test("tag sweep: New applied to fresh threads, stripped past the window", async () => {
+  const fresh = makeThread("t-fresh", { appliedTags: ["tag-genre"], createdTimestamp: Date.now() - 2 * 86_400_000 });
+  const old = makeThread("t-old", { appliedTags: ["tag-new"], createdTimestamp: Date.now() - 10 * 86_400_000 });
+  const deps = forumDeps([fresh, old], {
+    listings: [{ id: 1, forumThreadId: "t-fresh" }, { id: 2, forumThreadId: "t-old" }],
+  });
+
+  const changed = await runTagSweep(deps);
+  assert.equal(changed, 2);
+  assert.deepEqual(fresh.calls[0], ["tag-new", "tag-genre"], "fresh thread earns New and keeps its genre tag");
+  assert.deepEqual(old.calls[0], [], "aged-out thread loses New");
+});
+
+test("tag sweep: Top Rated honors avg+count; Trending honors velocity; Staff Pick preserved", async () => {
+  const top = makeThread("t-top", { appliedTags: ["tag-new"], createdTimestamp: Date.now() });
+  const few = makeThread("t-few", { appliedTags: ["tag-top"], createdTimestamp: Date.now() }); // below min count — loses it
+  const hot = makeThread("t-hot", { appliedTags: ["tag-genre"], createdTimestamp: Date.now() });
+  const picked = makeThread("t-picked", { appliedTags: ["tag-staff", "tag-genre"], createdTimestamp: Date.now() - 30 * 86_400_000 }); // staff pick + stale
+  const deps = forumDeps([top, few, hot, picked], {
+    listings: [
+      { id: 1, forumThreadId: "t-top" }, { id: 2, forumThreadId: "t-few" },
+      { id: 3, forumThreadId: "t-hot" }, { id: 4, forumThreadId: "t-picked" },
+    ],
+    stats: new Map([[1, { avg: 4.9, count: 8 }], [2, { avg: 5, count: 2 }]]),
+    velocity: new Map([[3, 9]]),
+  });
+
+  const changed = await runTagSweep(deps);
+  assert.equal(changed, 3, "top, few, hot change; picked is already correct");
+  assert.deepEqual(top.calls[0], ["tag-new", "tag-top"], "meets avg+count → badge added");
+  assert.deepEqual(few.calls[0], ["tag-new"], "below min ratings → badge stripped");
+  assert.deepEqual(hot.calls[0], ["tag-new", "tag-trend", "tag-genre"], "velocity over threshold → Trending");
+  assert.equal(picked.calls.length, 0, "Staff Pick + creator tags untouched, no write needed");
+});
+
+test("tag sweep: missing curated tag skips silently; inactive listing loses badges", async () => {
+  const orphan = makeThread("t-orphan", { appliedTags: ["tag-top", "tag-genre"], createdTimestamp: Date.now() });
+  const deps = forumDeps([orphan], {
+    listings: [], // delisted/banned → no listing maps to the thread
+    tags: TAGS.filter(t => t.name !== "Trending"), // tag deleted forum-side
+  });
+
+  const changed = await runTagSweep(deps);
+  assert.equal(changed, 1);
+  assert.deepEqual(orphan.calls[0], ["tag-genre"], "managed badges strip; creator tag stays");
+
+  // No curated tags at all → early no-op.
+  const none = forumDeps([makeThread("t-x")], { listings: [], tags: TAGS.filter(t => !t.moderated) });
+  assert.equal(await runTagSweep(none), 0);
 });
