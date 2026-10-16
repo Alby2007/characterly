@@ -319,28 +319,36 @@ const modal = $("#delete-modal");
 const confirmInput = $("#delete-confirm");
 const deleteBtn = $("#delete-do");
 
+const deleteErr = $("#delete-error");
+
 $("#btn-delete").addEventListener("click", () => {
   modal.hidden = false;
   confirmInput.value = "";
   deleteBtn.disabled = true;
+  deleteErr.hidden = true;
   confirmInput.focus();
 });
 $("#delete-cancel").addEventListener("click", () => { modal.hidden = true; });
 modal.addEventListener("click", e => { if (e.target === modal) modal.hidden = true; });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && !modal.hidden) modal.hidden = true; });
-confirmInput.addEventListener("input", () => { deleteBtn.disabled = confirmInput.value !== "DELETE"; });
+confirmInput.addEventListener("input", () => {
+  deleteBtn.disabled = confirmInput.value.trim().toUpperCase() !== "DELETE";
+});
 deleteBtn.addEventListener("click", async () => {
   deleteBtn.disabled = true;
-  // Bound the rpc: a hung response after the server committed would otherwise
-  // strand the modal (which swallows every click). A retry is safe — deleting
-  // an already-deleted user is a no-op that returns success.
-  const { error } = await withTimeout(deleteAccount(), 15000, "Delete").catch(e => ({ error: e }));
+  deleteErr.hidden = true;
+  // Bound the rpc: a hung request (e.g. queued behind a wedged auth lock)
+  // must surface, not sit silently. A retry is safe — deleting an
+  // already-deleted user is a no-op that returns success.
+  const { error } = await withTimeout(deleteAccount(), 10000, "Delete").catch(e => ({ error: e }));
   if (error) {
-    alert(error.message ?? "Delete failed — try again.");
+    deleteErr.textContent = error.message ?? "Delete failed — try again.";
+    deleteErr.hidden = false;
     deleteBtn.disabled = false;
     return;
   }
-  // signOut is bounded and force-clears local session keys — always navigates.
+  // Account is gone server-side. signOut clears local keys synchronously
+  // and never waits on the network, so navigation is instant either way.
   await signOut();
   window.location.href = "/";
 });

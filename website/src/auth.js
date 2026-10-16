@@ -1,5 +1,6 @@
 // Shared Supabase auth helpers for the account + dashboard pages.
 import { supabase } from "./supabase.js";
+import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } from "./config.js";
 
 const origin = () => window.location.origin;
 
@@ -57,20 +58,53 @@ export const withTimeout = (p, ms, label = "Request") =>
 
 // supabase-js signOut() can hang forever: even scope:'local' POSTs /logout
 // with no timeout, and dead sessions (deleted/expired user) are a known
-// upstream wedge (supabase/auth#1518, supabase-js#1700). Bound the wait and
-// force-clear the local session keys so callers can always navigate after —
-// server-side sessions are already gone for deleted users anyway.
+// upstream wedge (supabase/auth#1518, supabase-js#1700). Worse, the wedged
+// call keeps holding the navigator.locks auth lock, so every later auth
+// call in the tab queues behind it and hangs too. Never await it: local
+// logout is just dropping storage keys — do that synchronously and fire the
+// server-side revocation in the background. Callers navigate immediately.
 const clearLocalSession = () => {
   for (const key of Object.keys(localStorage)) {
     if (/^sb-.*-auth-token/.test(key)) localStorage.removeItem(key);
   }
 };
-export const signOut = () =>
-  Promise.race([supabase.auth.signOut({ scope: "local" }), new Promise(r => setTimeout(r, 2500))])
-    .catch(() => {})   // the goal is "leave" — an SDK error must not block navigation
-    .then(clearLocalSession);
+export const signOut = () => {
+  clearLocalSession();
+  supabase.auth.signOut({ scope: "local" }).catch(() => {});
+  return Promise.resolve();
+};
 
-export const deleteAccount = () => supabase.rpc("delete_own_account");
+// Delete must never ride the SDK's session path: supabase-js guards token
+// reads behind a navigator.locks lock, and a hung auth call holds that lock
+// forever — every later rpc/signOut then queues behind it and never resolves.
+// Read the stored access token straight from storage and POST the rpc raw.
+const storedAccessToken = () => {
+  for (const key of Object.keys(localStorage)) {
+    if (!/^sb-.*-auth-token$/.test(key)) continue;
+    try { return JSON.parse(localStorage.getItem(key))?.access_token ?? null; }
+    catch { return null; }
+  }
+  return null;
+};
+export const deleteAccount = async () => {
+  // Prefer a live (possibly refreshed) SDK token — but bound it, since a
+  // wedged auth lock would otherwise hang this before the request is sent.
+  const token =
+    (await withTimeout(supabase.auth.getSession(), 2000).catch(() => null))?.data?.session?.access_token
+    ?? storedAccessToken();
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/delete_own_account`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_PUBLISHABLE_KEY,
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: "{}",
+  });
+  if (res.ok) return { error: null };
+  const body = await res.json().catch(() => null);
+  return { error: new Error(body?.message ?? `Delete failed (HTTP ${res.status})`) };
+};
 
 // ── Discord OAuth ────────────────────────────────────────────────────────────
 const discordOpts = () => ({ provider: "discord", options: { redirectTo: origin() + authRedirectTarget() } });
