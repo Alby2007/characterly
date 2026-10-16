@@ -170,6 +170,16 @@ test("raid window: alert once when joins exceed threshold; auto-kick when armed"
   assert.equal(raider.added.length, 0, "kicked raider never gets the member role");
 });
 
+test("raid window: hot window suppresses welcome spam but still roles (alert-only mode)", async () => {
+  const deps = makeDeps();
+  for (let i = 0; i < 4; i++) await handleHouseMemberAdd(makeMember({ id: `u-r${i}` }), deps); // hot
+  const raider = makeMember({ id: "u-raider" });
+  await handleHouseMemberAdd(raider, deps);
+  assert.deepEqual(raider.added, ["r-member"], "hot window still grants the role — alert-only mode doesn't break real surges");
+  const welcomes = deps.sent.filter(s => s.id === "c-welcome");
+  assert.equal(welcomes.length, 3, "no welcome posted once the window is hot — one greeting per raider would flood the channel");
+});
+
 // ── Automod ──────────────────────────────────────────────────────────────────
 
 test("automod: invite link deleted + alerted", async () => {
@@ -222,6 +232,19 @@ test("automod: burst spam over threshold → delete + 5m timeout", async () => {
   const burst = makeMsg({ content: "spam 5" });
   assert.equal(await automodMessage(burst, deps), true, "5th message in window trips");
   assert.deepEqual(burst.timeouts, [300_000]);
+});
+
+test("automod: action cooldown — sustained spam deletes silently, no re-alert/re-timeout", async () => {
+  const deps = makeDeps();
+  const m1 = makeMsg({ content: "join https://discord.gg/a" });
+  assert.equal(await automodMessage(m1, deps), true);
+  assert.match(opsAlertText(deps), /invite link/);
+  // Same offender hits again inside 60s — deleted but no second alert.
+  const m2 = makeMsg({ content: "and again https://discord.gg/b" });
+  assert.equal(await automodMessage(m2, deps), true, "still acted (message handled)");
+  assert.equal(m2.deleted, true, "re-offense still deleted");
+  assert.equal(m2.timeouts.length, 0, "no repeat timeout inside the cooldown");
+  assert.equal(opsAlertText(deps).match(/invite link/g)?.length, 1, "ops channel isn't flooded per re-offense");
 });
 
 test("automod: new account + external link is deleted; old account + link passes", async () => {
@@ -295,15 +318,48 @@ test("ensureHouseLayout creates only what's missing; idempotent on second run", 
   assert.deepEqual(nonHouse, [], "refuses to touch a foreign guild");
 });
 
+test("ensureHouseLayout copies the category's overwrites to created channels", async () => {
+  // A rebuilt mods-chat must not come up public — children inherit the
+  // private category's permission overwrites at create time.
+  const catOverwrites = [
+    { id: "everyone", allow: 0n, deny: 1024n }, // ViewChannel denied
+    { id: "r-mod", allow: 1024n, deny: 0n },
+  ];
+  const existing: any[] = [
+    { id: "cat-services", name: "SERVICES", type: 4, permissionOverwrites: { cache: catOverwrites } },
+    { id: "cat-system", name: "SYSTEM", type: 4 },
+    { id: "cat-market", name: "CHARACTER MARKETPLACE", type: 4 },
+    { id: "cat-resources", name: "RESOURCES", type: 4 },
+    { id: "cat-help", name: "HELP", type: 4 },
+  ];
+  const created: any[] = [];
+  const guild = {
+    id: HOUSE,
+    channels: {
+      cache: { find: (fn: (c: any) => boolean) => existing.find(fn) },
+      create: async (opts: any) => { const c = { id: `n-${created.length}`, ...opts }; existing.push(c); created.push(opts); return c; },
+    },
+  };
+  await ensureHouseLayout(guild as any);
+  const modsChat = created.find(c => c.name === "mods-chat");
+  assert.ok(modsChat, "mods-chat was missing and got created");
+  assert.equal(modsChat.parent, "cat-services");
+  assert.deepEqual(modsChat.permissionOverwrites, catOverwrites.map(o => ({ id: o.id, allow: o.allow, deny: o.deny })),
+    "created under the private category's overwrites — not default-public");
+});
+
 // ── Host health + watchdog ───────────────────────────────────────────────────
 
 test("collectHostHealth reports proc/disk/db/queue", async () => {
+  let queueArg: unknown = "unset";
   const deps = makeDeps({
+    store: { queueStats: async (g: string | null) => { queueArg = g; return { pending: 2, dead: 1, oldestPendingAt: null }; } } as unknown as MemoryStore,
     exec: async () => ({ stdout: "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/x 100 80 20 80% /\n", stderr: "" }),
     dbPing: async () => 7,
     lagMs: () => 42,
   });
   const h = await collectHostHealth(deps);
+  assert.equal(queueArg, null, "ops queue view is fleet-wide, not house-only");
   assert.equal(h.diskPct, 80);
   assert.equal(h.dbPingMs, 7);
   assert.equal(h.lagMs, 42);
@@ -411,12 +467,14 @@ test("/ops deploy failure reports redacted stderr and does NOT exit", async () =
     exit: c => exits.push(c),
     exec: async (cmd: string) => {
       if (cmd.includes("git pull")) throw { stderr: "fatal: auth failed for token sekrit-123456789" };
+      if (cmd.includes("rev-parse")) return { stdout: "9abcdef\n", stderr: "" };
       return { stdout: "", stderr: "" };
     },
   }));
   const ix = makeIx({ strings: { action: "deploy" } });
   await handleOpsCommand(ix as any);
   assert.match(ix.edits[0] as string, /Deploy failed/);
+  assert.match(ix.edits[0] as string, /tree is at `9abcdef`/, "failure reports where the tree actually sits — pull may have advanced HEAD before npm ci failed");
   await new Promise(r => setTimeout(r, 400));
   assert.equal(exits.length, 0, "failed deploy leaves the old build running");
 });

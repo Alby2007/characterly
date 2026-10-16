@@ -261,15 +261,17 @@ client.once(Events.ClientReady, async ready => {
   applyRetention().catch(error => { inc("maintenance.error"); logError("Retention run failed", error); });
   sweepMissedSignals(24 * 60 * 60_000).catch(error => { inc("sweep.error"); logError("Boot sweep failed", error); }); // wide window on boot to cover downtime
   if (!config.visionModel) console.warn("[vision] VISION_MODEL unset — image attachments will be ignored");
-  // House ops — private layer for OUR community server + this host. All off
-  // unless HOUSE_GUILD_ID is set. Ops-channel announce doubles as the deploy
-  // marker: "online · sha X" means migrations 1..N all applied.
+  // House ops — private layer for OUR community server + this host. initOps
+  // runs unconditionally so the /ops console (status/logs/restart/deploy)
+  // answers an allowlisted operator's DM even when house config is broken —
+  // that's exactly when you'd want the console. The guild-facing pieces
+  // (layout, watchdog, boot announce, member ops) stay HOUSE_GUILD_ID-gated.
+  initOps(opsDeps);
+  const repoDir = config.opsRepoDir.replace(/^~(?=$|\/)/, "$HOME");
+  opsDeps.gitSha = await opsDeps.exec(`cd "${repoDir}" && git rev-parse --short HEAD`)
+    .then(r => r.stdout.trim()).catch(() => null);
   if (config.houseGuildId) {
     try {
-      initOps(opsDeps);
-      const repoDir = config.opsRepoDir.replace(/^~(?=$|\/)/, "$HOME");
-      opsDeps.gitSha = await opsDeps.exec(`cd "${repoDir}" && git rev-parse --short HEAD`)
-        .then(r => r.stdout.trim()).catch(() => null);
       const house = await opsDeps.fetchGuild(config.houseGuildId);
       if (house) {
         const made = await ensureHouseLayout(house).catch(e => { logError("house layout failed", e); return [] as string[]; });
@@ -745,12 +747,18 @@ const journalDeps = {
 // the lag accumulated since the last read.
 const opsDeps: OpsDeps = {
   get store() { return store; },
+  // Cache-first — welcome posts and automod alerts would otherwise REST-fetch
+  // the same channel on every join/message during a raid.
   fetchChannel: async id => {
+    const cached = client.channels.cache.get(id);
+    if (cached?.isTextBased() && "send" in cached) return cached as unknown as { send(p: unknown): Promise<unknown> };
     const c = await client.channels.fetch(id).catch(() => null);
     return c?.isTextBased() && "send" in c ? c as unknown as { send(p: unknown): Promise<unknown> } : null;
   },
   fetchGuild: id => client.guilds.fetch(id).then(g => g as unknown as GuildLike).catch(() => null),
-  exec: cmd => execAsync(cmd, { maxBuffer: 4 * 1024 * 1024 }),
+  // Bounded: a stalled `git pull` or hung `npm ci` must not freeze the /ops
+  // console forever — a timeout lands as a catchable error instead.
+  exec: cmd => execAsync(cmd, { maxBuffer: 4 * 1024 * 1024, timeout: 300_000 }),
   exit: code => process.exit(code),
   dbPing: async () => { const t = Date.now(); await sql`SELECT 1`; return Date.now() - t; },
   lagMs: () => { const ms = lagHistogram.mean / 1e6; lagHistogram.reset(); return ms; },

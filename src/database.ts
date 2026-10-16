@@ -245,15 +245,16 @@ export class MemoryStore {
     return rows[0]?.llm_calls ?? 0;
   }
 
-  /** Queue visibility for /status — pending work, dead-lettered rows
-   * (attempts >= 5: excluded from claiming but kept inspectable), and the
-   * oldest pending job's age so a draining-but-stale queue is visible. */
-  async queueStats(guildId: string): Promise<{ pending: number; dead: number; oldestPendingAt: Date | null }> {
+  /** Queue visibility for /status + the ops console — pending work,
+   * dead-lettered rows (attempts >= 5: excluded from claiming but kept
+   * inspectable), and the oldest pending job's age so a draining-but-stale
+   * queue is visible. `null` guildId = fleet-wide (the host's view). */
+  async queueStats(guildId: string | null): Promise<{ pending: number; dead: number; oldestPendingAt: Date | null }> {
     const rows = await this.sql<Array<{ pending: number; dead: number; oldest: Date | string | null }>>`
       SELECT count(*) FILTER (WHERE attempts < 5)::int AS pending,
              count(*) FILTER (WHERE attempts >= 5)::int AS dead,
              min(created_at) FILTER (WHERE attempts < 5) AS oldest
-      FROM jobs WHERE guild_id = ${guildId}
+      FROM jobs WHERE (${guildId}::text IS NULL OR guild_id = ${guildId})
     `;
     const r = rows[0];
     return { pending: r?.pending ?? 0, dead: r?.dead ?? 0, oldestPendingAt: r?.oldest ? new Date(r.oldest) : null };

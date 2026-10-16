@@ -26,13 +26,16 @@ export interface GuildChannelLike {
   name: string;
   type: number;
   parentId?: string | null;
+  /** Category's own overwrites — copied to created children so a rebuilt
+   * mods/ops channel doesn't come up world-readable. */
+  permissionOverwrites?: { cache?: Iterable<{ id: string; allow: bigint; deny: bigint }> };
 }
 
 export interface GuildLike {
   id: string;
   channels: {
     cache: { find(fn: (c: GuildChannelLike) => boolean): GuildChannelLike | undefined };
-    create(opts: { name: string; type: number; parent?: string }): Promise<GuildChannelLike>;
+    create(opts: { name: string; type: number; parent?: string; permissionOverwrites?: Array<{ id: string; allow: bigint; deny: bigint }> }): Promise<GuildChannelLike>;
   };
 }
 
@@ -55,7 +58,7 @@ export interface AutomodMessage {
     permissions: { has(flag: bigint): boolean };
     timeout?(ms: number, reason?: string): Promise<unknown>;
   } | null;
-  mentions: { users: { size: number }; everyone: boolean };
+  mentions: { users: { size: number }; roles?: { size: number }; everyone: boolean };
   delete(): Promise<unknown>;
 }
 
@@ -82,6 +85,7 @@ export function resetOpsState(): void {
   joinTimes.length = 0;
   lastRaidAlertAt = 0;
   burstWindow.clear();
+  lastActedAt.clear();
   activeBreaches.clear();
 }
 
@@ -103,13 +107,17 @@ const RAID_WINDOW_MS = 60_000;
 const joinTimes: number[] = [];
 let lastRaidAlertAt = 0;
 
-async function onboardMember(member: MemberLike, deps: OpsDeps): Promise<void> {
+async function onboardMember(member: MemberLike, deps: OpsDeps, opts: { welcome?: boolean } = {}): Promise<void> {
   if (config.houseMemberRoleId) {
     await member.roles.add(config.houseMemberRoleId).catch(e => {
       inc("ops.autorole_error");
       logError("house auto-role failed", e);
     });
   }
+  // `welcome:false` — a hot raid window shouldn't flood the welcome channel
+  // with one public greeting per raider; the role still lands so a real
+  // surge isn't broken by the detector.
+  if (opts.welcome === false) return;
   if (config.houseWelcomeChannelId) {
     const ch = await deps.fetchChannel(config.houseWelcomeChannelId).catch(() => null);
     const rules = config.houseRulesChannelId ? ` — read <#${config.houseRulesChannelId}> first` : "";
@@ -127,7 +135,8 @@ export async function handleHouseMemberAdd(member: MemberLike, deps: OpsDeps): P
   const now = Date.now();
   joinTimes.push(now);
   while (joinTimes.length && now - joinTimes[0] > RAID_WINDOW_MS) joinTimes.shift();
-  if (joinTimes.length > config.automodRaidJoins) {
+  const raidHot = joinTimes.length > config.automodRaidJoins;
+  if (raidHot) {
     if (config.automodRaidKick && member.kick) {
       await member.kick("automod: raid window").catch(e => logError("raid kick failed", e));
       await opsAlert(deps, `🚨 **Raid** — auto-kicked <@${member.user.id}> (${joinTimes.length} joins in 60s)`);
@@ -143,7 +152,7 @@ export async function handleHouseMemberAdd(member: MemberLike, deps: OpsDeps): P
   // Membership Screening: pending members haven't accepted the rules yet —
   // their role lands on the guildMemberUpdate pending→false flip instead.
   if (member.pending) return;
-  await onboardMember(member, deps);
+  await onboardMember(member, deps, { welcome: !raidHot });
 }
 
 export async function handleHouseMemberUpdate(
@@ -178,6 +187,11 @@ const SCAM_PATTERNS: Array<{ rule: string; re: RegExp }> = [
 ];
 
 const burstWindow = new Map<string, number[]>();
+// Per-author action cooldown — a sustained spammer re-trips the rules on
+// every message; within the cooldown we still delete but skip the repeat
+// timeout + alert so the ops channel isn't flooded.
+const ACTION_COOLDOWN_MS = 60_000;
+const lastActedAt = new Map<string, number>();
 
 /** Returns true when automod acted (message deleted / member sanctioned) —
  * the caller skips all further handling for the message. */
@@ -192,6 +206,16 @@ export async function automodMessage(message: AutomodMessage, deps: OpsDeps): Pr
   const excerpt = message.content.trim().slice(0, 120).replace(/\n+/g, " ");
 
   const act = async (rule: string, timeoutMs?: number): Promise<boolean> => {
+    const now = Date.now();
+    const last = lastActedAt.get(message.author.id) ?? 0;
+    lastActedAt.set(message.author.id, now);
+    if (lastActedAt.size > 10_000) lastActedAt.clear();
+    if (now - last < ACTION_COOLDOWN_MS) {
+      // Same offender, same burst — keep deleting, don't re-alert/re-timeout.
+      await message.delete().catch(() => {});
+      inc("ops.automod_suppressed");
+      return true;
+    }
     const deleted = await message.delete().then(() => true).catch(() => false);
     let timedOut = false;
     if (timeoutMs && message.member?.timeout) {
@@ -210,7 +234,8 @@ export async function automodMessage(message: AutomodMessage, deps: OpsDeps): Pr
     if (re.test(message.content)) return act(rule, 10 * 60_000);
   }
   // Mass mention — or @everyone/here from a member who lacks the permission.
-  const overMentions = message.mentions.users.size > config.automodMentionMax;
+  // Role mentions count too — a dozen @role pings is the same spam shape.
+  const overMentions = message.mentions.users.size + (message.mentions.roles?.size ?? 0) > config.automodMentionMax;
   const illegalEveryone = message.mentions.everyone &&
     !(message.member?.permissions.has(PermissionFlagsBits.MentionEveryone) ?? false);
   if (overMentions || illegalEveryone) return act("mass mention");
@@ -293,7 +318,12 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
     for (const wanted of group.channels) {
       const exists = guild.channels.cache.find(c => normName(c.name) === normName(wanted.name));
       if (!exists) {
-        await guild.channels.create({ name: wanted.name, type: wanted.type, parent: cat.id });
+        // New channels inherit the category's overwrites — a fresh
+        // mods/ops channel must not come up with default (public) perms.
+        const overwrites = cat.permissionOverwrites?.cache
+          ? [...cat.permissionOverwrites.cache].map(o => ({ id: o.id, allow: o.allow, deny: o.deny }))
+          : undefined;
+        await guild.channels.create({ name: wanted.name, type: wanted.type, parent: cat.id, permissionOverwrites: overwrites });
         created.push(`#${wanted.name}`);
       }
     }
@@ -329,9 +359,9 @@ export async function collectHostHealth(deps: OpsDeps): Promise<HostHealth> {
     if (m) diskPct = Number(m[1]);
   } catch { /* non-Linux host — disk stays null */ }
   const dbPingMs = await deps.dbPing().catch(() => null);
-  const queue = config.houseGuildId
-    ? await deps.store.queueStats(config.houseGuildId).catch(() => null)
-    : null;
+  // Fleet-wide queue depth — a pileup in any guild is the host's problem,
+  // not just the house guild's.
+  const queue = await deps.store.queueStats(null).catch(() => null);
   return {
     uptimeSec: process.uptime(),
     rssMb: mem.rss / 1_048_576,
@@ -459,8 +489,13 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
     try {
       await deps.exec(`cd "${repoDir}" && git pull --ff-only && npm ci`);
     } catch (e) {
-      const detail = redactSecrets(String((e as { stderr?: string; message?: string })?.stderr ?? (e as Error)?.message ?? e)).slice(0, 1500);
-      return interaction.editReply(`Deploy failed — still on \`${deps.gitSha ?? "?"}\`:\n\`\`\`\n${detail}\n\`\`\``);
+      const detail = redactSecrets(String((e as { stderr?: string; message?: string })?.stderr ?? (e as Error)?.message ?? e)).slice(0, 1400);
+      // Report where the tree actually sits: a successful `git pull` followed
+      // by a failed `npm ci` leaves HEAD advanced with mismatched deps —
+      // "still on <sha>" would be a lie, and the next incidental restart
+      // could land new code on old modules.
+      const head = await deps.exec(`cd "${repoDir}" && git rev-parse --short HEAD`).then(r => r.stdout.trim()).catch(() => "?");
+      return interaction.editReply(`Deploy failed — tree is at \`${head}\`, running \`${deps.gitSha ?? "?"}\`. If the pull landed and \`npm ci\` failed, fix deps or \`git checkout ${deps.gitSha ?? "<old>"}\` before the next restart:\n\`\`\`\n${detail}\n\`\`\``);
     }
     const sha = await deps.exec(`cd "${repoDir}" && git rev-parse --short HEAD`).then(r => r.stdout.trim()).catch(() => "?");
     deps.gitSha = sha;

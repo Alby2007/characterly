@@ -45,22 +45,24 @@ Env lives in `~/characterly/.env` on the VM — **not** in the repo. Changes nee
 
 ## House ops (`/ops`) — the bot operates our server + its own host
 
-When `HOUSE_GUILD_ID` is set, `src/ops.ts` runs a private operator layer: member ops (auto-role, welcome, raid detection), deterministic automod, channel layout (`ensureHouseLayout` on boot + `/ops layout`), and host self-ops (watchdog + `/ops`).
+When `HOUSE_GUILD_ID` is set, `src/ops.ts` runs a private operator layer: member ops (auto-role, welcome, raid detection), deterministic automod, channel layout (`ensureHouseLayout` on boot + `/ops layout`), and host self-ops (watchdog + `/ops`). The `/ops` console itself works even when `HOUSE_GUILD_ID` is unset — it controls the box, so it's initialized unconditionally; only the guild-facing pieces (layout, watchdog, member ops, boot announce) gate on the house id.
 
 **`/ops` (allowlisted via `OPS_USER_IDS`, works in the house guild or DM):**
 
 | action | effect |
 |---|---|
-| `status` | Health embed — uptime, heap/RSS, event-loop lag, disk, DB ping, queue depth, deployed sha |
+| `status` | Health embed — uptime, heap/RSS, event-loop lag, disk, DB ping, **fleet-wide** queue depth, deployed sha |
 | `logs [lines]` | `journalctl -u characterly -n N --no-pager`, secret-redacted, chunked under 2000 chars |
 | `restart` | `process.exit(1)` — `Restart=always` in the unit brings it back on the same code |
-| `deploy` | `git pull --ff-only && npm ci` in `OPS_REPO_DIR`, then exits (systemd restarts onto new code); failure reports redacted stderr and stays on the old build |
+| `deploy` | `git pull --ff-only && npm ci` in `OPS_REPO_DIR`, then exits (systemd restarts onto new code). On failure it reports where the tree *actually* sits — a landed pull + failed `npm ci` leaves HEAD advanced with mismatched deps, so the message shows both head and running sha |
 | `announce <text>` | Posts to `HOUSE_ANNOUNCE_CHANNEL_ID` as the bot |
-| `layout` | Creates any missing house channels/categories (idempotent) |
+| `layout` | Creates any missing house channels/categories (idempotent) — created children inherit the parent category's permission overwrites, so a rebuilt mods/ops channel never comes up public |
 
 **Host watchdog** — every `HOST_HEALTH_INTERVAL_MS` (5m): heap %, disk %, event-loop lag, DB ping. A breach pings `OPS_CHANNEL_ID` **once**, then a recovery notice when it clears.
 
-**Automod rules** (house guild only, deterministic, exempts `Manage Messages` holders + bots; runs before archiving so deleted spam never enters the memory pipeline): invite links → delete + alert · scam classes (nitro/crypto/steam/earn-money) → delete + 10m timeout + alert · mass mention (>8, or `@everyone` without permission) → delete + alert · burst spam (>6/8s) → delete + 5m timeout + alert · new account (<7d) + link → delete + alert.
+**Automod rules** (house guild only, deterministic, exempts `Manage Messages` holders + bots; runs before archiving so deleted spam never enters the memory pipeline): invite links → delete + alert · scam classes (nitro/crypto/steam/earn-money) → delete + 10m timeout + alert · mass mention (>8 user+role, or `@everyone` without permission) → delete + alert · burst spam (>6/8s) → delete + 5m timeout + alert · new account (<7d) + link → delete + alert. A 60s per-author action cooldown keeps repeat offenses deleting silently instead of re-alerting.
+
+**Member ops** — auto-role + welcome on join (Membership-Screening aware), leave logs, and a 60s join-window raid detector. While the window is hot the role still lands (alert-only mode doesn't break real surges) but the public welcome is suppressed so raiders don't flood the channel; `AUTOMOD_RAID_KICK=1` switches to auto-kick.
 
 **Prerequisites when enabling:** (1) toggle **Server Members Intent** in the dev portal *before* deploy — login fails without it; (2) grant the bot role **Manage Messages, Moderate Members, Manage Roles, Kick Members, Manage Channels** on the house server; (3) set `OPS_USER_IDS` — `/ops` controls the box, so it's person-allowlisted, not role-based. The systemd unit already carries `Restart=always` (verified), and `opc` is in `systemd-journal` so `journalctl` needs no sudo.
 
