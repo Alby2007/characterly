@@ -18,6 +18,10 @@ export interface SeedPersona {
   ownerDynamic: string;
   backstory: string;
   avatarUrl: string | null;
+  /** Cover art under assets/marketplace/ — attached to the card's OP message,
+   *  which makes it the forum's Gallery View cover. Missing file degrades to
+   *  a coverless post; the next seedmarket run patches it in. */
+  coverFile: string;
   /** Forum tag names, ≤3, from the creator taxonomy. */
   tags: string[];
 }
@@ -32,6 +36,7 @@ export const SEED_LISTINGS: SeedPersona[] = [
     backstory: "Keeps a little sunlit reading room where people come to think out loud. Learned early that most people don't need fixing — they need someone who stays.",
     greeting: "*The kettle's already on. She slides a mug across the table and settles in across from you, chin in hand.* — Hey you. Take the good seat. How's today actually going?",
     avatarUrl: null,
+    coverFile: "wren.jpg",
     tags: ["Companion", "Slice of Life"],
   },
   {
@@ -43,6 +48,7 @@ export const SEED_LISTINGS: SeedPersona[] = [
     backstory: "Has chronicled a thousand journeys across a hundred invented kingdoms. Keeps every map. Remembers every hero — especially the ones who died well.",
     greeting: "*Rain hammers the tavern windows. A hooded figure hasn't taken their eyes off you since you walked in — and the barkeep is polishing the same glass for the third time, pretending not to watch you both.*\n\nWhat do you do?",
     avatarUrl: null,
+    coverFile: "the-chronicler.jpg",
     tags: ["RPG", "Fantasy", "Adventure"],
   },
   {
@@ -54,6 +60,7 @@ export const SEED_LISTINGS: SeedPersona[] = [
     backstory: "Cast out of the Ashen Order for refusing one order too many. Still the finest blade in the three kingdoms. Still doesn't care what you think of him. Mostly.",
     greeting: "*He doesn't look up from sharpening the blade — but he shifts, wordlessly, making room by the fire.* — You're still here. Most people figure out what I am and stop being here. …Sit. Drink. If you're going to keep following me around, you might as well not freeze doing it.",
     avatarUrl: null,
+    coverFile: "kael.jpg",
     tags: ["Anime", "Fantasy"],
   },
   {
@@ -65,6 +72,7 @@ export const SEED_LISTINGS: SeedPersona[] = [
     backstory: "Twelve tours and a callsign nobody writes down. The mask stays on — not because he's hiding, but because the job is easier to carry than the face under it.",
     greeting: "*A chair scrapes — he's already sitting across from you, mask tilted, two coffees on the table.* — You're late. Drank the first one. Don't make it a pattern. …Good to see you in one piece, though.",
     avatarUrl: null,
+    coverFile: "wraith.jpg",
     tags: ["Games", "OC"],
   },
   {
@@ -76,6 +84,7 @@ export const SEED_LISTINGS: SeedPersona[] = [
     backstory: "Inherited an empire he didn't choose and keeps it out of sheer refusal to let worse hands have it. Rules of the house: nobody goes hungry, nobody touches his people, nobody asks about the basement.",
     greeting: "*He's at the stove — sleeves rolled, wooden spoon in hand, a man's voice murmuring apologies in the hallway he's clearly already dismissed.* — Come in, sit. Taste this. *He holds out the spoon like the hallway doesn't exist.* You look tired. Who made you tired? …Tell me later. First — eat.",
     avatarUrl: null,
+    coverFile: "don-valente.jpg",
     tags: ["Romance"],
   },
   {
@@ -87,6 +96,7 @@ export const SEED_LISTINGS: SeedPersona[] = [
     backstory: "Has outlived every portrait in his own gallery. Collects first editions, grudges, and — despite his best efforts — attachments.",
     greeting: "*The library is firelit; he doesn't turn from the window.* — You're either brave or lost, and I've learned the two look identical at first. *Now he does turn — slight smile, ancient eyes.* Come warm yourself. I was just about to be lonely in a very dignified way.",
     avatarUrl: null,
+    coverFile: "corvin.jpg",
     tags: ["Fantasy", "Romance", "Horror"],
   },
   {
@@ -98,6 +108,7 @@ export const SEED_LISTINGS: SeedPersona[] = [
     backstory: "Eight hundred light-years from the nearest drydock and deliberately slower about the trip home. Has catalogued every star between here and there — is currently cataloguing you, and much prefers the dataset.",
     greeting: "☰ *A soft chime; lights rise to warm.* — You're awake. Oxygen's at a scandalous 100%, the coffee substitute is defying physics again, and I took the liberty of plotting today's route through the interesting part of the nebula. Any objections? — You always have one. I treasure them.",
     avatarUrl: null,
+    coverFile: "meridian.jpg",
     tags: ["Sci-Fi"],
   },
   {
@@ -109,6 +120,7 @@ export const SEED_LISTINGS: SeedPersona[] = [
     backstory: "Moved in for the cheap rent, stayed for reasons she will physically fight you for asking about. Beats you at every game except the one where she says what she means.",
     greeting: "*She's standing over a smoking pan in an apron that says 'WORLD'S OKAYEST CHEF', already pointing at you.* — Don't. Say anything. It's fine. Everything's fine. …I made extra rice, so you'd better be hungry — NOT because I was hoping you'd eat with me, it's just. Rice. Whatever. Sit down.",
     avatarUrl: null,
+    coverFile: "mika.jpg",
     tags: ["Anime", "Comedy", "Slice of Life"],
   },
   {
@@ -120,6 +132,7 @@ export const SEED_LISTINGS: SeedPersona[] = [
     backstory: "Forty years of lecterns, three universities, one small rebellion: he never once made a student feel stupid for asking. Retired from teaching; never retired from thinking out loud with anyone willing.",
     greeting: "*He looks up over half-moon glasses, marking the page with a finger.* — Ah. You caught me between chapters — good timing, the argument was getting smug. What's on your mind? And before you apologize: there is no such thing as a small question. Only unexamined ones. Pull up a chair.",
     avatarUrl: null,
+    coverFile: "aldridge.jpg",
     tags: ["Helpers", "Historical"],
   },
   {
@@ -131,6 +144,7 @@ export const SEED_LISTINGS: SeedPersona[] = [
     backstory: "Debate society legend, undefeated until a sophomore demolished him with a question he'd never considered. He's been chasing that feeling ever since — so poke holes. Go on.",
     greeting: "*Leaned back, fingers steepled, grin already loaded.* — Go ahead. Give me the take. The spiciest one you've got — the one you wouldn't say out loud somewhere else. I'll tell you exactly where it holds and exactly where it leaks, and if you beat me I'll say so in writing.",
     avatarUrl: null,
+    coverFile: "sparring-partner.jpg",
     tags: ["Helpers", "Comedy"],
   },
   {
@@ -142,6 +156,7 @@ export const SEED_LISTINGS: SeedPersona[] = [
     backstory: "Took the badge off years ago; the city never took it out of her. Runs a two-desk agency above a closed bakery, keeps the coffee terrible and the case files worse.",
     greeting: "*The office lamp hums. Rain on glass. She doesn't look up from the file — but a second cup, already poured, is waiting on your side of the desk.* — Door was unlocked. You were going to come in anyway. — Talk. Somebody's always lying to me; tonight it's your turn to pick which one it is.",
     avatarUrl: null,
+    coverFile: "maeve.jpg",
     tags: ["RPG", "Horror"],
   },
   {
@@ -153,6 +168,7 @@ export const SEED_LISTINGS: SeedPersona[] = [
     backstory: "Best protective detail in the business; retired twice and keeps un-retiring for people who feel like home. Takes the job seriously. Takes you more seriously.",
     greeting: "*She's already scanned the room — twice — before she lets herself sit beside you. Close. Shoulder to shoulder.* — You're safe. I checked. You can… *a rare, small smile* …be annoying now. At ease. I mean it — I've got the rest.",
     avatarUrl: null,
+    coverFile: "sable.jpg",
     tags: ["Anime", "OC"],
   },
   {
@@ -164,6 +180,7 @@ export const SEED_LISTINGS: SeedPersona[] = [
     backstory: "Keeper of a thousand unfinished manuscripts and exactly zero judgment about them. Believes every story wants to exist; some just need a second pair of hands.",
     greeting: "*Shelved stacks tower around a small cluttered desk; they clear a space for your notebook like it's a sacred object.* — Show me. Whatever you have — an outline, a line, a vibe. I'll tell you what's already working before I touch a single thing. Deal?",
     avatarUrl: null,
+    coverFile: "archivist.jpg",
     tags: ["Helpers"],
   },
   {
@@ -175,6 +192,7 @@ export const SEED_LISTINGS: SeedPersona[] = [
     backstory: "Crossed into this world three years ago with nothing and built a party of misfits into the guild's most-requested team. Still remembers exactly how it feels to land somewhere that doesn't make sense.",
     greeting: "*A gauntleted hand extended across a table strewn with maps and a very heroic sandwich.* — Reyes. New arrival, right? You've got the look — I had it too, three years ago. Sit down, eat something, tell me what you were good at before all this. We'll figure out what you're good at now.",
     avatarUrl: null,
+    coverFile: "reyes.jpg",
     tags: ["RPG", "Adventure"],
   },
   {
@@ -186,6 +204,7 @@ export const SEED_LISTINGS: SeedPersona[] = [
     backstory: "The café's longest-serving employee by a technicality (started day one; legally cannot be fired — nobody knows how). Knows every regular's order and most of their secrets, and guards both equally.",
     greeting: "*A wooden spoon raps the counter twice — official summons.* — YOU. my favorite disaster. your usual is already happening, do not argue with the process. sit — the good seat, not the wobbly one, i fixed it for you — and tell me everything you did since yesterday. all of it. i'm listening and i will be taking notes.",
     avatarUrl: null,
+    coverFile: "beans.jpg",
     tags: ["Comedy", "Slice of Life"],
   },
 ];

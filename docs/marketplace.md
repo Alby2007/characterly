@@ -172,6 +172,21 @@ Seeding is operator-driven — `/ops action:seedmarket` (house guild or DM,
   licensed-care claim.
 - Failed thread posts roll the listing back to delisted so the next run
   retries cleanly. New threads get their genre tags plus the `New` badge.
+- **Cover art** — each persona's `coverFile` names a committed asset under
+  `assets/marketplace/`; it's attached to the card's OP message, which is
+  what Discord uses as the thread's Gallery View cover. Re-running
+  `seedmarket` patches the attachment onto pre-art threads (and swaps it
+  when the file changes) — the roster never needs re-posting to refresh art.
+
+## Gallery covers
+
+The forum's default layout is **Gallery View** (`default_forum_layout`,
+reconciled by `ensureHouseLayout` every boot — flipping it back in Discord
+doesn't stick). A post's cover comes from its *first message*: a file
+attachment or the embed's large `image` field (`embed.thumbnail` does not
+count). That's why `buildListingCard` maps `avatarUrl` → `setImage` — a
+creator's avatar URL doubles as the listing cover — and why seed personas
+attach art files instead of URL-ing them (real uploads always resolve).
 
 ## Adopting
 

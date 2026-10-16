@@ -56,8 +56,8 @@ When `HOUSE_GUILD_ID` is set, `src/ops.ts` runs a private operator layer: member
 | `restart` | `process.exit(1)` — `Restart=always` in the unit brings it back on the same code |
 | `deploy` | `git pull --ff-only && npm ci` in `OPS_REPO_DIR`, then exits (systemd restarts onto new code). On failure it reports where the tree *actually* sits — a landed pull + failed `npm ci` leaves HEAD advanced with mismatched deps, so the message shows both head and running sha |
 | `announce <text>` | Posts to `HOUSE_ANNOUNCE_CHANNEL_ID` as the bot |
-| `layout` | Creates any missing house channels/categories (idempotent) — created children inherit the parent category's permission overwrites, so a rebuilt mods/ops channel never comes up public |
-| `seedmarket` | Publishes the official seed roster (`src/seed-personas.ts`) under the bot's own account — idempotent: name-matched rows skip, leftover delisted seeds relist + re-post their thread, flagged/moderated rows are left alone |
+| `layout` | Creates any missing house channels/categories (idempotent) — created children inherit the parent category's permission overwrites, so a rebuilt mods/ops channel never comes up public. Also reconciles the `characters` forum to Gallery View (`default_forum_layout`) so listing cards render covers on the main page |
+| `seedmarket` | Publishes the official seed roster (`src/seed-personas.ts`) under the bot's own account — idempotent: name-matched rows skip (with a cover retrofit that attaches `assets/marketplace/<coverFile>` art to pre-art OP messages), leftover delisted seeds relist + re-post their thread, flagged/moderated rows are left alone |
 
 **Host watchdog** — every `HOST_HEALTH_INTERVAL_MS` (5m): heap %, disk %, event-loop lag, DB ping. A breach pings `OPS_CHANNEL_ID` **once**, then a recovery notice when it clears.
 

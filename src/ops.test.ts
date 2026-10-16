@@ -786,8 +786,9 @@ function opsInteraction(action: string, over: { userId?: string; guildId?: strin
   return { interaction, replies, edits };
 }
 
-test("/ops seedmarket: creates missing personas with genre tags, skips existing", async () => {
-  const created: Array<{ name: string; appliedTags?: string[] }> = [];
+test("/ops seedmarket: creates missing personas with genre tags, skips existing, patches covers", async () => {
+  const created: Array<{ name: string; appliedTags?: string[]; files?: Array<{ name?: string }> }> = [];
+  const cardEdits: Array<{ files?: Array<{ name?: string }> }> = [];
   const forum = {
     type: 15, // GuildForum
     availableTags: [
@@ -796,10 +797,16 @@ test("/ops seedmarket: creates missing personas with genre tags, skips existing"
       { id: "tag-sol", name: "Slice of Life" },
     ],
     threads: {
-      create: async (o: { name: string; appliedTags?: string[] }) => { created.push(o); return { id: "t-" + created.length }; },
+      create: async (o: { name: string; appliedTags?: string[]; message?: { files?: Array<{ name?: string }> } }) => {
+        created.push({ name: o.name, appliedTags: o.appliedTags, files: o.message?.files }); return { id: "t-" + created.length };
+      },
       fetch: async () => null,
     },
   };
+  // Wren's live thread predates cover art — its starter message has no
+  // attachment, so the seed pass should edit one in (the gallery cover).
+  const wrenStarter = { attachments: [] as Array<{ name?: string }>, edit: async (o: { files?: Array<{ name?: string }> }) => { cardEdits.push(o); return o; } };
+  const wrenThread = { fetchStarterMessage: async () => wrenStarter };
   const made: Array<{ spec: { name: string } }> = [];
   const relisted: number[] = [];
   const beansRow = { id: 10, name: "Beans", status: "delisted" as const, forumThreadId: null, version: 1, addCount: 0,
@@ -815,10 +822,10 @@ test("/ops seedmarket: creates missing personas with genre tags, skips existing"
       listingRatingStats: async () => undefined,
     } as unknown as MemoryStore,
   }));
-  const ix = opsInteraction("seedmarket", { channels: { "c-forum": forum } });
+  const ix = opsInteraction("seedmarket", { channels: { "c-forum": forum, "t-old": wrenThread } });
   await handleOpsCommand(ix.interaction as never);
-  // Wren (active, threaded) skips; Beans (delisted, no thread) recovers via
-  // relist + re-post; the remaining 13 create fresh.
+  // Wren (active, threaded) skips the listing path but gets its cover patched;
+  // Beans (delisted, no thread) recovers via relist + re-post; 13 create fresh.
   assert.equal(created.length, SEED_LISTINGS.length - 1, "all but Wren create threads — including Beans' recovery");
   assert.equal(made.length, SEED_LISTINGS.length - 2, "Wren and Beans never hit createListing");
   assert.deepEqual(relisted, [10], "Beans relisted before re-posting");
@@ -826,6 +833,14 @@ test("/ops seedmarket: creates missing personas with genre tags, skips existing"
   assert.ok(created.find(c => c.name.startsWith("Beans")), "Beans recovery re-posts a thread");
   const wren = created.find(c => c.name.startsWith("Wren"));
   assert.equal(wren, undefined);
+  // Cover retrofit: Wren's starter message gains wren.jpg via edit; every
+  // freshly created thread carries its persona's cover attachment.
+  assert.equal(cardEdits.length, 1, "only Wren's coverless card gets patched");
+  assert.equal(cardEdits[0]?.files?.[0]?.name, "wren.jpg");
+  for (const c of created) {
+    assert.ok(c.files?.length === 1 && /\.jpe?g$/.test(c.files[0]?.name ?? ""), `${c.name} carries a cover attachment`);
+  }
+  assert.match(ix.edits[0] ?? "", /cover patched/);
   // A persona whose tags resolve (Companion + Slice of Life exist on the fake forum)
   // gets appliedTags including New + its genres; names that don't resolve drop.
   const meridian = created.find(c => c.name.startsWith("NSS Meridian"));

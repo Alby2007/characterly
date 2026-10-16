@@ -1,10 +1,10 @@
 import os from "node:os";
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, PermissionFlagsBits, type ButtonInteraction, type ChatInputCommandInteraction } from "discord.js";
+import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, ForumLayoutType, PermissionFlagsBits, type ButtonInteraction, type ChatInputCommandInteraction } from "discord.js";
 import { config } from "./config.js";
 import { inc } from "./metrics.js";
 import { logError, redactSecrets } from "./secrets.js";
 import { checkListingFields, checkMessageContent } from "./safety.js";
-import { CURATED_TAGS, postListingThread } from "./marketplace.js";
+import { CURATED_TAGS, marketplaceAssetPath, postListingThread } from "./marketplace.js";
 import { SEED_LISTINGS } from "./seed-personas.js";
 import type { MemoryStore } from "./database.js";
 
@@ -57,6 +57,10 @@ export interface GuildChannelLike {
   name: string;
   type: number;
   parentId?: string | null;
+  /** Forum channels carry this — reconciled against WANTED_LAYOUT so the
+   * marketplace rides Gallery View even after a manual flip. */
+  defaultForumLayout?: number;
+  edit?(opts: { defaultForumLayout?: number }): Promise<unknown>;
   /** Category's own overwrites — copied to created children so a rebuilt
    * mods/ops channel doesn't come up world-readable. */
   permissionOverwrites?: { cache?: Iterable<{ id: string; allow: bigint; deny: bigint }> };
@@ -571,6 +575,16 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
           : undefined;
         await guild.channels.create({ name: wanted.name, type: wanted.type, parent: cat.id, permissionOverwrites: overwrites });
         created.push(`#${wanted.name}`);
+      } else if (
+        wanted.type === ChannelType.GuildForum
+        && exists.defaultForumLayout !== ForumLayoutType.GalleryView
+        && typeof exists.edit === "function"
+      ) {
+        // Gallery View is what turns listing-card attachments into covers on
+        // the forum's main page — reconcile it like the rest of the layout.
+        await exists.edit({ defaultForumLayout: ForumLayoutType.GalleryView })
+          .then(() => { created.push(`⚙ ${wanted.name} → gallery view`); })
+          .catch(() => {});
       }
     }
   }
@@ -803,11 +817,27 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
         }
         if (listing.status !== "active") { results.push(`· ${p.name} — status ${listing.status}, left alone`); continue; }
         if (!listing.forumThreadId) {
-          const tid = await postListingThread(cardAs, listing, deps.store, { tagNames: p.tags });
+          const tid = await postListingThread(cardAs, listing, deps.store, { tagNames: p.tags, coverFile: p.coverFile });
           if (!tid) { results.push(`✖ ${p.name} — thread recovery failed`); continue; }
           await deps.store.setListingThread(listing.id, tid).catch(() => {});
           results.push(`✔ ${p.name} — recovered (thread re-posted)`);
           continue;
+        }
+        // Cover retrofit — seed threads posted before the art existed carry no
+        // attachment; attach it to the OP card so the gallery cover appears.
+        // A name mismatch means the art changed → replace wholesale.
+        if (p.coverFile) {
+          type StarterMsg = { attachments?: { some(fn: (a: { name?: string | null }) => boolean): boolean }; edit(opts: { files: AttachmentBuilder[] }): Promise<unknown> };
+          const asset = marketplaceAssetPath(p.coverFile);
+          const thread = await interaction.client.channels.fetch(listing.forumThreadId).catch(() => null);
+          const starter = thread && "fetchStarterMessage" in thread
+            ? (await (thread as { fetchStarterMessage(): Promise<unknown> }).fetchStarterMessage().catch(() => null)) as StarterMsg | null
+            : null;
+          if (asset && starter && !starter.attachments?.some(a => a.name === p.coverFile)) {
+            const ok = await starter.edit({ files: [new AttachmentBuilder(asset, { name: p.coverFile })] }).then(() => true).catch(() => false);
+            results.push(ok ? `✔ ${p.name} — cover patched` : `✖ ${p.name} — cover patch failed`);
+            continue;
+          }
         }
         results.push(`· ${p.name} — already listed`);
         continue;
@@ -818,7 +848,7 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
       if (!screen.ok) { results.push(`✖ ${p.name} — blocked by the listing screen (${screen.field}: ${screen.category})`); continue; }
       const res = await deps.store.createListing(deps.botId, p).catch(() => null);
       if (!res?.ok) { results.push(`✖ ${p.name} — listing create failed`); continue; }
-      const threadId = await postListingThread(cardAs, res.listing, deps.store, { tagNames: p.tags });
+      const threadId = await postListingThread(cardAs, res.listing, deps.store, { tagNames: p.tags, coverFile: p.coverFile });
       if (!threadId) {
         await deps.store.delistListing(res.listing.id).catch(() => {});
         results.push(`✖ ${p.name} — thread post failed (rolled back)`);

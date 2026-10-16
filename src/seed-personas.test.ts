@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { SEED_LISTINGS } from "./seed-personas.js";
 import { checkListingFields } from "./safety.js";
+import { marketplaceAssetPath } from "./marketplace.js";
 
 // The creator taxonomy seeded on the forum — seed tags must stay inside it.
 const CREATOR_TAGS = new Set([
@@ -31,5 +34,17 @@ test("seed tags stay inside the creator taxonomy, ≤3 each", () => {
     for (const t of p.tags) {
       assert.ok(CREATOR_TAGS.has(t.toLowerCase()), `${p.name}: tag "${t}" isn't in the creator taxonomy`);
     }
+  }
+});
+
+test("every seed coverFile resolves to a committed image asset", () => {
+  for (const p of SEED_LISTINGS) {
+    assert.ok(p.coverFile, `${p.name} needs a coverFile`);
+    assert.ok(/\.(jpe?g|png|webp)$/i.test(p.coverFile), `${p.name}: ${p.coverFile} isn't an image ext`);
+    // The helper resolves inside assets/marketplace/ — a miss means the art
+    // was never committed and the listing would silently post coverless.
+    assert.ok(marketplaceAssetPath(p.coverFile), `${p.name}: assets/marketplace/${p.coverFile} missing`);
+    const size = fileURLToPath(new URL(`../assets/marketplace/${p.coverFile}`, import.meta.url));
+    assert.ok(existsSync(size), `${p.name}: ${size} missing`);
   }
 });
