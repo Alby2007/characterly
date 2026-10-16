@@ -145,23 +145,44 @@ test("house member add: posts welcome pointing at rules+verify; no auto-role; no
   assert.equal(bot.added.length, 0);
 });
 
-test("member screening: pending join gets nothing until the pending→false flip", async () => {
+test("member screening: pending joins are welcomed at join; the flip never double-greets", async () => {
   const deps = makeDeps();
   const m = makeMember({ pending: true });
   await handleHouseMemberAdd(m, deps);
   assert.equal(m.added.length, 0);
-  assert.equal(deps.sent.filter(s => s.id === "c-welcome").length, 0);
+  assert.equal(deps.sent.filter(s => s.id === "c-welcome").length, 1, "welcome lands at join, not after rules acceptance");
 
-  // guildMemberUpdate pending→false flip posts the welcome.
+  // guildMemberUpdate pending→false flip must not greet them a second time.
   const settled = makeMember({ pending: false });
   await handleHouseMemberUpdate({ pending: true }, settled, deps);
   assert.equal(settled.added.length, 0, "screening pass still doesn't grant Member — verify does");
-  assert.equal(deps.sent.filter(s => s.id === "c-welcome").length, 1, "welcome posts on the flip");
+  assert.equal(deps.sent.filter(s => s.id === "c-welcome").length, 1, "no double welcome on the flip");
 
   // A stale/non-flip update (uncached partial: pending undefined→false) does nothing.
   const again = makeMember({ pending: false });
   await handleHouseMemberUpdate({ pending: false }, again, deps);
-  assert.equal(deps.sent.filter(s => s.id === "c-welcome").length, 1, "no double welcome");
+  assert.equal(deps.sent.filter(s => s.id === "c-welcome").length, 1, "no welcome on a non-flip update");
+});
+
+test("raid-suppressed pending join is welcomed when they accept the rules", async () => {
+  const deps = makeDeps();
+  for (let i = 0; i < 4; i++) await handleHouseMemberAdd(makeMember({ id: `u-p${i}` }), deps); // hot
+  const late = makeMember({ id: "u-pending", pending: true });
+  await handleHouseMemberAdd(late, deps);
+  assert.equal(deps.sent.filter(s => s.id === "c-welcome").length, 3, "hot window suppresses the pending join's welcome too");
+
+  // They rode out the raid window and accepted the rules — greet them now.
+  await handleHouseMemberUpdate({ pending: true }, makeMember({ id: "u-pending", pending: false }), deps);
+  assert.equal(deps.sent.filter(s => s.id === "c-welcome").length, 4, "screening flip backfills a suppressed welcome");
+});
+
+test("a rejoin earns a fresh welcome (leave clears the dedupe)", async () => {
+  const deps = makeDeps();
+  await handleHouseMemberAdd(makeMember({ id: "u-boomerang" }), deps);
+  assert.equal(deps.sent.filter(s => s.id === "c-welcome").length, 1);
+  await handleHouseMemberRemove(makeMember({ id: "u-boomerang" }), deps);
+  await handleHouseMemberAdd(makeMember({ id: "u-boomerang" }), deps);
+  assert.equal(deps.sent.filter(s => s.id === "c-welcome").length, 2, "rejoin greets again");
 });
 
 test("member remove logs to ops channel", async () => {

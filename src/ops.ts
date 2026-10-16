@@ -128,6 +128,7 @@ export function initOps(d: OpsDeps): void { opsDeps = d; }
 export function resetOpsState(): void {
   joinTimes.length = 0;
   lastRaidAlertAt = 0;
+  welcomed.clear();
   burstWindow.clear();
   lastActedAt.clear();
   activeBreaches.clear();
@@ -152,21 +153,24 @@ const joinTimes: number[] = [];
 let lastRaidAlertAt = 0;
 
 // Member now means *verified* — the role is granted by the gate-channel
-// button after a linked-account check, not on join/screening. on board is
-// welcome-post only: point them at rules → verify.
-async function onboardMember(member: MemberLike, deps: OpsDeps, opts: { welcome?: boolean } = {}): Promise<void> {
+// button after a linked-account check, not on join/screening. onboard is
+// welcome-post only: point them at rules → verify. Returns whether a greeting
+// actually posted so the screening flip can retry joins the raid window ate.
+const welcomed = new Set<string>();
+
+async function onboardMember(member: MemberLike, deps: OpsDeps, opts: { welcome?: boolean } = {}): Promise<boolean> {
   // `welcome:false` — a hot raid window shouldn't flood the welcome channel
   // with one public greeting per raider.
-  if (opts.welcome === false) return;
-  if (config.houseWelcomeChannelId) {
-    const ch = await deps.fetchChannel(config.houseWelcomeChannelId).catch(() => null);
-    const rules = config.houseRulesChannelId ? `<#${config.houseRulesChannelId}>` : "the rules";
-    const gate = config.houseVerifyChannelId ? `, then verify in <#${config.houseVerifyChannelId}> to unlock the rest` : "";
-    await ch?.send({
-      content: `Welcome <@${member.user.id}> to Characterly — read ${rules} first${gate}. Your personal companion starts in the bot's DMs.`,
-      allowedMentions: { users: [member.user.id] },
-    }).catch(e => { inc("ops.welcome_error"); logError("house welcome failed", e); });
-  }
+  if (opts.welcome === false || !config.houseWelcomeChannelId) return false;
+  const ch = await deps.fetchChannel(config.houseWelcomeChannelId).catch(() => null);
+  if (!ch) return false;
+  const rules = config.houseRulesChannelId ? `<#${config.houseRulesChannelId}>` : "the rules";
+  const gate = config.houseVerifyChannelId ? `, then verify in <#${config.houseVerifyChannelId}> to unlock the rest` : "";
+  return ch.send({
+    content: `Welcome <@${member.user.id}> to Characterly — read ${rules} first${gate}. Your personal companion starts in the bot's DMs.`,
+    allowedMentions: { users: [member.user.id] },
+  }).then(() => true)
+    .catch(e => { inc("ops.welcome_error"); logError("house welcome failed", e); return false; });
 }
 
 export async function handleHouseMemberAdd(member: MemberLike, deps: OpsDeps): Promise<void> {
@@ -190,10 +194,9 @@ export async function handleHouseMemberAdd(member: MemberLike, deps: OpsDeps): P
       inc("ops.raid_alert");
     }
   }
-  // Membership Screening: pending members haven't accepted the rules yet —
-  // their welcome lands on the guildMemberUpdate pending→false flip instead.
-  if (member.pending) return;
-  await onboardMember(member, deps, { welcome: !raidHot });
+  // Welcome at join, screening or not — pending members can read channels even
+  // though they can't interact, so "read rules → verify" lands when it matters.
+  if (await onboardMember(member, deps, { welcome: !raidHot })) welcomed.add(member.user.id);
 }
 
 export async function handleHouseMemberUpdate(
@@ -202,15 +205,18 @@ export async function handleHouseMemberUpdate(
   deps: OpsDeps,
 ): Promise<void> {
   if (!isHouse(newMember.guild.id) || newMember.user.bot) return;
-  // The screening flip is the only transition we act on — strict === true on
-  // the old side so an uncached partial can't re-welcome an existing member.
-  if (oldMember.pending === true && newMember.pending === false) {
-    await onboardMember(newMember, deps);
+  // The screening flip is a fallback welcome: joins already greet on add, so
+  // this only fires for members the raid window suppressed (or a send that
+  // failed). `welcomed` dedupes; strict === true on the old side so an
+  // uncached partial can't greet an existing member.
+  if (oldMember.pending === true && newMember.pending === false && !welcomed.has(newMember.user.id)) {
+    if (await onboardMember(newMember, deps)) welcomed.add(newMember.user.id);
   }
 }
 
 export async function handleHouseMemberRemove(member: MemberLike, deps: OpsDeps): Promise<void> {
   if (!isHouse(member.guild.id) || member.user.bot) return;
+  welcomed.delete(member.user.id); // a rejoin earns a fresh welcome
   await opsAlert(deps, `👋 **${member.user.username ?? member.user.id}** left the server.`);
 }
 
