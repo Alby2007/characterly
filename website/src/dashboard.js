@@ -9,12 +9,62 @@ import {
 } from "./auth.js";
 
 const $ = sel => document.querySelector(sel);
+const guard = (p, ms = 8000) => withTimeout(p, ms).catch(e => console.warn("dashboard section failed:", e));
 
 const user = await requireAuth();
 if (!user) throw new Error("redirecting");
 
+// Wired FIRST: nothing below (network-bound renders) may be able to leave
+// sign-out / delete inert by hanging or throwing.
+// ── Sign out ───────────────────────────────────────────────────────────────
+for (const btn of [$("#nav-signout"), $("#nav-signout-mobile")]) {
+  btn.addEventListener("click", async () => {
+    try { await signOut(); } finally { window.location.href = "/"; }
+  });
+}
+
+// ── Delete account ─────────────────────────────────────────────────────────
+const modal = $("#delete-modal");
+const confirmInput = $("#delete-confirm");
+const deleteBtn = $("#delete-do");
+
+const deleteErr = $("#delete-error");
+
+$("#btn-delete").addEventListener("click", () => {
+  modal.hidden = false;
+  confirmInput.value = "";
+  deleteBtn.disabled = true;
+  deleteErr.hidden = true;
+  confirmInput.focus();
+});
+$("#delete-cancel").addEventListener("click", () => { modal.hidden = true; });
+modal.addEventListener("click", e => { if (e.target === modal) modal.hidden = true; });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !modal.hidden) modal.hidden = true; });
+confirmInput.addEventListener("input", () => {
+  deleteBtn.disabled = confirmInput.value.trim().toUpperCase() !== "DELETE";
+});
+deleteBtn.addEventListener("click", async () => {
+  deleteBtn.disabled = true;
+  deleteErr.hidden = true;
+  // Bound the rpc: a hung request (e.g. queued behind a wedged auth lock)
+  // must surface, not sit silently. A retry is safe — deleting an
+  // already-deleted user is a no-op that returns success.
+  const { error } = await withTimeout(deleteAccount(), 10000, "Delete").catch(e => ({ error: e }));
+  if (error) {
+    deleteErr.textContent = error.message ?? "Delete failed — try again.";
+    deleteErr.hidden = false;
+    deleteBtn.disabled = false;
+    return;
+  }
+  // Account is gone server-side. signOut clears local keys synchronously
+  // and never waits on the network, so navigation is instant either way.
+  await signOut();
+  window.location.href = "/";
+});
+
+
 // ── Profile ────────────────────────────────────────────────────────────────
-let profile = await getProfile(user.id).catch(() => null);
+let profile = await withTimeout(getProfile(user.id), 8000).catch(() => null);
 const displayName = profile?.display_name || user.user_metadata?.display_name || user.email.split("@")[0];
 
 const hour = new Date().getHours();
@@ -167,7 +217,7 @@ $("#form-link-code").addEventListener("submit", async e => {
   await renderBotSettings();
 });
 
-await renderDiscordCard();
+await guard(renderDiscordCard());
 renderBilling();
 
 // Back from Stripe checkout — the webhook does the crediting (seconds, not
@@ -288,8 +338,8 @@ for (const [sel, key] of [["#set-c2c", "c2c_enabled"], ["#set-alerts", "low_cred
   });
 }
 
-await renderTokens();
-await renderBotSettings();
+await guard(renderTokens());
+await guard(renderBotSettings());
 
 // ── Password change ────────────────────────────────────────────────────────
 $("#form-password").addEventListener("submit", async e => {
@@ -305,50 +355,4 @@ $("#form-password").addEventListener("submit", async e => {
   msg.classList.toggle("ok", !error);
   msg.hidden = false;
   if (!error) e.target.reset();
-});
-
-// ── Sign out ───────────────────────────────────────────────────────────────
-for (const btn of [$("#nav-signout"), $("#nav-signout-mobile")]) {
-  btn.addEventListener("click", async () => {
-    try { await signOut(); } finally { window.location.href = "/"; }
-  });
-}
-
-// ── Delete account ─────────────────────────────────────────────────────────
-const modal = $("#delete-modal");
-const confirmInput = $("#delete-confirm");
-const deleteBtn = $("#delete-do");
-
-const deleteErr = $("#delete-error");
-
-$("#btn-delete").addEventListener("click", () => {
-  modal.hidden = false;
-  confirmInput.value = "";
-  deleteBtn.disabled = true;
-  deleteErr.hidden = true;
-  confirmInput.focus();
-});
-$("#delete-cancel").addEventListener("click", () => { modal.hidden = true; });
-modal.addEventListener("click", e => { if (e.target === modal) modal.hidden = true; });
-document.addEventListener("keydown", e => { if (e.key === "Escape" && !modal.hidden) modal.hidden = true; });
-confirmInput.addEventListener("input", () => {
-  deleteBtn.disabled = confirmInput.value.trim().toUpperCase() !== "DELETE";
-});
-deleteBtn.addEventListener("click", async () => {
-  deleteBtn.disabled = true;
-  deleteErr.hidden = true;
-  // Bound the rpc: a hung request (e.g. queued behind a wedged auth lock)
-  // must surface, not sit silently. A retry is safe — deleting an
-  // already-deleted user is a no-op that returns success.
-  const { error } = await withTimeout(deleteAccount(), 10000, "Delete").catch(e => ({ error: e }));
-  if (error) {
-    deleteErr.textContent = error.message ?? "Delete failed — try again.";
-    deleteErr.hidden = false;
-    deleteBtn.disabled = false;
-    return;
-  }
-  // Account is gone server-side. signOut clears local keys synchronously
-  // and never waits on the network, so navigation is instant either way.
-  await signOut();
-  window.location.href = "/";
 });
