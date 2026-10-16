@@ -44,7 +44,7 @@ import { isSelfHarmSignal, CRISIS_RESPONSE, SAFE_REFUSAL } from "./safety.js";
 import {
   initOps, automodMessage, isHouse, opsAlert,
   handleHouseMemberAdd, handleHouseMemberUpdate, handleHouseMemberRemove,
-  ensureHouseLayout, startHostWatchdog,
+  ensureHouseLayout, startHostWatchdog, ensureVerifyGate, startLinkSweep,
   type OpsDeps, type GuildLike,
 } from "./ops.js";
 import { exec as cpExec } from "node:child_process";
@@ -205,6 +205,7 @@ let eventStore: EventStore;
 let profileStore: ProfileStore;
 let worker: { stop: () => Promise<void> } | undefined;
 let watchdog: { stop: () => void } | undefined;
+let linkSweep: { stop: () => void } | undefined;
 
 async function init() {
   store = await MemoryStore.create();
@@ -276,10 +277,14 @@ client.once(Events.ClientReady, async ready => {
       if (house) {
         const made = await ensureHouseLayout(house).catch(e => { logError("house layout failed", e); return [] as string[]; });
         if (made.length) await opsAlert(opsDeps, `🧱 House layout — created ${made.join(", ")}`);
+        // Verify gate card — posted once if missing; pending members see it
+        // but the button refuses until screening passes.
+        await ensureVerifyGate(opsDeps).catch(e => { inc("ops.init_error"); logError("verify gate failed", e); return false; });
       } else {
         logError("house ops init", new Error("HOUSE_GUILD_ID set but the guild isn't reachable"));
       }
       watchdog = startHostWatchdog(opsDeps);
+      linkSweep = startLinkSweep(opsDeps); // Member role ↔ account-link reconciliation
       await opsAlert(opsDeps, `🟢 Characterly online — sha \`${opsDeps.gitSha ?? "?"}\` · migrations applied · host watchdog armed`);
     } catch (error) { inc("ops.init_error"); logError("house ops init failed", error); }
   }
@@ -756,6 +761,19 @@ const opsDeps: OpsDeps = {
     return c?.isTextBased() && "send" in c ? c as unknown as { send(p: unknown): Promise<unknown> } : null;
   },
   fetchGuild: id => client.guilds.fetch(id).then(g => g as unknown as GuildLike).catch(() => null),
+  fetchMember: async (guildId, userId) => {
+    const g = await client.guilds.fetch(guildId).catch(() => null);
+    if (!g) return null;
+    return g.members.fetch(userId).then(m => m as unknown as import("./ops.js").MemberLike).catch(() => null);
+  },
+  listMembers: async guildId => {
+    const g = await client.guilds.fetch(guildId).catch(() => null);
+    if (!g) return [];
+    // members.list caps at 1000/page — plenty for the house server.
+    const coll = await g.members.list({ limit: 1000 }).catch(() => null);
+    return coll ? [...coll.values()] as unknown as import("./ops.js").MemberLike[] : [];
+  },
+  get botId() { return client.user?.id ?? null; },
   // Bounded: a stalled `git pull` or hung `npm ci` must not freeze the /ops
   // console forever — a timeout lands as a catchable error instead.
   exec: cmd => execAsync(cmd, { maxBuffer: 4 * 1024 * 1024, timeout: 300_000 }),

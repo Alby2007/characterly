@@ -1,5 +1,5 @@
 import os from "node:os";
-import { ChannelType, EmbedBuilder, PermissionFlagsBits, type ChatInputCommandInteraction } from "discord.js";
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, PermissionFlagsBits, type ButtonInteraction, type ChatInputCommandInteraction } from "discord.js";
 import { config } from "./config.js";
 import { inc } from "./metrics.js";
 import { logError, redactSecrets } from "./secrets.js";
@@ -19,6 +19,10 @@ export const isHouse = (guildId: string | null | undefined): boolean =>
 // Narrow structural shapes — tests hand fakes, index.ts casts the real objects.
 interface SendableChannel {
   send(payload: unknown): Promise<unknown>;
+  /** Present on real text channels — the verify-gate idempotency probe. */
+  messages?: {
+    fetch(opts: { limit: number }): Promise<Iterable<{ author?: { id?: string }; components?: unknown[] }>>;
+  };
 }
 
 export interface GuildChannelLike {
@@ -43,7 +47,11 @@ export interface MemberLike {
   pending?: boolean | null;
   user: { id: string; bot?: boolean | null; username?: string; createdTimestamp?: number };
   guild: { id: string };
-  roles: { add(id: string): Promise<unknown> };
+  roles: {
+    add(id: string): Promise<unknown>;
+    remove?(id: string): Promise<unknown>;
+    cache?: { has(id: string): boolean };
+  };
   kick?(reason?: string): Promise<unknown>;
 }
 
@@ -66,6 +74,11 @@ export interface OpsDeps {
   store: MemoryStore;
   fetchChannel: (id: string) => Promise<SendableChannel | null>;
   fetchGuild: (id: string) => Promise<GuildLike | null>;
+  /** Guild member lookups for the verify button + link sweep. */
+  fetchMember: (guildId: string, userId: string) => Promise<MemberLike | null>;
+  listMembers: (guildId: string) => Promise<MemberLike[]>;
+  /** The bot's own user id — gate-card idempotency checks message authorship. */
+  botId: string | null;
   exec: (cmd: string) => Promise<{ stdout: string; stderr: string }>;
   exit: (code: number) => void;
   /** Timed SELECT 1 — index.ts runs it on the shared pool. */
@@ -107,22 +120,19 @@ const RAID_WINDOW_MS = 60_000;
 const joinTimes: number[] = [];
 let lastRaidAlertAt = 0;
 
+// Member now means *verified* — the role is granted by the gate-channel
+// button after a linked-account check, not on join/screening. on board is
+// welcome-post only: point them at rules → verify.
 async function onboardMember(member: MemberLike, deps: OpsDeps, opts: { welcome?: boolean } = {}): Promise<void> {
-  if (config.houseMemberRoleId) {
-    await member.roles.add(config.houseMemberRoleId).catch(e => {
-      inc("ops.autorole_error");
-      logError("house auto-role failed", e);
-    });
-  }
   // `welcome:false` — a hot raid window shouldn't flood the welcome channel
-  // with one public greeting per raider; the role still lands so a real
-  // surge isn't broken by the detector.
+  // with one public greeting per raider.
   if (opts.welcome === false) return;
   if (config.houseWelcomeChannelId) {
     const ch = await deps.fetchChannel(config.houseWelcomeChannelId).catch(() => null);
-    const rules = config.houseRulesChannelId ? ` — read <#${config.houseRulesChannelId}> first` : "";
+    const rules = config.houseRulesChannelId ? `<#${config.houseRulesChannelId}>` : "the rules";
+    const gate = config.houseVerifyChannelId ? `, then verify in <#${config.houseVerifyChannelId}> to unlock the rest` : "";
     await ch?.send({
-      content: `Welcome <@${member.user.id}> to Characterly${rules}! Your personal companion starts in the bot's DMs — summon it into the server with \`/companion action:summon\`.`,
+      content: `Welcome <@${member.user.id}> to Characterly — read ${rules} first${gate}. Your personal companion starts in the bot's DMs.`,
       allowedMentions: { users: [member.user.id] },
     }).catch(e => { inc("ops.welcome_error"); logError("house welcome failed", e); });
   }
@@ -150,7 +160,7 @@ export async function handleHouseMemberAdd(member: MemberLike, deps: OpsDeps): P
     }
   }
   // Membership Screening: pending members haven't accepted the rules yet —
-  // their role lands on the guildMemberUpdate pending→false flip instead.
+  // their welcome lands on the guildMemberUpdate pending→false flip instead.
   if (member.pending) return;
   await onboardMember(member, deps, { welcome: !raidHot });
 }
@@ -171,6 +181,117 @@ export async function handleHouseMemberUpdate(
 export async function handleHouseMemberRemove(member: MemberLike, deps: OpsDeps): Promise<void> {
   if (!isHouse(member.guild.id) || member.user.bot) return;
   await opsAlert(deps, `👋 **${member.user.username ?? member.user.id}** left the server.`);
+}
+
+// ── Verify gate ──────────────────────────────────────────────────────────────
+// Member = verified: a persistent card in HOUSE_VERIFY_CHANNEL_ID carries the
+// house:verify button; clicking it checks for a linked Characterly account and
+// grants the role. The lobby (welcome/rules/gate) is all @everyone sees, so
+// the card must read sensibly to members still pending rules screening.
+
+const VERIFY_CUSTOM_ID = "house:verify";
+
+/** Post the verify card if the gate channel doesn't already carry one. */
+export async function ensureVerifyGate(deps: OpsDeps): Promise<boolean> {
+  if (!config.houseVerifyChannelId) return false;
+  const ch = await deps.fetchChannel(config.houseVerifyChannelId).catch(() => null);
+  if (!ch) return false;
+  const recent = await ch.messages?.fetch({ limit: 20 }).catch(() => null);
+  if (recent) {
+    for (const m of recent) {
+      if (m.author?.id === deps.botId && JSON.stringify(m.components ?? []).includes(VERIFY_CUSTOM_ID)) {
+        return false; // card already up
+      }
+    }
+  }
+  await ch.send({
+    embeds: [new EmbedBuilder()
+      .setTitle("Verify your Characterly account")
+      .setDescription(
+        "This server is members-only past this point — link your free Characterly account to unlock it.\n\n" +
+        "**How:** create an account at " + config.siteUrl + ", run `/link` in the bot's DMs, then click below.\n" +
+        "_Just joined? Accept the rules first — the button unlocks once you have._",
+      )],
+    components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(VERIFY_CUSTOM_ID).setLabel("Verify — I'm a Characterly member").setStyle(ButtonStyle.Success),
+    )],
+    allowedMentions: { parse: [] },
+  });
+  return true;
+}
+
+/** house:* buttons — routed from handleMemoryButton; deps are module-init'd. */
+export async function handleHouseButton(interaction: ButtonInteraction): Promise<unknown> {
+  const deps = opsDeps;
+  if (!deps) return interaction.reply({ content: "Ops isn't initialized yet — the bot is still starting.", ephemeral: true });
+  if (interaction.customId !== VERIFY_CUSTOM_ID) return;
+  if (!isHouse(interaction.guildId)) {
+    return interaction.reply({ content: "That button only works in our community server.", ephemeral: true });
+  }
+  if (!config.houseMemberRoleId) {
+    return interaction.reply({ content: "Verification isn't configured yet — tell an admin HOUSE_MEMBER_ROLE_ID is unset.", ephemeral: true });
+  }
+  const member = await deps.fetchMember(interaction.guildId!, interaction.user.id).catch(() => null);
+  if (!member) return interaction.reply({ content: "Couldn't find you in this server — try rejoining.", ephemeral: true });
+  if (member.pending === true) {
+    return interaction.reply({ content: "Accept the server rules first — then click again.", ephemeral: true });
+  }
+  if (member.roles.cache?.has(config.houseMemberRoleId)) {
+    return interaction.reply({ content: "Already verified — you're in.", ephemeral: true });
+  }
+  const account = await deps.store.accountForDiscordUser(interaction.user.id).catch(() => null);
+  if (!account) {
+    return interaction.reply({
+      content: `No linked Characterly account found — create one free at ${config.siteUrl}, run \`/link\` in the bot's DMs, then click **Verify** again.`,
+      ephemeral: true,
+    });
+  }
+  const granted = await member.roles.add(config.houseMemberRoleId).then(() => true).catch(e => {
+    inc("ops.verify_error");
+    logError("verify role grant failed", e);
+    return false;
+  });
+  if (!granted) {
+    return interaction.reply({ content: "The role grant didn't stick — tell an admin to check my permissions.", ephemeral: true });
+  }
+  inc("ops.verified");
+  await opsAlert(deps, `✅ <@${interaction.user.id}> verified — Member granted.`);
+  return interaction.reply({ content: "Verified — the rest of the server is open to you. Welcome to Characterly!", ephemeral: true });
+}
+
+// ── Link sweep ───────────────────────────────────────────────────────────────
+// Unlink is a website-side write the bot can't observe — so the sweep polls:
+// every interval, every holder of the Member role is re-checked against
+// accountForDiscordUser; a null (unlinked) result revokes the role. Bounded
+// by the account cache (60s) + sweep interval — worst-case ~6 min lag.
+
+export async function runMemberLinkSweep(deps: OpsDeps): Promise<number> {
+  const roleId = config.houseMemberRoleId;
+  if (!config.houseGuildId || !roleId || !deps.store.creditsSupported) return 0; // self-host: synthetic accounts for everyone
+  const members = await deps.listMembers(config.houseGuildId).catch(e => {
+    inc("ops.sweep_error");
+    logError("member link sweep fetch failed", e);
+    return [] as MemberLike[];
+  });
+  let revoked = 0;
+  for (const m of members) {
+    if (m.user.bot || !m.roles.cache?.has(roleId) || !m.roles.remove) continue;
+    const account = await deps.store.accountForDiscordUser(m.user.id).catch(() => null);
+    if (account) continue;
+    await m.roles.remove(roleId).catch(e => logError("member role revoke failed", e));
+    revoked++;
+    inc("ops.verify_revoked");
+    await opsAlert(deps, `🔻 <@${m.user.id}> unlinked their Characterly account — Member role removed.`);
+  }
+  return revoked;
+}
+
+export function startLinkSweep(deps: OpsDeps): { stop: () => void } {
+  const timer = setInterval(() => {
+    runMemberLinkSweep(deps).catch(e => { inc("ops.sweep_error"); logError("member link sweep failed", e); });
+  }, config.hostHealthIntervalMs);
+  timer.unref?.();
+  return { stop: () => clearInterval(timer) };
 }
 
 // ── Auto-moderation ──────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ import {
   isHouse, automodMessage, handleHouseMemberAdd, handleHouseMemberUpdate,
   handleHouseMemberRemove, ensureHouseLayout, collectHostHealth,
   runWatchdogTick, handleOpsCommand, initOps, resetOpsState, WANTED_LAYOUT,
+  ensureVerifyGate, handleHouseButton, runMemberLinkSweep,
   type OpsDeps, type AutomodMessage, type MemberLike,
 } from "./ops.js";
 import { config } from "./config.js";
@@ -15,6 +16,7 @@ const prev = {
   opsUserIds: config.opsUserIds, houseMemberRoleId: config.houseMemberRoleId,
   houseWelcomeChannelId: config.houseWelcomeChannelId, houseRulesChannelId: config.houseRulesChannelId,
   houseAnnounceChannelId: config.houseAnnounceChannelId, automodRaidJoins: config.automodRaidJoins,
+  houseVerifyChannelId: config.houseVerifyChannelId,
   automodRaidKick: config.automodRaidKick, automodBurstCount: config.automodBurstCount,
   automodMentionMax: config.automodMentionMax, automodNewAccountDays: config.automodNewAccountDays,
   hostHeapPct: config.hostHeapPct, hostDiskPct: config.hostDiskPct, hostLagMs: config.hostLagMs,
@@ -33,6 +35,7 @@ beforeEach(() => {
   config.houseWelcomeChannelId = "c-welcome";
   config.houseRulesChannelId = "c-rules";
   config.houseAnnounceChannelId = "c-announce";
+  config.houseVerifyChannelId = "c-verify";
   config.automodRaidJoins = 3;
   config.automodRaidKick = false;
   config.automodBurstCount = 4;
@@ -54,9 +57,14 @@ function makeDeps(over: Partial<OpsDeps> = {}): OpsDeps & { sent: Array<{ id: st
     sent,
     store: {
       queueStats: async () => ({ pending: 2, dead: 1, oldestPendingAt: null }),
+      creditsSupported: true,
+      accountForDiscordUser: async () => null,
     } as unknown as MemoryStore,
     fetchChannel: async id => ({ send: async (p: unknown) => { sent.push({ id, payload: p }); } }),
     fetchGuild: async () => null,
+    fetchMember: async () => null,
+    listMembers: async () => [],
+    botId: "bot-1",
     exec: async () => ({ stdout: "", stderr: "" }),
     exit: () => {},
     dbPing: async () => 4,
@@ -67,17 +75,24 @@ function makeDeps(over: Partial<OpsDeps> = {}): OpsDeps & { sent: Array<{ id: st
   return deps;
 }
 
-const makeMember = (over: Partial<MemberLike> & { id?: string } = {}): MemberLike & { added: string[]; kicked: string[] } => {
+const makeMember = (over: Partial<MemberLike> & { id?: string; hasRole?: boolean } = {}): MemberLike & { added: string[]; removed: string[]; kicked: string[] } => {
   const added: string[] = [];
+  const removed: string[] = [];
   const kicked: string[] = [];
+  const roleSet = new Set<string>(over.hasRole ? ["r-member"] : []);
+  const { hasRole, ...rest } = over;
   return {
-    added, kicked,
+    added, removed, kicked,
     pending: false,
     user: { id: over.id ?? "u1", bot: false, username: "Joiner", createdTimestamp: Date.now() - 90 * 86_400_000 },
     guild: { id: HOUSE },
-    roles: { add: async (id: string) => { added.push(id); } },
+    roles: {
+      add: async (id: string) => { added.push(id); roleSet.add(id); },
+      remove: async (id: string) => { removed.push(id); roleSet.delete(id); },
+      cache: { has: (id: string) => roleSet.has(id) },
+    },
     kick: async (r?: string) => { kicked.push(r ?? ""); },
-    ...over,
+    ...rest,
   };
 };
 
@@ -108,15 +123,16 @@ const opsAlertText = (deps: ReturnType<typeof makeDeps>) =>
 
 // ── Member ops ───────────────────────────────────────────────────────────────
 
-test("house member add: assigns role + posts welcome; non-house and bots skipped", async () => {
+test("house member add: posts welcome pointing at rules+verify; no auto-role; non-house and bots skipped", async () => {
   const deps = makeDeps();
   const m = makeMember();
   await handleHouseMemberAdd(m, deps);
-  assert.deepEqual(m.added, ["r-member"]);
+  assert.equal(m.added.length, 0, "Member is granted by verification, not on join");
   const welcome = deps.sent.find(s => s.id === "c-welcome");
   assert.ok(welcome, "welcome posted");
   assert.match(welcome.payload.content, /<@u1>/);
   assert.match(welcome.payload.content, /<#c-rules>/);
+  assert.match(welcome.payload.content, /<#c-verify>/);
 
   const foreign = makeMember({ guild: { id: "g-other" } });
   await handleHouseMemberAdd(foreign, deps);
@@ -131,18 +147,19 @@ test("member screening: pending join gets nothing until the pending→false flip
   const deps = makeDeps();
   const m = makeMember({ pending: true });
   await handleHouseMemberAdd(m, deps);
-  assert.equal(m.added.length, 0, "pending member must not be roled");
+  assert.equal(m.added.length, 0);
   assert.equal(deps.sent.filter(s => s.id === "c-welcome").length, 0);
 
-  // guildMemberUpdate pending→false flip completes onboarding.
+  // guildMemberUpdate pending→false flip posts the welcome.
   const settled = makeMember({ pending: false });
   await handleHouseMemberUpdate({ pending: true }, settled, deps);
-  assert.deepEqual(settled.added, ["r-member"]);
+  assert.equal(settled.added.length, 0, "screening pass still doesn't grant Member — verify does");
+  assert.equal(deps.sent.filter(s => s.id === "c-welcome").length, 1, "welcome posts on the flip");
 
   // A stale/non-flip update (uncached partial: pending undefined→false) does nothing.
   const again = makeMember({ pending: false });
   await handleHouseMemberUpdate({ pending: false }, again, deps);
-  assert.equal(again.added.length, 0);
+  assert.equal(deps.sent.filter(s => s.id === "c-welcome").length, 1, "no double welcome");
 });
 
 test("member remove logs to ops channel", async () => {
@@ -170,14 +187,105 @@ test("raid window: alert once when joins exceed threshold; auto-kick when armed"
   assert.equal(raider.added.length, 0, "kicked raider never gets the member role");
 });
 
-test("raid window: hot window suppresses welcome spam but still roles (alert-only mode)", async () => {
+test("raid window: hot window suppresses welcome spam (alert-only mode)", async () => {
   const deps = makeDeps();
   for (let i = 0; i < 4; i++) await handleHouseMemberAdd(makeMember({ id: `u-r${i}` }), deps); // hot
   const raider = makeMember({ id: "u-raider" });
   await handleHouseMemberAdd(raider, deps);
-  assert.deepEqual(raider.added, ["r-member"], "hot window still grants the role — alert-only mode doesn't break real surges");
+  assert.equal(raider.added.length, 0, "no role grants in the join path at all — verify owns that");
   const welcomes = deps.sent.filter(s => s.id === "c-welcome");
   assert.equal(welcomes.length, 3, "no welcome posted once the window is hot — one greeting per raider would flood the channel");
+});
+
+// ── Verify gate ──────────────────────────────────────────────────────────────
+
+test("ensureVerifyGate posts the card once; existing card is a no-op", async () => {
+  const deps = makeDeps();
+  assert.equal(await ensureVerifyGate(deps), true, "posts when the channel has no card");
+  const card = deps.sent.find(s => s.id === "c-verify");
+  assert.ok(card, "card posted to the gate channel");
+  assert.match(JSON.stringify(card.payload.components), /house:verify/);
+
+  // Channel now returns our own card in message history → no repost.
+  const deps2 = makeDeps({
+    fetchChannel: async () => ({
+      send: async () => {},
+      messages: { fetch: async () => [{ author: { id: "bot-1" }, components: card.payload.components }] },
+    }),
+  });
+  assert.equal(await ensureVerifyGate(deps2), false, "existing card detected — no repost");
+});
+
+const makeButtonIx = (over: any = {}) => {
+  const replies: any[] = [];
+  return {
+    replies,
+    customId: "house:verify",
+    guildId: HOUSE,
+    user: { id: "u1" },
+    reply: async (r: any) => { replies.push(r); return r; },
+    ...over,
+  };
+};
+
+test("house:verify — linked account grants Member; unlinked gets the signup pointer", async () => {
+  const linked = makeMember();
+  initOps(makeDeps({
+    fetchMember: async () => linked,
+    store: {
+      creditsSupported: true,
+      accountForDiscordUser: async () => ({ id: "acc-1", plan: "free", creditBalance: 0 }),
+    } as unknown as MemoryStore,
+  }));
+  const ix = makeButtonIx();
+  await handleHouseButton(ix as any);
+  assert.deepEqual(linked.added, ["r-member"], "linked account ⇒ Member granted");
+  assert.match(ix.replies[0].content, /Verified/);
+
+  const unlinked = makeMember();
+  initOps(makeDeps({ fetchMember: async () => unlinked }));
+  const ix2 = makeButtonIx();
+  await handleHouseButton(ix2 as any);
+  assert.equal(unlinked.added.length, 0, "no linked account ⇒ no role");
+  assert.match(ix2.replies[0].content, /No linked Characterly account/);
+  assert.match(ix2.replies[0].content, /\/link/);
+});
+
+test("house:verify — pending members are told to accept rules; non-house + already-verified refused", async () => {
+  initOps(makeDeps({ fetchMember: async () => makeMember({ pending: true }) }));
+  const ix = makeButtonIx();
+  await handleHouseButton(ix as any);
+  assert.match(ix.replies[0].content, /rules first/i);
+
+  initOps(makeDeps());
+  const foreign = makeButtonIx({ guildId: "g-other" });
+  await handleHouseButton(foreign as any);
+  assert.match(foreign.replies[0].content, /community server/);
+
+  initOps(makeDeps({ fetchMember: async () => makeMember({ hasRole: true }) }));
+  const done = makeButtonIx();
+  await handleHouseButton(done as any);
+  assert.match(done.replies[0].content, /Already verified/);
+});
+
+test("member link sweep: unlinked holder loses Member, linked keeps it", async () => {
+  const unlinked = makeMember({ id: "u-gone", hasRole: true });
+  const linked = makeMember({ id: "u-stay", hasRole: true });
+  const noRole = makeMember({ id: "u-plain" });
+  const linkedIds = new Set(["u-stay"]);
+  const deps = makeDeps({
+    listMembers: async () => [unlinked, linked, noRole],
+    store: {
+      creditsSupported: true,
+      accountForDiscordUser: async (id: string) => linkedIds.has(id) ? { id: "acc", plan: "free", creditBalance: 0 } : null,
+    } as unknown as MemoryStore,
+  });
+  const revoked = await runMemberLinkSweep(deps);
+  assert.equal(revoked, 1);
+  assert.deepEqual(unlinked.removed, ["r-member"], "unlinked ⇒ role removed");
+  assert.equal(linked.removed.length, 0, "linked ⇒ role kept");
+  assert.equal(noRole.removed.length, 0, "non-holders aren't touched");
+  assert.match(opsAlertText(deps), /u-gone.*Member role removed/);
 });
 
 // ── Automod ──────────────────────────────────────────────────────────────────

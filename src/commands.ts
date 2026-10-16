@@ -14,7 +14,7 @@ import { inc, metricsSnapshot } from "./metrics.js";
 import type { Companion, CompanionListing, CompanionSpec, MessageEvent } from "./types.js";
 import { config } from "./config.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
-import { handleOpsCommand } from "./ops.js";
+import { handleOpsCommand, handleHouseButton } from "./ops.js";
 
 export const ONBOARDING_ARCHETYPES: Record<
   string,
@@ -2116,6 +2116,9 @@ export async function handleCompanionModal(
 export async function handleMemoryButton(interaction: ButtonInteraction, store: MemoryStore, brainFor?: BrainFor, evStore?: EventStore) {
   if (interaction.customId === "forget:cancel") return interaction.update({ content: "No memory was deleted.", components: [] });
   const parts = interaction.customId.split(":");
+
+  // house:* — the verify-gate button on our own community server.
+  if (parts[0] === "house") return handleHouseButton(interaction);
 
   // market:{add|report|reportcat|talk|summon|dismiss|drop|unlist|relist|editmodal}:{id}
   // market:mod:{unflag|delist|ban|bancreator}:{listingId} — the companion

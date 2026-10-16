@@ -45,7 +45,7 @@ Env lives in `~/characterly/.env` on the VM — **not** in the repo. Changes nee
 
 ## House ops (`/ops`) — the bot operates our server + its own host
 
-When `HOUSE_GUILD_ID` is set, `src/ops.ts` runs a private operator layer: member ops (auto-role, welcome, raid detection), deterministic automod, channel layout (`ensureHouseLayout` on boot + `/ops layout`), and host self-ops (watchdog + `/ops`). The `/ops` console itself works even when `HOUSE_GUILD_ID` is unset — it controls the box, so it's initialized unconditionally; only the guild-facing pieces (layout, watchdog, member ops, boot announce) gate on the house id.
+When `HOUSE_GUILD_ID` is set, `src/ops.ts` runs a private operator layer: member ops (welcome, verify gate, link sweep, raid detection), deterministic automod, channel layout (`ensureHouseLayout` on boot + `/ops layout`), and host self-ops (watchdog + `/ops`). The `/ops` console itself works even when `HOUSE_GUILD_ID` is unset — it controls the box, so it's initialized unconditionally; only the guild-facing pieces (layout, watchdog, member ops, boot announce) gate on the house id.
 
 **`/ops` (allowlisted via `OPS_USER_IDS`, works in the house guild or DM):**
 
@@ -62,7 +62,11 @@ When `HOUSE_GUILD_ID` is set, `src/ops.ts` runs a private operator layer: member
 
 **Automod rules** (house guild only, deterministic, exempts `Manage Messages` holders + bots; runs before archiving so deleted spam never enters the memory pipeline): invite links → delete + alert · scam classes (nitro/crypto/steam/earn-money) → delete + 10m timeout + alert · mass mention (>8 user+role, or `@everyone` without permission) → delete + alert · burst spam (>6/8s) → delete + 5m timeout + alert · new account (<7d) + link → delete + alert. A 60s per-author action cooldown keeps repeat offenses deleting silently instead of re-alerting.
 
-**Member ops** — auto-role + welcome on join (Membership-Screening aware), leave logs, and a 60s join-window raid detector. While the window is hot the role still lands (alert-only mode doesn't break real surges) but the public welcome is suppressed so raiders don't flood the channel; `AUTOMOD_RAID_KICK=1` switches to auto-kick.
+**Member ops** — welcome on join (Membership-Screening aware), leave logs, and a 60s join-window raid detector. While the window is hot the public welcome is suppressed so raiders don't flood the channel; `AUTOMOD_RAID_KICK=1` switches to auto-kick.
+
+**Verify gate** — `Member` means *verified Characterly member*, not just passed screening. `@everyone` sees only the lobby (`welcome`, `rules`, the gate channel); everything else needs Member/Mod/Admin. A persistent card in `HOUSE_VERIFY_CHANNEL_ID` carries the **Verify** button: pending members are told to accept the rules first, unlinked users get pointed at the site + `/link`, linked accounts get the Member role and the server opens. The card is idempotent — `ensureVerifyGate` scans recent bot messages on boot and only posts when missing.
+
+**Link sweep** — unlinking a Characterly account happens on the website (`web_profiles.discord_user_id`), which the bot can't observe. A periodic sweep (same cadence as the watchdog) re-checks every Member-role holder against `accountForDiscordUser`; a null result removes the role and logs to the ops channel. Worst-case revocation lag is the account cache TTL (60s) plus one sweep interval (~6 min at defaults). Self-host (`creditsSupported` false) skips the sweep — every Discord user maps to a synthetic account anyway.
 
 **Prerequisites when enabling:** (1) toggle **Server Members Intent** in the dev portal *before* deploy — login fails without it; (2) grant the bot role **Manage Messages, Moderate Members, Manage Roles, Kick Members, Manage Channels** on the house server; (3) set `OPS_USER_IDS` — `/ops` controls the box, so it's person-allowlisted, not role-based. The systemd unit already carries `Restart=always` (verified), and `opc` is in `systemd-journal` so `journalctl` needs no sudo.
 

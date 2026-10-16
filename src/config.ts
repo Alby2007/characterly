@@ -93,6 +93,9 @@ const env = z.object({
   HOUSE_WELCOME_CHANNEL_ID: z.string().optional(),
   HOUSE_RULES_CHANNEL_ID: z.string().optional(),
   HOUSE_ANNOUNCE_CHANNEL_ID: z.string().optional(),
+  // The lobby gate channel: a persistent verify card lives here — clicking it
+  // checks for a linked Characterly account and grants HOUSE_MEMBER_ROLE_ID.
+  HOUSE_VERIFY_CHANNEL_ID: z.string().optional(),
   // Where ops alerts/host breaches go — defaults to the marketplace mod channel.
   OPS_CHANNEL_ID: z.string().optional(),
   // Discord user ids allowed to run /ops (controls the host — person-level,
@@ -200,6 +203,7 @@ export const config = {
   houseWelcomeChannelId: env.HOUSE_WELCOME_CHANNEL_ID,
   houseRulesChannelId: env.HOUSE_RULES_CHANNEL_ID,
   houseAnnounceChannelId: env.HOUSE_ANNOUNCE_CHANNEL_ID,
+  houseVerifyChannelId: env.HOUSE_VERIFY_CHANNEL_ID,
   opsChannelId: env.OPS_CHANNEL_ID ?? env.MARKETPLACE_MOD_CHANNEL_ID,
   opsUserIds: (env.OPS_USER_IDS ?? "").split(",").map(s => s.trim()).filter(Boolean),
   opsRepoDir: env.OPS_REPO_DIR,

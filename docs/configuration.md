@@ -62,9 +62,10 @@ Entirely opt-in: **`HOUSE_GUILD_ID` unset disables everything** below — no ext
 | Variable | Default | Description |
 |---|---|---|
 | `HOUSE_GUILD_ID` | (off) | Our community server id — gates member ops, automod, `/ops` |
-| `HOUSE_MEMBER_ROLE_ID` | — | Role auto-assigned on join (after Membership Screening passes) |
+| `HOUSE_MEMBER_ROLE_ID` | — | "Verified member" role — granted by the `house:verify` button after a linked-account check; auto-revoked by the link sweep when the account is unlinked |
 | `HOUSE_WELCOME_CHANNEL_ID` | — | Welcome posts land here |
 | `HOUSE_RULES_CHANNEL_ID` | — | Pointed at from welcome messages |
+| `HOUSE_VERIFY_CHANNEL_ID` | — | Lobby gate channel — a persistent verify card is posted here on boot if missing |
 | `HOUSE_ANNOUNCE_CHANNEL_ID` | — | `/ops announce` target |
 | `OPS_CHANNEL_ID` | `MARKETPLACE_MOD_CHANNEL_ID` | Ops alerts + host breach/recovery notices |
 | `OPS_USER_IDS` | — | Comma-separated user ids allowed to run `/ops` (controls the host — person-level, tighter than ManageGuild) |
