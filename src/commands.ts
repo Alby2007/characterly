@@ -2414,9 +2414,26 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       if (!listing || listing.status !== "active") {
         return interaction.reply({ content: "That listing is no longer available.", ephemeral: true });
       }
+      // Hosted lane needs a linked account BEFORE the adoption lands — an
+      // unlinked adopter otherwise owns a companion they can't chat with and
+      // only hits the DM link gate afterwards. undefined = the lookup broke:
+      // fail soft with a retry prompt, never a fake "no account". BYOK keeps
+      // its lane — a personal key covers chat unlinked, same as the DM gate.
       const account = store.creditsSupported
-        ? await store.accountForDiscordUser(userId).catch(() => null)
+        ? await store.accountForDiscordUser(userId).catch(() => undefined)
         : null;
+      if (store.creditsSupported && account === undefined) {
+        return interaction.reply({ content: "Couldn't check your account right now — try again in a moment.", ephemeral: true });
+      }
+      if (store.creditsSupported && !account
+          && !(await store.getGuildKey(`dm:${userId}`).catch(() => null))) {
+        return interaction.reply({
+          ephemeral: true,
+          content: config.houseVerifyChannelId
+            ? `You need a linked Characterly account to adopt companions — press **Verify** in <#${config.houseVerifyChannelId}> and it'll walk you through it, then come back.`
+            : `You need a linked Characterly account to adopt companions — create one free at ${config.siteUrl} and run \`/link\` in my DMs, then come back.`,
+        });
+      }
       // Self-host lane has no billing → no adoption cap; hosted free = FREE_ADOPTION_SLOTS, premium uncapped.
       // The daily anti-farming cap is enforced inside the transaction so
       // parallel Add clicks can't both squeeze under it.
@@ -2437,10 +2454,8 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       const greeted = await sendAdoptionGreeting(interaction.user, res.companion, listing.greeting);
       if (greeted) await store.markDmIntroduced(res.adoption.id);
       inc("market.adopted");
-      // Adopting is open to unlinked users, but hosted chat isn't — say so now
-      // rather than letting the first reply hit the link gate cold. And a user
-      // who only ever adopts never sees the DM onboarding path — keep the
-      // permanent awakened bond discoverable.
+      // A user who only ever adopts never sees the DM onboarding path — keep
+      // the permanent awakened bond discoverable.
       const awakened = await store.getCompanionByOwner(userId);
       const hasAwakened = awakened?.onboardingState === "active";
       const rows = hasAwakened
@@ -2456,9 +2471,6 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
             ? " They've introduced themselves — check your DMs! Once introduced, `/companion action:summon` works in servers too."
             : " I couldn't reach your DMs — open them once so they can introduce themselves (required before server summoning).") +
           " `/companion action:switch` changes who's answering." +
-          (store.creditsSupported && !account
-            ? ` Heads up — hosted chat needs a linked account: create one at ${config.siteUrl} and run \`/link\`, or connect your own key with \`/companion action:key\`.`
-            : "") +
           (hasAwakened ? "" : " You can also awaken a permanent companion of your own — that's the bond that stays yours forever."),
         components: rows,
       });

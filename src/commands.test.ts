@@ -860,6 +860,77 @@ test("market:modmsg — mod gate, keep/del/timeout actions resolve the report ro
   } finally { await sql.end(); }
 });
 
+// ── Marketplace: adoption link gate ─────────────────────────────────────────
+
+// Hosted lane needs web_profiles — stand it up like credits.test.ts does.
+async function webProfilesFixture(sql: ReturnType<typeof makeTestSql>) {
+  await sql`
+    CREATE TABLE IF NOT EXISTS web_profiles (
+      id UUID PRIMARY KEY, display_name TEXT, discord_user_id TEXT UNIQUE,
+      discord_username TEXT, discord_avatar_url TEXT,
+      plan TEXT NOT NULL DEFAULT 'free' CHECK (plan IN ('free','premium')),
+      credit_balance INT NOT NULL DEFAULT 0,
+      last_daily_grant_on DATE, last_weekly_grant_on DATE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+}
+
+test("market:add refuses unlinked users ephemerally — verify pointer, no adoption", async () => {
+  const sql = makeTestSql();
+  try {
+    await webProfilesFixture(sql);
+    const { store } = await makeStore(sql);
+    assert.equal(await store.initCreditsSupport(), true);
+    const listing = await makeListingRow(store, "u-creator-gate");
+    const saved = config.houseVerifyChannelId;
+    config.houseVerifyChannelId = "c-login";
+    try {
+      const ix = stubButton({ customId: `market:add:${listing.id}`, userId: "u-windowshopper" });
+      await handleMemoryButton(ix.interaction, store);
+      assert.equal(ix.replies[0]?.ephemeral, true);
+      assert.match(ix.replies[0]?.content ?? "", /linked Characterly account/);
+      assert.match(ix.replies[0]?.content ?? "", /<#c-login>/, "points at the verify channel");
+      assert.equal((await store.listCompanionsForUser("u-windowshopper")).length, 0, "no adoption must be written");
+    } finally { config.houseVerifyChannelId = saved; }
+  } finally { await sql.end(); }
+});
+
+test("market:add — linked and BYOK-unlinked users adopt; a lookup error says retry", async () => {
+  const sql = makeTestSql();
+  try {
+    await webProfilesFixture(sql);
+    const { store } = await makeStore(sql);
+    assert.equal(await store.initCreditsSupport(), true);
+    const listing = await makeListingRow(store, "u-creator-gate2");
+
+    // Linked account → the adoption lands.
+    await sql`INSERT INTO web_profiles (id, discord_user_id, plan) VALUES (gen_random_uuid(), 'u-linked-adopter', 'free')`;
+    const linked = stubButton({ customId: `market:add:${listing.id}`, userId: "u-linked-adopter" });
+    await handleMemoryButton(linked.interaction, store);
+    assert.match(linked.replies[0]?.content ?? "", /has joined your companions/);
+    assert.equal((await store.listCompanionsForUser("u-linked-adopter")).length, 1);
+
+    // Unlinked but carrying a personal key — the DM gate's own lane.
+    const listing2 = await makeListingRow(store, "u-creator-gate3", "Shelf2");
+    await store.upsertGuildKey("dm:u-byok", { keyEnc: Buffer.from("k"), keyHint: "hint", baseUrl: null, validatedAt: null });
+    const byok = stubButton({ customId: `market:add:${listing2.id}`, userId: "u-byok" });
+    await handleMemoryButton(byok.interaction, store);
+    assert.match(byok.replies[0]?.content ?? "", /has joined your companions/, "BYOK covers chat unlinked");
+
+    // A lookup THROW is unknown, not unlinked — never the signup pointer.
+    const orig = store.accountForDiscordUser.bind(store);
+    store.accountForDiscordUser = async () => { throw new Error("db is down"); };
+    try {
+      const flaky = stubButton({ customId: `market:add:${listing.id}`, userId: "u-flaky" });
+      await handleMemoryButton(flaky.interaction, store);
+      assert.match(flaky.replies[0]?.content ?? "", /try again/i);
+      assert.doesNotMatch(flaky.replies[0]?.content ?? "", /linked Characterly account/);
+      assert.equal((await store.listCompanionsForUser("u-flaky")).length, 0);
+    } finally { store.accountForDiscordUser = orig; }
+  } finally { await sql.end(); }
+});
+
 // ── "Report message" context command ─────────────────────────────────────────
 
 // The report path never touches the store — the dispatcher only needs it for

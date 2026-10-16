@@ -192,6 +192,12 @@ attach art files instead of URL-ing them (real uploads always resolve).
 
 Forum card → **Add** → `store.adoptListing` in one transaction:
 
+- **Link gate (hosted lane only)** — no linked account and no BYOK key →
+  Add is refused with an ephemeral pointer to the verify channel (or site +
+  `/link` when `HOUSE_VERIFY_CHANNEL_ID` is unset). An unlinked adopter would
+  only own a companion the DM gate refuses to serve. A lookup *error* fails
+  soft with a retry prompt — it's never treated as "no account". Self-host
+  has no accounts at all, so the gate no-ops there.
 - **Slot check** — free: `FREE_ADOPTION_SLOTS` active adoptions; Premium:
   uncapped; self-host lane: uncapped (no billing to meter). Enforced
   atomically inside the adoption transaction under a per-user advisory lock:
@@ -230,8 +236,9 @@ usable immediately for *other* listings.
 Adopters pay for their own turns — their tokens or BYOK key, exactly like an
 awakened companion. Clone `owner_user_id` = adopter, so `brainForUser`,
 `spendCredits`, journals, and memory scopes all resolve to the adopter; a
-popular character costs its creator nothing. Publishing/creating requires a
-linked account for accountability — adoption itself doesn't.
+popular character costs its creator nothing. Publishing *and* adopting both
+require a linked account (or a BYOK key) — publishing for accountability,
+adopting because hosted chat is the point of the clone.
 
 ## Moderation
 
