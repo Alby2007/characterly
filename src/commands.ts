@@ -931,7 +931,7 @@ export const commandDefinitions = [
       { name: "restart — restart the bot onto the same code", value: "restart" },
       { name: "deploy — git pull + npm ci + restart", value: "deploy" },
       { name: "announce — post to the announcements channel", value: "announce" },
-      { name: "layout — create missing house channels", value: "layout" },
+      { name: "layout — reconcile house channels, perms + resource posts", value: "layout" },
       { name: "seedmarket — populate the marketplace with the official roster", value: "seedmarket" },
     ] },
     { name: "text", description: "Announcement text (action=announce)", type: 3, required: false },

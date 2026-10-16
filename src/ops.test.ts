@@ -4,7 +4,7 @@ import {
   isHouse, isMarketplaceThread, automodMessage, handleHouseMemberAdd, handleHouseMemberUpdate,
   handleHouseMemberRemove, ensureHouseLayout, collectHostHealth,
   runWatchdogTick, handleOpsCommand, initOps, resetOpsState, WANTED_LAYOUT,
-  ensureVerifyGate, handleHouseButton, runMemberLinkSweep, runTagSweep,
+  ensureVerifyGate, handleHouseButton, runMemberLinkSweep, runTagSweep, ensureResourcePosts,
   type OpsDeps, type AutomodMessage, type MemberLike,
 } from "./ops.js";
 import { PermissionFlagsBits } from "discord.js";
@@ -644,6 +644,64 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
   const second = await ensureHouseLayout(guild as any);
   assert.equal(edits.length, 0, "second run must not re-write overwrites");
   assert.deepEqual(second, []);
+});
+
+test("ensureResourcePosts posts marked embeds once; dedupes extras; edits stale in place", async () => {
+  const deleted: string[] = [];
+  const edited: string[] = [];
+  const mkMsg = (id: string, embeds: unknown[] = [], bot = true) => ({
+    author: { id: bot ? "bot-1" : "u-x" },
+    embeds,
+    edit: async (p: { embeds: unknown[] }) => { edited.push(id); msgsById.set(id, mkMsg(id, p.embeds, bot)); },
+    delete: async () => {
+      deleted.push(id);
+      // A deleted message leaves the channel listing — like the real API.
+      for (const list of Object.values(chanMsgs)) {
+        const i = list.indexOf(id); if (i >= 0) list.splice(i, 1);
+      }
+    },
+  });
+  const msgsById = new Map<string, ReturnType<typeof mkMsg>>();
+  const marked = (key: string, v: number) => [{ footer: { text: `Char.ly resources · ${key} · v${v}` } }];
+  msgsById.set("m-new", mkMsg("m-new", marked("privacy-policy", 1)));   // current — kept
+  msgsById.set("m-dup", mkMsg("m-dup", marked("privacy-policy", 1)));   // duplicate — deleted
+  msgsById.set("m-stale", mkMsg("m-stale", marked("how-to-publish-bots", 0))); // stale — edited
+  msgsById.set("m-user", mkMsg("m-user", [], false));                  // human post — ignored
+
+  const chanMsgs: Record<string, string[]> = {
+    "c-privacy-policy": ["m-new", "m-dup", "m-user"],
+    "c-how-to-publish-bots": ["m-stale"],
+  };
+  const deps = makeDeps({
+    fetchChannel: async (id: string) => ({
+      send: async (p: any) => {
+        deps.sent.push({ id, payload: p });
+        const mid = `m-sent-${id}`;
+        msgsById.set(mid, mkMsg(mid, p.embeds, true));
+        (chanMsgs[id] ??= []).unshift(mid);
+      },
+      messages: { fetch: async () => (chanMsgs[id] ?? []).map(m => msgsById.get(m)!).filter(Boolean) },
+    }),
+  });
+  const names = ["what-is-characterly", "what-is-companionly", "get-characterly", "privacy-policy", "how-to-publish-bots"];
+  const chans = names.map(n => ({ id: `c-${n}`, name: n, type: 0 }));
+  const guild = { id: HOUSE, channels: { cache: { find: (fn: (c: any) => boolean) => chans.find(fn) } } };
+
+  const out = await ensureResourcePosts(deps, guild as any);
+  assert.equal(out.filter(s => s.startsWith("📝")).length, 3, "posts the 3 channels lacking a marked post");
+  assert.deepEqual(deleted, ["m-dup"], "older duplicate deleted, newest kept");
+  assert.deepEqual(edited, ["m-stale"], "stale post edited in place, not reposted");
+  const staleAfter = msgsById.get("m-stale")!.embeds;
+  assert.match(JSON.stringify(staleAfter), /how-to-publish-bots · v1/, "edit carries the new version marker");
+  assert.ok(!deps.sent.some(s => s.id === "c-privacy-policy"), "no repost where a current marker exists");
+
+  // Second run: everything marked current — total no-op.
+  deleted.length = 0; edited.length = 0;
+  const sentBefore = deps.sent.length;
+  const again = await ensureResourcePosts(deps, guild as any);
+  assert.deepEqual(again, []);
+  assert.equal(deps.sent.length, sentBefore);
+  assert.equal(deleted.length + edited.length, 0);
 });
 
 // ── Host health + watchdog ───────────────────────────────────────────────────

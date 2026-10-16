@@ -44,7 +44,7 @@ import { isSelfHarmSignal, CRISIS_RESPONSE, SAFE_REFUSAL } from "./safety.js";
 import {
   initOps, automodMessage, isHouse, isMarketplaceThread, opsAlert,
   handleHouseMemberAdd, handleHouseMemberUpdate, handleHouseMemberRemove,
-  ensureHouseLayout, startHostWatchdog, ensureVerifyGate, startLinkSweep,
+  ensureHouseLayout, ensureResourcePosts, startHostWatchdog, ensureVerifyGate, startLinkSweep,
   startTagSweep,
   type OpsDeps, type GuildLike,
 } from "./ops.js";
@@ -278,7 +278,9 @@ client.once(Events.ClientReady, async ready => {
       const house = await opsDeps.fetchGuild(config.houseGuildId);
       if (house) {
         const made = await ensureHouseLayout(house).catch(e => { logError("house layout failed", e); return [] as string[]; });
-        if (made.length) await opsAlert(opsDeps, `🧱 House layout — created ${made.join(", ")}`);
+        const posted = await ensureResourcePosts(opsDeps, house).catch(e => { logError("resource posts failed", e); return [] as string[]; });
+        const changed = [...made, ...posted];
+        if (changed.length) await opsAlert(opsDeps, `🧱 House layout — ${changed.join(", ")}`);
         // Verify gate card — posted once if missing; pending members see it
         // but the button refuses until screening passes.
         await ensureVerifyGate(opsDeps).catch(e => { inc("ops.init_error"); logError("verify gate failed", e); return false; });

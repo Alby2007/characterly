@@ -46,8 +46,8 @@ interface SendableChannel {
    *  yield messages — both shapes are unwrapped at the call site. */
   messages?: {
     fetch(opts: { limit: number }): Promise<Iterable<
-      { author?: { id?: string }; components?: unknown[]; delete?(): Promise<unknown> } |
-      [unknown, { author?: { id?: string }; components?: unknown[]; delete?(): Promise<unknown> }]
+      { author?: { id?: string }; components?: unknown[]; embeds?: unknown[]; edit?(o: { embeds: unknown[] }): Promise<unknown>; delete?(): Promise<unknown> } |
+      [unknown, { author?: { id?: string }; components?: unknown[]; embeds?: unknown[]; edit?(o: { embeds: unknown[] }): Promise<unknown>; delete?(): Promise<unknown> }]
     >>;
   };
   /** Forum channels only — the tag taxonomy the marketplace sweep manages. */
@@ -685,6 +685,143 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
   return created;
 }
 
+// ── Resource posts ───────────────────────────────────────────────────────────
+// Static explainer embeds for the RESOURCES channels. Every post's footer
+// carries `Char.ly resources · <channel> · vN` — the reconcile keeps exactly
+// one marked message per channel: extras are deleted, a stale version is
+// edited in place (no repost spam), and a missing one is posted fresh.
+
+const RESOURCE_MARKER = "Char.ly resources";
+
+function markedEmbeds(post: { channel: string; version: number; embeds(): EmbedBuilder[] }): ReturnType<EmbedBuilder["toJSON"]>[] {
+  return post.embeds().map(e =>
+    e.setFooter({ text: `${RESOURCE_MARKER} · ${post.channel} · v${post.version}` }).toJSON());
+}
+
+export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds(): EmbedBuilder[] }> = [
+  {
+    channel: "what-is-characterly",
+    version: 1,
+    embeds: () => [new EmbedBuilder()
+      .setTitle("What is Characterly?")
+      .setDescription(
+        "Characterly is a marketplace of AI companions that lives inside Discord.\n\n" +
+        `Browse **#characters**, pick someone you like, and hit **Add** — they're yours to talk to in DMs, or to summon into your servers. Every companion keeps its own private memory of *you*, so your version of a character is yours alone.\n\n` +
+        "**For everyone**\n" +
+        "• Browse a gallery of characters — cover art, genre tags, ratings, and community picks\n" +
+        "• One click to adopt — they start the conversation in your DMs\n" +
+        "• Ratings and comments keep the shelf honest\n\n" +
+        "**For creators**\n" +
+        "• Publish your own characters — your name stays on the card\n" +
+        "• Up to 3 genre tags, a gallery cover, an editable persona\n" +
+        "• Reports, flags, and staff review keep the shelf clean",
+      )],
+  },
+  {
+    channel: "what-is-companionly",
+    version: 1,
+    embeds: () => [new EmbedBuilder()
+      .setTitle("What is Companionly?")
+      .setDescription(
+        "Companionly is *your* companion — not picked off a shelf, but awakened by you.\n\n" +
+        "DM me and we'll have a short conversation about who they should be. They wake up with a name, a voice, and a bond that starts with you — and from then on they're permanent and yours.\n\n" +
+        "• **Awakened, not adopted** — their personality comes from your first conversation\n" +
+        "• **Lives in your DMs** — talk anytime; they remember your history together\n" +
+        "• **Bring them anywhere** — summon them into servers running Characterly\n" +
+        "• **One per account** — a bond, not a collection\n" +
+        "• **Publishable** — `/companion action:publish` puts them on the shelf as a character others can adopt",
+      )],
+  },
+  {
+    channel: "get-characterly",
+    version: 1,
+    embeds: () => [new EmbedBuilder()
+      .setTitle("Get Characterly")
+      .setDescription(
+        "Everything starts in DMs — here's the five-minute path.\n\n" +
+        `**1. Verify** — click **Verify** in ${config.houseVerifyChannelId ? `<#${config.houseVerifyChannelId}>` : "**#log-in**"}. It links your free Characterly account (that's what moderation and your data controls hang off) and unlocks the server.\n` +
+        "**2. Say hi** — DM me and talk. The first conversation awakens your Companion.\n" +
+        `**3. Browse the shelf** — ${config.marketplaceChannelId ? `<#${config.marketplaceChannelId}>` : "**#characters**"} is the marketplace. **Add** any character you want alongside yours.\n` +
+        "**4. Bring them to a server** — where the bot's installed, `/companion action:summon` pulls them into the channel.\n" +
+        "**5. Publish** — `/companion action:publish` or `action:create` when you have a character worth sharing.",
+      )],
+  },
+  {
+    channel: "privacy-policy",
+    version: 1,
+    embeds: () => [new EmbedBuilder()
+      .setTitle("Privacy — the short version")
+      .setDescription(
+        "The full policy is at [github.com/Alby2007/characterly/PRIVACY.md](https://github.com/Alby2007/characterly/blob/main/PRIVACY.md). The day-to-day version:\n\n" +
+        "• **Servers see nothing until enabled** — no messages are archived until a server admin runs `/memory-resume`\n" +
+        "• **Personal memory is opt-in** — derived facts, profile attributes, and relationship notes only exist for members who run `/profile-build` or `/opt-in`\n" +
+        "• **Retention is bounded** — raw messages are held 30 days, then permanently deleted\n" +
+        "• **Companion memory is yours** — your bond memories stay private to you and never leak into servers or other users' companions\n" +
+        "• **You hold the delete key** — `/opt-out` wipes derived data, `/forget` removes one memory, `/memory-export` shows everything held\n" +
+        "• **Removing the bot wipes the server** — every row it stored there goes with it",
+      )],
+  },
+  {
+    channel: "how-to-publish-bots",
+    version: 1,
+    embeds: () => [new EmbedBuilder()
+      .setTitle("Publish a character")
+      .setDescription(
+        "Two ways onto the shelf:\n\n" +
+        "**`/companion action:publish`** — publish your awakened companion as a character others can adopt. The modal takes a display name, tagline, greeting, and an optional cover image URL — the cover becomes its gallery art.\n\n" +
+        "**`/companion action:create`** — author a character from scratch, no awakened companion needed.\n\n" +
+        "**After it's live**\n" +
+        "• **Edit persona** on the card — voice, traits, bond, backstory\n" +
+        "• **Cover image** on the card — set or clear the gallery art anytime\n" +
+        "• **Tags** on the card — up to 3 genre tags so browsers find it\n" +
+        "• Adopters get independent copies — their memories and journals are theirs; your card keeps your name\n\n" +
+        "**The rules** — keep it SFW. Personas are screened on publish; listings can be flagged and moderators can delist. A linked account is required so creators own what they ship.",
+      )],
+  },
+];
+
+/** Reconcile the RESOURCES explainer posts — one marked message per channel,
+ *  stale versions edited in place, extras deleted, missing posted. Returns
+ *  what it did ([] when everything's current). */
+export async function ensureResourcePosts(deps: OpsDeps, guild: GuildLike): Promise<string[]> {
+  if (!isHouse(guild.id) || !deps.botId) return [];
+  const out: string[] = [];
+  for (const post of RESOURCE_POSTS) {
+    const found = guild.channels.cache.find(c => normName(c.name) === normName(post.channel));
+    if (!found) continue;
+    const ch = await deps.fetchChannel(found.id).catch(() => null);
+    if (!ch) continue;
+    const markerRe = new RegExp(`${RESOURCE_MARKER} · ${post.channel} · v(\\d+)`);
+    const recent = await ch.messages?.fetch({ limit: 20 }).catch(() => null);
+    let kept = false;
+    if (recent) {
+      for (const entry of recent) {
+        const m = (Array.isArray(entry) ? entry[1] : entry) as {
+          author?: { id?: string }; embeds?: unknown[];
+          edit?(o: { embeds: unknown[] }): Promise<unknown>; delete?(): Promise<unknown>;
+        };
+        if (m.author?.id !== deps.botId) continue;
+        const match = JSON.stringify(m.embeds ?? []).match(markerRe);
+        if (!match) continue;
+        if (kept) { await m.delete?.().catch(() => {}); continue; }
+        kept = true;
+        if (Number(match[1]) < post.version && typeof m.edit === "function") {
+          await m.edit({ embeds: markedEmbeds(post) })
+            .then(() => { out.push(`✏️ #${post.channel} → v${post.version}`); })
+            .catch(() => {});
+        }
+      }
+    }
+    if (!kept) {
+      const embeds = markedEmbeds(post);
+      await ch.send({ embeds, allowedMentions: { parse: [] } })
+        .then(() => { out.push(`📝 #${post.channel}`); })
+        .catch(() => {});
+    }
+  }
+  return out;
+}
+
 // ── Host self-ops ────────────────────────────────────────────────────────────
 
 export interface HostHealth {
@@ -881,8 +1018,13 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
       return null;
     });
     if (created === null) return interaction.reply({ content: "Layout check failed — see logs.", ephemeral: true });
+    const posted = await ensureResourcePosts(deps, guild).catch(e => {
+      logError("resource posts failed", e);
+      return null;
+    });
+    const did = [...created, ...(posted ?? [])];
     return interaction.reply({
-      content: created.length ? `Created: ${created.join(", ")}` : "Layout already complete — nothing to create.",
+      content: did.length ? `Did: ${did.join(", ")}` : "Layout + resource posts already current — nothing to do.",
       ephemeral: true,
     });
   }
