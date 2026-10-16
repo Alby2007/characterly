@@ -517,6 +517,7 @@ export const WANTED_LAYOUT: Array<{ category: string; channels: Array<{ name: st
       { name: "welcome", type: ChannelType.GuildText },
       { name: "announcements", type: ChannelType.GuildAnnouncement },
       { name: "rules", type: ChannelType.GuildText },
+      { name: "log-in", type: ChannelType.GuildText }, // the verify gate lives here
       { name: "updates", type: ChannelType.GuildText },
     ],
   },
