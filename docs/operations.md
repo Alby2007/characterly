@@ -43,6 +43,27 @@ cd ~/characterly && git log --oneline -3   # what's deployed
 
 Env lives in `~/characterly/.env` on the VM — **not** in the repo. Changes need a `systemctl restart`.
 
+## House ops (`/ops`) — the bot operates our server + its own host
+
+When `HOUSE_GUILD_ID` is set, `src/ops.ts` runs a private operator layer: member ops (auto-role, welcome, raid detection), deterministic automod, channel layout (`ensureHouseLayout` on boot + `/ops layout`), and host self-ops (watchdog + `/ops`).
+
+**`/ops` (allowlisted via `OPS_USER_IDS`, works in the house guild or DM):**
+
+| action | effect |
+|---|---|
+| `status` | Health embed — uptime, heap/RSS, event-loop lag, disk, DB ping, queue depth, deployed sha |
+| `logs [lines]` | `journalctl -u characterly -n N --no-pager`, secret-redacted, chunked under 2000 chars |
+| `restart` | `process.exit(1)` — `Restart=always` in the unit brings it back on the same code |
+| `deploy` | `git pull --ff-only && npm ci` in `OPS_REPO_DIR`, then exits (systemd restarts onto new code); failure reports redacted stderr and stays on the old build |
+| `announce <text>` | Posts to `HOUSE_ANNOUNCE_CHANNEL_ID` as the bot |
+| `layout` | Creates any missing house channels/categories (idempotent) |
+
+**Host watchdog** — every `HOST_HEALTH_INTERVAL_MS` (5m): heap %, disk %, event-loop lag, DB ping. A breach pings `OPS_CHANNEL_ID` **once**, then a recovery notice when it clears.
+
+**Automod rules** (house guild only, deterministic, exempts `Manage Messages` holders + bots; runs before archiving so deleted spam never enters the memory pipeline): invite links → delete + alert · scam classes (nitro/crypto/steam/earn-money) → delete + 10m timeout + alert · mass mention (>8, or `@everyone` without permission) → delete + alert · burst spam (>6/8s) → delete + 5m timeout + alert · new account (<7d) + link → delete + alert.
+
+**Prerequisites when enabling:** (1) toggle **Server Members Intent** in the dev portal *before* deploy — login fails without it; (2) grant the bot role **Manage Messages, Moderate Members, Manage Roles, Kick Members, Manage Channels** on the house server; (3) set `OPS_USER_IDS` — `/ops` controls the box, so it's person-allowlisted, not role-based. The systemd unit already carries `Restart=always` (verified), and `opc` is in `systemd-journal` so `journalctl` needs no sudo.
+
 ## Database access
 
 Supabase dashboard → SQL Editor, or `psql "$DATABASE_URL"`. The bot connects as `postgres` (bypasses RLS). Useful checks:

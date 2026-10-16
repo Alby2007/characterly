@@ -1,0 +1,447 @@
+import { test, beforeEach } from "node:test";
+import assert from "node:assert";
+import {
+  isHouse, automodMessage, handleHouseMemberAdd, handleHouseMemberUpdate,
+  handleHouseMemberRemove, ensureHouseLayout, collectHostHealth,
+  runWatchdogTick, handleOpsCommand, initOps, resetOpsState, WANTED_LAYOUT,
+  type OpsDeps, type AutomodMessage, type MemberLike,
+} from "./ops.js";
+import { config } from "./config.js";
+import type { MemoryStore } from "./database.js";
+
+// Config is a plain object — tests pin house/ops ids and restore on exit.
+const prev = {
+  houseGuildId: config.houseGuildId, opsChannelId: config.opsChannelId,
+  opsUserIds: config.opsUserIds, houseMemberRoleId: config.houseMemberRoleId,
+  houseWelcomeChannelId: config.houseWelcomeChannelId, houseRulesChannelId: config.houseRulesChannelId,
+  houseAnnounceChannelId: config.houseAnnounceChannelId, automodRaidJoins: config.automodRaidJoins,
+  automodRaidKick: config.automodRaidKick, automodBurstCount: config.automodBurstCount,
+  automodMentionMax: config.automodMentionMax, automodNewAccountDays: config.automodNewAccountDays,
+  hostHeapPct: config.hostHeapPct, hostDiskPct: config.hostDiskPct, hostLagMs: config.hostLagMs,
+  opsRepoDir: config.opsRepoDir,
+};
+
+const HOUSE = "g-house";
+const OPS = "c-ops";
+
+beforeEach(() => {
+  resetOpsState();
+  config.houseGuildId = HOUSE;
+  config.opsChannelId = OPS;
+  config.opsUserIds = ["u-op"];
+  config.houseMemberRoleId = "r-member";
+  config.houseWelcomeChannelId = "c-welcome";
+  config.houseRulesChannelId = "c-rules";
+  config.houseAnnounceChannelId = "c-announce";
+  config.automodRaidJoins = 3;
+  config.automodRaidKick = false;
+  config.automodBurstCount = 4;
+  config.automodMentionMax = 8;
+  config.automodNewAccountDays = 7;
+  config.hostHeapPct = 90;
+  config.hostDiskPct = 85;
+  config.hostLagMs = 1000;
+  config.opsRepoDir = "~/characterly";
+});
+
+process.on("exit", () => Object.assign(config, prev));
+
+// ── Fakes ────────────────────────────────────────────────────────────────────
+
+function makeDeps(over: Partial<OpsDeps> = {}): OpsDeps & { sent: Array<{ id: string; payload: any }> } {
+  const sent: Array<{ id: string; payload: any }> = [];
+  const deps: OpsDeps & { sent: typeof sent } = {
+    sent,
+    store: {
+      queueStats: async () => ({ pending: 2, dead: 1, oldestPendingAt: null }),
+    } as unknown as MemoryStore,
+    fetchChannel: async id => ({ send: async (p: unknown) => { sent.push({ id, payload: p }); } }),
+    fetchGuild: async () => null,
+    exec: async () => ({ stdout: "", stderr: "" }),
+    exit: () => {},
+    dbPing: async () => 4,
+    lagMs: () => 5,
+    gitSha: "abc1234",
+    ...over,
+  };
+  return deps;
+}
+
+const makeMember = (over: Partial<MemberLike> & { id?: string } = {}): MemberLike & { added: string[]; kicked: string[] } => {
+  const added: string[] = [];
+  const kicked: string[] = [];
+  return {
+    added, kicked,
+    pending: false,
+    user: { id: over.id ?? "u1", bot: false, username: "Joiner", createdTimestamp: Date.now() - 90 * 86_400_000 },
+    guild: { id: HOUSE },
+    roles: { add: async (id: string) => { added.push(id); } },
+    kick: async (r?: string) => { kicked.push(r ?? ""); },
+    ...over,
+  };
+};
+
+const makeMsg = (over: Partial<AutomodMessage> & { content?: string } = {}): AutomodMessage & { deleted: boolean; timeouts: number[] } => {
+  const state = { deleted: false, timeouts: [] as number[] };
+  return {
+    ...state,
+    get deleted() { return state.deleted; },
+    get timeouts() { return state.timeouts; },
+    id: "m1",
+    guildId: HOUSE,
+    channelId: "c1",
+    content: "hello world",
+    url: "https://discord.com/channels/g/c/m1",
+    author: { id: "u1", bot: false, username: "User", createdTimestamp: Date.now() - 90 * 86_400_000 },
+    member: {
+      permissions: { has: () => false },
+      timeout: async (ms: number) => { state.timeouts.push(ms); },
+    },
+    mentions: { users: { size: 0 }, everyone: false },
+    delete: async () => { state.deleted = true; },
+    ...over,
+  };
+};
+
+const opsAlertText = (deps: ReturnType<typeof makeDeps>) =>
+  deps.sent.filter(s => s.id === OPS).map(s => s.payload.content).join("\n");
+
+// ── Member ops ───────────────────────────────────────────────────────────────
+
+test("house member add: assigns role + posts welcome; non-house and bots skipped", async () => {
+  const deps = makeDeps();
+  const m = makeMember();
+  await handleHouseMemberAdd(m, deps);
+  assert.deepEqual(m.added, ["r-member"]);
+  const welcome = deps.sent.find(s => s.id === "c-welcome");
+  assert.ok(welcome, "welcome posted");
+  assert.match(welcome.payload.content, /<@u1>/);
+  assert.match(welcome.payload.content, /<#c-rules>/);
+
+  const foreign = makeMember({ guild: { id: "g-other" } });
+  await handleHouseMemberAdd(foreign, deps);
+  assert.equal(foreign.added.length, 0);
+
+  const bot = makeMember({ id: "u-bot", user: { id: "u-bot", bot: true, username: "B" } });
+  await handleHouseMemberAdd(bot, deps);
+  assert.equal(bot.added.length, 0);
+});
+
+test("member screening: pending join gets nothing until the pending→false flip", async () => {
+  const deps = makeDeps();
+  const m = makeMember({ pending: true });
+  await handleHouseMemberAdd(m, deps);
+  assert.equal(m.added.length, 0, "pending member must not be roled");
+  assert.equal(deps.sent.filter(s => s.id === "c-welcome").length, 0);
+
+  // guildMemberUpdate pending→false flip completes onboarding.
+  const settled = makeMember({ pending: false });
+  await handleHouseMemberUpdate({ pending: true }, settled, deps);
+  assert.deepEqual(settled.added, ["r-member"]);
+
+  // A stale/non-flip update (uncached partial: pending undefined→false) does nothing.
+  const again = makeMember({ pending: false });
+  await handleHouseMemberUpdate({ pending: false }, again, deps);
+  assert.equal(again.added.length, 0);
+});
+
+test("member remove logs to ops channel", async () => {
+  const deps = makeDeps();
+  await handleHouseMemberRemove(makeMember({ id: "u-leaver" }), deps);
+  assert.match(opsAlertText(deps), /left the server/);
+});
+
+test("raid window: alert once when joins exceed threshold; auto-kick when armed", async () => {
+  const deps = makeDeps();
+  for (let i = 0; i < 3; i++) await handleHouseMemberAdd(makeMember({ id: `u-j${i}` }), deps);
+  assert.equal(opsAlertText(deps).match(/Possible raid/g)?.length ?? 0, 0, "at threshold = no alert");
+  await handleHouseMemberAdd(makeMember({ id: "u-j3" }), deps);
+  assert.match(opsAlertText(deps), /Possible raid.*4 joins/, "crossing the threshold alerts");
+  await handleHouseMemberAdd(makeMember({ id: "u-j4" }), deps);
+  assert.equal(opsAlertText(deps).match(/Possible raid/g)?.length, 1, "alert is once per hot window");
+
+  resetOpsState();
+  config.automodRaidKick = true;
+  const deps2 = makeDeps();
+  for (let i = 0; i < 3; i++) await handleHouseMemberAdd(makeMember({ id: `u-k${i}` }), deps2);
+  const raider = makeMember({ id: "u-k3" });
+  await handleHouseMemberAdd(raider, deps2);
+  assert.equal(raider.kicked.length, 1, "hot window + armed = auto-kick");
+  assert.equal(raider.added.length, 0, "kicked raider never gets the member role");
+});
+
+// ── Automod ──────────────────────────────────────────────────────────────────
+
+test("automod: invite link deleted + alerted", async () => {
+  const deps = makeDeps();
+  const m = makeMsg({ content: "join my server https://discord.gg/free-stuff" });
+  assert.equal(await automodMessage(m, deps), true);
+  assert.equal(m.deleted, true);
+  assert.match(opsAlertText(deps), /invite link/);
+});
+
+test("automod: scam classes delete + 10m timeout", async () => {
+  const deps = makeDeps();
+  for (const content of [
+    "FREE nitro for everyone click here",
+    "connect your wallet to claim the airdrop",
+    "earn $500 a day from home",
+  ]) {
+    const m = makeMsg({ content });
+    assert.equal(await automodMessage(m, deps), true, content);
+    assert.equal(m.deleted, true);
+    assert.deepEqual(m.timeouts, [600_000], `10m timeout for: ${content}`);
+    resetOpsState();
+  }
+});
+
+test("automod: mass mention and unauthorized @everyone", async () => {
+  const deps = makeDeps();
+  const mass = makeMsg({ mentions: { users: { size: 9 }, everyone: false } });
+  assert.equal(await automodMessage(mass, deps), true);
+  assert.equal(mass.deleted, true);
+
+  const ping = makeMsg({ mentions: { users: { size: 0 }, everyone: true } });
+  assert.equal(await automodMessage(ping, deps), true, "@everyone without permission is deleted");
+
+  // MentionEveryone permission holder is allowed to use it.
+  const modPing = makeMsg({
+    mentions: { users: { size: 0 }, everyone: true },
+    member: {
+      permissions: { has: (f: bigint) => f === 0x20000n || f === 0x2000n }, // MentionEveryone | ManageMessages — ManageMessages exempts anyway
+    },
+  });
+  assert.equal(await automodMessage(modPing, deps), false);
+});
+
+test("automod: burst spam over threshold → delete + 5m timeout", async () => {
+  const deps = makeDeps();
+  for (let i = 0; i < 4; i++) {
+    assert.equal(await automodMessage(makeMsg({ content: `spam ${i}` }), deps), false, `msg ${i} under cap`);
+  }
+  const burst = makeMsg({ content: "spam 5" });
+  assert.equal(await automodMessage(burst, deps), true, "5th message in window trips");
+  assert.deepEqual(burst.timeouts, [300_000]);
+});
+
+test("automod: new account + external link is deleted; old account + link passes", async () => {
+  const deps = makeDeps();
+  const fresh = makeMsg({
+    content: "check this https://example.com/thing",
+    author: { id: "u-new", bot: false, username: "New", createdTimestamp: Date.now() - 2 * 86_400_000 },
+  });
+  assert.equal(await automodMessage(fresh, deps), true);
+
+  resetOpsState();
+  const old = makeMsg({
+    content: "check this https://example.com/thing",
+    author: { id: "u-old", bot: false, username: "Old", createdTimestamp: Date.now() - 400 * 86_400_000 },
+  });
+  assert.equal(await automodMessage(old, deps), false, "established accounts may post links");
+});
+
+test("automod: mods exempt, bots skipped, foreign guilds no-op, clean chat passes", async () => {
+  const deps = makeDeps();
+  const modMsg = makeMsg({
+    content: "https://discord.gg/mod-posted",
+    member: { permissions: { has: () => true }, timeout: async () => {} },
+  });
+  assert.equal(await automodMessage(modMsg, deps), false, "ManageMessages exempt");
+
+  const botMsg = makeMsg({ content: "https://discord.gg/x", author: { id: "b1", bot: true } });
+  assert.equal(await automodMessage(botMsg, deps), false);
+
+  const foreign = makeMsg({ content: "https://discord.gg/x", guildId: "g-other" });
+  assert.equal(await automodMessage(foreign, deps), false, "only the house guild is automodded");
+
+  assert.equal(await automodMessage(makeMsg({ content: "my companion said the funniest thing" }), deps), false);
+});
+
+// ── Layout ───────────────────────────────────────────────────────────────────
+
+test("ensureHouseLayout creates only what's missing; idempotent on second run", async () => {
+  const created: Array<{ name: string; type: number; parent?: string }> = [];
+  const existing: Array<{ id: string; name: string; type: number; parentId?: string | null }> = [
+    { id: "c1", name: "welcome", type: 0, parentId: "cat-system" },
+    { id: "cat-system", name: "SYSTEM", type: 4 },
+  ];
+  let n = 0;
+  const guild = {
+    id: HOUSE,
+    channels: {
+      cache: {
+        find: (fn: (c: any) => boolean) => existing.find(fn),
+      },
+      create: async (opts: { name: string; type: number; parent?: string }) => {
+        const c = { id: `new-${n++}`, ...opts, parentId: opts.parent };
+        existing.push(c);
+        created.push(opts);
+        return c;
+      },
+    },
+  };
+  const first = await ensureHouseLayout(guild as any);
+  assert.ok(first.length > 0);
+  assert.ok(!first.includes("#welcome"), "existing channel is adopted, not recreated");
+  // Every WANTED channel exists afterward.
+  for (const group of WANTED_LAYOUT) {
+    for (const w of group.channels) {
+      assert.ok(existing.some(c => c.name.toLowerCase() === w.name.toLowerCase()), `missing ${w.name}`);
+    }
+  }
+  const second = await ensureHouseLayout(guild as any);
+  assert.deepEqual(second, [], "second run is a no-op");
+  const nonHouse = await ensureHouseLayout({ ...guild, id: "g-other" } as any);
+  assert.deepEqual(nonHouse, [], "refuses to touch a foreign guild");
+});
+
+// ── Host health + watchdog ───────────────────────────────────────────────────
+
+test("collectHostHealth reports proc/disk/db/queue", async () => {
+  const deps = makeDeps({
+    exec: async () => ({ stdout: "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/x 100 80 20 80% /\n", stderr: "" }),
+    dbPing: async () => 7,
+    lagMs: () => 42,
+  });
+  const h = await collectHostHealth(deps);
+  assert.equal(h.diskPct, 80);
+  assert.equal(h.dbPingMs, 7);
+  assert.equal(h.lagMs, 42);
+  assert.equal(h.queuePending, 2);
+  assert.equal(h.queueDead, 1);
+  assert.equal(h.gitSha, "abc1234");
+  assert.ok(h.heapPct > 0 && h.rssMb > 0 && h.uptimeSec >= 0);
+});
+
+test("watchdog: breach alerts once, recovery notifies once", async () => {
+  // dbPing throws → "db" breach fires once, clears on heal.
+  let failing = true;
+  const deps = makeDeps({ dbPing: async () => { if (failing) throw new Error("down"); return 3; } });
+  await runWatchdogTick(deps);
+  await runWatchdogTick(deps);
+  const alerts = deps.sent.filter(s => /Host breach/.test(s.payload.content));
+  assert.equal(alerts.length, 1, "sustained breach alerts exactly once");
+  assert.match(alerts[0].payload.content, /database ping failed/);
+  failing = false;
+  await runWatchdogTick(deps);
+  assert.match(opsAlertText(deps), /Host recovered.*db/);
+  await runWatchdogTick(deps);
+  const recovers = deps.sent.filter(s => /Host recovered/.test(s.payload.content));
+  assert.equal(recovers.length, 1, "recovery notices once too");
+});
+
+// ── /ops ─────────────────────────────────────────────────────────────────────
+
+const makeIx = (over: any = {}) => {
+  const replies: any[] = [];
+  const edits: any[] = [];
+  const follows: any[] = [];
+  return {
+    replies, edits, follows,
+    guildId: HOUSE,
+    user: { id: "u-op" },
+    options: {
+      getString: (n: string) => over.strings?.[n] ?? null,
+      getInteger: (n: string) => over.integers?.[n] ?? null,
+      ...over.options,
+    },
+    reply: async (r: any) => { replies.push(r); return r; },
+    deferReply: async () => {},
+    editReply: async (r: any) => { edits.push(r); return r; },
+    followUp: async (r: any) => { follows.push(r); return r; },
+    ...over.ix,
+  };
+};
+
+test("/ops refuses non-allowlisted users and non-house guilds", async () => {
+  initOps(makeDeps());
+  const stranger = makeIx({ ix: { user: { id: "u-rando" } }, strings: { action: "status" } });
+  await handleOpsCommand(stranger as any);
+  assert.match(stranger.replies[0].content, /restricted/);
+
+  const wrongGuild = makeIx({ ix: { guildId: "g-other" }, strings: { action: "status" } });
+  await handleOpsCommand(wrongGuild as any);
+  assert.match(wrongGuild.replies[0].content, /house server/);
+
+  // DM is allowed for an allowlisted operator.
+  const dm = makeIx({ ix: { guildId: null }, strings: { action: "status" } });
+  await handleOpsCommand(dm as any);
+  assert.ok(dm.replies[0].embeds?.length === 1, "status embed in DM");
+});
+
+test("/ops status replies with the health embed", async () => {
+  initOps(makeDeps());
+  const ix = makeIx({ strings: { action: "status" } });
+  await handleOpsCommand(ix as any);
+  const embed = ix.replies[0].embeds[0];
+  assert.match(embed.data.title ?? "", /status/i);
+  const lag = embed.data.fields?.find((f: any) => /lag/i.test(f.name));
+  assert.ok(lag);
+});
+
+test("/ops restart replies then exits; /ops deploy pulls, then exits", async () => {
+  const exits: number[] = [];
+  const cmds: string[] = [];
+  initOps(makeDeps({
+    exit: c => exits.push(c),
+    exec: async (cmd: string) => {
+      cmds.push(cmd);
+      if (cmd.includes("rev-parse")) return { stdout: "deadbeef\n", stderr: "" };
+      return { stdout: "ok", stderr: "" };
+    },
+  }));
+
+  const restart = makeIx({ strings: { action: "restart" } });
+  await handleOpsCommand(restart as any);
+  assert.match(restart.replies[0].content, /Restarting/);
+  await new Promise(r => setTimeout(r, 400));
+  assert.deepEqual(exits, [1]);
+
+  const deploy = makeIx({ strings: { action: "deploy" } });
+  await handleOpsCommand(deploy as any);
+  assert.ok(cmds.some(c => c.includes("git pull --ff-only") && c.includes("npm ci")), "deploy runs pull+ci");
+  assert.match(deploy.edits[0] as string, /Deployed `deadbeef`/);
+  await new Promise(r => setTimeout(r, 400));
+  assert.deepEqual(exits, [1, 1]);
+});
+
+test("/ops deploy failure reports redacted stderr and does NOT exit", async () => {
+  const exits: number[] = [];
+  initOps(makeDeps({
+    exit: c => exits.push(c),
+    exec: async (cmd: string) => {
+      if (cmd.includes("git pull")) throw { stderr: "fatal: auth failed for token sekrit-123456789" };
+      return { stdout: "", stderr: "" };
+    },
+  }));
+  const ix = makeIx({ strings: { action: "deploy" } });
+  await handleOpsCommand(ix as any);
+  assert.match(ix.edits[0] as string, /Deploy failed/);
+  await new Promise(r => setTimeout(r, 400));
+  assert.equal(exits.length, 0, "failed deploy leaves the old build running");
+});
+
+test("/ops logs chunks + redacts journal output", async () => {
+  initOps(makeDeps({
+    exec: async () => ({ stdout: "line of output with a fake token gsk_abcd1234efgh\n".repeat(120), stderr: "" }),
+  }));
+  const ix = makeIx({ strings: { action: "logs" }, integers: { lines: 50 } });
+  await handleOpsCommand(ix as any);
+  assert.ok(ix.edits.length === 1);
+  assert.ok(ix.edits[0].length <= 2000, "chunked under Discord's limit");
+  assert.ok(ix.follows.length >= 0);
+});
+
+test("/ops announce posts to the announce channel; missing text refused", async () => {
+  const deps = makeDeps();
+  initOps(deps);
+  const noText = makeIx({ strings: { action: "announce" } });
+  await handleOpsCommand(noText as any);
+  assert.match(noText.replies[0].content, /announcement text/);
+
+  const ix = makeIx({ strings: { action: "announce", text: "Marketplace is open!" } });
+  await handleOpsCommand(ix as any);
+  const post = deps.sent.find(s => s.id === "c-announce");
+  assert.equal(post?.payload.content, "Marketplace is open!");
+  assert.match(ix.replies[0].content, /Posted/);
+});

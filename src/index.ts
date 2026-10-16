@@ -41,6 +41,15 @@ import { runJournalJob, type JournalJobPayload } from "./journal-job.js";
 import { selectCompanionForTurn } from "./scene-router.js";
 import { sendAsCompanion } from "./webhooks.js";
 import { isSelfHarmSignal, CRISIS_RESPONSE, SAFE_REFUSAL } from "./safety.js";
+import {
+  initOps, automodMessage, isHouse, opsAlert,
+  handleHouseMemberAdd, handleHouseMemberUpdate, handleHouseMemberRemove,
+  ensureHouseLayout, startHostWatchdog,
+  type OpsDeps, type GuildLike,
+} from "./ops.js";
+import { exec as cpExec } from "node:child_process";
+import { promisify } from "node:util";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { gatherOwnerSubtextForServer, gatherServerDigestForDm } from "./cross-context.js";
 import type { CompanionPersona, MessageEvent, PairContext } from "./types.js";
 
@@ -61,6 +70,12 @@ for (const [name, url] of [["GROQ_BASE_URL", config.groqBaseUrl], ["VISION_BASE_
   }
 }
 
+const execAsync = promisify(cpExec);
+// Event-loop lag sampler for the host watchdog — index.ts owns the histogram;
+// ops.ts reads it through a getter so tests inject their own.
+const lagHistogram = monitorEventLoopDelay();
+lagHistogram.enable();
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -69,6 +84,10 @@ const client = new Client({
     GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.DirectMessageReactions,
+    // Privileged — member join/update/remove for house ops only. Gated on
+    // HOUSE_GUILD_ID so deployments without house ops never request it; the
+    // portal toggle must be on before this ships to prod or login fails.
+    ...(config.houseGuildId ? [GatewayIntentBits.GuildMembers] : []),
   ],
   // Reactions on uncached messages arrive as partials — the listener resolves
   // them explicitly before interpreting.
@@ -185,6 +204,7 @@ let store: MemoryStore;
 let eventStore: EventStore;
 let profileStore: ProfileStore;
 let worker: { stop: () => Promise<void> } | undefined;
+let watchdog: { stop: () => void } | undefined;
 
 async function init() {
   store = await MemoryStore.create();
@@ -241,6 +261,26 @@ client.once(Events.ClientReady, async ready => {
   applyRetention().catch(error => { inc("maintenance.error"); logError("Retention run failed", error); });
   sweepMissedSignals(24 * 60 * 60_000).catch(error => { inc("sweep.error"); logError("Boot sweep failed", error); }); // wide window on boot to cover downtime
   if (!config.visionModel) console.warn("[vision] VISION_MODEL unset — image attachments will be ignored");
+  // House ops — private layer for OUR community server + this host. All off
+  // unless HOUSE_GUILD_ID is set. Ops-channel announce doubles as the deploy
+  // marker: "online · sha X" means migrations 1..N all applied.
+  if (config.houseGuildId) {
+    try {
+      initOps(opsDeps);
+      const repoDir = config.opsRepoDir.replace(/^~(?=$|\/)/, "$HOME");
+      opsDeps.gitSha = await opsDeps.exec(`cd "${repoDir}" && git rev-parse --short HEAD`)
+        .then(r => r.stdout.trim()).catch(() => null);
+      const house = await opsDeps.fetchGuild(config.houseGuildId);
+      if (house) {
+        const made = await ensureHouseLayout(house).catch(e => { logError("house layout failed", e); return [] as string[]; });
+        if (made.length) await opsAlert(opsDeps, `🧱 House layout — created ${made.join(", ")}`);
+      } else {
+        logError("house ops init", new Error("HOUSE_GUILD_ID set but the guild isn't reachable"));
+      }
+      watchdog = startHostWatchdog(opsDeps);
+      await opsAlert(opsDeps, `🟢 Characterly online — sha \`${opsDeps.gitSha ?? "?"}\` · migrations applied · host watchdog armed`);
+    } catch (error) { inc("ops.init_error"); logError("house ops init failed", error); }
+  }
   console.log(`Characterly online as ${ready.user.tag}`);
 });
 
@@ -258,6 +298,27 @@ client.on(Events.GuildDelete, guild => {
   handleGuildDelete(guild as Guild & { unavailable?: boolean }, store)
     .then(purged => { if (purged) { inc("guild.purged"); console.log(`Purged all data for removed guild ${guild.id} (${guild.name})`); } })
     .catch(error => { inc("guild.purge_error"); logError(`Guild purge failed for ${guild.id}`, error); });
+});
+
+// ── House member ops ─────────────────────────────────────────────────────────
+// GuildMembers is a privileged intent (requested only when HOUSE_GUILD_ID is
+// configured). isHouse re-checks inside each handler too — belt and suspenders.
+client.on(Events.GuildMemberAdd, member => {
+  if (!store || !isHouse(member.guild.id)) return;
+  handleHouseMemberAdd(member, opsDeps)
+    .catch(e => { inc("ops.member_error"); logError("house member-add failed", e); });
+});
+
+client.on(Events.GuildMemberUpdate, (oldMember, newMember) => {
+  if (!store || !isHouse(newMember.guild.id)) return;
+  handleHouseMemberUpdate(oldMember, newMember, opsDeps)
+    .catch(e => { inc("ops.member_error"); logError("house member-update failed", e); });
+});
+
+client.on(Events.GuildMemberRemove, member => {
+  if (!store || !isHouse(member.guild.id)) return;
+  handleHouseMemberRemove(member, opsDeps)
+    .catch(e => { inc("ops.member_error"); logError("house member-remove failed", e); });
 });
 
 async function applyRetention() {
@@ -677,6 +738,23 @@ const journalDeps = {
   get store() { return store; },
   brainFor,
   get botId() { return client.user!.id; },
+};
+
+// House ops — same deps-injection pattern. exec/exit are real here, faked in
+// tests; lagMs samples + resets the shared histogram so each tick reports
+// the lag accumulated since the last read.
+const opsDeps: OpsDeps = {
+  get store() { return store; },
+  fetchChannel: async id => {
+    const c = await client.channels.fetch(id).catch(() => null);
+    return c?.isTextBased() && "send" in c ? c as unknown as { send(p: unknown): Promise<unknown> } : null;
+  },
+  fetchGuild: id => client.guilds.fetch(id).then(g => g as unknown as GuildLike).catch(() => null),
+  exec: cmd => execAsync(cmd, { maxBuffer: 4 * 1024 * 1024 }),
+  exit: code => process.exit(code),
+  dbPing: async () => { const t = Date.now(); await sql`SELECT 1`; return Date.now() - t; },
+  lagMs: () => { const ms = lagHistogram.mean / 1e6; lagHistogram.reset(); return ms; },
+  gitSha: null,
 };
 
 async function handleDmMessage(
@@ -1120,6 +1198,14 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   }
   if (!message.content.trim() && !images.length) return;
   if (config.guildId && message.guild.id !== config.guildId) return;
+  // House automod runs before archive/LLM work — a deleted scam never enters
+  // the memory pipeline or spends a credit. Bots/webhook-echoes are skipped
+  // inside (companion sends arrive as webhook-authored messages).
+  if (isHouse(message.guild.id) && !message.author.bot) {
+    const acted = await automodMessage(message, opsDeps)
+      .catch(e => { inc("ops.automod_error"); logError("automod failed", e); return false; });
+    if (acted) return;
+  }
 
   // Check whether this guild message was sent by one of our own companion
   // webhooks. Discord can dispatch the MessageCreate echo before the send

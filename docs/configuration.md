@@ -55,6 +55,28 @@ Characterly is configured through environment variables validated at startup by 
 | `ENGAGEMENT_TTL_MS` | `120000` | How long a participant stays "in conversation" after their last addressed message. Range 10s–1h. Longer = chattier mid-flow but slower to drop out. |
 | `PROACTIVE`, `PROACTIVE_DELAY_MS`, `PROACTIVE_DAILY_CAP`, `PROACTIVE_RESPONSE_WINDOW_MS`, `PROACTIVE_BACKOFF_MS` | — | **Legacy no-ops.** The proactive-speaking feature was removed (the bot is pure plumbing and never speaks unprompted). These variables are still parsed so old `.env` files don't fail validation, but nothing reads them — setting any of them has no effect. Same for `server_settings.proactive_enabled`. |
 
+### House ops (private layer — our community server + this host)
+
+Entirely opt-in: **`HOUSE_GUILD_ID` unset disables everything** below — no extra intents, no listeners, no watchdog. Setting it requests the privileged **Server Members Intent** — toggle that in the dev portal *before* deploying or login fails. Details in `docs/operations.md`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `HOUSE_GUILD_ID` | (off) | Our community server id — gates member ops, automod, `/ops` |
+| `HOUSE_MEMBER_ROLE_ID` | — | Role auto-assigned on join (after Membership Screening passes) |
+| `HOUSE_WELCOME_CHANNEL_ID` | — | Welcome posts land here |
+| `HOUSE_RULES_CHANNEL_ID` | — | Pointed at from welcome messages |
+| `HOUSE_ANNOUNCE_CHANNEL_ID` | — | `/ops announce` target |
+| `OPS_CHANNEL_ID` | `MARKETPLACE_MOD_CHANNEL_ID` | Ops alerts + host breach/recovery notices |
+| `OPS_USER_IDS` | — | Comma-separated user ids allowed to run `/ops` (controls the host — person-level, tighter than ManageGuild) |
+| `OPS_REPO_DIR` | `~/characterly` | Repo checkout on the host for `/ops deploy` |
+| `AUTOMOD_BURST_COUNT` / `_WINDOW_MS` | `6` / `8000` | Messages-per-window that trips burst spam (delete + 5m timeout) |
+| `AUTOMOD_MENTION_MAX` | `8` | Mentions over this = mass mention (delete + alert) |
+| `AUTOMOD_NEW_ACCOUNT_DAYS` | `7` | Accounts younger than this can't post external links |
+| `AUTOMOD_RAID_JOINS` | `8` | Joins in 60s that trip the raid alert |
+| `AUTOMOD_RAID_KICK` | off | `1` auto-kicks joins while the raid window is hot |
+| `HOST_HEAP_PCT` / `HOST_DISK_PCT` / `HOST_LAG_MS` | `90` / `85` / `1000` | Watchdog breach thresholds (alert once, recover notice) |
+| `HOST_HEALTH_INTERVAL_MS` | `300000` | Watchdog tick |
+
 ---
 
 ## Discord bot setup

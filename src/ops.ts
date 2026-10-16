@@ -1,0 +1,502 @@
+import os from "node:os";
+import { ChannelType, EmbedBuilder, PermissionFlagsBits, type ChatInputCommandInteraction } from "discord.js";
+import { config } from "./config.js";
+import { inc } from "./metrics.js";
+import { logError, redactSecrets } from "./secrets.js";
+import type { MemoryStore } from "./database.js";
+
+// ── House ops ────────────────────────────────────────────────────────────────
+// The bot is also the private operator of OUR community server and its own
+// host — member ops, deterministic automod, channel layout, and host health.
+// Every path gates on HOUSE_GUILD_ID: this is never a per-guild feature, and
+// /ops is allowlisted to OPS_USER_IDS (person-level — it controls the box).
+// Lives outside index.ts so it can be unit-tested; index.ts wires the
+// listeners and passes live singletons through OpsDeps.
+
+export const isHouse = (guildId: string | null | undefined): boolean =>
+  !!config.houseGuildId && guildId === config.houseGuildId;
+
+// Narrow structural shapes — tests hand fakes, index.ts casts the real objects.
+interface SendableChannel {
+  send(payload: unknown): Promise<unknown>;
+}
+
+export interface GuildChannelLike {
+  id: string;
+  name: string;
+  type: number;
+  parentId?: string | null;
+}
+
+export interface GuildLike {
+  id: string;
+  channels: {
+    cache: { find(fn: (c: GuildChannelLike) => boolean): GuildChannelLike | undefined };
+    create(opts: { name: string; type: number; parent?: string }): Promise<GuildChannelLike>;
+  };
+}
+
+export interface MemberLike {
+  pending?: boolean | null;
+  user: { id: string; bot?: boolean | null; username?: string; createdTimestamp?: number };
+  guild: { id: string };
+  roles: { add(id: string): Promise<unknown> };
+  kick?(reason?: string): Promise<unknown>;
+}
+
+export interface AutomodMessage {
+  id: string;
+  guildId: string | null;
+  channelId: string;
+  content: string;
+  url?: string;
+  author: { id: string; bot?: boolean | null; username?: string; createdTimestamp?: number };
+  member: {
+    permissions: { has(flag: bigint): boolean };
+    timeout?(ms: number, reason?: string): Promise<unknown>;
+  } | null;
+  mentions: { users: { size: number }; everyone: boolean };
+  delete(): Promise<unknown>;
+}
+
+export interface OpsDeps {
+  store: MemoryStore;
+  fetchChannel: (id: string) => Promise<SendableChannel | null>;
+  fetchGuild: (id: string) => Promise<GuildLike | null>;
+  exec: (cmd: string) => Promise<{ stdout: string; stderr: string }>;
+  exit: (code: number) => void;
+  /** Timed SELECT 1 — index.ts runs it on the shared pool. */
+  dbPing: () => Promise<number>;
+  /** Mean event-loop lag in ms since the last sample (index.ts owns the histogram). */
+  lagMs: () => number;
+  gitSha: string | null;
+}
+
+// Module deps for handleOpsCommand (commands.ts can't receive them) — index.ts
+// calls initOps once at ClientReady. Direct functions always take deps.
+let opsDeps: OpsDeps | null = null;
+export function initOps(d: OpsDeps): void { opsDeps = d; }
+
+// Test-only: raid/burst windows and breach latches are module state.
+export function resetOpsState(): void {
+  joinTimes.length = 0;
+  lastRaidAlertAt = 0;
+  burstWindow.clear();
+  activeBreaches.clear();
+}
+
+async function opsChannel(deps: OpsDeps): Promise<SendableChannel | null> {
+  if (!config.opsChannelId) return null;
+  return deps.fetchChannel(config.opsChannelId).catch(() => null);
+}
+
+/** Alerts never ping — `parse: []` mutes any mentions inside the text. */
+export async function opsAlert(deps: OpsDeps, text: string): Promise<void> {
+  const ch = await opsChannel(deps);
+  await ch?.send({ content: text.slice(0, 1900), allowedMentions: { parse: [] } })
+    .catch(e => { inc("ops.alert_error"); logError("ops alert send failed", e); });
+}
+
+// ── Member ops ───────────────────────────────────────────────────────────────
+
+const RAID_WINDOW_MS = 60_000;
+const joinTimes: number[] = [];
+let lastRaidAlertAt = 0;
+
+async function onboardMember(member: MemberLike, deps: OpsDeps): Promise<void> {
+  if (config.houseMemberRoleId) {
+    await member.roles.add(config.houseMemberRoleId).catch(e => {
+      inc("ops.autorole_error");
+      logError("house auto-role failed", e);
+    });
+  }
+  if (config.houseWelcomeChannelId) {
+    const ch = await deps.fetchChannel(config.houseWelcomeChannelId).catch(() => null);
+    const rules = config.houseRulesChannelId ? ` — read <#${config.houseRulesChannelId}> first` : "";
+    await ch?.send({
+      content: `Welcome <@${member.user.id}> to Characterly${rules}! Your personal companion starts in the bot's DMs — summon it into the server with \`/companion action:summon\`.`,
+      allowedMentions: { users: [member.user.id] },
+    }).catch(e => { inc("ops.welcome_error"); logError("house welcome failed", e); });
+  }
+}
+
+export async function handleHouseMemberAdd(member: MemberLike, deps: OpsDeps): Promise<void> {
+  if (!isHouse(member.guild.id) || member.user.bot) return;
+  // Raid bookkeeping counts every join — pending or not — since a raid is a
+  // join-rate problem. Alert once per hot window; auto-kick only when armed.
+  const now = Date.now();
+  joinTimes.push(now);
+  while (joinTimes.length && now - joinTimes[0] > RAID_WINDOW_MS) joinTimes.shift();
+  if (joinTimes.length > config.automodRaidJoins) {
+    if (config.automodRaidKick && member.kick) {
+      await member.kick("automod: raid window").catch(e => logError("raid kick failed", e));
+      await opsAlert(deps, `🚨 **Raid** — auto-kicked <@${member.user.id}> (${joinTimes.length} joins in 60s)`);
+      inc("ops.raid_kick");
+      return;
+    }
+    if (now - lastRaidAlertAt > RAID_WINDOW_MS) {
+      lastRaidAlertAt = now;
+      await opsAlert(deps, `🚨 **Possible raid** — ${joinTimes.length} joins in 60s (auto-kick OFF; set AUTOMOD_RAID_KICK=1 to arm)`);
+      inc("ops.raid_alert");
+    }
+  }
+  // Membership Screening: pending members haven't accepted the rules yet —
+  // their role lands on the guildMemberUpdate pending→false flip instead.
+  if (member.pending) return;
+  await onboardMember(member, deps);
+}
+
+export async function handleHouseMemberUpdate(
+  oldMember: Pick<MemberLike, "pending">,
+  newMember: MemberLike,
+  deps: OpsDeps,
+): Promise<void> {
+  if (!isHouse(newMember.guild.id) || newMember.user.bot) return;
+  // The screening flip is the only transition we act on — strict === true on
+  // the old side so an uncached partial can't re-welcome an existing member.
+  if (oldMember.pending === true && newMember.pending === false) {
+    await onboardMember(newMember, deps);
+  }
+}
+
+export async function handleHouseMemberRemove(member: MemberLike, deps: OpsDeps): Promise<void> {
+  if (!isHouse(member.guild.id) || member.user.bot) return;
+  await opsAlert(deps, `👋 **${member.user.username ?? member.user.id}** left the server.`);
+}
+
+// ── Auto-moderation ──────────────────────────────────────────────────────────
+// Deterministic rules, house guild only. Runs before archive/LLM work so a
+// deleted scam never enters the memory pipeline or spends a credit.
+
+const INVITE_RE = /(?:discord\.gg\/|discord(?:app)?\.com\/invites?\/)/i;
+const LINK_RE = /https?:\/\/[^\s<>"']+/i;
+const SCAM_PATTERNS: Array<{ rule: string; re: RegExp }> = [
+  { rule: "nitro scam", re: /\b(?:free|claim|redeem|won|win)\b[^.\n]{0,30}\bnitro\b|\bnitro\b[^.\n]{0,30}\b(?:free|claim|redeem|giveaway)\b/i },
+  { rule: "crypto scam", re: /\b(?:airdrop|seed[\s-]?phrase|wallet[\s-]?drain|connect\s+your\s+wallet|claim\s+(?:your\s+)?(?:crypto|tokens?))\b/i },
+  { rule: "steam scam", re: /\bsteam\b[^.\n]{0,30}\b(?:gift|giveaway|free)\b|\b(?:free|won|win)\b[^.\n]{0,30}\bsteam\b/i },
+  { rule: "earn-money scam", re: /\b(?:earn|make)\s+\$\s?\d[\d,]*\s*(?:a|per|every)\s+(?:day|week|hour|month)\b/i },
+];
+
+const burstWindow = new Map<string, number[]>();
+
+/** Returns true when automod acted (message deleted / member sanctioned) —
+ * the caller skips all further handling for the message. */
+export async function automodMessage(message: AutomodMessage, deps: OpsDeps): Promise<boolean> {
+  if (!isHouse(message.guildId)) return false;
+  if (message.author.bot) return false;
+  // Manage Messages holders are trusted — a mod posting an invite link to
+  // the rules channel shouldn't eat a timeout.
+  if (message.member?.permissions.has(PermissionFlagsBits.ManageMessages)) return false;
+
+  const jump = message.url ?? `https://discord.com/channels/${message.guildId}/${message.channelId}/${message.id}`;
+  const excerpt = message.content.trim().slice(0, 120).replace(/\n+/g, " ");
+
+  const act = async (rule: string, timeoutMs?: number): Promise<boolean> => {
+    const deleted = await message.delete().then(() => true).catch(() => false);
+    let timedOut = false;
+    if (timeoutMs && message.member?.timeout) {
+      timedOut = await message.member.timeout(timeoutMs, `automod: ${rule}`).then(() => true).catch(() => false);
+    }
+    const action = [deleted && "deleted", timedOut && `timeout ${Math.round(timeoutMs! / 60_000)}m`].filter(Boolean).join(" + ") || "flagged (no perms)";
+    inc("ops.automod");
+    await opsAlert(deps, `🛡️ **${rule}** — <@${message.author.id}> in <#${message.channelId}> → ${action}\n> ${excerpt}\n${jump}`);
+    return true;
+  };
+
+  // Invite links — the fastest phishing vector on a community server.
+  if (INVITE_RE.test(message.content)) return act("invite link");
+  // Scam classes — same defensive-regex style as safety.ts's listing blocklist.
+  for (const { rule, re } of SCAM_PATTERNS) {
+    if (re.test(message.content)) return act(rule, 10 * 60_000);
+  }
+  // Mass mention — or @everyone/here from a member who lacks the permission.
+  const overMentions = message.mentions.users.size > config.automodMentionMax;
+  const illegalEveryone = message.mentions.everyone &&
+    !(message.member?.permissions.has(PermissionFlagsBits.MentionEveryone) ?? false);
+  if (overMentions || illegalEveryone) return act("mass mention");
+  // Burst spam — rolling per-user window.
+  const now = Date.now();
+  const times = burstWindow.get(message.author.id) ?? [];
+  while (times.length && now - times[0] > config.automodBurstWindowMs) times.shift();
+  times.push(now);
+  burstWindow.set(message.author.id, times);
+  if (burstWindow.size > 5_000) burstWindow.clear();
+  if (times.length > config.automodBurstCount) return act("burst spam", 5 * 60_000);
+  // New accounts posting links are almost never legitimate.
+  const created = message.author.createdTimestamp;
+  if (created && LINK_RE.test(message.content) &&
+    now - created < config.automodNewAccountDays * 86_400_000) {
+    return act("new-account link");
+  }
+  return false;
+}
+
+// ── Channel ops ──────────────────────────────────────────────────────────────
+// The wanted layout mirrors the live hub server. Matching is name-only after
+// NFKC+lowercase normalization (channel names may carry emoji, categories may
+// be styled) — a mis-parented channel is adopted, never duplicated.
+
+export const WANTED_LAYOUT: Array<{ category: string; channels: Array<{ name: string; type: ChannelType }> }> = [
+  {
+    category: "SYSTEM",
+    channels: [
+      { name: "welcome", type: ChannelType.GuildText },
+      { name: "announcements", type: ChannelType.GuildAnnouncement },
+      { name: "rules", type: ChannelType.GuildText },
+      { name: "updates", type: ChannelType.GuildText },
+    ],
+  },
+  {
+    category: "CHARACTER MARKETPLACE",
+    channels: [{ name: "characters", type: ChannelType.GuildForum }],
+  },
+  {
+    category: "RESOURCES",
+    channels: [
+      { name: "what-is-characterly", type: ChannelType.GuildText },
+      { name: "privacy-policy", type: ChannelType.GuildText },
+      { name: "how-to-publish-bots", type: ChannelType.GuildText },
+    ],
+  },
+  {
+    category: "HELP",
+    channels: [
+      { name: "faqs", type: ChannelType.GuildText },
+      { name: "support-ticket", type: ChannelType.GuildText },
+      { name: "suggest-a-feature", type: ChannelType.GuildText },
+    ],
+  },
+  {
+    category: "SERVICES",
+    channels: [
+      { name: "admins-chat", type: ChannelType.GuildText },
+      { name: "mods-chat", type: ChannelType.GuildText },
+    ],
+  },
+];
+
+const normName = (s: string) => s.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+
+/** Create missing categories + channels by name. Idempotent — returns the
+ * names of what it created ([] when the layout is already complete). */
+export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
+  if (!isHouse(guild.id)) return [];
+  const created: string[] = [];
+  for (const group of WANTED_LAYOUT) {
+    let cat = guild.channels.cache.find(
+      c => c.type === ChannelType.GuildCategory && normName(c.name) === normName(group.category),
+    );
+    if (!cat) {
+      cat = await guild.channels.create({ name: group.category, type: ChannelType.GuildCategory });
+      created.push(`📁 ${group.category}`);
+    }
+    for (const wanted of group.channels) {
+      const exists = guild.channels.cache.find(c => normName(c.name) === normName(wanted.name));
+      if (!exists) {
+        await guild.channels.create({ name: wanted.name, type: wanted.type, parent: cat.id });
+        created.push(`#${wanted.name}`);
+      }
+    }
+  }
+  return created;
+}
+
+// ── Host self-ops ────────────────────────────────────────────────────────────
+
+export interface HostHealth {
+  uptimeSec: number;
+  rssMb: number;
+  heapUsedMb: number;
+  heapTotalMb: number;
+  heapPct: number;
+  lagMs: number;
+  diskPct: number | null;
+  dbPingMs: number | null;
+  queuePending: number | null;
+  queueDead: number | null;
+  gitSha: string | null;
+}
+
+export async function collectHostHealth(deps: OpsDeps): Promise<HostHealth> {
+  const mem = process.memoryUsage();
+  const heapTotalMb = mem.heapTotal / 1_048_576;
+  const heapUsedMb = mem.heapUsed / 1_048_576;
+  let diskPct: number | null = null;
+  try {
+    const { stdout } = await deps.exec("df -P /");
+    const line = stdout.trim().split("\n").pop() ?? "";
+    const m = line.match(/(\d+)%/);
+    if (m) diskPct = Number(m[1]);
+  } catch { /* non-Linux host — disk stays null */ }
+  const dbPingMs = await deps.dbPing().catch(() => null);
+  const queue = config.houseGuildId
+    ? await deps.store.queueStats(config.houseGuildId).catch(() => null)
+    : null;
+  return {
+    uptimeSec: process.uptime(),
+    rssMb: mem.rss / 1_048_576,
+    heapUsedMb,
+    heapTotalMb,
+    heapPct: heapTotalMb ? (heapUsedMb / heapTotalMb) * 100 : 0,
+    lagMs: deps.lagMs(),
+    diskPct,
+    dbPingMs,
+    queuePending: queue?.pending ?? null,
+    queueDead: queue?.dead ?? null,
+    gitSha: deps.gitSha,
+  };
+}
+
+// Breach latches — a key enters on first breach (alert) and leaves on
+// recovery (notice), so a sustained breach alerts exactly once.
+const activeBreaches = new Set<string>();
+
+export async function runWatchdogTick(deps: OpsDeps): Promise<HostHealth> {
+  const h = await collectHostHealth(deps);
+  const breaches: Array<[string, string]> = [];
+  if (h.heapPct > config.hostHeapPct) breaches.push(["heap", `heap ${h.heapPct.toFixed(0)}% > ${config.hostHeapPct}%`]);
+  if (h.diskPct !== null && h.diskPct > config.hostDiskPct) breaches.push(["disk", `disk ${h.diskPct}% > ${config.hostDiskPct}%`]);
+  if (h.lagMs > config.hostLagMs) breaches.push(["lag", `event-loop lag ${Math.round(h.lagMs)}ms > ${config.hostLagMs}ms`]);
+  if (h.dbPingMs === null) breaches.push(["db", "database ping failed"]);
+  for (const [key, detail] of breaches) {
+    if (!activeBreaches.has(key)) {
+      activeBreaches.add(key);
+      inc("ops.breach");
+      await opsAlert(deps, `⚠️ **Host breach** — ${detail} (sha \`${h.gitSha ?? "?"}\`)`);
+    }
+  }
+  for (const key of [...activeBreaches]) {
+    if (!breaches.some(([k]) => k === key)) {
+      activeBreaches.delete(key);
+      await opsAlert(deps, `✅ **Host recovered** — ${key} back under limit`);
+    }
+  }
+  return h;
+}
+
+export function startHostWatchdog(deps: OpsDeps): { stop: () => void } {
+  const timer = setInterval(() => {
+    runWatchdogTick(deps).catch(e => { inc("ops.watchdog_error"); logError("host watchdog tick failed", e); });
+  }, config.hostHealthIntervalMs);
+  timer.unref?.();
+  return { stop: () => clearInterval(timer) };
+}
+
+// ── /ops ─────────────────────────────────────────────────────────────────────
+
+function healthEmbed(h: HostHealth): EmbedBuilder {
+  const fmt = (n: number | null, suffix = "") => n === null ? "n/a" : `${n}${suffix}`;
+  const up = h.uptimeSec;
+  const uptime = up >= 86400 ? `${(up / 86400).toFixed(1)}d` : up >= 3600 ? `${(up / 3600).toFixed(1)}h` : `${Math.floor(up / 60)}m`;
+  return new EmbedBuilder()
+    .setTitle("Characterly host — status")
+    .addFields(
+      { name: "Uptime", value: `${uptime} · sha \`${h.gitSha ?? "?"}\``, inline: true },
+      { name: "Heap", value: `${h.heapUsedMb.toFixed(0)}/${h.heapTotalMb.toFixed(0)} MB (${h.heapPct.toFixed(0)}%)`, inline: true },
+      { name: "RSS", value: `${h.rssMb.toFixed(0)} MB`, inline: true },
+      { name: "Event-loop lag", value: `${h.lagMs.toFixed(0)} ms`, inline: true },
+      { name: "Disk /", value: fmt(h.diskPct, "%"), inline: true },
+      { name: "DB ping", value: h.dbPingMs === null ? "FAIL" : `${h.dbPingMs} ms`, inline: true },
+      { name: "Job queue", value: `${h.queuePending ?? "?"} pending · ${h.queueDead ?? "?"} dead`, inline: true },
+    );
+}
+
+/** Chunk a long log tail into fenced <2000-char replies — Discord's limit. */
+function chunkText(text: string, max = 1800): string[] {
+  const chunks: string[] = [];
+  let cur = "";
+  for (const line of text.split("\n")) {
+    if (cur.length + line.length + 1 > max) { chunks.push(cur); cur = ""; }
+    cur += (cur ? "\n" : "") + line.slice(0, max);
+  }
+  if (cur) chunks.push(cur);
+  // Tail is what matters — cap at 6 chunks (10k chars) and drop the oldest.
+  return chunks.slice(-6);
+}
+
+export async function handleOpsCommand(interaction: ChatInputCommandInteraction): Promise<unknown> {
+  if (!opsDeps) {
+    return interaction.reply({ content: "Ops isn't initialized yet — the bot is still starting.", ephemeral: true });
+  }
+  const deps = opsDeps;
+  if (!config.opsUserIds.includes(interaction.user.id)) {
+    inc("ops.denied");
+    return interaction.reply({ content: "That command is restricted to operators.", ephemeral: true });
+  }
+  if (interaction.guildId && !isHouse(interaction.guildId)) {
+    return interaction.reply({ content: "`/ops` only runs in the house server (or in DM).", ephemeral: true });
+  }
+  const action = interaction.options.getString("action", true);
+
+  if (action === "status") {
+    const h = await collectHostHealth(deps);
+    return interaction.reply({ embeds: [healthEmbed(h)], ephemeral: true });
+  }
+
+  if (action === "logs") {
+    const n = Math.min(Math.max(interaction.options.getInteger("lines") ?? 30, 1), 200);
+    await interaction.deferReply({ ephemeral: true });
+    const { stdout, stderr } = await deps.exec(`journalctl -u characterly -n ${n} --no-pager`)
+      .catch(e => ({ stdout: "", stderr: `journalctl failed: ${String((e as Error)?.message ?? e)}` }));
+    const out = redactSecrets((stdout || stderr || "(no output)").trim());
+    const chunks = chunkText(out);
+    await interaction.editReply("```\n" + chunks[0] + "\n```");
+    for (const c of chunks.slice(1)) {
+      await interaction.followUp({ ephemeral: true, content: "```\n" + c + "\n```" });
+    }
+    return;
+  }
+
+  if (action === "restart") {
+    await interaction.reply({ content: "Restarting — systemd brings me back in a few seconds.", ephemeral: true });
+    setTimeout(() => deps.exit(1), 300).unref?.();
+    return;
+  }
+
+  if (action === "deploy") {
+    await interaction.deferReply({ ephemeral: true });
+    const repoDir = config.opsRepoDir.replace(/^~(?=$|\/)/, os.homedir());
+    try {
+      await deps.exec(`cd "${repoDir}" && git pull --ff-only && npm ci`);
+    } catch (e) {
+      const detail = redactSecrets(String((e as { stderr?: string; message?: string })?.stderr ?? (e as Error)?.message ?? e)).slice(0, 1500);
+      return interaction.editReply(`Deploy failed — still on \`${deps.gitSha ?? "?"}\`:\n\`\`\`\n${detail}\n\`\`\``);
+    }
+    const sha = await deps.exec(`cd "${repoDir}" && git rev-parse --short HEAD`).then(r => r.stdout.trim()).catch(() => "?");
+    deps.gitSha = sha;
+    await interaction.editReply(`Deployed \`${sha}\` — restarting onto it now.`);
+    setTimeout(() => deps.exit(1), 300).unref?.();
+    return;
+  }
+
+  if (action === "announce") {
+    const text = interaction.options.getString("text")?.trim();
+    if (!text) return interaction.reply({ content: "Give me the announcement text.", ephemeral: true });
+    if (!config.houseAnnounceChannelId) return interaction.reply({ content: "HOUSE_ANNOUNCE_CHANNEL_ID isn't set.", ephemeral: true });
+    const ch = await deps.fetchChannel(config.houseAnnounceChannelId).catch(() => null);
+    if (!ch) return interaction.reply({ content: "Can't reach the announcements channel — check my permissions.", ephemeral: true });
+    const sent = await ch.send({ content: text.slice(0, 1900), allowedMentions: { parse: [] } }).then(() => true).catch(e => {
+      logError("ops announce failed", e);
+      return false;
+    });
+    if (!sent) return interaction.reply({ content: "Send failed — check my channel permissions.", ephemeral: true });
+    return interaction.reply({ content: `Posted in <#${config.houseAnnounceChannelId}>.`, ephemeral: true });
+  }
+
+  if (action === "layout") {
+    if (!config.houseGuildId) return interaction.reply({ content: "HOUSE_GUILD_ID isn't set.", ephemeral: true });
+    const guild = await deps.fetchGuild(config.houseGuildId).catch(() => null);
+    if (!guild) return interaction.reply({ content: "Can't reach the house server.", ephemeral: true });
+    const created = await ensureHouseLayout(guild).catch(e => {
+      logError("house layout failed", e);
+      return null;
+    });
+    if (created === null) return interaction.reply({ content: "Layout check failed — see logs.", ephemeral: true });
+    return interaction.reply({
+      content: created.length ? `Created: ${created.join(", ")}` : "Layout already complete — nothing to create.",
+      ephemeral: true,
+    });
+  }
+
+  return interaction.reply({ content: `Unknown /ops action: ${action}`, ephemeral: true });
+}

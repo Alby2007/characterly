@@ -85,6 +85,35 @@ const env = z.object({
   // Safety classifier model — defaults to the hosted reply model; a small
   // fast model is fine (the verdict schema is tiny).
   SAFETY_MODEL: z.string().optional(),
+  // ── House ops: the bot privately operates OUR community server + its own
+  // host. Entire layer is off unless HOUSE_GUILD_ID is set — never a per-guild
+  // feature other servers can reach.
+  HOUSE_GUILD_ID: z.string().optional(),
+  HOUSE_MEMBER_ROLE_ID: z.string().optional(),
+  HOUSE_WELCOME_CHANNEL_ID: z.string().optional(),
+  HOUSE_RULES_CHANNEL_ID: z.string().optional(),
+  HOUSE_ANNOUNCE_CHANNEL_ID: z.string().optional(),
+  // Where ops alerts/host breaches go — defaults to the marketplace mod channel.
+  OPS_CHANNEL_ID: z.string().optional(),
+  // Discord user ids allowed to run /ops (controls the host — person-level,
+  // tighter than ManageGuild).
+  OPS_USER_IDS: z.string().optional(),
+  // Repo checkout on the host for /ops deploy. `~` is resolved at use.
+  OPS_REPO_DIR: z.string().default("~/characterly"),
+  // House automod thresholds — all deterministic, house-guild only.
+  AUTOMOD_BURST_COUNT: z.coerce.number().int().min(2).default(6),
+  AUTOMOD_BURST_WINDOW_MS: z.coerce.number().int().min(1_000).default(8_000),
+  AUTOMOD_MENTION_MAX: z.coerce.number().int().min(3).default(8),
+  AUTOMOD_NEW_ACCOUNT_DAYS: z.coerce.number().int().min(0).default(7),
+  AUTOMOD_RAID_JOINS: z.coerce.number().int().min(3).default(8),
+  // "1" auto-kicks new joins while the raid window is hot — default OFF
+  // (kicking is one-way; alerts alone usually suffice).
+  AUTOMOD_RAID_KICK: z.string().optional(),
+  // Host watchdog thresholds (heap %, disk %, event-loop lag ms, tick ms).
+  HOST_HEAP_PCT: z.coerce.number().int().min(1).max(100).default(90),
+  HOST_DISK_PCT: z.coerce.number().int().min(1).max(100).default(85),
+  HOST_LAG_MS: z.coerce.number().int().min(50).default(1_000),
+  HOST_HEALTH_INTERVAL_MS: z.coerce.number().int().min(30_000).default(300_000),
 }).parse(process.env);
 
 export const config = {
@@ -164,4 +193,24 @@ export const config = {
   marketReportDailyCap: env.MARKET_REPORT_DAILY_CAP,
   marketAdoptDailyCap: env.MARKET_ADOPT_DAILY_CAP,
   safetyModel: env.SAFETY_MODEL ?? env.GROQ_MODEL,
+  // House ops — see ops.ts. houseGuildId unset disables the whole layer
+  // (intents, listeners, watchdog never activate).
+  houseGuildId: env.HOUSE_GUILD_ID,
+  houseMemberRoleId: env.HOUSE_MEMBER_ROLE_ID,
+  houseWelcomeChannelId: env.HOUSE_WELCOME_CHANNEL_ID,
+  houseRulesChannelId: env.HOUSE_RULES_CHANNEL_ID,
+  houseAnnounceChannelId: env.HOUSE_ANNOUNCE_CHANNEL_ID,
+  opsChannelId: env.OPS_CHANNEL_ID ?? env.MARKETPLACE_MOD_CHANNEL_ID,
+  opsUserIds: (env.OPS_USER_IDS ?? "").split(",").map(s => s.trim()).filter(Boolean),
+  opsRepoDir: env.OPS_REPO_DIR,
+  automodBurstCount: env.AUTOMOD_BURST_COUNT,
+  automodBurstWindowMs: env.AUTOMOD_BURST_WINDOW_MS,
+  automodMentionMax: env.AUTOMOD_MENTION_MAX,
+  automodNewAccountDays: env.AUTOMOD_NEW_ACCOUNT_DAYS,
+  automodRaidJoins: env.AUTOMOD_RAID_JOINS,
+  automodRaidKick: env.AUTOMOD_RAID_KICK === "1",
+  hostHeapPct: env.HOST_HEAP_PCT,
+  hostDiskPct: env.HOST_DISK_PCT,
+  hostLagMs: env.HOST_LAG_MS,
+  hostHealthIntervalMs: env.HOST_HEALTH_INTERVAL_MS,
 };

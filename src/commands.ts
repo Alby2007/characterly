@@ -14,6 +14,7 @@ import { inc, metricsSnapshot } from "./metrics.js";
 import type { Companion, CompanionListing, CompanionSpec, MessageEvent } from "./types.js";
 import { config } from "./config.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
+import { handleOpsCommand } from "./ops.js";
 
 export const ONBOARDING_ARCHETYPES: Record<
   string,
@@ -863,7 +864,21 @@ export const commandDefinitions = [
   // In a server this is the guild-scope key (admin only); in DMs it stores the
   // user's personal key — the same modal backs both paths.
   { name: "setup", description: "Connect an AI API key — server key for admins here, your personal key in DMs", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
-  { name: "link", description: "Get a one-time code to link this Discord account to your Characterly web account" }
+  { name: "link", description: "Get a one-time code to link this Discord account to your Characterly web account" },
+  // House ops console — visible everywhere but refuses anyone not in
+  // OPS_USER_IDS (it controls the host). Works in the house guild and DMs.
+  { name: "ops", description: "Operator console — host health, deploy, house ops", options: [
+    { name: "action", description: "What to do", type: 3, required: true, choices: [
+      { name: "status — host + queue health", value: "status" },
+      { name: "logs — last N journal lines", value: "logs" },
+      { name: "restart — restart the bot onto the same code", value: "restart" },
+      { name: "deploy — git pull + npm ci + restart", value: "deploy" },
+      { name: "announce — post to the announcements channel", value: "announce" },
+      { name: "layout — create missing house channels", value: "layout" },
+    ] },
+    { name: "text", description: "Announcement text (action=announce)", type: 3, required: false },
+    { name: "lines", description: "Journal lines for action=logs (default 30, max 200)", type: 4, required: false },
+  ] },
 ];
 
 const confidence = (value: number | undefined) => {
@@ -890,6 +905,9 @@ const SERVER_ONLY_COMMANDS = new Set([
 ]);
 
 export async function handleMemoryCommand(interaction: ChatInputCommandInteraction, store: MemoryStore, brainFor: BrainFor, evStore?: EventStore, profileStore: ProfileStore = new ProfileStore()) {
+  // /ops self-gates on OPS_USER_IDS and house-guild context — dispatch before
+  // the server-only/link gates so an allowlisted operator can use it in DMs.
+  if (interaction.commandName === "ops") return handleOpsCommand(interaction);
   if (!interaction.guildId && SERVER_ONLY_COMMANDS.has(interaction.commandName)) {
     return interaction.reply({ content: "That command can only be used inside a Discord server.", ephemeral: true });
   }
