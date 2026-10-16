@@ -1,0 +1,63 @@
+<!-- Characterly — email change confirmation. Applied via
+     supabase/email/apply.mjs or Dashboard → Authentication → Email Templates
+     → Change Email Address.
+     Variables: {{ .ConfirmationURL }} {{ .Email }} {{ .NewEmail }} {{ .SiteURL }} -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background-color:#0d0a0e;">
+<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">
+  Confirm the new email address on your Characterly account.
+</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#0d0a0e;">
+<tr><td align="center" style="padding:40px 16px;">
+  <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background-color:#141015;border:1px solid #2a2126;border-radius:14px;">
+
+    <tr><td align="center" style="padding:36px 40px 0;">
+      <div style="font-family:Georgia,'Times New Roman',serif;font-size:13px;letter-spacing:6px;color:#d4a35b;text-transform:uppercase;">
+        ✦&nbsp;&nbsp;Characterly&nbsp;&nbsp;✦
+      </div>
+      <div style="border-bottom:1px solid #2a2126;font-size:1px;line-height:1px;margin-top:28px;">&nbsp;</div>
+    </td></tr>
+
+    <tr><td style="padding:32px 40px 0;">
+      <h1 style="margin:0;font-family:Georgia,'Times New Roman',serif;font-size:30px;line-height:1.2;font-weight:normal;color:#efe5d1;">
+        A change of address.
+      </h1>
+      <p style="margin:18px 0 0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;line-height:1.65;color:#c4b7a0;">
+        This address was set as the new email on a Characterly account.
+        Confirm it to finish the change — until you do, everything stays as
+        it was.
+      </p>
+    </td></tr>
+
+    <tr><td align="center" style="padding:30px 40px 8px;">
+      <a href="{{ .ConfirmationURL }}" style="display:inline-block;padding:14px 36px;background-color:#d4a35b;border-radius:8px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;font-weight:bold;color:#1b161c;text-decoration:none;">
+        Confirm this email
+      </a>
+    </td></tr>
+
+    <tr><td style="padding:10px 40px 0;">
+      <p style="margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:12px;line-height:1.6;color:#93877a;">
+        Button not working? Paste this link into your browser:
+      </p>
+      <p style="margin:8px 0 0;font-family:Consolas,monospace;font-size:11px;line-height:1.5;color:#94703c;word-break:break-all;">
+        {{ .ConfirmationURL }}
+      </p>
+    </td></tr>
+
+    <tr><td style="padding:30px 40px 36px;">
+      <p style="margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:12px;line-height:1.6;color:#5c5249;">
+        Sent to {{ .Email }}. Didn't change your account email? Ignore this —
+        the change only lands if the link is used.
+      </p>
+      <p style="margin:16px 0 0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:12px;color:#5c5249;">
+        Characterly — companions that remember you.
+      </p>
+    </td></tr>
+
+  </table>
+</td></tr>
+</table>
+</body>
+</html>

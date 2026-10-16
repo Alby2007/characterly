@@ -77,6 +77,22 @@ The `/**` glob covers verification emails, magic links, password recovery, and O
 | **Leaked password protection** (`Auth → Password security`) | Recommended ON | HaveIBeenPwned screening; Supabase advisor flags it when off. |
 | Email confirmations | ON (default) | Sign-ups get a verification link; redirect allowlist must cover the landing page. |
 
+### Auth email templates
+
+Branded templates live in `supabase/email/` (`confirm-signup`, `magic-link`,
+`reset-password`, `change-email`) — hosted projects don't read email
+templates from `config.toml`, so they're applied via the Management API:
+
+```bash
+SUPABASE_ACCESS_TOKEN=sbp_... node supabase/email/apply.mjs --check  # read live state
+SUPABASE_ACCESS_TOKEN=sbp_... node supabase/email/apply.mjs          # apply all four
+```
+
+(or paste each file into Dashboard → Authentication → Email Templates).
+The script refuses to apply a file missing `{{ .ConfirmationURL }}` — a
+template without its link is a dead letter. Invite/reauthentication
+templates stay at Supabase defaults (nothing on the site fires them).
+
 ---
 
 ## How Discord ↔ account linking works
