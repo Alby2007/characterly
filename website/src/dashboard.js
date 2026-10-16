@@ -4,7 +4,7 @@ import { DISCORD_OAUTH_ENABLED } from "./config.js";
 import {
   requireAuth, getProfile, updateDisplayName,
   updatePassword, deleteAccount, signOut,
-  linkDiscord, getIdentities, unlinkDiscord, unlinkDiscordLink, claimLinkCode,
+  linkDiscord, getIdentities, unlinkDiscord, unlinkDiscordLink, claimLinkCode, withTimeout,
   getBotSettings, saveBotSettings, getByokStatus, getCreditLedger,
 } from "./auth.js";
 
@@ -331,11 +331,16 @@ document.addEventListener("keydown", e => { if (e.key === "Escape" && !modal.hid
 confirmInput.addEventListener("input", () => { deleteBtn.disabled = confirmInput.value !== "DELETE"; });
 deleteBtn.addEventListener("click", async () => {
   deleteBtn.disabled = true;
-  const { error } = await deleteAccount();
+  // Bound the rpc: a hung response after the server committed would otherwise
+  // strand the modal (which swallows every click). A retry is safe — deleting
+  // an already-deleted user is a no-op that returns success.
+  const { error } = await withTimeout(deleteAccount(), 15000, "Delete").catch(e => ({ error: e }));
   if (error) {
-    alert(error.message);
+    alert(error.message ?? "Delete failed — try again.");
     deleteBtn.disabled = false;
     return;
   }
-  try { await signOut(); } finally { window.location.href = "/"; }
+  // signOut is bounded and force-clears local session keys — always navigates.
+  await signOut();
+  window.location.href = "/";
 });

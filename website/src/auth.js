@@ -49,7 +49,27 @@ export const resendVerification = email =>
 export const resetPassword = email =>
   supabase.auth.resetPasswordForEmail(email, { redirectTo: `${origin()}/account?mode=recovery` });
 export const updatePassword = newPassword => supabase.auth.updateUser({ password: newPassword });
-export const signOut = () => supabase.auth.signOut({ scope: "local" });
+
+/** Reject if `p` doesn't settle within `ms` — supabase-js calls carry no
+ * timeout, and a wedged network call must not freeze the UI behind a modal. */
+export const withTimeout = (p, ms, label = "Request") =>
+  Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${label} timed out — try again`)), ms))]);
+
+// supabase-js signOut() can hang forever: even scope:'local' POSTs /logout
+// with no timeout, and dead sessions (deleted/expired user) are a known
+// upstream wedge (supabase/auth#1518, supabase-js#1700). Bound the wait and
+// force-clear the local session keys so callers can always navigate after —
+// server-side sessions are already gone for deleted users anyway.
+const clearLocalSession = () => {
+  for (const key of Object.keys(localStorage)) {
+    if (/^sb-.*-auth-token/.test(key)) localStorage.removeItem(key);
+  }
+};
+export const signOut = () =>
+  Promise.race([supabase.auth.signOut({ scope: "local" }), new Promise(r => setTimeout(r, 2500))])
+    .catch(() => {})   // the goal is "leave" — an SDK error must not block navigation
+    .then(clearLocalSession);
+
 export const deleteAccount = () => supabase.rpc("delete_own_account");
 
 // ── Discord OAuth ────────────────────────────────────────────────────────────
