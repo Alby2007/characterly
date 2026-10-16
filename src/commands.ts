@@ -410,13 +410,42 @@ export function buildPublishModal(companion: Companion, listing: CompanionListin
     .setMaxLength(1000)
     .setPlaceholder("The character opens the conversation, in their voice");
   if (listing?.greeting) greetingInput.setValue(listing.greeting.slice(0, 1000));
+  // Cover art: the embed's large image doubles as the forum's Gallery cover.
+  // Prefilled so republish shows (and can swap/clear) the current cover.
+  const coverInput = new TextInputBuilder()
+    .setCustomId("listing-cover")
+    .setLabel("Cover image URL (optional)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false)
+    .setMaxLength(400)
+    .setPlaceholder("https://… image URL — becomes the gallery cover");
+  const prefillCover = listing?.avatarUrl ?? companion.avatarUrl;
+  if (prefillCover) coverInput.setValue(prefillCover.slice(0, 400));
 
   modal.addComponents(
     new ActionRowBuilder<TextInputBuilder>().addComponents(nameInput),
     new ActionRowBuilder<TextInputBuilder>().addComponents(taglineInput),
     new ActionRowBuilder<TextInputBuilder>().addComponents(greetingInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(coverInput),
   );
   return modal;
+}
+
+/** One-field URL modal for the card's Cover button. Blank input clears the
+ *  cover — the same control sets and removes. */
+export function buildCoverModal(listing: CompanionListing): ModalBuilder {
+  const input = new TextInputBuilder()
+    .setCustomId("cover-url")
+    .setLabel("Cover image URL — blank removes it")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false)
+    .setMaxLength(400)
+    .setPlaceholder("https://… public image URL");
+  if (listing.avatarUrl) input.setValue(listing.avatarUrl.slice(0, 400));
+  return new ModalBuilder()
+    .setCustomId(`market_cover:${listing.id}`)
+    .setTitle(`Cover image — ${listing.name.slice(0, 30)}`)
+    .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
 }
 
 export function buildMarketPersonaModal(listing: CompanionListing): ModalBuilder {
@@ -689,7 +718,8 @@ async function doRelist(
   const tagRow = await tagPickerRow(interaction.client, res.listing.id);
   return reply(
     `**${res.listing.name}** is back on the shelf in <#${config.marketplaceChannelId}>!` +
-    (tagRow ? " Pick the tags that fit it below." : ""),
+    (tagRow ? " Pick the tags that fit it below." : "") +
+    " The post's **Cover image** button sets its gallery art.",
     tagRow ? [tagRow] : [],
   );
 }
@@ -876,7 +906,7 @@ export const commandDefinitions = [
       { name: "kick — Admin: remove a member's companion from this server", value: "kick" },
       { name: "key — Connect or update your personal AI API key", value: "key" },
       { name: "status — Check your personal API key, DM usage, and active servers", value: "status" },
-      { name: "avatar — Set your companion's avatar URL", value: "avatar" },
+      { name: "avatar — Set your companion's avatar (URL or upload)", value: "avatar" },
       { name: "publish — List your companion in the hub server's marketplace", value: "publish" },
       { name: "create — Author an extra marketplace character (counts toward listing slots)", value: "create" },
       { name: "unpublish — Remove your companion from the marketplace", value: "unpublish" },
@@ -885,6 +915,7 @@ export const commandDefinitions = [
       { name: "drop — Give up an adopted companion (12h re-adopt cooldown)", value: "drop" },
     ] },
     { name: "avatar_url", description: "Public http(s) image URL when action is avatar", type: 3, required: false },
+    { name: "avatar_file", description: "Uploaded image when action is avatar — also used as the marketplace cover", type: 11, required: false },
     { name: "user", description: "Member whose companion to inspect (card) or remove (kick)", type: 6, required: false }
   ] },
   // In a server this is the guild-scope key (admin only); in DMs it stores the
@@ -1252,14 +1283,32 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     }
     if (action === "avatar") {
       const url = interaction.options.getString("avatar_url")?.trim();
-      if (!url || !isSafeUrl(url) || await resolvesToPrivateAddress(new URL(url).hostname)) {
-        return interaction.reply({ content: "Please provide a valid public `http(s)` image URL in `avatar_url`.", ephemeral: true });
+      const file = interaction.options.getAttachment?.("avatar_file") ?? null;
+      if (url && file) {
+        return interaction.reply({ content: "Pick one — either `avatar_url` or `avatar_file`, not both.", ephemeral: true });
       }
-      const updated = await store.updateCompanionAvatar(interaction.user.id, url);
+      let avatarUrl: string;
+      if (file) {
+        // Discord CDN links are already public https; keep the scheme check
+        // anyway so a forged/stub attachment can't smuggle another protocol.
+        if (!file.contentType?.startsWith("image/")) {
+          return interaction.reply({ content: "`avatar_file` must be an image upload (png, jpg, webp, gif…).", ephemeral: true });
+        }
+        if (!isSafeUrl(file.url)) {
+          return interaction.reply({ content: "That upload didn't give me a usable image URL — try `avatar_url` instead.", ephemeral: true });
+        }
+        avatarUrl = file.url;
+      } else {
+        if (!url || !isSafeUrl(url) || await resolvesToPrivateAddress(new URL(url).hostname)) {
+          return interaction.reply({ content: "Provide a public `http(s)` image in `avatar_url`, or upload one as `avatar_file`.", ephemeral: true });
+        }
+        avatarUrl = url;
+      }
+      const updated = await store.updateCompanionAvatar(interaction.user.id, avatarUrl);
       if (!updated) {
         return interaction.reply({ content: "You haven't created a companion yet — send me a DM first!", ephemeral: true });
       }
-      return interaction.reply({ content: `Updated **${updated.name || "your companion"}**'s avatar.`, ephemeral: true });
+      return interaction.reply({ content: `Updated **${updated.name || "your companion"}**'s avatar — it'll show as the marketplace cover next time you publish (or use the listing's **Cover image** button).`, ephemeral: true });
     }
     if (action === "publish") {
       if (!config.marketplaceChannelId) {
@@ -1954,12 +2003,13 @@ export async function handleCompanionModal(
     inc("market.published");
     const manageRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId(`market:editmodal:${listing.id}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`market:cover:${listing.id}`).setLabel("Cover image").setStyle(ButtonStyle.Secondary),
     );
     const tagRow = await tagPickerRow(interaction.client, listing.id);
     return interaction.reply({
       ephemeral: true,
       content:
-        `**${listing.name}** is live in <#${config.marketplaceChannelId}>! Use **Edit persona** below to set traits and their bond with adopters.` +
+        `**${listing.name}** is live in <#${config.marketplaceChannelId}>! Use **Edit persona** for traits and bond, or **Cover image** for the gallery art.` +
         (tagRow ? " Pick the tags that fit it below." : ""),
       components: [manageRow, ...(tagRow ? [tagRow] : [])],
     });
@@ -1985,6 +2035,16 @@ export async function handleCompanionModal(
     const name = interaction.fields.getTextInputValue("listing-name").trim().slice(0, 64) || companion.name;
     const tagline = interaction.fields.getTextInputValue("listing-tagline").trim().slice(0, 120);
     const greeting = interaction.fields.getTextInputValue("listing-greeting").trim().slice(0, 1000);
+    // The modal's cover field is the avatar source of truth on publish —
+    // it's prefilled with the current cover, so blank means "remove it".
+    const coverField = interaction.fields.getTextInputValue("listing-cover").trim().slice(0, 400);
+    let avatarUrl: string | null = null;
+    if (coverField) {
+      if (!isSafeUrl(coverField) || await resolvesToPrivateAddress(new URL(coverField).hostname)) {
+        return interaction.reply({ content: "That cover image URL isn't a valid public `http(s)` URL.", ephemeral: true });
+      }
+      avatarUrl = coverField;
+    }
     if (!tagline || !greeting) {
       return interaction.reply({ content: "Tagline and greeting are both required.", ephemeral: true });
     }
@@ -2015,7 +2075,7 @@ export async function handleCompanionModal(
       ownerDynamic: existing?.ownerDynamic ?? companion.ownerDynamic,
       backstory: existing?.backstory ?? companion.backstory,
       greeting,
-      avatarUrl: existing?.avatarUrl ?? companion.avatarUrl,
+      avatarUrl,
     }, { maxListings: listingCapFor(store, account), maxDailyPublish: config.marketPublishDailyCap });
     if (!res.ok) {
       return interaction.reply({ content: res.reason === "daily_cap" ? DAILY_PUBLISH_MSG : LISTING_CAP_MSG, ephemeral: true });
@@ -2047,13 +2107,15 @@ export async function handleCompanionModal(
     inc("market.published");
     const manageRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId(`market:editmodal:${listing.id}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`market:cover:${listing.id}`).setLabel("Cover image").setStyle(ButtonStyle.Secondary),
     );
     const tagRow = await tagPickerRow(interaction.client, listing.id);
     return interaction.reply({
       ephemeral: true,
       content:
         `**${listing.name}** is live in <#${config.marketplaceChannelId}>! (v${listing.version}) — anyone can adopt them from the post.` +
-        (tagRow ? " Pick the tags that fit it below." : ""),
+        (tagRow ? " Pick the tags that fit it below." : "") +
+        " Set gallery art anytime with the post's **Cover image** button.",
       components: [manageRow, ...(tagRow ? [tagRow] : [])],
     });
   }
@@ -2099,6 +2161,46 @@ export async function handleCompanionModal(
     return interaction.reply({
       ephemeral: true,
       content: `**${updated.name}** updated to v${updated.version} — the change is live for all ${updated.addCount} adopter${updated.addCount === 1 ? "" : "s"}.`,
+    });
+  }
+
+  // market_cover:<listingId> — cover image set/clear; edits the forum post's
+  // starter message in place so the gallery cover updates immediately.
+  if (interaction.customId.startsWith("market_cover:")) {
+    const listingId = Number(interaction.customId.slice("market_cover:".length));
+    const userId = interaction.user.id;
+    const listing = await store.listingById(listingId);
+    if (!listing || listing.creatorUserId !== userId) {
+      return interaction.reply({ content: "That's not your listing.", ephemeral: true });
+    }
+    if (await store.creatorBan(userId).catch(() => null)) {
+      return interaction.reply({ content: BANNED_CREATOR_MSG, ephemeral: true });
+    }
+    const url = interaction.fields.getTextInputValue("cover-url").trim().slice(0, 400);
+    let avatarUrl: string | null = null;
+    if (url) {
+      if (!isSafeUrl(url) || await resolvesToPrivateAddress(new URL(url).hostname)) {
+        return interaction.reply({ content: "That cover image URL isn't a valid public `http(s)` URL.", ephemeral: true });
+      }
+      avatarUrl = url;
+    }
+    const updated = await store.updateListing(listing.id, userId, {
+      name: listing.name, tagline: listing.tagline, voicePersona: listing.voicePersona,
+      coreTraits: listing.coreTraits, ownerDynamic: listing.ownerDynamic,
+      backstory: listing.backstory, greeting: listing.greeting, avatarUrl,
+    });
+    if (!updated) {
+      return interaction.reply({ content: "That's not your listing.", ephemeral: true });
+    }
+    // Re-render the OP card in place — same helper the rating flow uses, so
+    // the gallery cover updates immediately without a repost.
+    await refreshListingCard(interaction.client, updated, store);
+    inc("market.coverSet");
+    return interaction.reply({
+      ephemeral: true,
+      content: avatarUrl
+        ? `Cover updated for **${updated.name}** — the forum post refreshes in place.`
+        : `Cover removed from **${updated.name}** — the card still renders normally.`,
     });
   }
 
@@ -2635,6 +2737,19 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         return interaction.reply({ content: "Editing requires modal support.", ephemeral: true });
       }
       return interaction.showModal(buildMarketPersonaModal(listing));
+    }
+    if (sub === "cover") {
+      const listing = await store.listingById(id);
+      if (!listing || listing.creatorUserId !== userId) {
+        return interaction.reply({ content: "That's not your listing.", ephemeral: true });
+      }
+      if (await store.creatorBan(userId).catch(() => null)) {
+        return interaction.reply({ content: BANNED_CREATOR_MSG, ephemeral: true });
+      }
+      if (typeof interaction.showModal !== "function") {
+        return interaction.reply({ content: "Setting a cover requires modal support.", ephemeral: true });
+      }
+      return interaction.showModal(buildCoverModal(listing));
     }
     return;
   }

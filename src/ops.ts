@@ -41,9 +41,14 @@ interface ThreadLike {
 
 interface SendableChannel {
   send(payload: unknown): Promise<unknown>;
-  /** Present on real text channels — the verify-gate idempotency probe. */
+  /** Present on real text channels — the verify-gate idempotency probe.
+   *  discord.js Collections yield [snowflake, message] pairs; plain iterables
+   *  yield messages — both shapes are unwrapped at the call site. */
   messages?: {
-    fetch(opts: { limit: number }): Promise<Iterable<{ author?: { id?: string }; components?: unknown[] }>>;
+    fetch(opts: { limit: number }): Promise<Iterable<
+      { author?: { id?: string }; components?: unknown[]; delete?(): Promise<unknown> } |
+      [unknown, { author?: { id?: string }; components?: unknown[]; delete?(): Promise<unknown> }]
+    >>;
   };
   /** Forum channels only — the tag taxonomy the marketplace sweep manages. */
   availableTags?: ForumTagLike[];

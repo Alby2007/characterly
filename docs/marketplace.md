@@ -33,11 +33,12 @@ live listing — a new listing, or a delisted → active *revive*. Republishing 
 already-live listing is the only free path.
 
 Modal (`market_publish:<companionId>`): **display name**, **tagline** (card
-blurb), **greeting** (the character's first DM to an adopter). On first publish
-the persona is cloned from the companion; on republish the existing listing
-persona is preserved and only name/tagline/greeting update — persona edits go
-through **Edit persona** (`market:editmodal` → `market_edit:<listingId>` modal:
-name, voice, traits, bond, backstory).
+blurb), **greeting** (the character's first DM to an adopter), and **cover
+image URL** (optional — prefilled with the current cover, so clearing it
+removes the art). On first publish the persona is cloned from the companion;
+on republish the existing listing persona is preserved and only the modal
+fields update — persona edits go through **Edit persona** (`market:editmodal`
+→ `market_edit:<listingId>` modal: name, voice, traits, bond, backstory).
 
 ### Path B: author a freehand character — `/companion action:create`
 
@@ -45,9 +46,9 @@ For characters not tied to your awakened bond (v35 — `source_companion_id` is
 nullable and stays NULL). Gates: marketplace configured → linked account → slot
 check (same atomic enforcement as `publish`). Modal: name, tagline, greeting,
 voice, optional backstory. Traits/dynamic start as defaults; the **Edit
-persona** button on the success reply fills them in. `create` does *not*
-require an awakened companion — a pure creator can join, link, and stock the
-shelf.
+persona** button on the success reply fills them in, and **Cover image** adds
+the art. `create` does *not* require an awakened companion — a pure creator
+can join, link, and stock the shelf.
 
 ### What the bot does with a publish (both paths)
 
@@ -187,6 +188,30 @@ attachment or the embed's large `image` field (`embed.thumbnail` does not
 count). That's why `buildListingCard` maps `avatarUrl` → `setImage` — a
 creator's avatar URL doubles as the listing cover — and why seed personas
 attach art files instead of URL-ing them (real uploads always resolve).
+
+### Creators setting covers
+
+Three doors, one field (`companion_listings.avatar_url`):
+
+- **Cover image button** — every listing card carries a creator-only **Cover
+  image** button (`market:cover:<id>` → `market_cover:<id>` modal). Ownership
+  and the creator-ban freeze are re-checked at both the button and the modal
+  submit — customIds are forgeable. Submitting a URL writes `avatar_url`,
+  then `refreshListingCard` edits the OP card in place (no repost — ratings
+  and comments are untouched). Submitting blank removes the cover; a card
+  without one still renders normally.
+- **Publish-modal field** — `action:publish`'s modal has an optional *Cover
+  image URL* slot, prefilled with the listing's (then the companion's)
+  current value. Whatever's in the box at submit is the new truth — blank
+  clears. This also fixes the old republish semantics where an existing
+  cover always won over a freshly-set companion avatar.
+- **`/companion action:avatar`** — accepts `avatar_url` (validated public
+  URL) *or* `avatar_file` (a Discord attachment upload; its CDN URL is used
+  directly). Supplying both is refused. On an awakened companion it sets
+  `companions.avatar_url`, which the publish modal picks up on next publish.
+
+All URL inputs run `isSafeUrl` + `resolvesToPrivateAddress` — public
+`http(s)` only, no private IPs, no localhost, no unresolvable hosts.
 
 ## Adopting
 

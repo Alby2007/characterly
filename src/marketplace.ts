@@ -55,6 +55,8 @@ export function buildListingComponents(listingId: number): ActionRowBuilder<Butt
     new ButtonBuilder().setCustomId(`market:add:${listingId}`).setLabel("Add to your companions").setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(`market:rate:${listingId}`).setLabel("Rate").setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId(`market:tags:${listingId}`).setLabel("Tags").setStyle(ButtonStyle.Secondary),
+    // Creator-only at click (same gate as Tags) — the URL-modal cover setter.
+    new ButtonBuilder().setCustomId(`market:cover:${listingId}`).setLabel("Cover image").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`market:report:${listingId}`).setLabel("Report").setStyle(ButtonStyle.Secondary),
   );
 }

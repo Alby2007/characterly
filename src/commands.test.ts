@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ChannelType } from "discord.js";
 import type { ButtonInteraction, ChatInputCommandInteraction, MessageContextMenuCommandInteraction, ModalSubmitInteraction, StringSelectMenuInteraction } from "discord.js";
-import { handleMemoryButton, handleMemoryCommand, handleMarketplaceContext, handleMarketSelect, handleSetupModal } from "./commands.js";
+import { handleMemoryButton, handleMemoryCommand, handleMarketplaceContext, handleMarketSelect, handleSetupModal, handleCompanionModal, buildCoverModal, buildPublishModal } from "./commands.js";
 import { ProfileStore } from "./profiles.js";
 import type { MemoryStore } from "./database.js";
 import { makeTestSql, makeStore } from "./test-helpers.js";
@@ -38,6 +38,7 @@ function stubCommand(opts: {
       getString: (name: string, _required?: boolean) => opts.options?.[name] ?? null,
       getUser: (name: string) => opts.options?.[name] ?? null,
       getChannel: (name: string) => opts.options?.[name] ?? null,
+      getAttachment: (name: string) => opts.options?.[name] ?? null,
     },
     reply: async (r: (typeof replies)[number]) => { replies.push(r); return r; },
     editReply: async (r: string) => { replies.push({ content: r }); return r; },
@@ -81,6 +82,7 @@ function stubButton(opts: {
     },
     reply: async (r: (typeof replies)[number]) => { replies.push(r); return r; },
     update: async (r: (typeof updates)[number]) => { updates.push(r); return r; },
+    showModal: async (m: unknown) => { replies.push({ content: `modal:${(m as { data?: { custom_id?: string } }).data?.custom_id ?? "?"}` }); },
   };
   return { interaction: interaction as unknown as ButtonInteraction, replies, updates };
 }
@@ -1147,4 +1149,157 @@ test("Staff pick — mod toggles the badge on/off; non-mod and non-marketplace r
       assert.match(mod2.replies[0]?.content ?? "", /Removed/i);
     } finally { await sql.end(); }
   } finally { Object.assign(config, saved); }
+});
+
+// ── Marketplace: cover image ─────────────────────────────────────────────────
+
+function stubCoverSubmit(opts: { listingId: number; userId: string; coverUrl?: string; edits?: unknown[] }) {
+  const replies: Replies = [];
+  const edits = opts.edits ?? [];
+  const starter = { edit: async (p: unknown) => { edits.push(p); return p; } };
+  const thread = { fetchStarterMessage: async () => starter };
+  const forum = { type: ChannelType.GuildForum, threads: { fetch: async () => thread } };
+  const interaction = {
+    customId: `market_cover:${opts.listingId}`,
+    user: { id: opts.userId, username: "C" },
+    fields: { getTextInputValue: () => opts.coverUrl ?? "" },
+    client: {
+      channels: { fetch: async () => forum },
+      users: { fetch: async () => ({ globalName: "The Creator", username: "C" }) },
+    },
+    reply: async (r: (typeof replies)[number]) => { replies.push(r); return r; },
+  };
+  return { interaction: interaction as unknown as ModalSubmitInteraction, replies, edits };
+}
+
+test("market:cover button — creator gets the modal, others and banned creators don't", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const listing = await makeListingRow(store, "u-cover");
+
+    const stranger = stubButton({ customId: `market:cover:${listing.id}`, userId: "u-rando" });
+    await handleMemoryButton(stranger.interaction, store);
+    assert.match(stranger.replies[0]?.content ?? "", /not your listing/i);
+
+    await store.banCreator("u-cover", "u-mod");
+    const banned = stubButton({ customId: `market:cover:${listing.id}`, userId: "u-cover" });
+    await handleMemoryButton(banned.interaction, store);
+    assert.match(banned.replies[0]?.content ?? "", /suspended|banned|removed/i);
+    await sql`DELETE FROM marketplace_bans`;
+
+    const own = stubButton({ customId: `market:cover:${listing.id}`, userId: "u-cover" });
+    await handleMemoryButton(own.interaction, store);
+    assert.equal(own.replies[0]?.content, `modal:market_cover:${listing.id}`);
+  } finally { await sql.end(); }
+});
+
+test("market_cover submit — sets the cover and re-renders the OP card in place", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const listing = await makeListingRow(store, "u-cover2");
+    await store.setListingThread(listing.id, "t-99");
+
+    const { interaction, replies, edits } = stubCoverSubmit({
+      listingId: listing.id, userId: "u-cover2", coverUrl: "https://example.com/art.png",
+    });
+    await handleCompanionModal(interaction, store);
+    assert.match(replies[0]?.content ?? "", /Cover updated/i);
+    assert.equal((await store.listingById(listing.id))!.avatarUrl, "https://example.com/art.png");
+    assert.equal(edits.length, 1, "starter message must be edited in place — not reposted");
+    const embed = (edits[0] as { embeds: { data: { image?: { url?: string } } }[] }).embeds[0];
+    assert.equal(embed.data.image?.url, "https://example.com/art.png");
+  } finally { await sql.end(); }
+});
+
+test("market_cover submit — rejects private/forged URLs and non-owners; blank clears", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const listing = await makeListingRow(store, "u-cover3");
+
+    const stranger = stubCoverSubmit({ listingId: listing.id, userId: "u-other", coverUrl: "https://example.com/x.png" });
+    await handleCompanionModal(stranger.interaction, store);
+    assert.match(stranger.replies[0]?.content ?? "", /not your listing/i);
+
+    const bad = stubCoverSubmit({ listingId: listing.id, userId: "u-cover3", coverUrl: "http://169.254.169.254/latest" });
+    await handleCompanionModal(bad.interaction, store);
+    assert.match(bad.replies[0]?.content ?? "", /valid public/i);
+    assert.equal((await store.listingById(listing.id))!.avatarUrl, null, "rejected URL must not persist");
+
+    await store.updateListing(listing.id, "u-cover3", {
+      name: listing.name, tagline: listing.tagline, voicePersona: listing.voicePersona,
+      coreTraits: listing.coreTraits, ownerDynamic: listing.ownerDynamic,
+      backstory: listing.backstory, greeting: listing.greeting, avatarUrl: "https://example.com/old.png",
+    });
+    const clear = stubCoverSubmit({ listingId: listing.id, userId: "u-cover3", coverUrl: "" });
+    await handleCompanionModal(clear.interaction, store);
+    assert.match(clear.replies[0]?.content ?? "", /Cover removed/i);
+    assert.equal((await store.listingById(listing.id))!.avatarUrl, null);
+  } finally { await sql.end(); }
+});
+
+test("cover modals — buildCoverModal prefills; buildPublishModal exposes the field", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const res = await store.createListing("u-cover4", {
+      name: "Arted", tagline: "t", voicePersona: "v", coreTraits: [],
+      ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: "https://example.com/cur.png",
+    });
+    if (!res.ok) throw new Error("listing failed");
+    const modal = buildCoverModal(res.listing).toJSON();
+    assert.equal(modal.custom_id, `market_cover:${res.listing.id}`);
+    assert.equal((modal.components[0] as any).components[0].custom_id, "cover-url");
+    assert.equal((modal.components[0] as any).components[0].value, "https://example.com/cur.png");
+
+    const companion = await store.activateCompanion("u-cover4", "Owner", {
+      name: "Nyx", voicePersona: "dry", coreTraits: [], ownerDynamic: "d",
+      backstory: "", avatarUrl: "https://example.com/comp.png",
+    });
+    const pub = buildPublishModal(companion, null).toJSON();
+    const fieldIds = pub.components.map((r: any) => r.components[0].custom_id);
+    assert.ok(fieldIds.includes("listing-cover"), "publish modal must expose a cover field");
+    const coverRow = pub.components.find((r: any) => r.components[0].custom_id === "listing-cover") as any;
+    assert.equal(coverRow.components[0].value, "https://example.com/comp.png", "prefills the companion avatar");
+    assert.equal(coverRow.components[0].required, false);
+  } finally { await sql.end(); }
+});
+
+test("/companion action:avatar — file upload wins over URL path, both-refused, non-image refused", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    await store.activateCompanion("u-av", "Owner", {
+      name: "Nyx", voicePersona: "dry", coreTraits: [], ownerDynamic: "d",
+      backstory: "", avatarUrl: null,
+    });
+
+    const both = stubCommand({
+      commandName: "companion", userId: "u-av",
+      options: { action: "avatar", avatar_url: "https://example.com/a.png", avatar_file: { url: "https://cdn.discordapp.com/x.png", contentType: "image/png" } },
+    });
+    await handleMemoryCommand(both.interaction, store, brainFor);
+    assert.match(both.replies[0]?.content ?? "", /Pick one/i);
+
+    const notImg = stubCommand({
+      commandName: "companion", userId: "u-av",
+      options: { action: "avatar", avatar_file: { url: "https://cdn.discordapp.com/x.pdf", contentType: "application/pdf" } },
+    });
+    await handleMemoryCommand(notImg.interaction, store, brainFor);
+    assert.match(notImg.replies[0]?.content ?? "", /image upload/i);
+
+    const file = stubCommand({
+      commandName: "companion", userId: "u-av",
+      options: { action: "avatar", avatar_file: { url: "https://cdn.discordapp.com/attachments/1/art.png", contentType: "image/png" } },
+    });
+    await handleMemoryCommand(file.interaction, store, brainFor);
+    assert.match(file.replies[0]?.content ?? "", /avatar/i);
+    assert.equal((await store.getCompanionByOwner("u-av"))!.avatarUrl, "https://cdn.discordapp.com/attachments/1/art.png");
+
+    const neither = stubCommand({ commandName: "companion", userId: "u-av", options: { action: "avatar" } });
+    await handleMemoryCommand(neither.interaction, store, brainFor);
+    assert.match(neither.replies[0]?.content ?? "", /avatar_url|avatar_file/);
+  } finally { await sql.end(); }
 });

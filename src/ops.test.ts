@@ -255,7 +255,7 @@ test("ensureVerifyGate deletes duplicate cards but leaves other messages", async
     fetchChannel: async () => ({
       send: async () => {},
       // Collection shape: pairs. Two bot cards + a human message in between.
-      messages: { fetch: async () => new Map<string, unknown>([
+      messages: { fetch: async () => new Map([
         ["m-new", msg("m-new", "bot-1")],
         ["m-human", msg("m-human", "u-1", false)],
         ["m-old", msg("m-old", "bot-1")],
