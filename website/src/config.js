@@ -1,9 +1,10 @@
 // Single source of truth for outbound links — change them here, not in markup.
 export const LINKS = {
-  // Bot invite: applications.commands + bot scopes, with the permissions the
-  // bot needs (view/send/read history/manage webhooks/embeds/attach/react).
-  addToDiscord:
-    "https://discord.com/oauth2/authorize?client_id=1549171765056639048&scope=bot%20applications.commands&permissions=536988736",
+  // Discord-provided install link — scopes/permissions come from the app's
+  // default install settings (guild: bot+commands w/ perms; user: commands),
+  // so the authorize page offers BOTH "Add to Server" and "Add to My Apps".
+  // Pinning scope=bot here would force guild-only and hide the DM option.
+  addToDiscord: "https://discord.com/oauth2/authorize?client_id=1549171765056639048",
   discord: "https://discord.gg/vCjQ9v3md",
   github: "https://github.com/Alby2007/characterly",
   privacy: "https://github.com/Alby2007/characterly/blob/main/PRIVACY.md",
