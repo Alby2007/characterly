@@ -2461,12 +2461,15 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
     });
   }
 
-  // server:decline — the card's one-click opt-out. Leaving the guild fires
-  // GuildDelete → purgeGuild, so the disclosure's "kick deletes every row"
-  // promise is literally what the button does. Reply BEFORE leaving — the
-  // bot can't send anything once it's gone.
+  // server:decline — the card's opt-out is a two-step. Removing is instant
+  // and irreversible (GuildDelete purges every stored row), so the first
+  // click opens an ephemeral confirm instead of touching the shared card —
+  // a stray admin click must not wipe an established guild, and a confirm
+  // state on the shared card could strand Enable/Awaken for everyone else.
+  // The confirm carries the card's message id so it can be marked on the
+  // way out.
   if (parts[0] === "server" && parts[1] === "decline") {
-    if (!interaction.guildId || !interaction.guild) {
+    if (!interaction.guildId) {
       return interaction.reply({ content: "This button can only be used inside a Discord server.", ephemeral: true });
     }
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
@@ -2475,18 +2478,89 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         ephemeral: true,
       });
     }
-    await interaction.update({
-      content: "Characterly is leaving this server — every row it stored here is being deleted. Re-invite anytime.",
-      components: [],
+    const cardId = interaction.message?.id ?? "";
+    return interaction.reply({
+      ephemeral: true,
+      content:
+        "**Remove Characterly from this server?** The bot leaves immediately and every row it stored here — " +
+        "members' memories, profiles, settings — is permanently deleted. This can't be undone.",
+      components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`server:declineconfirm:${cardId}`)
+          .setLabel("Yes — remove and delete everything")
+          .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId("server:declinecancel")
+          .setLabel("Cancel")
+          .setStyle(ButtonStyle.Secondary),
+      )],
     });
-    await interaction.guild.leave().catch(error => {
+  }
+
+  if (parts[0] === "server" && parts[1] === "declinecancel") {
+    return interaction.update({ content: "Cancelled — Characterly stays.", components: [] });
+  }
+
+  if (parts[0] === "server" && parts[1] === "declineconfirm") {
+    const cardId = parts[2];
+    if (!interaction.guildId) {
+      return interaction.reply({ content: "This button can only be used inside a Discord server.", ephemeral: true });
+    }
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+      return interaction.reply({
+        content: "Only server administrators (`Manage Server`) can remove Characterly from this server.",
+        ephemeral: true,
+      });
+    }
+    // interaction.guild resolves from the guild cache — fall back to a fetch
+    // so a cold cache right after a restart doesn't false-refuse a real
+    // click, and a second admin's confirm (after the first already left)
+    // gets a clean answer instead of a 404.
+    const guild = interaction.guild
+      ?? await interaction.client.guilds.fetch(interaction.guildId).catch(() => null);
+    if (!guild) {
+      return interaction.update({ content: "I'm already gone from this server.", components: [] });
+    }
+    await interaction.update({ content: "Removing Characterly — every stored row is being deleted.", components: [] });
+    // Mark the card so nobody clicks Enable on a dead card. If it's already
+    // deleted that's fine — leaving is what matters.
+    const channel = interaction.channel;
+    const card = cardId && channel && "messages" in channel
+      ? await (channel as TextChannel).messages.fetch(cardId).catch(() => null)
+      : null;
+    if (card) {
+      await card.edit({
+        content: "Characterly is leaving this server — every row it stored here is being deleted. Re-invite anytime.",
+        components: [],
+      }).catch(() => {});
+    }
+    // Leave BEFORE any further sends — the bot can't message once it's gone.
+    const left = await guild.leave().then(() => true).catch(async error => {
       inc("server.decline_error");
       logError("Decline-and-leave failed", error);
-      return interaction.followUp({
-        content: "I couldn't remove myself — kick me manually and I'll still delete every stored row.",
+      // A second admin's confirm can land after the first already left — the
+      // 404 isn't a failure worth escalating, just say so. Never purge when
+      // the bot is still in the guild: it keeps operating on that data.
+      const gone = !interaction.client.guilds.cache.has(interaction.guildId!);
+      await interaction.followUp({
+        content: gone
+          ? "I'm already gone from this server."
+          : "I couldn't remove myself — kick me manually and I'll still delete every stored row.",
         ephemeral: true,
       }).catch(() => {});
+      return false;
     });
+    if (left) {
+      // Discord normally delivers GuildDelete → handleGuildDelete runs this
+      // exact pause+purge — but the event is at-most-once. Running it here
+      // too (idempotent) means a dropped gateway event can't leave the
+      // card's "every row is deleted" promise unkept.
+      pauseGuildClaims(guild.id);
+      await store.purgeGuild(guild.id).catch(error => {
+        inc("server.decline_purge_error");
+        logError("Decline purge failed — GuildDelete or the orphan sweep will retry", error);
+      });
+    }
     return;
   }
 

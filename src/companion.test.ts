@@ -702,10 +702,12 @@ test("onboarding UX: bare greeting guard, welcome/draft/awakened cards, proactiv
 
   const storedKeys = new Map<string, any>();
   let pausedState = true;
+  const purgedGuilds: string[] = [];
   const keyStore = {
     upsertGuildKey: async (scope: string, k: any) => { storedKeys.set(scope, k); },
     getCompanionByOwner: async () => null,
     setPaused: async (_gId: string, paused: boolean) => { pausedState = paused; },
+    purgeGuild: async (gId: string) => { purgedGuilds.push(gId); },
   } as unknown as MemoryStore;
 
   const keyEditReplies: any[] = [];
@@ -756,10 +758,12 @@ test("onboarding UX: bare greeting guard, welcome/draft/awakened cards, proactiv
   assert.equal(pausedState, false, "server:enable unpaused the guild");
   assert.match(enableReplies[0]?.content ?? "", /Characterly is now \*\*enabled\*\*/i);
 
-  // 9. server:decline — admins leave the guild (GuildDelete purges every row);
-  //    non-admins are refused and the bot stays.
+  // 9. server:decline — two-step: the click opens an ephemeral confirm and
+  //    leaves the shared card untouched; the confirm edits the card, then
+  //    leaves (GuildDelete purges every row). Non-admins refused at both
+  //    steps; a cold guild cache falls back to fetch; a failed leave gets an
+  //    ephemeral kick-me-manually fallback.
   let leftGuild = false;
-  const declineUpdates: any[] = [];
   const declineReplies: any[] = [];
   await handleMemoryButton(
     {
@@ -768,32 +772,130 @@ test("onboarding UX: bare greeting guard, welcome/draft/awakened cards, proactiv
       guild: { leave: async () => { leftGuild = true; } },
       user: { id: "u-admin", username: "Admin" },
       memberPermissions: { has: () => true },
+      message: { id: "m-card" },
       reply: async (r: any) => { declineReplies.push(r); return r; },
-      update: async (r: any) => { declineUpdates.push(r); return r; },
-    } as any,
-    keyStore,
-  );
-  assert.equal(leftGuild, true, "server:decline left the guild");
-  assert.equal(declineUpdates.length, 1, "card updated before leaving");
-  assert.match(declineUpdates[0]?.content ?? "", /leaving this server/i);
-  assert.deepEqual(declineUpdates[0]?.components, []);
-
-  let leftGuildDenied = false;
-  const deniedReplies: any[] = [];
-  await handleMemoryButton(
-    {
-      customId: "server:decline",
-      guildId: "g1",
-      guild: { leave: async () => { leftGuildDenied = true; } },
-      user: { id: "u-member", username: "Member" },
-      memberPermissions: { has: () => false },
-      reply: async (r: any) => { deniedReplies.push(r); return r; },
       update: async () => {},
     } as any,
     keyStore,
   );
-  assert.equal(leftGuildDenied, false, "non-admin decline never leaves");
+  assert.equal(leftGuild, false, "decline alone never leaves — it only confirms");
+  assert.equal(declineReplies.length, 1);
+  assert.equal(declineReplies[0]?.ephemeral, true, "confirm prompt is ephemeral");
+  assert.match(declineReplies[0]?.content ?? "", /can't be undone/i);
+  const confirmId = declineReplies[0]?.components?.[0]?.components?.[0]?.data?.custom_id ?? "";
+  assert.equal(confirmId, "server:declineconfirm:m-card", "confirm carries the card message id");
+
+  // Confirm: updates the ephemeral, edits the card, then leaves.
+  const cardEdits: any[] = [];
+  const confirmUpdates: any[] = [];
+  await handleMemoryButton(
+    {
+      customId: confirmId,
+      guildId: "g1",
+      guild: { id: "g1", leave: async () => { leftGuild = true; } },
+      user: { id: "u-admin", username: "Admin" },
+      memberPermissions: { has: () => true },
+      channel: { messages: { fetch: async (id: string) => ({ edit: async (r: any) => { cardEdits.push({ id, ...r }); } }) } },
+      client: { guilds: { fetch: async () => null, cache: { has: () => true } } },
+      update: async (r: any) => { confirmUpdates.push(r); return r; },
+      reply: async () => {},
+      followUp: async () => {},
+    } as any,
+    keyStore,
+  );
+  assert.equal(leftGuild, true, "confirmed decline left the guild");
+  assert.equal(confirmUpdates.length, 1);
+  assert.deepEqual(confirmUpdates[0]?.components, []);
+  assert.equal(cardEdits[0]?.id, "m-card", "the card message was edited on the way out");
+  assert.match(cardEdits[0]?.content ?? "", /leaving this server/i);
+  assert.deepEqual(cardEdits[0]?.components, []);
+  assert.deepEqual(purgedGuilds, ["g1"], "successful leave purges directly — a dropped GuildDelete can't strand the privacy promise");
+
+  // Cold cache: interaction.guild is null → falls back to guilds.fetch.
+  let leftViaFetch = false;
+  await handleMemoryButton(
+    {
+      customId: "server:declineconfirm:m-card",
+      guildId: "g1",
+      guild: null,
+      user: { id: "u-admin", username: "Admin" },
+      memberPermissions: { has: () => true },
+      channel: { messages: { fetch: async () => null } },
+      client: { guilds: { fetch: async () => ({ id: "g1", leave: async () => { leftViaFetch = true; } }), cache: { has: () => true } } },
+      update: async () => {},
+      reply: async () => {},
+      followUp: async () => {},
+    } as any,
+    keyStore,
+  );
+  assert.equal(leftViaFetch, true, "cold-cache confirm fetches the guild");
+  assert.equal(purgedGuilds.length, 2, "fetched-guild leave purges too");
+
+  // Leave failure → ephemeral fallback says kick manually (purge still runs
+  // on a real kick); an already-gone guild gets the benign message instead.
+  const failFollowUps: any[] = [];
+  await handleMemoryButton(
+    {
+      customId: "server:declineconfirm:m-card",
+      guildId: "g1",
+      guild: { leave: async () => { throw new Error("boom"); } },
+      user: { id: "u-admin", username: "Admin" },
+      memberPermissions: { has: () => true },
+      channel: { messages: { fetch: async () => null } },
+      client: { guilds: { fetch: async () => null, cache: { has: () => true } } },
+      update: async () => {},
+      reply: async () => {},
+      followUp: async (r: any) => { failFollowUps.push(r); return r; },
+    } as any,
+    keyStore,
+  );
+  assert.match(failFollowUps[0]?.content ?? "", /kick me manually/i);
+  assert.equal(purgedGuilds.length, 2, "a failed leave must NOT purge — the bot is still serving the guild");
+
+  const goneUpdates: any[] = [];
+  await handleMemoryButton(
+    {
+      customId: "server:declineconfirm:m-card",
+      guildId: "g1",
+      guild: null,
+      user: { id: "u-admin", username: "Admin" },
+      memberPermissions: { has: () => true },
+      channel: { messages: { fetch: async () => null } },
+      client: { guilds: { fetch: async () => { throw new Error("unknown guild"); }, cache: { has: () => false } } },
+      update: async (r: any) => { goneUpdates.push(r); return r; },
+      reply: async () => {},
+      followUp: async () => {},
+    } as any,
+    keyStore,
+  );
+  assert.match(goneUpdates[0]?.content ?? "", /already gone/i, "double-confirm says already gone");
+
+  // Non-admins are refused at both steps and nothing leaves.
+  let leftGuildDenied = false;
+  const deniedReplies: any[] = [];
+  const deniedGuild = { leave: async () => { leftGuildDenied = true; } };
+  for (const customId of ["server:decline", "server:declineconfirm:m-card"]) {
+    await handleMemoryButton(
+      {
+        customId,
+        guildId: "g1",
+        guild: deniedGuild,
+        user: { id: "u-member", username: "Member" },
+        memberPermissions: { has: () => false },
+        message: { id: "m-card" },
+        channel: { messages: { fetch: async () => null } },
+        client: { guilds: { fetch: async () => deniedGuild, cache: { has: () => true } } },
+        reply: async (r: any) => { deniedReplies.push(r); return r; },
+        update: async () => {},
+        followUp: async () => {},
+      } as any,
+      keyStore,
+    );
+  }
+  assert.equal(leftGuildDenied, false, "non-admin decline/confirm never leaves");
+  assert.equal(deniedReplies.length, 2);
   assert.match(deniedReplies[0]?.content ?? "", /administrators/i);
+  assert.equal(purgedGuilds.length, 2, "refused paths never purge");
 });
 
 // ── DB-backed integration tests ───────────────────────────────────────────────

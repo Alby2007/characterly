@@ -19,7 +19,7 @@ Alongside the bot, `website/` is a Vite multi-page site (landing page, account s
 | `src/profile-build.ts` | `runProfileBuild`, `PROFILE_BUILD_COOLDOWN_MS` | Self-service opt-in scan (`/profile-build`): targeted corpus → extraction → verification → scoped profile build |
 | `src/persist-extraction.ts` | `persistExtraction` | The single consent-gated write path for extraction results — person memories need an opted-in subject; relationships need one opted-in party |
 | `src/brains.ts` | `createBrainResolver`, `detectProviderFromKey`, `guardedLlmFetch` | User-first `Brain` resolver (BYOK): user's encrypted personal key (`dm:<userId>`) with prefix auto-detection (Groq, OpenRouter, OpenAI, xAI) → summoned companion owners' keys for server plumbing → operator env fallback → null (dormant) |
-| `src/guild-lifecycle.ts` | `announceIfNeeded`, `handleGuildDelete` | Characterly join disclosure card (with 1-click **Enable Characterly** and **Awaken Your Companion** buttons, idempotent via `announced_at`) + kick-purge |
+| `src/guild-lifecycle.ts` | `announceIfNeeded`, `handleGuildDelete` | Characterly join disclosure card (with 1-click **Enable Characterly**, **Awaken Your Companion**, and two-step **Remove Characterly** buttons, idempotent via `announced_at`) + kick-purge |
 | `src/jobs.ts` | `enqueue`, `claimNext`, `startWorker` | Postgres job queue for deferrable cognition — `SKIP LOCKED` claims with a 10-min visibility lease, per-guild serial + global cap 8, backoff retry, 5-attempt dead-letter, `NOTIFY`/`LISTEN` wake + 3s poll |
 | `src/speech-gate.ts` | `evaluateSpeechTurn` | Single-turn speak/silence evaluator used for standalone transcript replay tests |
 | `src/reply-throttle.ts` | `ReplyThrottle` | Per-user/actor reply budget (token bucket with refund on unsent replies) — bounds the drain one actor can cause against daily LLM caps |
@@ -268,11 +268,12 @@ Every LLM call resolves through `createBrainResolver` (`src/brains.ts`). In Char
 
 ## Guild lifecycle — consent posture
 
-New guilds start **dormant**: `server_settings` defaults are `memory_enabled=0, reply_enabled=0` (v16), so `handleMessage` returns before archiving and nothing is recorded. On every `GuildCreate`, `announceIfNeeded` (`guild-lifecycle.ts`) posts the Characterly disclosure card to the system channel and stamps `server_settings.announced_at` **only after a successful send**. The card includes two buttons:
+New guilds start **dormant**: `server_settings` defaults are `memory_enabled=0, reply_enabled=0` (v16), so `handleMessage` returns before archiving and nothing is recorded. On every `GuildCreate`, `announceIfNeeded` (`guild-lifecycle.ts`) posts the Characterly disclosure card to the system channel and stamps `server_settings.announced_at` **only after a successful send**. The card includes three buttons:
 - **Enable Characterly (Admins)** (`server:enable`, requires `Manage Server`) — unpauses the server in one click (`setPaused(guildId, false)`), with no server API key required.
 - **Awaken Your Companion** (`onboard:start`) — starts DM companion onboarding for members (or summons their already-awakened companion into the server).
+- **Remove Characterly (Admins)** (`server:decline`, requires `Manage Server`) — a two-step opt-out. The first click replies **ephemerally** with a *Yes — remove and delete everything* / *Cancel* pair (the shared card stays put, so a stray click can't wipe an established guild and a confirm state can't strand the other buttons). On `server:declineconfirm` the card is edited to "leaving — every row deleted", `guild.leave()` runs, and then `pauseGuildClaims` + `store.purgeGuild` run **directly** — `GuildDelete` normally delivers the same purge, but the event is at-most-once and the purge is idempotent, so a dropped gateway event can't leave the privacy promise unkept. If `leave()` throws (or a second admin's confirm lands after the first), an ephemeral fallback tells the admin to kick manually — the kick fires `GuildDelete`, which purges anyway.
 
-On `GuildDelete`, `handleGuildDelete` runs `store.purgeGuild` — every guild-scoped row in one FK-ordered transaction. `guild.unavailable` (a Discord outage, not a kick) is explicitly never a purge trigger; a kick during an active `/server-build` is absorbed by the build's error path.
+On `GuildDelete`, `handleGuildDelete` runs `store.purgeGuild` — every guild-scoped row in one FK-ordered transaction. `guild.unavailable` (a Discord outage, not a kick) is explicitly never a purge trigger; a kick during an active `/server-build` is absorbed by the build's error path, and post-purge straggler writes are swept by the periodic `guildsNotIn` orphan check.
 
 ---
 

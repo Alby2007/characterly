@@ -250,7 +250,7 @@ characterly/
 │   ├── profile-build.ts      # /profile-build per-user scan
 │   ├── server-ingest.ts      # Server-level historical build (ingest + /server-build)
 │   ├── ingest.ts             # CLI wrapper for runServerIngest
-│   ├── guild-lifecycle.ts    # Join disclosure card, 1-click enable, kick-purge
+│   ├── guild-lifecycle.ts    # Join disclosure card, 1-click enable, two-step decline opt-out, kick-purge
 │   ├── commands.ts           # Slash commands, onboarding cards/modals, interaction handlers
 │   ├── speech-gate.ts        # Standalone speak/silence evaluator for tests
 │   ├── reply-throttle.ts     # Per-user reply token bucket
