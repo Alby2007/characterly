@@ -3,7 +3,9 @@ import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder
 import { config } from "./config.js";
 import { inc } from "./metrics.js";
 import { logError, redactSecrets } from "./secrets.js";
-import { checkMessageContent } from "./safety.js";
+import { checkListingFields, checkMessageContent } from "./safety.js";
+import { CURATED_TAGS, postListingThread } from "./marketplace.js";
+import { SEED_LISTINGS } from "./seed-personas.js";
 import type { MemoryStore } from "./database.js";
 
 // ── House ops ────────────────────────────────────────────────────────────────
@@ -340,13 +342,7 @@ export function startLinkSweep(deps: OpsDeps): { stop: () => void } {
 //
 // Tag NAMES are the contract between Discord-side config and this code —
 // matched case-insensitively; a missing name skips its rule silently.
-
-export const CURATED_TAGS = {
-  new: "New",
-  topRated: "Top Rated",
-  trending: "Trending",
-  staffPick: "Staff Pick",
-} as const;
+// CURATED_TAGS lives in ./marketplace.js (the shared leaf module).
 
 export async function runTagSweep(deps: OpsDeps): Promise<number> {
   if (!config.marketplaceChannelId) return 0;
@@ -781,6 +777,60 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
       content: created.length ? `Created: ${created.join(", ")}` : "Layout already complete — nothing to create.",
       ephemeral: true,
     });
+  }
+
+  if (action === "seedmarket") {
+    if (!config.marketplaceChannelId) return interaction.reply({ content: "MARKETPLACE_CHANNEL_ID isn't set.", ephemeral: true });
+    if (!deps.botId) return interaction.reply({ content: "I can't resolve my own user id yet.", ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    // Idempotent — personas already listed under the bot account are skipped,
+    // so re-runs only fill gaps (safe after edits or new personas).
+    const existing = await deps.store.listMyListings(deps.botId).catch(() => null);
+    if (!existing) return interaction.editReply("Couldn't read existing listings — check the database.");
+    const byName = new Map(existing.map(l => [l.name.toLowerCase(), l]));
+    const cardAs = { client: interaction.client, user: interaction.client.user ?? interaction.user };
+    const results: string[] = [];
+    for (const p of SEED_LISTINGS) {
+      let listing = byName.get(p.name.toLowerCase());
+      if (listing) {
+        // Recovery: a seed left delisted (rollback leftover from a failed
+        // first run) relists — unless a mod took it down, which relistListing
+        // refuses on its own. A row missing its thread gets a fresh card.
+        if (listing.status === "delisted") {
+          const rel = await deps.store.relistListing(listing.id, deps.botId, SEED_LISTINGS.length).catch(() => null);
+          if (!rel?.ok) { results.push(`· ${p.name} — delisted, relist refused (${rel?.reason ?? "error"})`); continue; }
+          listing = rel.listing;
+        }
+        if (listing.status !== "active") { results.push(`· ${p.name} — status ${listing.status}, left alone`); continue; }
+        if (!listing.forumThreadId) {
+          const tid = await postListingThread(cardAs, listing, deps.store, { tagNames: p.tags });
+          if (!tid) { results.push(`✖ ${p.name} — thread recovery failed`); continue; }
+          await deps.store.setListingThread(listing.id, tid).catch(() => {});
+          results.push(`✔ ${p.name} — recovered (thread re-posted)`);
+          continue;
+        }
+        results.push(`· ${p.name} — already listed`);
+        continue;
+      }
+      // Our own curated text still passes through the same deterministic
+      // screen a user publish would — the standard is the standard.
+      const screen = checkListingFields(p);
+      if (!screen.ok) { results.push(`✖ ${p.name} — blocked by the listing screen (${screen.field}: ${screen.category})`); continue; }
+      const res = await deps.store.createListing(deps.botId, p).catch(() => null);
+      if (!res?.ok) { results.push(`✖ ${p.name} — listing create failed`); continue; }
+      const threadId = await postListingThread(cardAs, res.listing, deps.store, { tagNames: p.tags });
+      if (!threadId) {
+        await deps.store.delistListing(res.listing.id).catch(() => {});
+        results.push(`✖ ${p.name} — thread post failed (rolled back)`);
+        continue;
+      }
+      await deps.store.setListingThread(res.listing.id, threadId).catch(() => {});
+      inc("market.published");
+      results.push(`✔ ${p.name} — ${p.tags.join(", ")}`);
+      await new Promise(r => setTimeout(r, 300)); // forum pacing — thread creates aren't free
+    }
+    const made = results.filter(r => r.startsWith("✔")).length;
+    return interaction.editReply(`**Seed roster** — ${made} created, ${results.length - made} skipped/failed:\n${results.join("\n")}`.slice(0, 1990));
   }
 
   return interaction.reply({ content: `Unknown /ops action: ${action}`, ephemeral: true });

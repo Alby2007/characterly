@@ -128,7 +128,7 @@ the next `setAppliedTags` write):
   re-tag replaces only the creator's own picks.
 - **Curated badges** — four *moderated* tags the bot manages. The tag
   **names are the contract**: `New`, `Top Rated`, `Trending`, `Staff Pick`,
-  matched case-insensitively (`CURATED_TAGS` in `ops.ts`); a missing name
+  matched case-insensitively (`CURATED_TAGS` in `src/marketplace.ts`); a missing name
   skips its rule silently.
   - `New` — applied at thread creation; the tag sweep strips it once the
     thread is older than `MARKET_NEW_TAG_DAYS`.
@@ -145,6 +145,33 @@ three *automated* badges for active threads, writes only when the applied
 set differs, and caps the merged set at Discord's five-tag maximum with
 managed badges first. Badges belong to *active* listings — a delisted or
 banned row maps to no thread and its curated tags strip on the next pass.
+
+## The official seed roster
+
+`src/seed-personas.ts` holds fifteen first-party personas — original
+archetypes built to cover the proven demand curves on character platforms
+(comfort listener, RPG narrators, cold protector, masked operative, devoted
+mob boss, starship AI, chaotic gremlin, tutors and collaborators) *without*
+seeding canon IP: the marketplace rules ask creators to publish work they
+own, and platform-seeded copyrighted characters would undercut that before
+launch.
+
+Seeding is operator-driven — `/ops action:seedmarket` (house guild or DM,
+`OPS_USER_IDS`):
+
+- Each persona clears the *same* `checkListingFields` screen user publishes
+  face, then `createListing` under the **bot's own user id** — cards read
+  "by Characterly", rows are ordinary listings: adoptable, ratable,
+  reportable, moderatable.
+- **Idempotent by (bot, name)** — re-runs skip what exists; a delisted
+  leftover (from a failed first run) relists via `relistListing` (which
+  refuses mod takedowns on its own) and gets its thread re-posted; a
+  flagged/moderated seed is reported and left alone.
+- The comfort-listener slot is deliberately a *friend*, not a therapist —
+  Wren "always has time for you"; the persona text makes no clinical or
+  licensed-care claim.
+- Failed thread posts roll the listing back to delisted so the next run
+  retries cleanly. New threads get their genre tags plus the `New` badge.
 
 ## Adopting
 

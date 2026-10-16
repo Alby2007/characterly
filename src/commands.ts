@@ -14,7 +14,8 @@ import { inc, metricsSnapshot } from "./metrics.js";
 import type { Companion, CompanionListing, CompanionSpec, MessageEvent } from "./types.js";
 import { config } from "./config.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
-import { CURATED_TAGS, handleOpsCommand, handleHouseButton, isHouse, isMarketplaceThread } from "./ops.js";
+import { handleOpsCommand, handleHouseButton, isHouse, isMarketplaceThread } from "./ops.js";
+import { CURATED_TAGS, postListingThread, buildListingCard, buildListingComponents } from "./marketplace.js";
 
 export const ONBOARDING_ARCHETYPES: Record<
   string,
@@ -447,29 +448,9 @@ export function buildMarketPersonaModal(listing: CompanionListing): ModalBuilder
   return modal;
 }
 
-export function buildListingCard(listing: CompanionListing, creatorName: string, stats?: { avg: number; count: number }): EmbedBuilder {
-  const embed = new EmbedBuilder()
-    .setTitle(listing.name)
-    .setDescription(listing.tagline || "A companion up for adoption")
-    .addFields(
-      { name: "Voice & Vibe", value: listing.voicePersona || "—" },
-      { name: "Traits", value: listing.coreTraits.length ? listing.coreTraits.join(", ") : "—", inline: true },
-      { name: "Adopted by", value: `${listing.addCount} user${listing.addCount === 1 ? "" : "s"}`, inline: true },
-      { name: "Rating", value: stats && stats.count > 0 ? `★ ${stats.avg.toFixed(1)} · ${stats.count} rating${stats.count === 1 ? "" : "s"}` : "No ratings yet", inline: true },
-    )
-    .setFooter({ text: `by ${creatorName} · Characterly Marketplace · v${listing.version}` });
-  if (listing.avatarUrl) embed.setThumbnail(listing.avatarUrl);
-  return embed;
-}
-
-export function buildListingComponents(listingId: number): ActionRowBuilder<ButtonBuilder> {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`market:add:${listingId}`).setLabel("Add to your companions").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`market:rate:${listingId}`).setLabel("Rate").setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`market:tags:${listingId}`).setLabel("Tags").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`market:report:${listingId}`).setLabel("Report").setStyle(ButtonStyle.Secondary),
-  );
-}
+// Card builders + thread posting live in ./marketplace.js so ops.ts can use
+// them without a commands↔ops import cycle. Re-exported for existing imports.
+export { buildListingCard, buildListingComponents } from "./marketplace.js";
 
 /** Ephemeral multi-select of the forum's creator-pickable (non-moderated)
  *  tags — the curated badges never appear here. Returns null when the forum
@@ -610,32 +591,6 @@ async function listingSlotError(
   const count = await store.activeListingCount(userId);
   if (count < listingCapFor(store, account)) return null;
   return LISTING_CAP_MSG;
-}
-
-/** Create the forum thread + listing card the bot owns (both publish paths,
- *  plus relist). Returns the new thread id, or null on failure — the caller
- *  decides whether to roll the listing row back. */
-async function postListingThread(
-  interaction: { client: ChatInputCommandInteraction["client"]; user: { username?: string; globalName?: string | null } },
-  listing: CompanionListing,
-  store: MemoryStore,
-): Promise<string | null> {
-  const channel = await interaction.client.channels.fetch(config.marketplaceChannelId!).catch(() => null);
-  if (!channel || channel.type !== ChannelType.GuildForum) return null;
-  const creatorName = interaction.user.globalName ?? interaction.user.username ?? "a creator";
-  const stats = await store.listingRatingStats(listing.id).catch(() => undefined);
-  // Every fresh thread earns the curated "New" badge — the tag sweep strips
-  // it once the thread ages past MARKET_NEW_TAG_DAYS.
-  const newTag = channel.availableTags?.find(t => t.name.toLowerCase() === CURATED_TAGS.new.toLowerCase());
-  const thread = await channel.threads.create({
-    name: `${listing.name} — ${listing.tagline}`.slice(0, 100),
-    appliedTags: newTag ? [newTag.id] : undefined,
-    message: {
-      embeds: [buildListingCard(listing, creatorName, stats)],
-      components: [buildListingComponents(listing.id)],
-    },
-  }).catch(() => null);
-  return thread?.id ?? null;
 }
 
 /** Re-render the listing card in place after a rating lands. Best-effort —
@@ -946,6 +901,7 @@ export const commandDefinitions = [
       { name: "deploy — git pull + npm ci + restart", value: "deploy" },
       { name: "announce — post to the announcements channel", value: "announce" },
       { name: "layout — create missing house channels", value: "layout" },
+      { name: "seedmarket — populate the marketplace with the official roster", value: "seedmarket" },
     ] },
     { name: "text", description: "Announcement text (action=announce)", type: 3, required: false },
     { name: "lines", description: "Journal lines for action=logs (default 30, max 200)", type: 4, required: false },

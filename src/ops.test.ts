@@ -8,6 +8,7 @@ import {
   type OpsDeps, type AutomodMessage, type MemberLike,
 } from "./ops.js";
 import { config } from "./config.js";
+import { SEED_LISTINGS } from "./seed-personas.js";
 import type { MemoryStore } from "./database.js";
 
 // Config is a plain object — tests pin house/ops ids and restore on exit.
@@ -760,4 +761,86 @@ test("tag sweep: missing curated tag skips silently; inactive listing loses badg
   // No curated tags at all → early no-op.
   const none = forumDeps([makeThread("t-x")], { listings: [], tags: TAGS.filter(t => !t.moderated) });
   assert.equal(await runTagSweep(none), 0);
+});
+
+// ── Marketplace seeding ─────────────────────────────────────────────────────
+
+function opsInteraction(action: string, over: { userId?: string; guildId?: string; text?: string; lines?: number; channels?: Record<string, unknown> } = {}) {
+  const replies: Array<{ content?: string; ephemeral?: boolean }> = [];
+  const edits: string[] = [];
+  const interaction = {
+    user: { id: over.userId ?? "u-op" },
+    guildId: over.guildId === undefined ? HOUSE : over.guildId,
+    options: {
+      getString: (name: string, _req?: boolean) => (name === "action" ? action : name === "text" ? (over.text ?? null) : null),
+      getInteger: (name: string) => (name === "lines" ? (over.lines ?? null) : null),
+    },
+    client: {
+      user: { id: "bot-1", username: "Characterly", globalName: "Characterly" },
+      channels: { fetch: async (id: string) => over.channels?.[id] ?? null },
+    },
+    reply: async (r: (typeof replies)[number]) => { replies.push(r); return r; },
+    deferReply: async () => ({}),
+    editReply: async (r: { content?: string } | string) => { edits.push(typeof r === "string" ? r : r.content ?? ""); return r; },
+  };
+  return { interaction, replies, edits };
+}
+
+test("/ops seedmarket: creates missing personas with genre tags, skips existing", async () => {
+  const created: Array<{ name: string; appliedTags?: string[] }> = [];
+  const forum = {
+    type: 15, // GuildForum
+    availableTags: [
+      { id: "tag-new", name: "New", moderated: true },
+      { id: "tag-comp", name: "Companion" },
+      { id: "tag-sol", name: "Slice of Life" },
+    ],
+    threads: {
+      create: async (o: { name: string; appliedTags?: string[] }) => { created.push(o); return { id: "t-" + created.length }; },
+      fetch: async () => null,
+    },
+  };
+  const made: Array<{ spec: { name: string } }> = [];
+  const relisted: number[] = [];
+  const beansRow = { id: 10, name: "Beans", status: "delisted" as const, forumThreadId: null, version: 1, addCount: 0,
+    tagline: "t", voicePersona: "v", coreTraits: [], ownerDynamic: "", backstory: "", greeting: "g", avatarUrl: null };
+  initOps(makeDeps({
+    fetchChannel: async () => forum as never,
+    store: {
+      listMyListings: async () => [{ id: 9, name: "Wren", status: "active", forumThreadId: "t-old" }, beansRow],
+      createListing: async (_u: string, spec: { name: string }) => { made.push({ spec }); return { ok: true, listing: { id: 100 + made.length, version: 1, addCount: 0, status: "active", forumThreadId: null, ...spec } }; },
+      relistListing: async (id: number) => { relisted.push(id); return { ok: true, listing: { ...beansRow, status: "active" } }; },
+      delistListing: async () => true,
+      setListingThread: async () => true,
+      listingRatingStats: async () => undefined,
+    } as unknown as MemoryStore,
+  }));
+  const ix = opsInteraction("seedmarket", { channels: { "c-forum": forum } });
+  await handleOpsCommand(ix.interaction as never);
+  // Wren (active, threaded) skips; Beans (delisted, no thread) recovers via
+  // relist + re-post; the remaining 13 create fresh.
+  assert.equal(created.length, SEED_LISTINGS.length - 1, "all but Wren create threads — including Beans' recovery");
+  assert.equal(made.length, SEED_LISTINGS.length - 2, "Wren and Beans never hit createListing");
+  assert.deepEqual(relisted, [10], "Beans relisted before re-posting");
+  assert.equal(made.some(m => m.spec.name === "Wren"), false, "existing listing skipped by name");
+  assert.ok(created.find(c => c.name.startsWith("Beans")), "Beans recovery re-posts a thread");
+  const wren = created.find(c => c.name.startsWith("Wren"));
+  assert.equal(wren, undefined);
+  // A persona whose tags resolve (Companion + Slice of Life exist on the fake forum)
+  // gets appliedTags including New + its genres; names that don't resolve drop.
+  const meridian = created.find(c => c.name.startsWith("NSS Meridian"));
+  assert.ok(meridian);
+  assert.deepEqual(meridian!.appliedTags, ["tag-new"], "Sci-Fi tag absent from the fake forum — only New applies");
+  assert.match(ix.edits[0] ?? "", /Seed roster/);
+});
+
+test("/ops seedmarket: refuses when the marketplace channel isn't configured", async () => {
+  const saved = config.marketplaceChannelId;
+  config.marketplaceChannelId = undefined;
+  try {
+    initOps(makeDeps());
+    const ix = opsInteraction("seedmarket");
+    await handleOpsCommand(ix.interaction as never);
+    assert.match(ix.replies[0]?.content ?? "", /MARKETPLACE_CHANNEL_ID/i);
+  } finally { config.marketplaceChannelId = saved; }
 });
