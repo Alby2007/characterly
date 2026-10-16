@@ -66,15 +66,24 @@ Statuses: `active` → `flagged` (report threshold hold) → `delisted` /
 - **`flagged`** — moderation hold. New Adds blocked; clones keep chatting;
   creator **cannot** delist or relist it (that would launder the flag);
   republish saves edits but keeps the flag. Only a human review clears it.
-- **`delisted`** — soft removal. No new Adds; clones keep chatting. Creator
-  can relist (slot-checked). This is the creator's own "unpublish" state too.
+- **`delisted`** — soft removal. No new Adds; clones keep chatting. Two
+  flavors share this status, told apart by `moderation_events` (a `delist`,
+  `ban`, or `ban_creator` row marks a takedown):
+  - *Creator unpublish* — reversible: relist button/`/companion
+    action:relist` brings it back (slot-checked).
+  - *Mod takedown* — **not** creator-reversible: relist refuses, republish
+    saves edits but keeps it down, and it stays out of the relist picker.
+    Only a mod **Keep up** restores it.
 - **`banned`** — kill switch. No Adds, no relist, and **all clones freeze**:
   they vanish from adopter rosters, stop answering DMs, and stop speaking in
-  guilds. Query-level (`companions` rows are never deleted), so a bad ban is
-  fully reversible.
+  guilds. A frozen adoption also stops consuming the adopter's slot — the
+  user can't drop what they can't see, so the slot releases until the ban
+  lifts. Query-level (`companions` rows are never deleted), so a bad ban is
+  fully reversible: **Keep up** ladders `banned → flagged → active`.
 - **Creator ban** (`marketplace_bans`) — publish-ban + freeze: can't
-  publish/create again, all their listings → `banned`. They can still chat
-  and adopt personally.
+  publish, create, relist, or edit personas; all their listings → `banned`.
+  Enforced on every write path (command, button, and modal submit — custom
+  IDs are forgeable). They can still chat and adopt personally.
 
 ### Screening mechanics
 
@@ -95,17 +104,25 @@ classifier is the real screen, the report pipeline is the backstop.
 Forum-card **Report** opens a category picker (harmful / sexual / minor
 safety / hate / spam / stolen persona / other). Reports dedupe per
 `(listing, reporter)`; at `MARKETPLACE_REPORT_FLAG_THRESHOLD` the listing
-auto-flags. Every report pings `MARKETPLACE_MOD_CHANNEL_ID` with the
-category and action buttons — **Keep up** (unflag), **Delist**, **Ban
-listing**, **Ban creator** — gated to `MARKETPLACE_MOD_ROLE_IDS` (fallback:
-ManageGuild). Every mod action writes a `moderation_events` row with the
-actor, action, and note.
+auto-flags. The category is whitelisted server-side — a forged button
+customId can't inject arbitrary text (or a `@everyone`) into the mod ping.
+Every report pings `MARKETPLACE_MOD_CHANNEL_ID` with the category and
+action buttons — **Keep up** (unflag: `flagged→active`, mod-delisted→
+`active`, `banned→flagged`), **Delist**, **Ban listing**, **Ban creator** —
+gated to `MARKETPLACE_MOD_ROLE_IDS` (fallback: ManageGuild). Every mod
+action writes a `moderation_events` row with the actor, action, and note.
 
 ### Rate limits (per UTC day, derived from table rows)
 
-- `MARKET_PUBLISH_DAILY_CAP` (5) — new listings created
+- `MARKET_PUBLISH_DAILY_CAP` (5) — new listings created; republishes and
+  relists of existing rows don't consume it
 - `MARKET_REPORT_DAILY_CAP` (20) — report-bombing is a griefing vector
 - `MARKET_ADOPT_DAILY_CAP` (20) — adoption bot-farming inflates `add_count`
+
+All three are enforced **inside** the write transactions under the same
+per-user advisory locks as the slot caps — the counts you see in command
+handlers are advisory UX only; parallel clicks can't race past the real
+check.
 
 ## The NSFW lane (deferred)
 

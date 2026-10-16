@@ -109,7 +109,7 @@ test("adoptListing clones a companions row owned by the adopter", async () => {
   const creator = await awakenedCompanion(store, "u-creator2", "Moth");
   const listing = await makeListing(store, "u-creator2", creator.id, "Moth");
 
-  const res = await store.adoptListing("u-adopter", listing.id, 1, COOLDOWN);
+  const res = await store.adoptListing("u-adopter", listing.id, { maxSlots: 1 });
   assert.equal(res.ok, true);
   if (!res.ok) return;
   assert.equal(res.reused, false);
@@ -123,7 +123,7 @@ test("adoptListing clones a companions row owned by the adopter", async () => {
   assert.equal(res.adoption.dmIntroducedAt, null);
 
   // Idempotent re-click reuses the same clone, doesn't double-count.
-  const again = await store.adoptListing("u-adopter", listing.id, 1, COOLDOWN);
+  const again = await store.adoptListing("u-adopter", listing.id, { maxSlots: 1 });
   assert.equal(again.ok, true);
   if (again.ok) {
     assert.equal(again.reused, true);
@@ -131,7 +131,7 @@ test("adoptListing clones a companions row owned by the adopter", async () => {
   }
 
   // Creator's own listing can't be adopted by them.
-  const own = await store.adoptListing("u-creator2", listing.id, 10, COOLDOWN);
+  const own = await store.adoptListing("u-creator2", listing.id, { maxSlots: 10 });
   assert.equal(own.ok, false);
   if (!own.ok) assert.equal(own.reason, "own_listing");
 });
@@ -144,15 +144,15 @@ test("free cap gates fresh adoptions; premium slot ceiling is unbounded", async 
   const listing2 = await makeListing(store, "u-c4", creator2.id, "B");
 
   // free: 1 slot
-  const first = await store.adoptListing("u-free", listing.id, 1, COOLDOWN);
+  const first = await store.adoptListing("u-free", listing.id, { maxSlots: 1 });
   assert.equal(first.ok, true);
-  const second = await store.adoptListing("u-free", listing2.id, 1, COOLDOWN);
+  const second = await store.adoptListing("u-free", listing2.id, { maxSlots: 1 });
   assert.equal(second.ok, false);
   if (!second.ok) assert.equal(second.reason, "cap");
 
   // premium: effectively uncapped (caller passes a huge ceiling)
-  const p1 = await store.adoptListing("u-premium", listing.id, Number.MAX_SAFE_INTEGER, COOLDOWN);
-  const p2 = await store.adoptListing("u-premium", listing2.id, Number.MAX_SAFE_INTEGER, COOLDOWN);
+  const p1 = await store.adoptListing("u-premium", listing.id, { maxSlots: Number.MAX_SAFE_INTEGER });
+  const p2 = await store.adoptListing("u-premium", listing2.id, { maxSlots: Number.MAX_SAFE_INTEGER });
   assert.equal(p1.ok, true);
   assert.equal(p2.ok, true);
 });
@@ -161,7 +161,7 @@ test("drop frees the slot, starts a 12h cooldown, re-adopt reuses the clone", as
   const { store } = await freshStore();
   const creator = await awakenedCompanion(store, "u-c5", "Ash");
   const listing = await makeListing(store, "u-c5", creator.id, "Ash");
-  const first = await store.adoptListing("u-dropper", listing.id, 1, COOLDOWN);
+  const first = await store.adoptListing("u-dropper", listing.id, { maxSlots: 1 });
   assert.equal(first.ok, true);
   if (!first.ok) return;
 
@@ -181,13 +181,13 @@ test("drop frees the slot, starts a 12h cooldown, re-adopt reuses the clone", as
   assert.equal((await store.resolveDmCompanion("u-dropper"))?.id ?? null, null);
 
   // Blocked during cooldown…
-  const blocked = await store.adoptListing("u-dropper", listing.id, 1, COOLDOWN);
+  const blocked = await store.adoptListing("u-dropper", listing.id, { maxSlots: 1 });
   assert.equal(blocked.ok, false);
   if (!blocked.ok) assert.equal(blocked.reason, "cooldown");
 
   // …and once it expires, re-adopting reuses the same clone + relationship.
   await sql`UPDATE companion_adoptions SET cooldown_until = NOW() - INTERVAL '1 minute' WHERE id = ${dropped!.id}`;
-  const reAdopt = await store.adoptListing("u-dropper", listing.id, 1, COOLDOWN);
+  const reAdopt = await store.adoptListing("u-dropper", listing.id, { maxSlots: 1 });
   assert.equal(reAdopt.ok, true);
   if (reAdopt.ok) {
     assert.equal(reAdopt.reused, true);
@@ -202,7 +202,7 @@ test("resolveDmCompanion honors the pick and falls back to awakened", async () =
   const awakened = await awakenedCompanion(store, "u-picker", "Home");
   const creator = await awakenedCompanion(store, "u-c6", "Guest");
   const listing = await makeListing(store, "u-c6", creator.id, "Guest");
-  const adopted = await store.adoptListing("u-picker", listing.id, 1, COOLDOWN);
+  const adopted = await store.adoptListing("u-picker", listing.id, { maxSlots: 1 });
   assert.equal(adopted.ok, true);
   if (!adopted.ok) return;
 
@@ -226,7 +226,7 @@ test("listing edits propagate persona to clones but not adopter-owned state", as
   const { store } = await freshStore();
   const creator = await awakenedCompanion(store, "u-c7", "Old Name");
   const listing = await makeListing(store, "u-c7", creator.id, "Old Name");
-  const adopt = await store.adoptListing("u-ad7", listing.id, 1, COOLDOWN);
+  const adopt = await store.adoptListing("u-ad7", listing.id, { maxSlots: 1 });
   assert.equal(adopt.ok, true);
   if (!adopt.ok) return;
 
@@ -261,12 +261,15 @@ test("reports dedupe per user, count up, flag blocks new adds; delist blocks add
   const creator = await awakenedCompanion(store, "u-c8", "Flag");
   const listing = await makeListing(store, "u-c8", creator.id, "Flag");
 
-  assert.equal(await store.reportListing(listing.id, "u-r1"), 1);
-  assert.equal(await store.reportListing(listing.id, "u-r1"), -1); // dup
-  assert.equal(await store.reportListing(listing.id, "u-r2"), 2);
+  const r1 = await store.reportListing(listing.id, "u-r1");
+  assert.ok(r1.ok && r1.count === 1);
+  const dup = await store.reportListing(listing.id, "u-r1");
+  assert.ok(!dup.ok && dup.reason === "dup");
+  const r2 = await store.reportListing(listing.id, "u-r2");
+  assert.ok(r2.ok && r2.count === 2);
 
   assert.equal(await store.flagListing(listing.id), true);
-  const blocked = await store.adoptListing("u-r3", listing.id, 1, COOLDOWN);
+  const blocked = await store.adoptListing("u-r3", listing.id, { maxSlots: 1 });
   assert.equal(blocked.ok, false);
   if (!blocked.ok) assert.equal(blocked.reason, "delisted");
 
@@ -311,7 +314,7 @@ test("a flagged listing is a moderation hold — delist/relist/republish can't l
   const plain = await makeListing(store, "u-flag2", creator2.id, "Plain");
   assert.equal(await store.delistListing(plain.id), true);
   assert.equal(await store.flagListing(plain.id), false);
-  const gone = await store.adoptListing("u-anyone", plain.id, 1, COOLDOWN);
+  const gone = await store.adoptListing("u-anyone", plain.id, { maxSlots: 1 });
   assert.equal(gone.ok, false);
   if (!gone.ok) assert.equal(gone.reason, "delisted");
 });
@@ -334,7 +337,7 @@ test("freehand listings: createListing works without an awakened source, adopts 
   assert.equal(listing.sourceCompanionId, null);
   assert.equal(listing.version, 1);
 
-  const adopt = await store.adoptListing("u-freehand-adopter", listing.id, 1, COOLDOWN);
+  const adopt = await store.adoptListing("u-freehand-adopter", listing.id, { maxSlots: 1 });
   assert.equal(adopt.ok, true);
   if (adopt.ok) {
     assert.equal(adopt.companion.kind, "adopted");
@@ -372,7 +375,7 @@ test("updateListing edits a freehand listing, bumps version, propagates to clone
   assert.equal(res.ok, true);
   if (!res.ok) return;
   const listing = res.listing;
-  const adopt = await store.adoptListing("u-ad-editor", listing.id, 1, COOLDOWN);
+  const adopt = await store.adoptListing("u-ad-editor", listing.id, { maxSlots: 1 });
   assert.equal(adopt.ok, true);
   if (!adopt.ok) return;
 
@@ -418,7 +421,7 @@ test("markDmIntroduced stamps the adoption; roster lists awakened then adopted",
   const awakened = await awakenedCompanion(store, "u-i", "Main");
   const creator = await awakenedCompanion(store, "u-c9", "Side");
   const listing = await makeListing(store, "u-c9", creator.id, "Side");
-  const adopt = await store.adoptListing("u-i", listing.id, 1, COOLDOWN);
+  const adopt = await store.adoptListing("u-i", listing.id, { maxSlots: 1 });
   assert.equal(adopt.ok, true);
   if (!adopt.ok) return;
 
@@ -439,25 +442,25 @@ test("re-adoption after cooldown still consumes the free slot cap", async () => 
   const listingB = await makeListing(store, "u-cap2", c2.id, "B");
 
   // Free user (1 slot): adopt A, drop A, adopt B — all legal.
-  const first = await store.adoptListing("u-cycler", listingA.id, 1, COOLDOWN);
+  const first = await store.adoptListing("u-cycler", listingA.id, { maxSlots: 1 });
   assert.equal(first.ok, true);
   if (!first.ok) return;
   await store.dropAdoption("u-cycler", first.companion.id, COOLDOWN);
-  const second = await store.adoptListing("u-cycler", listingB.id, 1, COOLDOWN);
+  const second = await store.adoptListing("u-cycler", listingB.id, { maxSlots: 1 });
   assert.equal(second.ok, true);
   assert.equal(await store.activeAdoptionCount("u-cycler"), 1);
 
   // Once A's cooldown expires, re-adopting it must respect the cap — the
   // slot is already held by B.
   await sql`UPDATE companion_adoptions SET cooldown_until = NOW() - INTERVAL '1 minute' WHERE user_id = 'u-cycler'`;
-  const reAdopt = await store.adoptListing("u-cycler", listingA.id, 1, COOLDOWN);
+  const reAdopt = await store.adoptListing("u-cycler", listingA.id, { maxSlots: 1 });
   assert.equal(reAdopt.ok, false);
   if (!reAdopt.ok) assert.equal(reAdopt.reason, "cap");
   assert.equal(await store.activeAdoptionCount("u-cycler"), 1);
 
   // Dropping B frees the slot — then re-adopting A works and reuses the clone.
   if (second.ok) await store.dropAdoption("u-cycler", second.companion.id, COOLDOWN);
-  const freed = await store.adoptListing("u-cycler", listingA.id, 1, COOLDOWN);
+  const freed = await store.adoptListing("u-cycler", listingA.id, { maxSlots: 1 });
   assert.equal(freed.ok, true);
   if (freed.ok) assert.equal(freed.companion.id, first.companion.id);
 });
@@ -472,8 +475,8 @@ test("parallel adoptions on different listings can't both beat the cap", async (
   // Two simultaneous Adds on different listings — the per-user advisory lock
   // serializes them, so exactly one wins the single free slot.
   const [r1, r2] = await Promise.all([
-    store.adoptListing("u-racer", listingA.id, 1, COOLDOWN),
-    store.adoptListing("u-racer", listingB.id, 1, COOLDOWN),
+    store.adoptListing("u-racer", listingA.id, { maxSlots: 1 }),
+    store.adoptListing("u-racer", listingB.id, { maxSlots: 1 }),
   ]);
   const oks = [r1, r2].filter(r => r.ok);
   const caps = [r1, r2].filter(r => !r.ok && r.reason === "cap");
@@ -487,12 +490,12 @@ test("add_count only counts fresh adoptions, not re-adopt cycles", async () => {
   const creator = await awakenedCompanion(store, "u-cnt", "Pop");
   const listing = await makeListing(store, "u-cnt", creator.id, "Pop");
 
-  const adopt = await store.adoptListing("u-cnt-a", listing.id, 5, COOLDOWN);
+  const adopt = await store.adoptListing("u-cnt-a", listing.id, { maxSlots: 5 });
   assert.equal(adopt.ok, true);
   if (!adopt.ok) return;
   await store.dropAdoption("u-cnt-a", adopt.companion.id, COOLDOWN);
   await sql`UPDATE companion_adoptions SET cooldown_until = NOW() - INTERVAL '1 minute' WHERE user_id = 'u-cnt-a'`;
-  const reAdopt = await store.adoptListing("u-cnt-a", listing.id, 5, COOLDOWN);
+  const reAdopt = await store.adoptListing("u-cnt-a", listing.id, { maxSlots: 5 });
   assert.equal(reAdopt.ok, true);
 
   assert.equal((await store.listingById(listing.id))!.addCount, 1);
@@ -506,11 +509,11 @@ test("listing cap: create/upsert/relist enforce it atomically inside the write",
   });
 
   // Two freehand creates fill the 2-slot cap; a third is refused.
-  const a = await store.createListing("u-lcap", spec("A"), 2);
-  const b = await store.createListing("u-lcap", spec("B"), 2);
+  const a = await store.createListing("u-lcap", spec("A"), { maxListings: 2 });
+  const b = await store.createListing("u-lcap", spec("B"), { maxListings: 2 });
   assert.equal(a.ok, true);
   assert.equal(b.ok, true);
-  const third = await store.createListing("u-lcap", spec("C"), 2);
+  const third = await store.createListing("u-lcap", spec("C"), { maxListings: 2 });
   assert.equal(third.ok, false);
   if (!third.ok) assert.equal(third.reason, "cap");
 
@@ -528,7 +531,7 @@ test("listing cap: create/upsert/relist enforce it atomically inside the write",
   // Delisting that backed listing + a fresh create re-fills the cap; the
   // republish (revive) is now refused — it would push the live count to 3.
   await store.delistListing(backed.listing.id);
-  const refill = await store.createListing("u-lcap", spec("D"), 2);
+  const refill = await store.createListing("u-lcap", spec("D"), { maxListings: 2 });
   assert.equal(refill.ok, true);
   const revive = await store.upsertListing("u-lcap", awakened.id, spec("Backed v2"), { maxListings: 2 });
   assert.equal(revive.ok, false);
@@ -556,8 +559,8 @@ test("parallel creates can't both beat the listing cap", async () => {
     ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
   });
   const [r1, r2] = await Promise.all([
-    store.createListing("u-pc", spec("A"), 1),
-    store.createListing("u-pc", spec("B"), 1),
+    store.createListing("u-pc", spec("A"), { maxListings: 1 }),
+    store.createListing("u-pc", spec("B"), { maxListings: 1 }),
   ]);
   assert.equal([r1, r2].filter(r => r.ok).length, 1);
   assert.equal([r1, r2].filter(r => !r.ok && r.reason === "cap").length, 1);
@@ -570,7 +573,7 @@ test("reportListing stores the category; dailyReportCount counts today's rows", 
   const listing = await makeListing(store, "u-rc", creator.id, "Rep");
 
   const n = await store.reportListing(listing.id, "u-rep1", "hate");
-  assert.equal(n, 1);
+  assert.ok(n.ok && n.count === 1);
   const row = await sql<Array<{ category: string }>>`SELECT category FROM listing_reports WHERE listing_id = ${listing.id}`;
   assert.equal(row[0].category, "hate");
   assert.equal(await store.dailyReportCount("u-rep1"), 1);
@@ -584,7 +587,7 @@ test("banned listings freeze clones everywhere — roster, DM resolution, guilds
   const creator = await awakenedCompanion(store, "u-ban", "Baddie");
   const listing = await makeListing(store, "u-ban", creator.id, "Baddie");
 
-  const adopt = await store.adoptListing("u-ad-ban", listing.id, 5, COOLDOWN);
+  const adopt = await store.adoptListing("u-ad-ban", listing.id, { maxSlots: 5 });
   assert.equal(adopt.ok, true);
   if (!adopt.ok) return;
   await store.summonCompanion("g-ban", adopt.companion.id, "u-ad-ban", "ad");
@@ -605,7 +608,7 @@ test("banned listings freeze clones everywhere — roster, DM resolution, guilds
   assert.equal((await store.listGuildCompanions("g-ban")).length, 0);
 
   // New adoption refused; the row still exists for the audit trail.
-  const readd = await store.adoptListing("u-ad-ban2", listing.id, 5, COOLDOWN);
+  const readd = await store.adoptListing("u-ad-ban2", listing.id, { maxSlots: 5 });
   assert.equal(readd.ok, false);
   assert.equal((await store.listingById(listing.id))!.status, "banned");
 
@@ -649,11 +652,11 @@ test("banCreator publish-bans and freezes all their live listings", async () => 
   const l2res = await store.createListing("u-bc", {
     name: "Free", tagline: "t", voicePersona: "v", coreTraits: [],
     ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
-  }, 10);
+  }, { maxListings: 10 });
   assert.equal(l2res.ok, true);
   if (!l2res.ok) return;
 
-  const adopt = await store.adoptListing("u-adbc", l1.id, 5, COOLDOWN);
+  const adopt = await store.adoptListing("u-adbc", l1.id, { maxSlots: 5 });
   assert.equal(adopt.ok, true);
 
   const affected = await store.banCreator("u-bc", "mod-9", "spam network");
@@ -676,7 +679,7 @@ test("daily counters: publish + adopt windows", async () => {
   const listing = await makeListing(store, "u-dc", c.id, "D");
   assert.equal(await store.dailyPublishCount("u-dc"), 1);
 
-  const adopt = await store.adoptListing("u-dca", listing.id, 5, COOLDOWN);
+  const adopt = await store.adoptListing("u-dca", listing.id, { maxSlots: 5 });
   assert.equal(adopt.ok, true);
   assert.equal(await store.dailyAdoptCount("u-dca"), 1);
 
@@ -684,4 +687,133 @@ test("daily counters: publish + adopt windows", async () => {
   await sql`UPDATE companion_listings SET created_at = NOW() - INTERVAL '2 days' WHERE id = ${listing.id}`;
   assert.equal(await store.dailyAdoptCount("u-dca"), 0);
   assert.equal(await store.dailyPublishCount("u-dc"), 0);
+});
+
+test("a banned listing's frozen adoption frees the adopter's slot", async () => {
+  const { store } = await freshStore();
+  const c1 = await awakenedCompanion(store, "u-frz1", "One");
+  const l1 = await makeListing(store, "u-frz1", c1.id, "One");
+  const c2 = await awakenedCompanion(store, "u-frz2", "Two");
+  const l2 = await makeListing(store, "u-frz2", c2.id, "Two");
+
+  // Free-tier slot (1) filled by the first adoption.
+  const a1 = await store.adoptListing("u-freezer", l1.id, { maxSlots: 1 });
+  assert.equal(a1.ok, true);
+  assert.equal(await store.activeAdoptionCount("u-freezer"), 1);
+  const capped = await store.adoptListing("u-freezer", l2.id, { maxSlots: 1 });
+  assert.equal(capped.ok, false);
+
+  // Banning l1 freezes the clone — the slot is released so the user isn't
+  // permanently stuck with a ghost they can't see or drop.
+  await store.modAction(l1.id, "mod-x", "ban");
+  assert.equal(await store.activeAdoptionCount("u-freezer"), 0);
+  const a2 = await store.adoptListing("u-freezer", l2.id, { maxSlots: 1 });
+  assert.equal(a2.ok, true);
+  // The adoption row itself is preserved — unbanning restores the clone.
+  const kept = await store.adoptionFor("u-freezer", l1.id);
+  assert.ok(kept && !kept.droppedAt);
+});
+
+test("mod takedowns can't be creator-relisted or republished; unflag restores", async () => {
+  const { store } = await freshStore();
+  const c = await awakenedCompanion(store, "u-mt", "Mod");
+  const listing = await makeListing(store, "u-mt", c.id, "Mod");
+
+  // A creator delist stays reversible…
+  await store.delistListing(listing.id);
+  const own = await store.relistListing(listing.id, "u-mt", 5);
+  assert.equal(own.ok, true);
+  assert.equal(own.ok && own.listing.status, "active");
+
+  // …but a MOD delist is a takedown the creator can't undo.
+  const modDelist = await store.modAction(listing.id, "mod-y", "delist");
+  assert.equal(modDelist?.status, "delisted");
+  const relist = await store.relistListing(listing.id, "u-mt", 5);
+  assert.equal(relist.ok, false);
+  if (!relist.ok) assert.equal(relist.reason, "moderated");
+  // …and it stays out of the relist picker.
+  assert.equal((await store.listDelistedListings("u-mt")).length, 0);
+  // …and a republish saves persona edits but keeps the listing down.
+  const repub = await store.upsertListing("u-mt", c.id, {
+    name: "Mod", tagline: "v2", voicePersona: "v", coreTraits: [],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+  });
+  assert.equal(repub.ok, true);
+  if (repub.ok) assert.equal(repub.listing.status, "delisted");
+
+  // Only a mod can bring it back — unflag restores a mod-delisted row.
+  const restored = await store.modAction(listing.id, "mod-y", "unflag");
+  assert.equal(restored?.status, "active");
+
+  // banned → unflag goes back to flagged (review queue), not straight live.
+  await store.modAction(listing.id, "mod-y", "ban");
+  const unbanned = await store.modAction(listing.id, "mod-y", "unflag");
+  assert.equal(unbanned?.status, "flagged");
+  // …and from flagged it clears fully.
+  const cleared = await store.modAction(listing.id, "mod-y", "unflag");
+  assert.equal(cleared?.status, "active");
+
+  // Once the takedown is resolved by an unflag, a later creator unpublish is
+  // ordinary again — relistable and back in the picker (stale mod events
+  // must not haunt the listing forever).
+  await store.delistListing(listing.id);
+  assert.equal((await store.listDelistedListings("u-mt")).length, 1);
+  const relisted = await store.relistListing(listing.id, "u-mt", 5);
+  assert.equal(relisted.ok, true);
+});
+
+test("daily publish cap is enforced inside the write tx — new rows only", async () => {
+  const { store } = await freshStore();
+  const spec = (name: string) => ({
+    name, tagline: "t", voicePersona: "v", coreTraits: [] as string[],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+  });
+  const c = await awakenedCompanion(store, "u-dp", "DP");
+
+  const first = await store.upsertListing("u-dp", c.id, spec("DP"), { maxDailyPublish: 1 });
+  assert.equal(first.ok, true);
+  // A second NEW row the same day refuses…
+  const second = await store.createListing("u-dp", spec("DP2"), { maxDailyPublish: 1 });
+  assert.equal(second.ok, false);
+  if (!second.ok) assert.equal(second.reason, "daily_cap");
+  // …but a republish of the existing row isn't a new listing — allowed.
+  const repub = await store.upsertListing("u-dp", c.id, spec("DP v2"), { maxDailyPublish: 1 });
+  assert.equal(repub.ok, true);
+  // Parallel new creates can't both slide under the cap either.
+  const [r1, r2] = await Promise.all([
+    store.createListing("u-dp2", spec("A"), { maxDailyPublish: 1 }),
+    store.createListing("u-dp2", spec("B"), { maxDailyPublish: 1 }),
+  ]);
+  assert.equal([r1, r2].filter(r => r.ok).length, 1);
+  assert.equal([r1, r2].filter(r => !r.ok && r.reason === "daily_cap").length, 1);
+});
+
+test("daily report cap is enforced inside reportListing's tx", async () => {
+  const { store } = await freshStore();
+  const c1 = await awakenedCompanion(store, "u-rc1", "R1");
+  const l1 = await makeListing(store, "u-rc1", c1.id, "R1");
+  const c2 = await awakenedCompanion(store, "u-rc2", "R2");
+  const l2 = await makeListing(store, "u-rc2", c2.id, "R2");
+
+  const r1 = await store.reportListing(l1.id, "u-bomber", "spam", "", 1);
+  assert.ok(r1.ok);
+  const r2 = await store.reportListing(l2.id, "u-bomber", "spam", "", 1);
+  assert.ok(!r2.ok && r2.reason === "daily_cap");
+});
+
+test("daily adopt cap is enforced inside adoptListing's tx", async () => {
+  const { store } = await freshStore();
+  const c1 = await awakenedCompanion(store, "u-ac1", "A1");
+  const l1 = await makeListing(store, "u-ac1", c1.id, "A1");
+  const c2 = await awakenedCompanion(store, "u-ac2", "A2");
+  const l2 = await makeListing(store, "u-ac2", c2.id, "A2");
+
+  const a1 = await store.adoptListing("u-farmer", l1.id, { maxSlots: 10, maxDaily: 1 });
+  assert.equal(a1.ok, true);
+  const a2 = await store.adoptListing("u-farmer", l2.id, { maxSlots: 10, maxDaily: 1 });
+  assert.equal(a2.ok, false);
+  if (!a2.ok) assert.equal(a2.reason, "daily_cap");
+  // …and a re-click on the same live adoption stays a free no-op.
+  const noop = await store.adoptListing("u-farmer", l1.id, { maxSlots: 10, maxDaily: 1 });
+  assert.equal(noop.ok, true);
 });

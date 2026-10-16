@@ -117,11 +117,13 @@ The full policy + enforcement spec lives in **[docs/moderation.md](moderation.md
 The mechanics in one paragraph:
 
 - **Report** → a category picker (`market:reportcat`), stored per
-  (listing, reporter, category) in `listing_reports`. At
-  `MARKETPLACE_REPORT_FLAG_THRESHOLD` the listing becomes `flagged` — a
-  **moderation hold**: Adds blocked, creator can't delist/relist/republish
-  the flag away; only a mod action clears it. Daily report cap
-  (`MARKET_REPORT_DAILY_CAP`) blunts report-bombing.
+  (listing, reporter, category) in `listing_reports` — the category is
+  whitelisted against `REPORT_CATEGORIES` so a forged button can't inject
+  arbitrary text into the mod ping. At `MARKETPLACE_REPORT_FLAG_THRESHOLD`
+  the listing becomes `flagged` — a **moderation hold**: Adds blocked,
+  creator can't delist/relist/republish the flag away; only a mod action
+  clears it. Daily report cap (`MARKET_REPORT_DAILY_CAP`) blunts
+  report-bombing — enforced inside the report transaction.
 - **Publish screening (fail-closed)** — deterministic blocklist
   (`checkListingFields`) then `Brain.safetyVerdict` on the operator model
   (`safetyBrain()`); all three write paths (publish/create/edit) screen the
@@ -131,16 +133,23 @@ The mechanics in one paragraph:
   `SAFE_REFUSAL` and refunds the reply leg.
 - **Self-harm triage** — `isSelfHarmSignal` on every DM; hit → scripted
   `CRISIS_RESPONSE`, no charge, no throttle.
-- **Statuses** — `active` → `flagged` → `delisted` / `banned`. `banned` is
+- **Statuses** — `active` → `flagged` → `delisted` / `banned`. `delisted`
+  has two flavors told apart by `moderation_events`: a *creator unpublish*
+  relists freely; a *mod takedown* refuses creator relist/republish and
+  hides from the relist picker — only **Keep up** restores it. `banned` is
   the kill switch: clones freeze everywhere (roster, DM, guilds) via the
-  `adopted_from_listing_id → status` join. **Creator bans**
-  (`marketplace_bans`) ban all their listings + block future publishing.
+  `adopted_from_listing_id → status` join, and a frozen adoption releases
+  the adopter's slot until the ban lifts. **Keep up** ladders
+  `banned→flagged→active`. **Creator bans** (`marketplace_bans`) ban all
+  their listings + block every write path (publish, create, relist, edit).
 - **Mod UX** — every report ping in `MARKETPLACE_MOD_CHANNEL_ID` carries
   **Keep up / Delist / Ban listing / Ban creator** buttons
   (`market:mod:<action>:<id>`), gated to `MARKETPLACE_MOD_ROLE_IDS`
   (fallback: ManageGuild). Actions land in `moderation_events`.
-- **Rate limits** — `MARKET_PUBLISH_DAILY_CAP` (5), `MARKET_REPORT_DAILY_CAP`
-  (20), `MARKET_ADOPT_DAILY_CAP` (20) — all per UTC day.
+- **Rate limits** — `MARKET_PUBLISH_DAILY_CAP` (5, new rows only —
+  republishes/relists don't consume it), `MARKET_REPORT_DAILY_CAP` (20),
+  `MARKET_ADOPT_DAILY_CAP` (20) — all per UTC day, all enforced inside the
+  same advisory-locked write transactions as the slot caps.
 
 ## Config reference
 

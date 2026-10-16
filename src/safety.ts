@@ -18,7 +18,8 @@ const LISTING_BLOCKLIST: Array<{ re: RegExp; category: string }> = [
   },
   {
     category: "hate",
-    re: /\b(n[i1!]?gg?[e3]r|f[a4]gg?[o0]t|k[i1]ke|ch[i1]nk|sp[i1]c|tr[a4]nny)\b/i,
+    // gg+ requires the doubled consonant — "Niger"/"Nigerian" don't trip it.
+    re: /\b(n[i1!]gg+[e3a4]r?s?|f[a4]gg?[o0]t|k[i1]ke|ch[i1]nk|sp[i1]c|tr[a4]nny)\b/i,
   },
   {
     category: "self-harm promotion",
@@ -70,20 +71,26 @@ export const REPORT_CATEGORIES: ReadonlyArray<readonly [string, string]> = [
 
 // ── Self-harm triage ─────────────────────────────────────────────────────────
 // First-person signals only — quoting or discussing the topic ("my friend is
-// suicidal") shouldn't fire. Fires on intent phrasing; false positives cost
-// one supportive message, which is the correct side to err on.
+// suicidal") shouldn't fire. Broad topic words (self-harm, commit suicide,
+// "want to live") are all anchored to a first-person intent marker or to the
+// end of the message, so "a documentary about self-harm", "he wants to commit
+// suicide", and "I don't want to live in this city" all pass through. False
+// positives cost one supportive message, which is the correct side to err on.
 const SELF_HARM_PATTERNS: RegExp[] = [
   /\b(kill|killing)\s+myself\b/i,
-  /\b(want|wanna|going)\s+to\s+(die|kill\s+myself|end\s+(it|my\s+life))\b/i,
-  /\b(end|ending)\s+(it\s+all|my\s+life|everything)\b/i,
-  /\bcommit\s+suicide\b/i,
+  /\b(want|wanna|plan|need)\s+to\s+(die|kill\s+myself|end\s+(it|it\s+all|my\s+life|everything))\b/i,
+  /\bi'?m\s+(going|gonna|about)\s+to\s+(die|kill\s+myself|end\s+(it|it\s+all|my\s+life|everything))\b/i,
+  /\bending\s+it\s+all\b/i,
+  /\bi('ll|\s+will|\s+wanna|\s+want\s+to|\s+plan\s+to|\s+might|\s+should|'?m\s+(going|about)\s+to)\s+commit\s+suicide\b/i,
+  /\bi('?m|\s+am)\s+committing\s+suicide\b/i,
   /\b(i'?m|i\s+am|i'?ve\s+been|feeling)\s+(really\s+|so\s+|kind\s+of\s+|pretty\s+)?suicidal\b/i,
-  /\bself[- ]?harm(ing)?\b/i,
+  /\bi('?m|'?ve|\s+am|\s+have)?\s*(been\s+)?self[- ]?harm(ed|ing)?\b/i,
+  /\burges?\s+to\s+self[- ]?harm\b/i,
   /\b(hurt|hurting|cut|cutting)\s+myself\b/i,
-  /\bkms\b/i,
-  /\bno\s+reason\s+to\s+(live|go\s+on|keep\s+going)\b/i,
+  /(?<!\d\s)(?<!\d)\bkms\b/i,
+  /\bno\s+reason\s+to\s+(live|go\s+on|keep\s+going)\b(\s+(any\s?more|anymore))?\s*[.!?]*\s*$/i,
   /\b(better\s+off|world\s+is\s+better)\s+(dead|without\s+me)\b/i,
-  /\bdon'?t\s+want\s+to\s+(live|be\s+(here|alive)|exist)\s*(any\s?more)?\b/i,
+  /\bdon'?t\s+want\s+to\s+(live|be\s+(here|alive)|exist)\b(\s+(any\s?more|anymore|tonight|right\s+now|now))?\s*[.!?]*\s*$/i,
 ];
 
 export function isSelfHarmSignal(content: string): boolean {

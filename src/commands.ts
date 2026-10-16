@@ -508,14 +508,18 @@ const LISTING_CAP_MSG = `You can run **${config.freeListingSlots} live listing${
 
 const BANNED_CREATOR_MSG = "Your marketplace access has been suspended — you can't publish new characters. If you think this is a mistake, contact a moderator.";
 
+const DAILY_PUBLISH_MSG = `That's a lot of characters for one day — the limit is ${config.marketPublishDailyCap} new listing${config.marketPublishDailyCap === 1 ? "" : "s"} per day. Try again tomorrow.`;
+
 /** Returns the refusal message if the user can't create a listing right now —
- *  creator ban first, then the daily publish cap. Caller still runs the slot
- *  check separately. */
-async function publishGateError(store: MemoryStore, userId: string): Promise<string | null> {
+ *  creator ban first, then (when the write would produce a NEW listing row —
+ *  `isNewListing`) the daily publish cap. Republishes/revives skip the daily
+ *  check: they aren't new listings. Advisory UX check only — the store
+ *  enforces both atomically at write time. */
+async function publishGateError(store: MemoryStore, userId: string, isNewListing: boolean): Promise<string | null> {
   if (await store.creatorBan(userId).catch(() => null)) return BANNED_CREATOR_MSG;
-  const published = await store.dailyPublishCount(userId).catch(() => 0);
-  if (published >= config.marketPublishDailyCap) {
-    return `That's a lot of characters for one day — the limit is ${config.marketPublishDailyCap} new listing${config.marketPublishDailyCap === 1 ? "" : "s"} per day. Try again tomorrow.`;
+  if (isNewListing) {
+    const published = await store.dailyPublishCount(userId).catch(() => 0);
+    if (published >= config.marketPublishDailyCap) return DAILY_PUBLISH_MSG;
   }
   return null;
 }
@@ -639,10 +643,16 @@ async function doRelist(
   const reply = (content: string) =>
     isButton ? (interaction as ButtonInteraction).update({ content, components: [] }) : interaction.reply({ content, ephemeral: true });
 
+  // A stale/forged relist button must not outlive a creator ban — enforce it
+  // here in the shared path, not only in the command that renders the picker.
+  if (await store.creatorBan(interaction.user.id).catch(() => null)) {
+    return reply(BANNED_CREATOR_MSG);
+  }
   const res = await store.relistListing(listing.id, interaction.user.id, listingCapFor(store, account));
   if (!res.ok) {
     const msg =
       res.reason === "cap" ? LISTING_CAP_MSG
+        : res.reason === "moderated" ? `**${listing.name}** was taken down by a moderator — only they can bring it back.`
         : res.reason === "not_delisted" ? `**${listing.name}** isn't unpublished — nothing to bring back.`
         : "That listing isn't yours to relist.";
     return reply(msg);
@@ -1209,12 +1219,14 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
           ephemeral: true,
         });
       }
-      const gateError = await publishGateError(store, interaction.user.id);
+      const listing = await store.listingForCompanion(companion.id);
+      // Daily cap only gates a genuinely new listing row — republish/revive
+      // of an existing row isn't a "new listing".
+      const gateError = await publishGateError(store, interaction.user.id, !listing);
       if (gateError) return interaction.reply({ content: gateError, ephemeral: true });
       if (typeof interaction.showModal !== "function") {
         return interaction.reply({ content: "Publishing requires modal support.", ephemeral: true });
       }
-      const listing = await store.listingForCompanion(companion.id);
       // A revive (delisted → active) adds a live listing back — only a
       // republish of an already-live listing skips the slot check.
       if (!listing || listing.status === "delisted") {
@@ -1234,7 +1246,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
           ephemeral: true,
         });
       }
-      const gateError = await publishGateError(store, interaction.user.id);
+      const gateError = await publishGateError(store, interaction.user.id, true);
       if (gateError) return interaction.reply({ content: gateError, ephemeral: true });
       const slotError = await listingSlotError(store, interaction.user.id, account);
       if (slotError) return interaction.reply({ content: slotError, ephemeral: true });
@@ -1850,7 +1862,7 @@ export async function handleCompanionModal(
     if (!channel || channel.type !== ChannelType.GuildForum) {
       return interaction.reply({ content: "The marketplace channel isn't reachable — tell a moderator to check MARKETPLACE_CHANNEL_ID.", ephemeral: true });
     }
-    const gateError = await publishGateError(store, userId);
+    const gateError = await publishGateError(store, userId, true);
     if (gateError) return interaction.reply({ content: gateError, ephemeral: true });
     const slotError = await listingSlotError(store, userId, account);
     if (slotError) return interaction.reply({ content: slotError, ephemeral: true });
@@ -1871,9 +1883,9 @@ export async function handleCompanionModal(
       name, tagline, greeting, voicePersona,
       coreTraits: [], ownerDynamic: "a companion who met you here", backstory,
       avatarUrl: null,
-    }, listingCapFor(store, account));
+    }, { maxListings: listingCapFor(store, account), maxDailyPublish: config.marketPublishDailyCap });
     if (!res.ok) {
-      return interaction.reply({ content: LISTING_CAP_MSG, ephemeral: true });
+      return interaction.reply({ content: res.reason === "daily_cap" ? DAILY_PUBLISH_MSG : LISTING_CAP_MSG, ephemeral: true });
     }
     const listing = res.listing;
     const threadId = await postListingThread(interaction, listing);
@@ -1916,9 +1928,9 @@ export async function handleCompanionModal(
     if (!tagline || !greeting) {
       return interaction.reply({ content: "Tagline and greeting are both required.", ephemeral: true });
     }
-    const gateError = await publishGateError(store, userId);
-    if (gateError) return interaction.reply({ content: gateError, ephemeral: true });
     const existing = await store.listingForCompanion(companion.id);
+    const gateError = await publishGateError(store, userId, !existing);
+    if (gateError) return interaction.reply({ content: gateError, ephemeral: true });
     // Only a republish of an already-live listing skips the slot check —
     // reviving a delisted one adds a live listing back.
     if (!existing || existing.status === "delisted") {
@@ -1944,18 +1956,21 @@ export async function handleCompanionModal(
       backstory: existing?.backstory ?? companion.backstory,
       greeting,
       avatarUrl: existing?.avatarUrl ?? companion.avatarUrl,
-    }, { maxListings: listingCapFor(store, account) });
+    }, { maxListings: listingCapFor(store, account), maxDailyPublish: config.marketPublishDailyCap });
     if (!res.ok) {
-      return interaction.reply({ content: LISTING_CAP_MSG, ephemeral: true });
+      return interaction.reply({ content: res.reason === "daily_cap" ? DAILY_PUBLISH_MSG : LISTING_CAP_MSG, ephemeral: true });
     }
     const listing = res.listing;
-    // Flagged/banned listings survive republish with their status — save the
-    // edits but don't post a fresh card whose buttons would refuse anyway.
-    if (listing.status === "flagged" || listing.status === "banned") {
+    // Flagged/banned/mod-taken-down listings survive republish with their
+    // status — save the edits but don't post a fresh card whose buttons
+    // would refuse anyway.
+    if (listing.status !== "active") {
       return interaction.reply({
         ephemeral: true,
         content: listing.status === "banned"
           ? `**${listing.name}** was removed by moderation and can't be republished.`
+          : listing.status === "delisted"
+          ? `Edits saved (v${listing.version}), but **${listing.name}** was taken down by a moderator — only they can bring it back.`
           : `Edits saved (v${listing.version}) — **${listing.name}** is still under review, so the marketplace post stays down until a moderator clears it.`,
       });
     }
@@ -1988,6 +2003,11 @@ export async function handleCompanionModal(
     const listing = await store.listingById(listingId);
     if (!listing || listing.creatorUserId !== userId) {
       return interaction.reply({ content: "That's not your listing.", ephemeral: true });
+    }
+    // Same freeze as the button that opens this modal — a submit can lag a
+    // ban by minutes (modal timeouts) or be forged outright.
+    if (await store.creatorBan(userId).catch(() => null)) {
+      return interaction.reply({ content: BANNED_CREATOR_MSG, ephemeral: true });
     }
     const name = interaction.fields.getTextInputValue("companion-name").trim().slice(0, 64);
     const voicePersona = interaction.fields.getTextInputValue("voice-persona").trim().slice(0, 500);
@@ -2116,10 +2136,16 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         }
         if (action !== "unflag") await archiveThread(listing.forumThreadId);
         inc(`market.mod_${action}`);
+        const verb =
+          action === "unflag"
+            // banned→flagged lands back in the review queue; flagged and
+            // mod-delisted both restore to live.
+            ? updated.status === "flagged" ? "Ban softened — back under review (flagged)" : "Restored — listing is back up"
+            : action === "delist" ? "Delisted (clones keep their companions)" : "Banned — clones frozen";
         return interaction.update({
           content:
             `${interaction.message.content}\n—\n` +
-            `**${action === "unflag" ? "Cleared the flag — listing stays up" : action === "delist" ? "Delisted (clones keep their companions)" : "Banned — clones frozen"}** by <@${userId}> · <t:${Math.floor(Date.now() / 1000)}:R>`,
+            `**${verb}** by <@${userId}> · <t:${Math.floor(Date.now() / 1000)}:R>`,
           components: [],
         });
       }
@@ -2145,22 +2171,20 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       if (!listing || listing.status !== "active") {
         return interaction.reply({ content: "That listing is no longer available.", ephemeral: true });
       }
-      // Adoption farming inflates add_count for free — bound it.
-      const adopted = await store.dailyAdoptCount(userId).catch(() => 0);
-      if (adopted >= config.marketAdoptDailyCap) {
-        return interaction.reply({ content: `That's a lot of adoptions for one day — the limit is ${config.marketAdoptDailyCap}. Try again tomorrow.`, ephemeral: true });
-      }
       const account = store.creditsSupported
         ? await store.accountForDiscordUser(userId).catch(() => null)
         : null;
       // Self-host lane has no billing → no adoption cap; hosted free = FREE_ADOPTION_SLOTS, premium uncapped.
+      // The daily anti-farming cap is enforced inside the transaction so
+      // parallel Add clicks can't both squeeze under it.
       const maxSlots = !store.creditsSupported || account?.plan === "premium"
         ? Number.MAX_SAFE_INTEGER
         : config.freeAdoptionSlots;
-      const res = await store.adoptListing(userId, id, maxSlots, config.adoptionCooldownMs);
+      const res = await store.adoptListing(userId, id, { maxSlots, maxDaily: config.marketAdoptDailyCap });
       if (!res.ok) {
         const msg =
           res.reason === "cap" ? `Free accounts can have ${config.freeAdoptionSlots} active adoption${config.freeAdoptionSlots === 1 ? "" : "s"} — drop one first, or go Premium for unlimited: ${config.siteUrl}/dashboard#billing`
+          : res.reason === "daily_cap" ? `That's a lot of adoptions for one day — the limit is ${config.marketAdoptDailyCap}. Try again tomorrow.`
           : res.reason === "cooldown" ? `You dropped **${listing.name}** recently — you can adopt them again ${res.cooldownUntil ? `<t:${Math.floor(new Date(res.cooldownUntil).getTime() / 1000)}:R>` : "in about 12 hours"}.`
           : res.reason === "own_listing" ? `**${listing.name}** is your own companion — they're already bound to you.`
           : "That listing is no longer available.";
@@ -2225,7 +2249,10 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
     }
 
     if (sub === "reportcat") {
-      const category = parts[3] ?? "other";
+      // parts[3] is attacker-controlled — a forged customId could inject an
+      // arbitrary string (incl. @everyone) into the mod-channel ping. Only
+      // whitelisted categories reach the store or any message.
+      const category = REPORT_CATEGORIES.some(([c]) => c === parts[3]) ? parts[3] : "other";
       const listing = await store.listingById(id);
       if (!listing || listing.status !== "active") {
         return interaction.update({ content: "That listing is no longer available.", components: [] });
@@ -2233,15 +2260,18 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       if (listing.creatorUserId === userId) {
         return interaction.update({ content: "This is your own listing.", components: [] });
       }
-      // Reports are the backstop — rate-limit them so they can't be a weapon.
-      const reported = await store.dailyReportCount(userId).catch(() => 0);
-      if (reported >= config.marketReportDailyCap) {
-        return interaction.update({ content: `You've filed ${config.marketReportDailyCap} reports today — that's the limit.`, components: [] });
+      // The daily report cap is enforced inside the store transaction —
+      // parallel clicks can't bomb past it.
+      const rep = await store.reportListing(id, userId, category, "", config.marketReportDailyCap);
+      if (!rep.ok) {
+        return interaction.update({
+          content: rep.reason === "daily_cap"
+            ? `You've filed ${config.marketReportDailyCap} reports today — that's the limit.`
+            : "You've already reported this listing — the team has it.",
+          components: [],
+        });
       }
-      const count = await store.reportListing(id, userId, category);
-      if (count < 0) {
-        return interaction.update({ content: "You've already reported this listing — the team has it.", components: [] });
-      }
+      const count = rep.count;
       const flagged = count >= config.marketplaceReportFlagThreshold && listing.status === "active" && await store.flagListing(id);
       if (config.marketplaceModChannelId) {
         const catLabel = REPORT_CATEGORIES.find(([c]) => c === category)?.[1] ?? category;
@@ -2340,6 +2370,11 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       const listing = await store.listingById(id);
       if (!listing || listing.creatorUserId !== userId) {
         return interaction.reply({ content: "That's not your listing.", ephemeral: true });
+      }
+      // A creator-ban freezes their marketplace surface — edits too, not just
+      // publishes/relists. Button customIds are forgeable, so check here.
+      if (await store.creatorBan(userId).catch(() => null)) {
+        return interaction.reply({ content: BANNED_CREATOR_MSG, ephemeral: true });
       }
       if (typeof interaction.showModal !== "function") {
         return interaction.reply({ content: "Editing requires modal support.", ephemeral: true });

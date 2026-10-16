@@ -2503,8 +2503,8 @@ export class MemoryStore {
     creatorUserId: string,
     sourceCompanionId: number,
     spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
-    opts: { forumThreadId?: string | null; maxListings?: number } = {},
-  ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "cap" }> {
+    opts: { forumThreadId?: string | null; maxListings?: number; maxDailyPublish?: number } = {},
+  ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "cap" | "daily_cap" }> {
     const persona = {
       name: spec.name, tagline: spec.tagline, voicePersona: spec.voicePersona,
       coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
@@ -2513,7 +2513,7 @@ export class MemoryStore {
     const res = await this.sql.begin(async sql => {
       // Serialize per-creator listing writes — the cap count and the insert
       // must be atomic across parallel publishes/creates/relists.
-      if (opts.maxListings != null) {
+      if (opts.maxListings != null || opts.maxDailyPublish != null) {
         await sql`SELECT pg_advisory_xact_lock(hashtext(${`listing:${creatorUserId}`}))`;
         const existingRows = await sql<Array<{ status: string }>>`
           SELECT status FROM companion_listings WHERE source_companion_id = ${sourceCompanionId}
@@ -2522,12 +2522,22 @@ export class MemoryStore {
         // The upsert adds a live listing only when there's no row yet or the
         // row revives from 'delisted'; editing an active/flagged listing
         // changes nothing the cap counts.
-        if (!existing || existing.status === "delisted") {
+        if (opts.maxListings != null && (!existing || existing.status === "delisted")) {
           const countRows = await sql<[{ n: number | string }]>`
             SELECT COUNT(*) AS n FROM companion_listings
             WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted'
           `;
           if (Number(countRows[0].n) >= opts.maxListings) return { ok: false as const, reason: "cap" as const };
+        }
+        // The daily publish cap counts genuinely new rows — a revive or a
+        // republish isn't a new listing. Under the same lock so parallel
+        // publishes can't both slide under it.
+        if (!existing && opts.maxDailyPublish != null) {
+          const dailyRows = await sql<[{ n: number | string }]>`
+            SELECT COUNT(*) AS n FROM companion_listings
+            WHERE creator_user_id = ${creatorUserId} AND created_at > NOW() - INTERVAL '1 day'
+          `;
+          if (Number(dailyRows[0].n) >= opts.maxDailyPublish) return { ok: false as const, reason: "daily_cap" as const };
         }
       }
       const rows = await sql<Array<any>>`
@@ -2549,9 +2559,24 @@ export class MemoryStore {
           avatar_url     = EXCLUDED.avatar_url,
           forum_thread_id = COALESCE(EXCLUDED.forum_thread_id, companion_listings.forum_thread_id),
           version        = companion_listings.version + 1,
-          -- Republishing revives a delisted listing but must NOT clear a
-          -- moderation flag — flagged stays flagged until a human reviews it.
-          status         = CASE WHEN companion_listings.status = 'delisted' THEN 'active' ELSE companion_listings.status END,
+          -- Republishing revives a creator-delisted listing but must NOT clear
+          -- a moderation flag, and must NOT undo a mod takedown — a delisted
+          -- row with an outstanding takedown event (one newer than the latest
+          -- unflag) stays down until a mod clears it.
+          status         = CASE
+            WHEN companion_listings.status = 'delisted'
+             AND NOT EXISTS (
+               SELECT 1 FROM moderation_events me
+               WHERE me.listing_id = companion_listings.id
+                 AND me.action IN ('delist', 'ban', 'ban_creator')
+                 AND me.created_at > COALESCE(
+                   (SELECT MAX(me2.created_at) FROM moderation_events me2
+                    WHERE me2.listing_id = companion_listings.id AND me2.action = 'unflag'),
+                   '-infinity'::timestamptz)
+             )
+            THEN 'active'
+            ELSE companion_listings.status
+          END,
           updated_at     = NOW()
         RETURNING *
       `;
@@ -2573,16 +2598,25 @@ export class MemoryStore {
   async createListing(
     creatorUserId: string,
     spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
-    maxListings?: number,
-  ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "cap" }> {
+    opts: { maxListings?: number; maxDailyPublish?: number } = {},
+  ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "cap" | "daily_cap" }> {
     return this.sql.begin(async sql => {
-      if (maxListings != null) {
+      if (opts.maxListings != null || opts.maxDailyPublish != null) {
         await sql`SELECT pg_advisory_xact_lock(hashtext(${`listing:${creatorUserId}`}))`;
-        const countRows = await sql<[{ n: number | string }]>`
-          SELECT COUNT(*) AS n FROM companion_listings
-          WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted'
-        `;
-        if (Number(countRows[0].n) >= maxListings) return { ok: false as const, reason: "cap" as const };
+        if (opts.maxListings != null) {
+          const countRows = await sql<[{ n: number | string }]>`
+            SELECT COUNT(*) AS n FROM companion_listings
+            WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted'
+          `;
+          if (Number(countRows[0].n) >= opts.maxListings) return { ok: false as const, reason: "cap" as const };
+        }
+        if (opts.maxDailyPublish != null) {
+          const dailyRows = await sql<[{ n: number | string }]>`
+            SELECT COUNT(*) AS n FROM companion_listings
+            WHERE creator_user_id = ${creatorUserId} AND created_at > NOW() - INTERVAL '1 day'
+          `;
+          if (Number(dailyRows[0].n) >= opts.maxDailyPublish) return { ok: false as const, reason: "daily_cap" as const };
+        }
       }
       const rows = await sql<Array<any>>`
         INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, avatar_url, version, status, created_at, updated_at)
@@ -2610,16 +2644,19 @@ export class MemoryStore {
 
   /** Revive a delisted listing (creator-owned only). Refuses anything that
    *  isn't 'delisted' — flagged rows can't reach this path because delist
-   *  holds them, so a relist can never launder a moderation flag. The
-   *  live-listing cap is enforced atomically: a revive adds a live listing
-   *  back. */
+   *  holds them, so a relist can never launder a moderation flag. A delist
+   *  caused by a *mod* action also refuses ('moderated') — creator relist
+   *  can't undo a takedown; only a mod unflag can. "Mod-caused" means a
+   *  takedown event newer than the latest unflag — a resolved takedown or a
+   *  plain creator unpublish stays relistable. The live-listing cap is
+   *  enforced atomically: a revive adds a live listing back. */
   async relistListing(
     listingId: number,
     creatorUserId: string,
     maxListings: number,
   ): Promise<
     | { ok: true; listing: CompanionListing }
-    | { ok: false; reason: "not_found" | "not_delisted" | "cap" }
+    | { ok: false; reason: "not_found" | "not_delisted" | "cap" | "moderated" }
   > {
     return this.sql.begin(async sql => {
       await sql`SELECT pg_advisory_xact_lock(hashtext(${`listing:${creatorUserId}`}))`;
@@ -2629,6 +2666,17 @@ export class MemoryStore {
       `;
       if (!rows[0]) return { ok: false as const, reason: "not_found" as const };
       if (rows[0].status !== "delisted") return { ok: false as const, reason: "not_delisted" as const };
+      const modRows = await sql<Array<{ x: number }>>`
+        SELECT 1 AS x FROM moderation_events me
+        WHERE me.listing_id = ${listingId}
+          AND me.action IN ('delist', 'ban', 'ban_creator')
+          AND me.created_at > COALESCE(
+            (SELECT MAX(me2.created_at) FROM moderation_events me2
+             WHERE me2.listing_id = ${listingId} AND me2.action = 'unflag'),
+            '-infinity'::timestamptz)
+        LIMIT 1
+      `;
+      if (modRows.length) return { ok: false as const, reason: "moderated" as const };
       const countRows = await sql<[{ n: number | string }]>`
         SELECT COUNT(*) AS n FROM companion_listings
         WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted'
@@ -2642,11 +2690,22 @@ export class MemoryStore {
     }) as Promise<any>;
   }
 
-  /** A creator's unpublished listings — the relist pool. */
+  /** A creator's unpublished listings — the relist pool. Mod-takedowns are
+   *  excluded: the creator can't bring them back, so they don't belong in
+   *  the picker. */
   async listDelistedListings(creatorUserId: string): Promise<CompanionListing[]> {
     const rows = await this.sql<Array<any>>`
       SELECT * FROM companion_listings
       WHERE creator_user_id = ${creatorUserId} AND status = 'delisted'
+        AND NOT EXISTS (
+          SELECT 1 FROM moderation_events me
+          WHERE me.listing_id = companion_listings.id
+            AND me.action IN ('delist', 'ban', 'ban_creator')
+            AND me.created_at > COALESCE(
+              (SELECT MAX(me2.created_at) FROM moderation_events me2
+               WHERE me2.listing_id = companion_listings.id AND me2.action = 'unflag'),
+              '-infinity'::timestamptz)
+        )
       ORDER BY updated_at DESC
     `;
     return rows.map(r => this.rowToListing(r));
@@ -2740,20 +2799,39 @@ export class MemoryStore {
     return result.count > 0;
   }
 
-  async reportListing(listingId: number, reporterUserId: string, category = "other", reason = ""): Promise<number> {
-    const inserted = await this.sql`
-      INSERT INTO listing_reports (listing_id, reporter_user_id, category, reason)
-      VALUES (${listingId}, ${reporterUserId}, ${category}, ${reason})
-      ON CONFLICT (listing_id, reporter_user_id) DO NOTHING
-      RETURNING id
-    `;
-    if (!inserted.length) return -1; // already reported by this user
-    const rows = await this.sql<Array<{ report_count: number }>>`
-      UPDATE companion_listings SET report_count = report_count + 1, updated_at = NOW()
-      WHERE id = ${listingId}
-      RETURNING report_count
-    `;
-    return Number(rows[0]?.report_count ?? 0);
+  /** File a categorized report. The anti-bombing daily cap (`maxDaily`)
+   *  is enforced inside the transaction under a per-reporter advisory lock —
+   *  parallel report clicks can't both slide under the ceiling. */
+  async reportListing(
+    listingId: number,
+    reporterUserId: string,
+    category = "other",
+    reason = "",
+    maxDaily?: number,
+  ): Promise<{ ok: true; count: number } | { ok: false; reason: "dup" | "daily_cap" }> {
+    return this.sql.begin(async sql => {
+      await sql`SELECT pg_advisory_xact_lock(hashtext(${`report:${reporterUserId}`}))`;
+      if (maxDaily != null) {
+        const dailyRows = await sql<[{ n: number | string }]>`
+          SELECT COUNT(*) AS n FROM listing_reports
+          WHERE reporter_user_id = ${reporterUserId} AND created_at > NOW() - INTERVAL '1 day'
+        `;
+        if (Number(dailyRows[0].n) >= maxDaily) return { ok: false as const, reason: "daily_cap" as const };
+      }
+      const inserted = await sql`
+        INSERT INTO listing_reports (listing_id, reporter_user_id, category, reason)
+        VALUES (${listingId}, ${reporterUserId}, ${category}, ${reason})
+        ON CONFLICT (listing_id, reporter_user_id) DO NOTHING
+        RETURNING id
+      `;
+      if (!inserted.length) return { ok: false as const, reason: "dup" as const };
+      const rows = await sql<Array<{ report_count: number }>>`
+        UPDATE companion_listings SET report_count = report_count + 1, updated_at = NOW()
+        WHERE id = ${listingId}
+        RETURNING report_count
+      `;
+      return { ok: true as const, count: Number(rows[0]?.report_count ?? 0) };
+    }) as Promise<any>;
   }
 
   async flagListing(listingId: number): Promise<boolean> {
@@ -2761,25 +2839,46 @@ export class MemoryStore {
     return result.count > 0;
   }
 
-  /** A human moderation action on a listing — 'unflag' clears a hold back to
-   *  active, 'delist' takes it down (keeps clones), 'ban' is the kill switch
-   *  (freezes clones via the roster/DM/guild joins). Bypasses the creator
-   *  paths' status restrictions — mods can act on flagged rows. Every call
-   *  writes a moderation_events audit row. */
+  /** A human moderation action on a listing. 'delist' takes it down (keeps
+   *  clones); 'ban' is the kill switch (freezes clones via the roster/DM/
+   *  guild joins); 'unflag' is the restore path: flagged → active,
+   *  mod-delisted → active (a delist the *creator* caused stays down — only
+   *  mod takedowns are mod-reversible), banned → flagged (back into the
+   *  review queue rather than straight back live). Bypasses the creator
+   *  paths' status restrictions. Every call writes a moderation_events row. */
   async modAction(
     listingId: number,
     actorUserId: string,
     action: "unflag" | "delist" | "ban",
     note = "",
   ): Promise<CompanionListing | null> {
-    const target = action === "unflag" ? "active" : action === "delist" ? "delisted" : "banned";
-    const from = action === "unflag" ? ["flagged"] : action === "delist" ? ["active", "flagged"] : ["active", "flagged", "delisted"];
     return this.sql.begin(async sql => {
-      const rows = await sql<Array<any>>`
-        UPDATE companion_listings SET status = ${target}, updated_at = NOW()
-        WHERE id = ${listingId} AND status = ANY(${from})
-        RETURNING *
-      `;
+      const rows = action === "unflag"
+        ? await sql<Array<any>>`
+            UPDATE companion_listings SET
+              status = CASE WHEN status = 'banned' THEN 'flagged' ELSE 'active' END,
+              updated_at = NOW()
+            WHERE id = ${listingId} AND (
+              status IN ('flagged', 'banned')
+              -- A delisted row only unflags when its takedown is outstanding —
+              -- creator unpublishes aren't mod-restorable.
+              OR (status = 'delisted' AND EXISTS (
+                SELECT 1 FROM moderation_events me
+                WHERE me.listing_id = companion_listings.id
+                  AND me.action IN ('delist', 'ban', 'ban_creator')
+                  AND me.created_at > COALESCE(
+                    (SELECT MAX(me2.created_at) FROM moderation_events me2
+                     WHERE me2.listing_id = companion_listings.id AND me2.action = 'unflag'),
+                    '-infinity'::timestamptz)
+              ))
+            )
+            RETURNING *
+          `
+        : await sql<Array<any>>`
+            UPDATE companion_listings SET status = ${action === "delist" ? "delisted" : "banned"}, updated_at = NOW()
+            WHERE id = ${listingId} AND status = ANY(${action === "delist" ? ["active", "flagged"] : ["active", "flagged", "delisted"]})
+            RETURNING *
+          `;
       if (!rows[0]) return null;
       await sql`
         INSERT INTO moderation_events (listing_id, actor_user_id, action, note)
@@ -2894,9 +2993,15 @@ export class MemoryStore {
     `;
   }
 
+  /** Active adoptions that actually occupy a slot — clones of banned
+   *  listings are frozen and hidden (the user can't drop what they can't
+   *  see), so they don't consume the slot while the ban stands. */
   async activeAdoptionCount(userId: string): Promise<number> {
     const rows = await this.sql<[{ n: number | string }]>`
-      SELECT COUNT(*) AS n FROM companion_adoptions WHERE user_id = ${userId} AND dropped_at IS NULL
+      SELECT COUNT(*) AS n FROM companion_adoptions a
+      LEFT JOIN companion_listings l ON l.id = a.listing_id
+      WHERE a.user_id = ${userId} AND a.dropped_at IS NULL
+        AND (l.id IS NULL OR l.status <> 'banned')
     `;
     return Number(rows[0].n);
   }
@@ -2923,11 +3028,10 @@ export class MemoryStore {
   async adoptListing(
     userId: string,
     listingId: number,
-    maxSlots: number,
-    cooldownMs: number,
+    opts: { maxSlots: number; maxDaily?: number },
   ): Promise<
     | { ok: true; companion: Companion; adoption: CompanionAdoption; reused: boolean }
-    | { ok: false; reason: "not_found" | "delisted" | "own_listing" | "cap" | "cooldown"; cooldownUntil?: string }
+    | { ok: false; reason: "not_found" | "delisted" | "own_listing" | "cap" | "cooldown" | "daily_cap"; cooldownUntil?: string }
   > {
     return this.sql.begin(async sql => {
       // Serialize per-user adoption txs — without this, parallel Add clicks on
@@ -2958,12 +3062,26 @@ export class MemoryStore {
 
       // Both paths below end in an ACTIVE adoption — a re-adopt consumes a
       // slot exactly like a fresh one (the early return above already
-      // filtered the free no-op click).
+      // filtered the free no-op click). Adoptions of banned listings are
+      // frozen ghosts — they don't count (same exclusion as
+      // activeAdoptionCount).
       if (!existing || existing.dropped_at) {
         const countRows = await sql<[{ n: number | string }]>`
-          SELECT COUNT(*) AS n FROM companion_adoptions WHERE user_id = ${userId} AND dropped_at IS NULL
+          SELECT COUNT(*) AS n FROM companion_adoptions a
+          LEFT JOIN companion_listings l ON l.id = a.listing_id
+          WHERE a.user_id = ${userId} AND a.dropped_at IS NULL
+            AND (l.id IS NULL OR l.status <> 'banned')
         `;
-        if (Number(countRows[0].n) >= maxSlots) return { ok: false as const, reason: "cap" as const };
+        if (Number(countRows[0].n) >= opts.maxSlots) return { ok: false as const, reason: "cap" as const };
+        // Anti-farming daily cap — checked under the same advisory lock so
+        // parallel Add clicks can't both squeeze under the ceiling.
+        if (opts.maxDaily != null) {
+          const dailyRows = await sql<[{ n: number | string }]>`
+            SELECT COUNT(*) AS n FROM companion_adoptions
+            WHERE user_id = ${userId} AND adopted_at > NOW() - INTERVAL '1 day'
+          `;
+          if (Number(dailyRows[0].n) >= opts.maxDaily) return { ok: false as const, reason: "daily_cap" as const };
+        }
       }
 
       let companionId: number;

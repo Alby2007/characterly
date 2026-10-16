@@ -521,3 +521,61 @@ test("migration v29 creates user_bot_settings outside the auth gate and rolls ba
     assert.equal(gone[0].t, null, "rollback should drop user_bot_settings");
   } finally { await sql.end(); }
 });
+
+test("migration v36 creates the moderation surface and rolls back banned -> flagged", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any);
+
+    // listing_reports.category
+    const catCol = await sql<Array<{ column_name: string; column_default: string | null }>>`
+      SELECT column_name, column_default FROM information_schema.columns
+      WHERE table_name = 'listing_reports' AND column_name = 'category'`;
+    assert.equal(catCol.length, 1, "listing_reports.category missing");
+    assert.ok(catCol[0].column_default?.includes("'other'"), "category should default to 'other'");
+
+    // marketplace_bans + moderation_events tables/columns.
+    const banCols = await sql<Array<{ column_name: string }>>`
+      SELECT column_name FROM information_schema.columns WHERE table_name = 'marketplace_bans'`;
+    assert.deepEqual(
+      banCols.map(c => c.column_name).sort(),
+      ["banned_by", "created_at", "discord_user_id", "reason"],
+    );
+    const evCols = await sql<Array<{ column_name: string; is_nullable: string }>>`
+      SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name = 'moderation_events'`;
+    const evNames = evCols.map(c => c.column_name).sort();
+    assert.deepEqual(evNames, ["action", "actor_user_id", "created_at", "id", "listing_id", "note"]);
+    assert.equal(evCols.find(c => c.column_name === "listing_id")?.is_nullable, "YES",
+      "moderation_events.listing_id must be nullable (ON DELETE SET NULL)");
+
+    // Indexes that make the per-day rate-limit counts cheap.
+    const idx = await sql<Array<{ indexname: string }>>`SELECT indexname FROM pg_indexes WHERE schemaname='public'`;
+    const names = idx.map(r => r.indexname);
+    for (const n of ["mod_events_listing", "listing_reports_reporter", "listings_creator_created", "adoptions_user_adopted"]) {
+      assert.ok(names.includes(n), `Missing index: ${n}`);
+    }
+
+    // Seed a banned listing — rollback must convert it to flagged, not leave
+    // it in a status the older code can't read.
+    await sql`INSERT INTO companion_listings (creator_user_id, name, status) VALUES ('u-v36', 'Banned', 'banned')`;
+    await sql`INSERT INTO companion_listings (creator_user_id, name, status) VALUES ('u-v36', 'Fine', 'active')`;
+    await sql`INSERT INTO moderation_events (listing_id, actor_user_id, action) VALUES (NULL, 'u-v36', 'ban')`;
+    await sql`INSERT INTO marketplace_bans (discord_user_id, banned_by) VALUES ('u-v36', 'mod-1')`;
+
+    await runMigrations(sql as any, 35);
+    const statuses = await sql<Array<{ status: string }>>`SELECT status FROM companion_listings ORDER BY name`;
+    assert.deepEqual(statuses.map(s => s.status), ["flagged", "active"], "banned should revert to flagged on rollback");
+    const gone = await sql<Array<{ t: string | null }>>`
+      SELECT to_regclass('public.moderation_events') AS t UNION ALL SELECT to_regclass('public.marketplace_bans')`;
+    assert.ok(gone.every(r => r.t === null), "rollback should drop both moderation tables");
+    const catGone = await sql<Array<{ column_name: string }>>`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'listing_reports' AND column_name = 'category'`;
+    assert.equal(catGone.length, 0, "rollback should drop category");
+    const idxGone = await sql<Array<{ indexname: string }>>`
+      SELECT indexname FROM pg_indexes WHERE schemaname='public'
+        AND indexname IN ('mod_events_listing','listing_reports_reporter','listings_creator_created','adoptions_user_adopted')`;
+    assert.equal(idxGone.length, 0, "rollback should drop the rate-limit indexes");
+  } finally { await sql.end(); }
+});
