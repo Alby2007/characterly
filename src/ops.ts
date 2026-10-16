@@ -68,14 +68,21 @@ export interface GuildChannelLike {
   edit?(opts: { defaultForumLayout?: number }): Promise<unknown>;
   /** Category's own overwrites — copied to created children so a rebuilt
    * mods/ops channel doesn't come up world-readable. */
-  permissionOverwrites?: { cache?: Iterable<{ id: string; allow: bigint; deny: bigint }> };
+  /** True when the channel's overwrites match its parent's (Discord "synced").
+   *  Read BEFORE mutating the parent — a stale-cache mismatch can read false
+   *  post-edit. */
+  permissionsLocked?: boolean | null;
+  permissionOverwrites?: {
+    cache?: Iterable<{ id: string; allow: unknown; deny: unknown }>;
+    edit?(id: string, perms: { [perm: string]: boolean | null }): Promise<unknown>;
+  };
 }
 
 export interface GuildLike {
   id: string;
   channels: {
     cache: { find(fn: (c: GuildChannelLike) => boolean): GuildChannelLike | undefined };
-    create(opts: { name: string; type: number; parent?: string; permissionOverwrites?: Array<{ id: string; allow: bigint; deny: bigint }> }): Promise<GuildChannelLike>;
+    create(opts: { name: string; type: number; parent?: string; permissionOverwrites?: Array<{ id: string; allow: unknown; deny: unknown }> }): Promise<GuildChannelLike>;
   };
 }
 
@@ -527,15 +534,22 @@ export async function automodMessage(message: AutomodMessage, deps: OpsDeps): Pr
 // NFKC+lowercase normalization (channel names may carry emoji, categories may
 // be styled) — a mis-parented channel is adopted, never duplicated.
 
-export const WANTED_LAYOUT: Array<{ category: string; channels: Array<{ name: string; type: ChannelType }> }> = [
+export const WANTED_LAYOUT: Array<{
+  category: string;
+  /** Members get view-but-no-type on the whole category (enforced at the
+   *  category level so synced children inherit and stay synced). */
+  readOnly?: boolean;
+  channels: Array<{ name: string; type: ChannelType; readOnly?: boolean }>;
+}> = [
   {
     category: "SYSTEM",
     channels: [
       { name: "welcome", type: ChannelType.GuildText },
-      { name: "announcements", type: ChannelType.GuildAnnouncement },
+      { name: "announcements", type: ChannelType.GuildAnnouncement, readOnly: true },
       { name: "rules", type: ChannelType.GuildText },
       { name: "log-in", type: ChannelType.GuildText }, // the verify gate lives here
-      { name: "updates", type: ChannelType.GuildText },
+      { name: "updates", type: ChannelType.GuildText, readOnly: true },
+      { name: "events", type: ChannelType.GuildText, readOnly: true },
     ],
   },
   {
@@ -544,14 +558,18 @@ export const WANTED_LAYOUT: Array<{ category: string; channels: Array<{ name: st
   },
   {
     category: "RESOURCES",
+    readOnly: true,
     channels: [
       { name: "what-is-characterly", type: ChannelType.GuildText },
+      { name: "what-is-companionly", type: ChannelType.GuildText },
+      { name: "get-characterly", type: ChannelType.GuildText },
       { name: "privacy-policy", type: ChannelType.GuildText },
       { name: "how-to-publish-bots", type: ChannelType.GuildText },
     ],
   },
   {
     category: "HELP",
+    readOnly: true,
     channels: [
       { name: "faqs", type: ChannelType.GuildText },
       { name: "support-ticket", type: ChannelType.GuildText },
@@ -569,6 +587,41 @@ export const WANTED_LAYOUT: Array<{ category: string; channels: Array<{ name: st
 
 const normName = (s: string) => s.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
 
+/** Typing perms denied on read-only surfaces — messages, thread replies, and
+ *  forum-post/thread creation. ViewChannel stays allowed. */
+const READONLY_DENY_BITS = [
+  PermissionFlagsBits.SendMessages,
+  PermissionFlagsBits.SendMessagesInThreads,
+  PermissionFlagsBits.CreatePublicThreads,
+  PermissionFlagsBits.CreatePrivateThreads,
+] as const;
+const READONLY_DENY_PERMS = {
+  SendMessages: false,
+  SendMessagesInThreads: false,
+  CreatePublicThreads: false,
+  CreatePrivateThreads: false,
+};
+
+function denyHas(deny: unknown, bit: bigint): boolean {
+  if (typeof deny === "bigint") return (deny & bit) === bit;
+  const d = deny as { has?(b: bigint): boolean } | null | undefined;
+  return typeof d?.has === "function" && d.has(bit);
+}
+
+/** Deny the Member role's typing perms on a channel/category while keeping
+ *  its ViewChannel. Scoped to Member so mods/admins/the bot retain posting —
+ *  member-facing announcements go through the bot (`/ops announce`) anyway. */
+async function ensureReadOnly(ch: GuildChannelLike, created: string[], label: string): Promise<void> {
+  const roleId = config.houseMemberRoleId;
+  const overwrites = ch.permissionOverwrites;
+  if (!roleId || typeof overwrites?.edit !== "function") return;
+  const cur = [...(overwrites.cache ?? [])].find(o => o.id === roleId);
+  if (cur && READONLY_DENY_BITS.every(b => denyHas(cur.deny, b))) return;
+  await overwrites.edit(roleId, { ViewChannel: true, ...READONLY_DENY_PERMS })
+    .then(() => { created.push(`🔒 ${label}`); })
+    .catch(() => {});
+}
+
 /** Create missing categories + channels by name. Idempotent — returns the
  * names of what it created ([] when the layout is already complete). */
 export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
@@ -582,15 +635,29 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
       cat = await guild.channels.create({ name: group.category, type: ChannelType.GuildCategory });
       created.push(`📁 ${group.category}`);
     }
+    // Read-only categories get the Member typing deny at the PARENT — synced
+    // children inherit it, and writing channel-level overwrites would desync
+    // them. Snapshot child sync-state BEFORE mutating the parent (discord.js
+    // compares live overwrites, so the flag can flip false post-edit), and run
+    // the parent edit before creates so children copy the denied set.
+    const syncBefore = new Map<string, boolean>();
+    if (group.readOnly) {
+      for (const wanted of group.channels) {
+        const ch = guild.channels.cache.find(c => normName(c.name) === normName(wanted.name));
+        if (ch) syncBefore.set(normName(wanted.name), ch.permissionsLocked === true);
+      }
+      await ensureReadOnly(cat, created, `📁 ${group.category}`);
+    }
     for (const wanted of group.channels) {
       const exists = guild.channels.cache.find(c => normName(c.name) === normName(wanted.name));
+      let target = exists;
       if (!exists) {
         // New channels inherit the category's overwrites — a fresh
         // mods/ops channel must not come up with default (public) perms.
         const overwrites = cat.permissionOverwrites?.cache
           ? [...cat.permissionOverwrites.cache].map(o => ({ id: o.id, allow: o.allow, deny: o.deny }))
           : undefined;
-        await guild.channels.create({ name: wanted.name, type: wanted.type, parent: cat.id, permissionOverwrites: overwrites });
+        target = await guild.channels.create({ name: wanted.name, type: wanted.type, parent: cat.id, permissionOverwrites: overwrites });
         created.push(`#${wanted.name}`);
       } else if (
         wanted.type === ChannelType.GuildForum
@@ -602,6 +669,11 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
         await exists.edit({ defaultForumLayout: ForumLayoutType.GalleryView })
           .then(() => { created.push(`⚙ ${wanted.name} → gallery view`); })
           .catch(() => {});
+      }
+      // Explicit readOnly channels (mixed parents like SYSTEM) and children
+      // that weren't synced to a readOnly parent need their own deny.
+      if (target && (wanted.readOnly === true || (group.readOnly === true && syncBefore.get(normName(wanted.name)) !== true))) {
+        await ensureReadOnly(target, created, `#${wanted.name}`);
       }
     }
   }

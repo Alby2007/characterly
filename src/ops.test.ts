@@ -7,6 +7,7 @@ import {
   ensureVerifyGate, handleHouseButton, runMemberLinkSweep, runTagSweep,
   type OpsDeps, type AutomodMessage, type MemberLike,
 } from "./ops.js";
+import { PermissionFlagsBits } from "discord.js";
 import { config } from "./config.js";
 import { SEED_LISTINGS } from "./seed-personas.js";
 import type { MemoryStore } from "./database.js";
@@ -564,6 +565,76 @@ test("ensureHouseLayout copies the category's overwrites to created channels", a
   assert.equal(modsChat.parent, "cat-services");
   assert.deepEqual(modsChat.permissionOverwrites, catOverwrites.map(o => ({ id: o.id, allow: o.allow, deny: o.deny })),
     "created under the private category's overwrites — not default-public");
+});
+
+test("ensureHouseLayout denies Member typing on readOnly surfaces; synced children inherit", async () => {
+  const edits: Array<{ target: string; id: string; perms: Record<string, unknown> }> = [];
+  // Overwrite fake: edits mutate the stored allow/deny so a second run no-ops.
+  const mkOw = (tag: string, deny = 0n) => {
+    const ow = { id: "r-member", allow: 1024n, deny };
+    return {
+      cache: [ow],
+      edit: async (id: string, perms: Record<string, unknown>) => {
+        edits.push({ target: tag, id, perms });
+        for (const [k, v] of Object.entries(perms)) {
+          const bit = PermissionFlagsBits[k as keyof typeof PermissionFlagsBits] as bigint;
+          if (v === false) ow.deny |= bit; else if (v === true) ow.allow |= bit;
+        }
+      },
+    };
+  };
+  const mkCat = (name: string) => ({ id: `cat-${name.toLowerCase()}`, name, type: 4, permissionOverwrites: mkOw(`cat:${name}`) });
+  const mkCh = (name: string, parentId: string, synced: boolean, type = 0) =>
+    ({ id: `c-${name}`, name, type, parentId, permissionsLocked: synced, permissionOverwrites: mkOw(name) });
+  const existing = [
+    mkCat("SYSTEM"), mkCat("CHARACTER MARKETPLACE"), mkCat("RESOURCES"), mkCat("HELP"), mkCat("SERVICES"),
+    mkCh("welcome", "cat-system", true),
+    mkCh("announcements", "cat-system", false), mkCh("events", "cat-system", false), mkCh("updates", "cat-system", false),
+    mkCh("rules", "cat-system", true), mkCh("log-in", "cat-system", true),
+    mkCh("characters", "cat-character marketplace", true, 15),
+    ...["what-is-characterly", "what-is-companionly", "get-characterly", "privacy-policy", "how-to-publish-bots"]
+      .map(n => mkCh(n, "cat-resources", true)),
+    mkCh("faqs", "cat-help", true), mkCh("support-ticket", "cat-help", true), mkCh("suggest-a-feature", "cat-help", true),
+    mkCh("admins-chat", "cat-services", true), mkCh("mods-chat", "cat-services", true),
+  ];
+  const guild = {
+    id: HOUSE,
+    channels: {
+      cache: { find: (fn: (c: any) => boolean) => existing.find(fn) },
+      create: async (o: any) => ({ id: `n-${o.name}`, ...o, parentId: o.parent }),
+    },
+  };
+
+  await ensureHouseLayout(guild as any);
+
+  // Category-level denies for the fully read-only categories.
+  for (const cat of ["cat:RESOURCES", "cat:HELP"]) {
+    const e = edits.find(x => x.target === cat && x.id === "r-member");
+    assert.ok(e, `${cat} should get the Member typing deny`);
+    assert.equal(e!.perms.SendMessages, false);
+    assert.equal(e!.perms.ViewChannel, true, "members keep view access");
+  }
+  // Synced children are left alone — they inherit the parent deny.
+  for (const n of ["faqs", "support-ticket", "suggest-a-feature", "privacy-policy", "how-to-publish-bots"]) {
+    assert.ok(!edits.some(e => e.target === n), `synced #${n} inherits the category deny — no per-channel write`);
+  }
+  // SYSTEM's readOnly channels are individually flagged (mixed category).
+  for (const n of ["announcements", "events", "updates"]) {
+    const e = edits.find(x => x.target === n && x.id === "r-member");
+    assert.ok(e, `#${n} should get its own Member deny`);
+    assert.equal(e!.perms.SendMessagesInThreads, false);
+    assert.equal(e!.perms.ViewChannel, true);
+  }
+  // Open surfaces stay open.
+  for (const t of ["welcome", "characters", "cat:SYSTEM", "cat:SERVICES", "mods-chat"]) {
+    assert.ok(!edits.some(e => e.target === t), `${t} must not get a Member deny`);
+  }
+
+  // Idempotent — denies already present, nothing new to write.
+  edits.length = 0;
+  const second = await ensureHouseLayout(guild as any);
+  assert.equal(edits.length, 0, "second run must not re-write overwrites");
+  assert.deepEqual(second, []);
 });
 
 // ── Host health + watchdog ───────────────────────────────────────────────────
