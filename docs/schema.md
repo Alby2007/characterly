@@ -663,6 +663,40 @@ Moderation foundation (v34): one row per (listing, reporter) so reports dedupe n
 
 ---
 
+### `listing_ratings`
+
+Star ratings on a listing's card (v37) — one row per `(listing_id, rater_user_id)`, so a re-rate is an upsert that moves the vote without growing the table. The card shows `AVG(stars)` + count.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT PK | |
+| `listing_id` | BIGINT | FK → `companion_listings.id ON DELETE CASCADE` (indexed) |
+| `rater_user_id` | TEXT | Composite unique with `listing_id` |
+| `stars` | SMALLINT | `CHECK (stars BETWEEN 1 AND 5)` |
+| `created_at` / `updated_at` | TIMESTAMPTZ | `updated_at` moves on re-rate |
+
+**RLS:** enabled, zero policies.
+
+---
+
+### `comment_reports`
+
+Message-scoped reports for comments inside listing threads (v37) — separate from `listing_reports` so a reported *comment* doesn't count toward the listing's auto-flag threshold. Dedupes per `(message_id, reporter_user_id)`; the reporter's daily budget is shared with `listing_reports` under the same `report:<userId>` advisory lock.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT PK | |
+| `listing_id` | BIGINT NULL | FK → `companion_listings.id ON DELETE SET NULL` — resolved via `listingByThreadId` at report time; NULL if the thread↔listing mapping is gone |
+| `thread_id` / `message_id` | TEXT | The reported comment's thread + message snowflakes |
+| `author_user_id` | TEXT | The comment's author — lets the Timeout mod action resolve the target from the stored row, not the (forgeable) button id |
+| `reporter_user_id` | TEXT | Composite unique with `message_id`; indexed with `created_at` for the shared daily cap |
+| `category` | TEXT | Same allowlist as listing reports minus `theft` (`other` fallback on forged ids) |
+| `created_at` | TIMESTAMPTZ | |
+
+**RLS:** enabled, zero policies.
+
+---
+
 ### `marketplace_bans`
 
 Creator publish-bans (v36), keyed by Discord user id so the self-host lane (no web accounts) can use them too. A ban publish-locks the creator and `banCreator` marks all their live listings `banned` — which freezes their adopted clones via the roster/DM/guild joins.
@@ -746,3 +780,4 @@ Version tracking for the migration system.
 | 34 | `v34_companion_marketplace` | Companion marketplace: `companions.kind`/`adopted_from_listing_id`/`listing_version`, partial unique index `companions_one_awakened` replaces the blanket owner uniqueness, `companion_listings`/`companion_persona_versions`/`companion_adoptions`/`listing_reports` tables, `user_bot_settings.active_dm_companion_id` |
 | 35 | `v35_listing_source_nullable` | `companion_listings.source_companion_id` drops `NOT NULL` — freehand creator-authored listings (`/companion action:create`) have no awakened source |
 | 36 | `v36_moderation_surface` | `listing_reports.category`, `marketplace_bans`, `moderation_events`, and the per-day rate-limit indexes (`reporter_user_id`/`creator_user_id`/`user_id` + timestamps) |
+| 37 | `v37_ratings_and_comment_reports` | `listing_ratings` (upsert-per-rater, `stars` 1–5 CHECK) + `comment_reports` (dedupe per `(message_id, reporter_user_id)`, shared daily report budget) — listing threads become the comment + rating surface |

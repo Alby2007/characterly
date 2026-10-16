@@ -3,6 +3,7 @@ import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder
 import { config } from "./config.js";
 import { inc } from "./metrics.js";
 import { logError, redactSecrets } from "./secrets.js";
+import { checkMessageContent } from "./safety.js";
 import type { MemoryStore } from "./database.js";
 
 // ── House ops ────────────────────────────────────────────────────────────────
@@ -15,6 +16,12 @@ import type { MemoryStore } from "./database.js";
 
 export const isHouse = (guildId: string | null | undefined): boolean =>
   !!config.houseGuildId && guildId === config.houseGuildId;
+
+/** True when the channel is a thread inside the marketplace forum — the
+ *  listing comment surface. Used to keep comments out of the memory/reply
+ *  pipeline (index.ts) and to scope the "Report message" context command. */
+export const isMarketplaceThread = (channel: { isThread?(): boolean; parentId?: string | null } | null | undefined): boolean =>
+  !!channel?.isThread?.() && channel.parentId === config.marketplaceChannelId;
 
 // Narrow structural shapes — tests hand fakes, index.ts casts the real objects.
 interface SendableChannel {
@@ -354,6 +361,11 @@ export async function automodMessage(message: AutomodMessage, deps: OpsDeps): Pr
   for (const { rule, re } of SCAM_PATTERNS) {
     if (re.test(message.content)) return act(rule, 10 * 60_000);
   }
+  // Hard-line content — the listing blocklist applied to live chat: slurs,
+  // minor-safety text, self-harm promotion, illegal content get deleted and
+  // timeout the author, in comments and everywhere else in the house guild.
+  const contentHit = checkMessageContent(message.content);
+  if (!contentHit.ok) return act(`hard-line content (${contentHit.category})`, 30 * 60_000);
   // Mass mention — or @everyone/here from a member who lacks the permission.
   // Role mentions count too — a dozen @role pings is the same spam shape.
   const overMentions = message.mentions.users.size + (message.mentions.roles?.size ?? 0) > config.automodMentionMax;

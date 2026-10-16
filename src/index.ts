@@ -14,7 +14,7 @@ import {
   commandDefinitions,
   findMutualGuilds,
   handleCompanionModal,
-  handleMemoryButton,
+  handleMemoryButton, handleReportMessageCommand,
   handleMemoryCommand,
   handleSetupModal,
   sendAdoptionGreeting,
@@ -42,7 +42,7 @@ import { selectCompanionForTurn } from "./scene-router.js";
 import { sendAsCompanion } from "./webhooks.js";
 import { isSelfHarmSignal, CRISIS_RESPONSE, SAFE_REFUSAL } from "./safety.js";
 import {
-  initOps, automodMessage, isHouse, opsAlert,
+  initOps, automodMessage, isHouse, isMarketplaceThread, opsAlert,
   handleHouseMemberAdd, handleHouseMemberUpdate, handleHouseMemberRemove,
   ensureHouseLayout, startHostWatchdog, ensureVerifyGate, startLinkSweep,
   type OpsDeps, type GuildLike,
@@ -620,6 +620,7 @@ async function sweepMissedSignals(windowMs: number) {
 client.on(Events.InteractionCreate, async interaction => {
   try {
     if (interaction.isChatInputCommand()) await handleMemoryCommand(interaction, store, brainFor, eventStore, profileStore);
+    if (interaction.isMessageContextMenuCommand()) await handleReportMessageCommand(interaction);
     if (interaction.isModalSubmit()) {
       await handleSetupModal(interaction, store, invalidateBrain);
       await handleCompanionModal(interaction, store, scopeId => lookupCache.delete(scopeId));
@@ -1232,6 +1233,10 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       .catch(e => { inc("ops.automod_error"); logError("automod failed", e); return false; });
     if (acted) return;
   }
+  // Marketplace listing threads are a comment surface, not memory material —
+  // no archive, extraction, awaken-notice, or companion replies. Automod has
+  // already run above, so moderation coverage is unchanged.
+  if (isMarketplaceThread(message.channel)) return;
 
   // Check whether this guild message was sent by one of our own companion
   // webhooks. Discord can dispatch the MessageCreate echo before the send

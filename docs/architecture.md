@@ -238,6 +238,8 @@ Every durable message used to run 3+ sequential LLM calls inside `handleMessage`
 
 `server_settings.ignored_channels` (`/ignore-channel`, `/unignore-channel`, listed in `/memory-settings`) makes a channel fully invisible: `handleMessage` returns before `recordMessage`/`brainFor`/member writes, the sweep filters archived rows from ignored channels, and `runServerIngest` early-returns — so `/server-build` never scans one either.
 
+A second, structural exclusion sits one level up: **marketplace listing threads** (`isMarketplaceThread` — a thread whose parent is `MARKETPLACE_CHANNEL_ID`) return from `handleMessage` *after* house automod but *before* event construction, so comments are moderated but never archived, extracted, answered, or greeted — they're public discourse on the listing card, not memory material. Unlike ignored channels this can't be configured away, and it applies to every guild message in those threads including replies to the card itself.
+
 ### Cross-guild isolation
 
 `isolation.test.ts` is the dedicated proof: every store read path and every command surface is invoked as guild A against a seeded guild B and must return A's rows only (or a refusal) — including `jobs`/`guild_usage`/`guild_keys` and `purgeGuild` scoping.

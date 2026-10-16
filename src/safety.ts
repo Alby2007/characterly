@@ -35,6 +35,17 @@ const LISTING_BLOCKLIST: Array<{ re: RegExp; category: string }> = [
   },
 ];
 
+/** Deterministic check over a single free-text field. Used by
+ *  checkListingFields per field and by house automod on live comment text —
+ *  the hard-line categories (minor safety, hate, self-harm promo, illegal)
+ *  apply to any user-authored surface, not just authored listings. */
+export function checkMessageContent(text: string): { ok: true } | { ok: false; category: string } {
+  for (const { re, category } of LISTING_BLOCKLIST) {
+    if (re.test(text)) return { ok: false, category };
+  }
+  return { ok: true };
+}
+
 /** Deterministic check over authored listing fields. Returns the first hit
  *  with its category and field name so the refusal can name both. */
 export function checkListingFields(
@@ -51,9 +62,8 @@ export function checkListingFields(
   ];
   for (const [field, text] of entries) {
     if (!text) continue;
-    for (const { re, category } of LISTING_BLOCKLIST) {
-      if (re.test(text)) return { ok: false, category, field };
-    }
+    const hit = checkMessageContent(text);
+    if (!hit.ok) return { ok: false, category: hit.category, field };
   }
   return { ok: true };
 }

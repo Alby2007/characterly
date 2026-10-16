@@ -1910,6 +1910,54 @@ const migrations: Migration[] = [
       await sql`ALTER TABLE listing_reports DROP COLUMN IF EXISTS category`;
     },
   },
+  // v37 — listing thread comments become a first-class surface: star ratings
+  // aggregate onto the card, and comments get their own report pipeline (a
+  // comment report shouldn't count toward the listing's auto-flag threshold,
+  // so it lives in its own table). Ratings dedupe per (listing, rater) — a
+  // re-rate is an upsert; comment reports dedupe per (message, reporter).
+  {
+    version: 37,
+    name: "v37_ratings_and_comment_reports",
+    up: async (sql) => {
+      await sql`
+        CREATE TABLE IF NOT EXISTS listing_ratings (
+          id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          listing_id    BIGINT NOT NULL REFERENCES companion_listings(id) ON DELETE CASCADE,
+          rater_user_id TEXT NOT NULL,
+          stars         SMALLINT NOT NULL CHECK (stars BETWEEN 1 AND 5),
+          created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(listing_id, rater_user_id)
+        )
+      `;
+      await sql`ALTER TABLE listing_ratings ENABLE ROW LEVEL SECURITY`;
+      await sql`CREATE INDEX IF NOT EXISTS listing_ratings_listing ON listing_ratings(listing_id)`;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS comment_reports (
+          id               BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          listing_id       BIGINT REFERENCES companion_listings(id) ON DELETE SET NULL,
+          thread_id        TEXT NOT NULL,
+          message_id       TEXT NOT NULL,
+          author_user_id   TEXT NOT NULL,
+          reporter_user_id TEXT NOT NULL,
+          category         TEXT NOT NULL DEFAULT 'other',
+          created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(message_id, reporter_user_id)
+        )
+      `;
+      await sql`ALTER TABLE comment_reports ENABLE ROW LEVEL SECURITY`;
+      await sql`CREATE INDEX IF NOT EXISTS comment_reports_message ON comment_reports(message_id)`;
+      await sql`CREATE INDEX IF NOT EXISTS comment_reports_reporter ON comment_reports(reporter_user_id, created_at)`;
+    },
+    down: async (sql) => {
+      await sql`DROP INDEX IF EXISTS comment_reports_reporter`;
+      await sql`DROP INDEX IF EXISTS comment_reports_message`;
+      await sql`DROP TABLE IF EXISTS comment_reports`;
+      await sql`DROP INDEX IF EXISTS listing_ratings_listing`;
+      await sql`DROP TABLE IF EXISTS listing_ratings`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

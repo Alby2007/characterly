@@ -4,13 +4,15 @@ The policy and enforcement surface for the companion marketplace. The
 audience this product courts — companion-platform refugees — skews young and
 emotionally invested, so moderation is a product feature, not a checkbox.
 
-Three surfaces exist, and they are moderated **differently**:
+Four surfaces exist, and they are moderated **differently**:
 
 1. **Listing content** — name, tagline, greeting, persona fields. Authored
    text, reviewed at publish/edit time.
 2. **Generated output** — what adopted companions actually *say*. Unbounded
    and prompt-injectable; screened at generation time.
-3. **Actors** — creators and reporters, via linked accounts, bans, and rate
+3. **Listing-thread comments** — user discussion on the cards. Live chat,
+   moderated by automod + message-level reports (below).
+4. **Actors** — creators and reporters, via linked accounts, bans, and rate
    limits.
 
 ## Content policy
@@ -111,6 +113,31 @@ action buttons — **Keep up** (unflag: `flagged→active`, mod-delisted→
 `active`, `banned→flagged`), **Delist**, **Ban listing**, **Ban creator** —
 gated to `MARKETPLACE_MOD_ROLE_IDS` (fallback: ManageGuild). Every mod
 action writes a `moderation_events` row with the actor, action, and note.
+
+### Comment moderation (v37)
+
+Listing threads are the comment surface — readable by everyone, writable by
+verified Members (+ staff). They get a distinct moderation lane, not the
+listing-report one:
+
+- **Automod first.** House automod runs on every guild message before any
+  other handling, so comments inherit the invite-link, scam, mass-mention,
+  burst-spam, and new-account-link rules for free. On top of that,
+  `checkMessageContent` applies the listing blocklist to live chat text:
+  slurs, minor-safety text, self-harm promotion, and illegal instruction are
+  deleted and the author timed out 30m. After automod, marketplace-thread
+  messages exit the pipeline entirely — no archive, no memory extraction,
+  no companion replies, no summon notices (`isMarketplaceThread`: thread
+  parent == `MARKETPLACE_CHANNEL_ID`).
+- **Report message** (message context-menu command) only fires inside
+  marketplace threads. Category picker → `comment_reports` row (unique per
+  `(message, reporter)`) → mod ping with the quoted excerpt
+  (`allowedMentions.parse: []` — the quote can't ping), jump link, and
+  **Keep / Delete comment / Timeout author (10m)** buttons, gated to the
+  same mod check. The Timeout target resolves from the stored row, not the
+  button's author id.
+- **Daily cap is shared** with listing reports — one `report:<userId>`
+  budget across both lanes, enforced inside the transaction.
 
 ### Rate limits (per UTC day, derived from table rows)
 

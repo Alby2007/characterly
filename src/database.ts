@@ -2835,6 +2835,69 @@ export class MemoryStore {
     }) as Promise<any>;
   }
 
+  // ── Ratings + comment reports (v37) ────────────────────────────────────────
+  // Listing threads are the comment surface: ratings are one row per
+  // (listing, rater) so a re-rate is an upsert; comment reports dedupe per
+  // (message, reporter) and share the reporter's daily cap budget with
+  // listing reports — one anti-bombing ceiling across both lanes.
+
+  async rateListing(listingId: number, raterUserId: string, stars: number): Promise<void> {
+    await this.sql`
+      INSERT INTO listing_ratings (listing_id, rater_user_id, stars)
+      VALUES (${listingId}, ${raterUserId}, ${stars})
+      ON CONFLICT (listing_id, rater_user_id)
+      DO UPDATE SET stars = EXCLUDED.stars, updated_at = NOW()
+    `;
+  }
+
+  async listingRatingStats(listingId: number): Promise<{ avg: number; count: number }> {
+    const rows = await this.sql<Array<{ avg: number | string | null; n: number | string }>>`
+      SELECT AVG(stars) AS avg, COUNT(*) AS n FROM listing_ratings WHERE listing_id = ${listingId}
+    `;
+    return { avg: rows[0].avg == null ? 0 : Number(rows[0].avg), count: Number(rows[0].n) };
+  }
+
+  async listingByThreadId(threadId: string): Promise<CompanionListing | null> {
+    const rows = await this.sql<Array<any>>`SELECT * FROM companion_listings WHERE forum_thread_id = ${threadId}`;
+    return rows[0] ? this.rowToListing(rows[0]) : null;
+  }
+
+  /** File a report on a comment inside a listing thread. Shares the
+   *  reporter's daily budget with listing reports — the cap exists to blunt
+   *  report-bombing, and the lane doesn't matter for that. Dedupe is per
+   *  (message, reporter): the same user can report different comments. */
+  async reportComment(
+    r: { listingId: number | null; threadId: string; messageId: string; authorUserId: string; reporterUserId: string; category?: string },
+    maxDaily?: number,
+  ): Promise<{ ok: true } | { ok: false; reason: "dup" | "daily_cap" }> {
+    return this.sql.begin(async sql => {
+      await sql`SELECT pg_advisory_xact_lock(hashtext(${`report:${r.reporterUserId}`}))`;
+      if (maxDaily != null) {
+        const dailyRows = await sql<[{ n: number | string }]>`
+          SELECT (SELECT COUNT(*) FROM listing_reports WHERE reporter_user_id = ${r.reporterUserId} AND created_at > NOW() - INTERVAL '1 day')
+               + (SELECT COUNT(*) FROM comment_reports WHERE reporter_user_id = ${r.reporterUserId} AND created_at > NOW() - INTERVAL '1 day') AS n
+        `;
+        if (Number(dailyRows[0].n) >= maxDaily) return { ok: false as const, reason: "daily_cap" as const };
+      }
+      const inserted = await sql`
+        INSERT INTO comment_reports (listing_id, thread_id, message_id, author_user_id, reporter_user_id, category)
+        VALUES (${r.listingId}, ${r.threadId}, ${r.messageId}, ${r.authorUserId}, ${r.reporterUserId}, ${r.category ?? "other"})
+        ON CONFLICT (message_id, reporter_user_id) DO NOTHING
+        RETURNING id
+      `;
+      return inserted.length ? { ok: true as const } : { ok: false as const, reason: "dup" as const };
+    }) as Promise<any>;
+  }
+
+  /** Lookup the stored report row for a message — the mod timeout action
+   *  resolves the author id from here rather than trusting the button. */
+  async commentReportFor(messageId: string): Promise<{ authorUserId: string } | null> {
+    const rows = await this.sql<Array<{ author_user_id: string }>>`
+      SELECT author_user_id FROM comment_reports WHERE message_id = ${messageId} LIMIT 1
+    `;
+    return rows[0] ? { authorUserId: rows[0].author_user_id } : null;
+  }
+
   async flagListing(listingId: number): Promise<boolean> {
     const result = await this.sql`UPDATE companion_listings SET status = 'flagged', updated_at = NOW() WHERE id = ${listingId} AND status = 'active'`;
     return result.count > 0;

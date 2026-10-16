@@ -1,4 +1,4 @@
-import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonInteraction, ButtonStyle, ChannelType, ChatInputCommandInteraction, EmbedBuilder, ModalBuilder, ModalSubmitInteraction, PermissionFlagsBits, TextInputBuilder, TextInputStyle, type TextChannel } from "discord.js";
+import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonInteraction, ButtonStyle, ChannelType, ChatInputCommandInteraction, EmbedBuilder, escapeMarkdown, ModalBuilder, ModalSubmitInteraction, PermissionFlagsBits, TextInputBuilder, TextInputStyle, type Client, type MessageContextMenuCommandInteraction, type TextChannel } from "discord.js";
 import type { Brain } from "./brain.js";
 import { MemoryStore, type Memory } from "./database.js";
 import { EventStore } from "./events.js";
@@ -14,7 +14,7 @@ import { inc, metricsSnapshot } from "./metrics.js";
 import type { Companion, CompanionListing, CompanionSpec, MessageEvent } from "./types.js";
 import { config } from "./config.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
-import { handleOpsCommand, handleHouseButton } from "./ops.js";
+import { handleOpsCommand, handleHouseButton, isHouse, isMarketplaceThread } from "./ops.js";
 
 export const ONBOARDING_ARCHETYPES: Record<
   string,
@@ -447,7 +447,7 @@ export function buildMarketPersonaModal(listing: CompanionListing): ModalBuilder
   return modal;
 }
 
-export function buildListingCard(listing: CompanionListing, creatorName: string): EmbedBuilder {
+export function buildListingCard(listing: CompanionListing, creatorName: string, stats?: { avg: number; count: number }): EmbedBuilder {
   const embed = new EmbedBuilder()
     .setTitle(listing.name)
     .setDescription(listing.tagline || "A companion up for adoption")
@@ -455,6 +455,7 @@ export function buildListingCard(listing: CompanionListing, creatorName: string)
       { name: "Voice & Vibe", value: listing.voicePersona || "—" },
       { name: "Traits", value: listing.coreTraits.length ? listing.coreTraits.join(", ") : "—", inline: true },
       { name: "Adopted by", value: `${listing.addCount} user${listing.addCount === 1 ? "" : "s"}`, inline: true },
+      { name: "Rating", value: stats && stats.count > 0 ? `★ ${stats.avg.toFixed(1)} · ${stats.count} rating${stats.count === 1 ? "" : "s"}` : "No ratings yet", inline: true },
     )
     .setFooter({ text: `by ${creatorName} · Characterly Marketplace · v${listing.version}` });
   if (listing.avatarUrl) embed.setThumbnail(listing.avatarUrl);
@@ -464,6 +465,7 @@ export function buildListingCard(listing: CompanionListing, creatorName: string)
 export function buildListingComponents(listingId: number): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`market:add:${listingId}`).setLabel("Add to your companions").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`market:rate:${listingId}`).setLabel("Rate").setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId(`market:report:${listingId}`).setLabel("Report").setStyle(ButtonStyle.Secondary),
   );
 }
@@ -592,19 +594,55 @@ async function listingSlotError(
 async function postListingThread(
   interaction: { client: ChatInputCommandInteraction["client"]; user: { username?: string; globalName?: string | null } },
   listing: CompanionListing,
+  store: MemoryStore,
 ): Promise<string | null> {
   const channel = await interaction.client.channels.fetch(config.marketplaceChannelId!).catch(() => null);
   if (!channel || channel.type !== ChannelType.GuildForum) return null;
   const creatorName = interaction.user.globalName ?? interaction.user.username ?? "a creator";
+  const stats = await store.listingRatingStats(listing.id).catch(() => undefined);
   const thread = await channel.threads.create({
     name: `${listing.name} — ${listing.tagline}`.slice(0, 100),
     message: {
-      embeds: [buildListingCard(listing, creatorName)],
+      embeds: [buildListingCard(listing, creatorName, stats)],
       components: [buildListingComponents(listing.id)],
     },
   }).catch(() => null);
   return thread?.id ?? null;
 }
+
+/** Re-render the listing card in place after a rating lands. Best-effort —
+ *  a deleted thread or archived card just skips the refresh. */
+async function refreshListingCard(client: Client, listing: CompanionListing, store: MemoryStore): Promise<void> {
+  if (!listing.forumThreadId || !config.marketplaceChannelId) return;
+  const channel = await client.channels.fetch(config.marketplaceChannelId).catch(() => null);
+  const thread = channel && channel.type === ChannelType.GuildForum
+    ? await channel.threads.fetch(listing.forumThreadId).catch(() => null)
+    : null;
+  if (!thread) return;
+  const starter = await thread.fetchStarterMessage().catch(() => null);
+  if (!starter) return;
+  const creator = await client.users.fetch(listing.creatorUserId).catch(() => null);
+  const creatorName = creator?.globalName ?? creator?.username ?? "a creator";
+  const stats = await store.listingRatingStats(listing.id).catch(() => undefined);
+  await starter.edit({
+    embeds: [buildListingCard(listing, creatorName, stats)],
+    components: [buildListingComponents(listing.id)],
+  }).catch(() => {});
+}
+
+/** Rating gate: on the house guild, a verified Member (or a marketplace mod —
+ *  staff may not carry Member). Outside the house, or when no Member role is
+ *  configured (self-host), anyone holding the button may rate. */
+function canRateListing(interaction: ButtonInteraction): boolean {
+  if (!isHouse(interaction.guildId) || !config.houseMemberRoleId) return true;
+  if (isMarketplaceMod(interaction)) return true;
+  const raw = (interaction.member as { roles?: unknown } | null)?.roles;
+  return Array.isArray(raw)
+    ? raw.includes(config.houseMemberRoleId)
+    : (raw as { cache?: { has(id: string): boolean } } | null)?.cache?.has?.(config.houseMemberRoleId) ?? false;
+}
+
+const RATE_GATE_MSG = `Verify your Characterly account in <#${config.houseVerifyChannelId}> to rate listings — it keeps review-bombing out.`;
 
 async function unlistListing(interaction: ChatInputCommandInteraction | ButtonInteraction, listing: CompanionListing, store: MemoryStore) {
   const delisted = await store.delistListing(listing.id);
@@ -658,7 +696,7 @@ async function doRelist(
         : "That listing isn't yours to relist.";
     return reply(msg);
   }
-  const threadId = await postListingThread(interaction, res.listing);
+  const threadId = await postListingThread(interaction, res.listing, store);
   if (!threadId) {
     await store.delistListing(res.listing.id);
     return reply("I couldn't create the forum post — check my permissions in the marketplace channel.");
@@ -879,6 +917,10 @@ export const commandDefinitions = [
     { name: "text", description: "Announcement text (action=announce)", type: 3, required: false },
     { name: "lines", description: "Journal lines for action=logs (default 30, max 200)", type: 4, required: false },
   ] },
+  // Message context menu — right-click → Apps → "Report message" on a comment
+  // inside a marketplace listing thread. Validated to that surface in the
+  // handler; everywhere else it replies "not reportable".
+  { name: "Report message", type: 3 },
 ];
 
 const confidence = (value: number | undefined) => {
@@ -1906,7 +1948,7 @@ export async function handleCompanionModal(
       return interaction.reply({ content: res.reason === "daily_cap" ? DAILY_PUBLISH_MSG : LISTING_CAP_MSG, ephemeral: true });
     }
     const listing = res.listing;
-    const threadId = await postListingThread(interaction, listing);
+    const threadId = await postListingThread(interaction, listing, store);
     if (!threadId) {
       await store.delistListing(listing.id);
       return interaction.reply({ content: "I couldn't create the forum post — check my permissions in the marketplace channel.", ephemeral: true });
@@ -1996,7 +2038,7 @@ export async function handleCompanionModal(
       const old = await channel.threads.fetch(existing.forumThreadId).catch(() => null);
       if (old) await old.setLocked(true).then(() => old.setArchived(true)).catch(() => {});
     }
-    const threadId = await postListingThread(interaction, listing);
+    const threadId = await postListingThread(interaction, listing, store);
     if (!threadId) {
       await store.delistListing(listing.id);
       return interaction.reply({ content: "I couldn't create the forum post — check my permissions in the marketplace channel.", ephemeral: true });
@@ -2184,8 +2226,156 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       return interaction.reply({ content: "Unknown moderation action.", ephemeral: true });
     }
 
+    // Moderator actions on a reported comment — `market:modmsg:{action}:{channelId}:{messageId}:{authorId}`.
+    // The author id travels in the customId but is re-resolved from the report
+    // row where possible (forged buttons still need a real mod to click, but
+    // don't hand out leverage anyway).
+    if (sub === "modmsg") {
+      const action = parts[2];
+      const channelId = parts[3];
+      const messageId = parts[4];
+      if (!channelId || !messageId) return interaction.reply({ content: "That button is no longer valid.", ephemeral: true });
+      if (!isMarketplaceMod(interaction)) {
+        return interaction.reply({ content: "Moderator role required.", ephemeral: true });
+      }
+      const stamp = `by <@${userId}> · <t:${Math.floor(Date.now() / 1000)}:R>`;
+      if (action === "keep") {
+        inc("market.modmsg_keep");
+        return interaction.update({ content: `${interaction.message.content}\n—\n**Comment kept** — report dismissed ${stamp}`, components: [] });
+      }
+      if (action === "del") {
+        const channel = await interaction.client.channels.fetch(channelId).catch(() => null);
+        const target = channel && "messages" in channel
+          ? await (channel as TextChannel).messages.fetch(messageId).then(m => m.delete()).then(() => true).catch(() => false)
+          : false;
+        inc("market.modmsg_del");
+        return interaction.update({
+          content: `${interaction.message.content}\n—\n**Comment ${target ? "deleted" : "already gone"}** ${stamp}`,
+          components: [],
+        });
+      }
+      if (action === "timeout") {
+        const rec = await store.commentReportFor(messageId).catch(() => null);
+        const authorId = rec?.authorUserId ?? parts[5];
+        const timedOut = authorId && interaction.guild
+          ? await interaction.guild.members.edit(authorId, {
+              communicationDisabledUntil: new Date(Date.now() + 10 * 60_000).toISOString(),
+              reason: `comment report: ${messageId}`,
+            }).then(() => true).catch(() => false)
+          : false;
+        inc("market.modmsg_timeout");
+        return interaction.update({
+          content: `${interaction.message.content}\n—\n**Author ${timedOut ? "timed out for 10m" : "timeout failed — they may have left"}** ${stamp}`,
+          components: [],
+        });
+      }
+      return interaction.reply({ content: "Unknown moderation action.", ephemeral: true });
+    }
+
+    // Comment report category picked — `market:commentcat:{channelId}:{messageId}:{category}`.
+    if (sub === "commentcat") {
+      const channelId = parts[2];
+      const messageId = parts[3];
+      const category = COMMENT_REPORT_CATEGORIES.some(([c]) => c === parts[4]) ? parts[4] : "other";
+      const channel = await interaction.client.channels.fetch(channelId).catch(() => null);
+      const target = channel && "messages" in channel
+        ? await (channel as TextChannel).messages.fetch(messageId).catch(() => null)
+        : null;
+      if (!target) {
+        return interaction.update({ content: "That comment is already gone.", components: [] });
+      }
+      if (target.author.id === userId) {
+        return interaction.update({ content: "You can't report your own comment.", components: [] });
+      }
+      const listing = await store.listingByThreadId(channelId).catch(() => null);
+      const rep = await store.reportComment({
+        listingId: listing?.id ?? null,
+        threadId: channelId,
+        messageId,
+        authorUserId: target.author.id,
+        reporterUserId: userId,
+        category,
+      }, config.marketReportDailyCap);
+      if (!rep.ok) {
+        return interaction.update({
+          content: rep.reason === "daily_cap"
+            ? `You've filed ${config.marketReportDailyCap} reports today — that's the limit.`
+            : "You've already reported that comment — the team has it.",
+          components: [],
+        });
+      }
+      if (config.marketplaceModChannelId) {
+        const catLabel = COMMENT_REPORT_CATEGORIES.find(([c]) => c === category)?.[1] ?? category;
+        const modChannel = await interaction.client.channels.fetch(config.marketplaceModChannelId).catch(() => null);
+        if (modChannel?.isTextBased() && "send" in modChannel) {
+          // Quoted content can carry mentions — suppress parsing entirely, then
+          // allow-list just the author/reporter pings we emit ourselves.
+          const excerpt = escapeMarkdown(target.content.trim().replace(/\n+/g, " ")).slice(0, 400) || "*(no text)*";
+          await (modChannel as TextChannel).send({
+            allowedMentions: { parse: [], users: [target.author.id, userId] },
+            content:
+              `💬 **${catLabel}** — comment report on **${listing?.name ?? "an unlisted thread"}** (listing ${listing?.id ?? "?"}) in <#${channelId}>\n` +
+              `Author <@${target.author.id}> · reported by <@${userId}>\n> ${excerpt}\n` +
+              `https://discord.com/channels/${interaction.guildId}/${channelId}/${messageId}`,
+            components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+              new ButtonBuilder().setCustomId(`market:modmsg:keep:${channelId}:${messageId}:${target.author.id}`).setLabel("Keep").setStyle(ButtonStyle.Success),
+              new ButtonBuilder().setCustomId(`market:modmsg:del:${channelId}:${messageId}:${target.author.id}`).setLabel("Delete comment").setStyle(ButtonStyle.Secondary),
+              new ButtonBuilder().setCustomId(`market:modmsg:timeout:${channelId}:${messageId}:${target.author.id}`).setLabel("Timeout author (10m)").setStyle(ButtonStyle.Danger),
+            )],
+          }).catch(() => {});
+        }
+      }
+      inc("market.comment_reported");
+      return interaction.update({ content: `Thanks — your **${COMMENT_REPORT_CATEGORIES.find(([c]) => c === category)?.[1] ?? category}** report is with the mods.`, components: [] });
+    }
+
     const id = Number(parts[2]);
     if (!Number.isFinite(id)) return interaction.reply({ content: "That button is no longer valid.", ephemeral: true });
+
+    // Listing rating — `market:rate:{id}` opens an ephemeral ★1–5 picker;
+    // `market:rateval:{id}:{stars}` records it. Re-rating is an upsert.
+    if (sub === "rate") {
+      const listing = await store.listingById(id);
+      if (!listing || listing.status !== "active") {
+        return interaction.reply({ content: "That listing is no longer available.", ephemeral: true });
+      }
+      if (listing.creatorUserId === userId) {
+        return interaction.reply({ content: "You can't rate your own listing.", ephemeral: true });
+      }
+      if (!canRateListing(interaction)) {
+        return interaction.reply({ content: RATE_GATE_MSG, ephemeral: true });
+      }
+      return interaction.reply({
+        ephemeral: true,
+        content: `How's **${listing.name}** treating you?`,
+        components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+          ...[1, 2, 3, 4, 5].map(n =>
+            new ButtonBuilder().setCustomId(`market:rateval:${id}:${n}`).setLabel("★".repeat(n)).setStyle(ButtonStyle.Primary),
+          ),
+        )],
+      });
+    }
+
+    if (sub === "rateval") {
+      const stars = Number(parts[3]);
+      const listing = await store.listingById(id);
+      if (!listing || listing.status !== "active") {
+        return interaction.update({ content: "That listing is no longer available.", components: [] });
+      }
+      if (listing.creatorUserId === userId) {
+        return interaction.update({ content: "You can't rate your own listing.", components: [] });
+      }
+      if (!Number.isInteger(stars) || stars < 1 || stars > 5) {
+        return interaction.update({ content: "That rating isn't valid.", components: [] });
+      }
+      if (!canRateListing(interaction)) {
+        return interaction.update({ content: RATE_GATE_MSG, components: [] });
+      }
+      await store.rateListing(id, userId, stars);
+      inc("market.rated");
+      await refreshListingCard(interaction.client, listing, store);
+      return interaction.update({ content: `Rated **${listing.name}** ${"★".repeat(stars)} — the card's been updated.`, components: [] });
+    }
 
     if (sub === "add") {
       const listing = await store.listingById(id);
@@ -2859,4 +3049,40 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
   const memory = await store.getMemory(guildId, Number(rawId));
   if (!memory || memory.subjectId !== userId || (await store.forget(guildId, memory.id)) === 0) return interaction.update({ content: "That memory is no longer available.", components: [] });
   return interaction.update({ content: `Forgot memory **#${memory.id}**. I will not use it in future replies.`, components: [] });
+}
+
+// Comment reports reuse the listing categories minus "stolen persona" —
+// a comment can't steal a character; that one's listing-only.
+const COMMENT_REPORT_CATEGORIES = REPORT_CATEGORIES.filter(([c]) => c !== "theft");
+
+/** "Report message" context-menu entry. Only meaningful on a comment inside
+ *  a marketplace listing thread — everywhere else it declines. Shows the
+ *  ephemeral category picker; the `market:commentcat` button does the write. */
+export async function handleReportMessageCommand(interaction: MessageContextMenuCommandInteraction) {
+  const target = interaction.targetMessage;
+  const channel = target.channel ?? interaction.channel;
+  if (!isHouse(interaction.guildId) || !isMarketplaceThread(channel)) {
+    return interaction.reply({ content: "This only works on comments inside marketplace listings.", ephemeral: true });
+  }
+  if (target.author.id === interaction.user.id) {
+    return interaction.reply({ content: "You can't report your own comment.", ephemeral: true });
+  }
+  if (target.author.bot) {
+    return interaction.reply({ content: "That's a system message — use **Report** on the listing card for listing issues.", ephemeral: true });
+  }
+  const catRows = [0, 3].map(offset =>
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      ...COMMENT_REPORT_CATEGORIES.slice(offset, offset + 3).map(([cat, label]) =>
+        new ButtonBuilder()
+          .setCustomId(`market:commentcat:${channel.id}:${target.id}:${cat}`)
+          .setLabel(label)
+          .setStyle(cat === "minor" ? ButtonStyle.Danger : ButtonStyle.Secondary),
+      ),
+    ),
+  );
+  return interaction.reply({
+    ephemeral: true,
+    content: "What's wrong with this comment? Pick the closest reason:",
+    components: catRows,
+  });
 }

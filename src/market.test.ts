@@ -817,3 +817,77 @@ test("daily adopt cap is enforced inside adoptListing's tx", async () => {
   const noop = await store.adoptListing("u-farmer", l1.id, { maxSlots: 10, maxDaily: 1 });
   assert.equal(noop.ok, true);
 });
+
+// ── v37: ratings + comment reports ───────────────────────────────────────────
+
+test("rateListing upserts one row per rater; stats reflect the latest vote", async () => {
+  const { store } = await freshStore();
+  const c = await awakenedCompanion(store, "u-rate-c", "R");
+  const l = await makeListing(store, "u-rate-c", c.id, "R");
+
+  assert.deepEqual(await store.listingRatingStats(l.id), { avg: 0, count: 0 });
+
+  await store.rateListing(l.id, "u-rater1", 4);
+  assert.deepEqual(await store.listingRatingStats(l.id), { avg: 4, count: 1 });
+
+  await store.rateListing(l.id, "u-rater2", 2);
+  assert.deepEqual(await store.listingRatingStats(l.id), { avg: 3, count: 2 });
+
+  // A re-rate is an upsert — count doesn't grow, the vote moves.
+  await store.rateListing(l.id, "u-rater1", 5);
+  const stats = await store.listingRatingStats(l.id);
+  assert.equal(stats.count, 2);
+  assert.equal(stats.avg, 3.5);
+});
+
+test("listingByThreadId resolves a forum thread to its listing", async () => {
+  const { store } = await freshStore();
+  const c = await awakenedCompanion(store, "u-thr", "T");
+  const l = await makeListing(store, "u-thr", c.id, "T");
+  assert.equal(await store.listingByThreadId("thr-none"), null, "no thread bound yet");
+  await store.setListingThread(l.id, "thr-123");
+  assert.equal((await store.listingByThreadId("thr-123"))?.id, l.id);
+  assert.equal(await store.listingByThreadId("thr-other"), null);
+});
+
+test("reportComment dedupes per (message, reporter) and shares the daily report cap with listing reports", async () => {
+  const { store } = await freshStore();
+  const c = await awakenedCompanion(store, "u-cr", "C");
+  const l = await makeListing(store, "u-cr", c.id, "C");
+
+  const rep = { listingId: l.id, threadId: "thr-1", messageId: "msg-1", authorUserId: "u-author", reporterUserId: "u-rep", category: "spam" };
+  assert.ok((await store.reportComment(rep, 10)).ok);
+  // Same comment, same reporter — deduped.
+  const dup = await store.reportComment(rep, 10);
+  assert.ok(!dup.ok && dup.reason === "dup");
+  // Same reporter, different comment — a new report.
+  assert.ok((await store.reportComment({ ...rep, messageId: "msg-2" }, 10)).ok);
+  // A different reporter on the same comment — also a new report.
+  assert.ok((await store.reportComment({ ...rep, reporterUserId: "u-rep2" }, 10)).ok);
+
+  // The reporter's daily budget is shared across both report lanes — a
+  // listing report consumes the same ceiling a comment report does.
+  const c2 = await awakenedCompanion(store, "u-cr2", "D");
+  const l2 = await makeListing(store, "u-cr2", c2.id, "D");
+  assert.ok((await store.reportListing(l2.id, "u-mixed", "spam", "", 2)).ok);
+  assert.ok((await store.reportComment({ listingId: l2.id, threadId: "thr-2", messageId: "msg-9", authorUserId: "u-author", reporterUserId: "u-mixed" }, 2)).ok);
+  const over = await store.reportComment({ listingId: l2.id, threadId: "thr-2", messageId: "msg-10", authorUserId: "u-author", reporterUserId: "u-mixed" }, 2);
+  assert.ok(!over.ok && over.reason === "daily_cap");
+
+  // commentReportFor lets the mod timeout resolve the author from the row,
+  // not the (forgeable) button id.
+  assert.equal((await store.commentReportFor("msg-1"))?.authorUserId, "u-author");
+  assert.equal(await store.commentReportFor("msg-nope"), null);
+});
+
+test("parallel comment reports can't both slip under the daily cap", async () => {
+  const { store } = await freshStore();
+  const c = await awakenedCompanion(store, "u-pcr", "P");
+  const l = await makeListing(store, "u-pcr", c.id, "P");
+  const [r1, r2] = await Promise.all([
+    store.reportComment({ listingId: l.id, threadId: "t", messageId: "pa", authorUserId: "a", reporterUserId: "u-pcap" }, 1),
+    store.reportComment({ listingId: l.id, threadId: "t", messageId: "pb", authorUserId: "a", reporterUserId: "u-pcap" }, 1),
+  ]);
+  assert.equal([r1, r2].filter(r => r.ok).length, 1);
+  assert.equal([r1, r2].filter(r => !r.ok && r.reason === "daily_cap").length, 1);
+});

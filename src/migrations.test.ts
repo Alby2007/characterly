@@ -579,3 +579,67 @@ test("migration v36 creates the moderation surface and rolls back banned -> flag
     assert.equal(idxGone.length, 0, "rollback should drop the rate-limit indexes");
   } finally { await sql.end(); }
 });
+
+test("migration v37 creates listing_ratings + comment_reports with constraints, rolls back cleanly", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any);
+
+    const rateCols = await sql<Array<{ column_name: string; is_nullable: string }>>`
+      SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name = 'listing_ratings'`;
+    assert.deepEqual(
+      rateCols.map(c => c.column_name).sort(),
+      ["created_at", "id", "listing_id", "rater_user_id", "stars", "updated_at"],
+    );
+    const repCols = await sql<Array<{ column_name: string; is_nullable: string }>>`
+      SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name = 'comment_reports'`;
+    assert.deepEqual(
+      repCols.map(c => c.column_name).sort(),
+      ["author_user_id", "category", "created_at", "id", "listing_id", "message_id", "reporter_user_id", "thread_id"],
+    );
+    assert.equal(repCols.find(c => c.column_name === "listing_id")?.is_nullable, "YES",
+      "comment_reports.listing_id must be nullable (ON DELETE SET NULL)");
+
+    const idx = await sql<Array<{ indexname: string }>>`SELECT indexname FROM pg_indexes WHERE schemaname='public'`;
+    const names = idx.map(r => r.indexname);
+    for (const n of ["listing_ratings_listing", "comment_reports_message", "comment_reports_reporter"]) {
+      assert.ok(names.includes(n), `Missing index: ${n}`);
+    }
+
+    // Functional constraints: one rating per (listing, rater); stars 1–5;
+    // one report per (message, reporter); listing_id optional on reports.
+    await sql`INSERT INTO companion_listings (creator_user_id, name) VALUES ('u-v37', 'Rated') RETURNING id`;
+    const [l] = await sql<[{ id: number }]>`SELECT id FROM companion_listings WHERE creator_user_id = 'u-v37'`;
+    await sql`INSERT INTO listing_ratings (listing_id, rater_user_id, stars) VALUES (${l.id}, 'u-r1', 4)`;
+    await assert.rejects(
+      sql`INSERT INTO listing_ratings (listing_id, rater_user_id, stars) VALUES (${l.id}, 'u-r1', 5)`,
+      /unique/i, "second rating row from the same rater must violate UNIQUE",
+    );
+    await assert.rejects(
+      sql`INSERT INTO listing_ratings (listing_id, rater_user_id, stars) VALUES (${l.id}, 'u-r2', 9)`,
+      /check/i, "stars outside 1–5 must violate the CHECK",
+    );
+    // …but the app's upsert path turns the unique conflict into an update.
+    await sql`INSERT INTO listing_ratings (listing_id, rater_user_id, stars) VALUES (${l.id}, 'u-r1', 5)
+              ON CONFLICT (listing_id, rater_user_id) DO UPDATE SET stars = EXCLUDED.stars, updated_at = NOW()`;
+    const [avg] = await sql<[{ n: number }]>`SELECT COUNT(*)::int AS n FROM listing_ratings WHERE listing_id = ${l.id}`;
+    assert.equal(avg.n, 1, "upsert keeps one row per rater");
+
+    await sql`INSERT INTO comment_reports (thread_id, message_id, author_user_id, reporter_user_id)
+              VALUES ('t1', 'm1', 'u-author', 'u-r1')`;
+    await assert.rejects(
+      sql`INSERT INTO comment_reports (thread_id, message_id, author_user_id, reporter_user_id)
+          VALUES ('t1', 'm1', 'u-author', 'u-r1')`,
+      /unique/i, "duplicate report on the same message must violate UNIQUE",
+    );
+    // Listing-less reports are legal (thread mapping can be lost).
+    await sql`INSERT INTO comment_reports (thread_id, message_id, author_user_id, reporter_user_id)
+              VALUES ('t1', 'm2', 'u-author', 'u-r1')`;
+
+    await runMigrations(sql as any, 36);
+    const gone = await sql<Array<{ t: string | null }>>`
+      SELECT to_regclass('public.listing_ratings') AS t UNION ALL SELECT to_regclass('public.comment_reports')`;
+    assert.ok(gone.every(r => r.t === null), "rollback should drop both v37 tables");
+  } finally { await sql.end(); }
+});

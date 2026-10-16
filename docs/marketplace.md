@@ -61,6 +61,47 @@ shelf.
    can't be faked by users posting links.
 3. Republishing an existing listing archives the old thread (locked + archived)
    and posts a fresh card — it does not edit in place.
+
+## Discussion on the listing — comments, ratings, and comment moderation
+
+Each listing thread doubles as its comment section. The boundaries are
+deliberate:
+
+- **Who can read** — everyone (`@everyone` sees the marketplace category; the
+  shelf is the shop window). **Who can post comments** — verified Members +
+  Mod/Admin only (`SendMessagesInThreads` is denied to `@everyone`, so
+  unverified browsers can't talk). Thread creation is bot-only —
+  `SendMessages` is denied to every role, so the card schema can't be faked.
+- **Star ratings (v37)** — the card carries a **Rate** button
+  (`market:rate:<id>`) → an ephemeral ★1–5 picker (`market:rateval:<id>:<n>`).
+  One vote per user per listing (re-rating upserts); the card embed shows
+  `★ avg · n ratings` and refreshes on each vote. Creators can't rate their
+  own listing; on the house guild the voter must hold the Member role (or be
+  marketplace staff — mods may not carry Member). Stored in
+  `listing_ratings`.
+- **Comment reports** — right-click → **Apps → Report message** (a
+  `MESSAGE`-type context command) works only inside marketplace threads. It
+  opens the same category picker as listing reports (minus *stolen persona*),
+  writes a `comment_reports` row (deduped per `(message, reporter)`), and
+  pings `MARKETPLACE_MOD_CHANNEL_ID` with the quoted excerpt (mention-parsing
+  suppressed — a report can't be weaponized into a ping), the jump link, and
+  **Keep / Delete comment / Timeout author (10m)** buttons
+  (`market:modmsg:<action>:<channelId>:<messageId>:<authorId>`), gated to the
+  same `isMarketplaceMod` check. The author for Timeout resolves from the
+  stored report row, not the button id.
+- **Moderation coverage** — house automod runs on every guild message
+  *before* any other handling, so comments get the same invite-link, scam,
+  mass-mention, burst-spam, and new-account-link rules as the rest of the
+  server, plus the `checkMessageContent` hard-line screen (slurs,
+  minor-safety, self-harm promo, illegal content → delete + 30m timeout).
+- **Not memory** — listing-thread messages return early from the pipeline
+  after automod: no archive rows, no memory extraction, no companion
+  selection/replies, no awaken/summon notices. Comments are public discourse,
+  not remembered material (`isMarketplaceThread` — a thread whose parent is
+  `MARKETPLACE_CHANNEL_ID`).
+- **Daily caps** — comment reports share the reporter's
+  `MARKET_REPORT_DAILY_CAP` budget with listing reports (same
+  `report:<userId>` advisory lock and combined count inside the transaction).
 4. The success reply offers **Edit persona**; persona updates bump `version`
    and `propagateListingVersion` pushes persona fields into every adopted
    clone. Adopter-owned state (memories, journal, guild rows, introduction
@@ -146,6 +187,14 @@ The mechanics in one paragraph:
   **Keep up / Delist / Ban listing / Ban creator** buttons
   (`market:mod:<action>:<id>`), gated to `MARKETPLACE_MOD_ROLE_IDS`
   (fallback: ManageGuild). Actions land in `moderation_events`.
+- **Comment reports** — message-level reports (right-click → *Report
+  message*) land in `comment_reports`, not `listing_reports`: a bad comment
+  shouldn't count toward the listing's flag threshold. Mods get
+  **Keep / Delete comment / Timeout author (10m)** buttons
+  (`market:modmsg:<action>:<channelId>:<messageId>:<authorId>`); the ping
+  quotes the comment with mention parsing suppressed, and Timeout resolves
+  the author from the stored row rather than the button id. The daily
+  report cap is shared across both lanes.
 - **Rate limits** — `MARKET_PUBLISH_DAILY_CAP` (5, new rows only —
   republishes/relists don't consume it), `MARKET_REPORT_DAILY_CAP` (20),
   `MARKET_ADOPT_DAILY_CAP` (20) — all per UTC day, all enforced inside the

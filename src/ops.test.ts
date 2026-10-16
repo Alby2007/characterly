@@ -1,7 +1,7 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert";
 import {
-  isHouse, automodMessage, handleHouseMemberAdd, handleHouseMemberUpdate,
+  isHouse, isMarketplaceThread, automodMessage, handleHouseMemberAdd, handleHouseMemberUpdate,
   handleHouseMemberRemove, ensureHouseLayout, collectHostHealth,
   runWatchdogTick, handleOpsCommand, initOps, resetOpsState, WANTED_LAYOUT,
   ensureVerifyGate, handleHouseButton, runMemberLinkSweep,
@@ -20,7 +20,7 @@ const prev = {
   automodRaidKick: config.automodRaidKick, automodBurstCount: config.automodBurstCount,
   automodMentionMax: config.automodMentionMax, automodNewAccountDays: config.automodNewAccountDays,
   hostHeapPct: config.hostHeapPct, hostDiskPct: config.hostDiskPct, hostLagMs: config.hostLagMs,
-  opsRepoDir: config.opsRepoDir,
+  opsRepoDir: config.opsRepoDir, marketplaceChannelId: config.marketplaceChannelId,
 };
 
 const HOUSE = "g-house";
@@ -45,6 +45,7 @@ beforeEach(() => {
   config.hostDiskPct = 85;
   config.hostLagMs = 1000;
   config.opsRepoDir = "~/characterly";
+  config.marketplaceChannelId = "c-forum";
 });
 
 process.on("exit", () => Object.assign(config, prev));
@@ -369,6 +370,35 @@ test("automod: new account + external link is deleted; old account + link passes
     author: { id: "u-old", bot: false, username: "Old", createdTimestamp: Date.now() - 400 * 86_400_000 },
   });
   assert.equal(await automodMessage(old, deps), false, "established accounts may post links");
+});
+
+test("automod: hard-line blocklist content is deleted + 30m timeout", async () => {
+  const deps = makeDeps();
+  // "hire a hitman" trips the illegal-content entry of the safety blocklist —
+  // the same hard lines that screen authored listings apply to live chat.
+  const m = makeMsg({ content: "anyone know where to hire a hitman" });
+  assert.equal(await automodMessage(m, deps), true);
+  assert.equal(m.deleted, true);
+  assert.deepEqual(m.timeouts, [1_800_000]);
+  assert.match(opsAlertText(deps), /hard-line content \(illegal content\)/);
+
+  // Borderline-but-fine comment chatter stays up.
+  resetOpsState();
+  assert.equal(await automodMessage(makeMsg({ content: "this character's backstory is dark but well written" }), deps), false);
+});
+
+test("isMarketplaceThread matches only threads under the marketplace forum", () => {
+  const thread = { isThread: () => true, parentId: "c-forum" };
+  assert.equal(isMarketplaceThread(thread), true);
+  assert.equal(isMarketplaceThread({ isThread: () => true, parentId: "c-other" }), false);
+  assert.equal(isMarketplaceThread({ isThread: () => false, parentId: "c-forum" }), false);
+  assert.equal(isMarketplaceThread({ parentId: "c-forum" }), false, "no isThread() → not a thread");
+  assert.equal(isMarketplaceThread(null), false);
+  const saved = config.marketplaceChannelId;
+  config.marketplaceChannelId = undefined;
+  try {
+    assert.equal(isMarketplaceThread(thread), false, "unset forum id matches nothing");
+  } finally { config.marketplaceChannelId = saved; }
 });
 
 test("automod: mods exempt, bots skipped, foreign guilds no-op, clean chat passes", async () => {

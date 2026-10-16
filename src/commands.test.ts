@@ -1,8 +1,8 @@
 import "dotenv/config";
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ButtonInteraction, ChatInputCommandInteraction, ModalSubmitInteraction } from "discord.js";
-import { handleMemoryButton, handleMemoryCommand, handleSetupModal } from "./commands.js";
+import type { ButtonInteraction, ChatInputCommandInteraction, MessageContextMenuCommandInteraction, ModalSubmitInteraction } from "discord.js";
+import { handleMemoryButton, handleMemoryCommand, handleReportMessageCommand, handleSetupModal } from "./commands.js";
 import { ProfileStore } from "./profiles.js";
 import { makeTestSql, makeStore } from "./test-helpers.js";
 import type { Brain } from "./brain.js";
@@ -47,7 +47,11 @@ function stubCommand(opts: {
   return { interaction: interaction as unknown as ChatInputCommandInteraction, replies };
 }
 
-function stubButton(opts: { customId: string; userId: string; guildId?: string; admin?: boolean; channelId?: string }): { interaction: ButtonInteraction; replies: Replies; updates: Replies } {
+function stubButton(opts: {
+  customId: string; userId: string; guildId?: string; admin?: boolean; channelId?: string;
+  member?: unknown; channels?: Record<string, unknown>; message?: { content: string };
+  onMemberEdit?: (userId: string, data: unknown) => Promise<unknown>;
+}): { interaction: ButtonInteraction; replies: Replies; updates: Replies } {
   const replies: Replies = [];
   const updates: Replies = [];
   // Empty message fetch → the ingest loop breaks immediately and the build
@@ -58,14 +62,21 @@ function stubButton(opts: { customId: string; userId: string; guildId?: string; 
     user: { id: opts.userId },
     guildId: opts.guildId ?? "g1",
     memberPermissions: { has: () => !!opts.admin },
+    member: opts.member,
     guild: {
       channels: {
         cache: { get: (id: string) => (id === (opts.channelId ?? "ch-1") ? channel : null) },
         fetch: async () => channel,
       },
+      members: { edit: opts.onMemberEdit ?? (async () => ({})) },
     },
     channel: { send: async () => {} },
-    client: { user: { id: "bot-1" } },
+    message: opts.message ?? { content: "" },
+    client: {
+      user: { id: "bot-1" },
+      channels: { fetch: async (id: string) => opts.channels?.[id] ?? null },
+      users: { fetch: async () => null },
+    },
     reply: async (r: (typeof replies)[number]) => { replies.push(r); return r; },
     update: async (r: (typeof updates)[number]) => { updates.push(r); return r; },
   };
@@ -628,4 +639,245 @@ test("/opt-out deletes consolidated behavioral patterns", async () => {
     assert.equal((await store.patterns("g1", "u-user")).length, 0, "opt-out must delete derived patterns");
     assert.equal((await store.listMemories("g1", "u-user", {})).memories.filter(m => m.status !== "forgotten").length, 0);
   } finally { await sql.end(); }
+});
+
+// ── Marketplace: ratings ─────────────────────────────────────────────────────
+
+async function makeListingRow(store: Awaited<ReturnType<typeof makeStore>>["store"], creatorId: string, name = "Shelf") {
+  const res = await store.createListing(creatorId, {
+    name, tagline: "t", voicePersona: "v", coreTraits: [],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+  });
+  assert.equal(res.ok, true);
+  if (!res.ok) throw new Error("makeListingRow failed");
+  return res.listing;
+}
+
+test("market:rate opens an ephemeral ★1–5 picker; creators can't self-rate", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const listing = await makeListingRow(store, "u-creator");
+
+    const own = stubButton({ customId: `market:rate:${listing.id}`, userId: "u-creator" });
+    await handleMemoryButton(own.interaction, store);
+    assert.match(own.replies[0]?.content ?? "", /own listing/i);
+    assert.equal(own.replies[0]?.components, undefined, "no picker for the creator");
+
+    const picker = stubButton({ customId: `market:rate:${listing.id}`, userId: "u-rater" });
+    await handleMemoryButton(picker.interaction, store);
+    assert.equal(picker.replies[0]?.ephemeral, true);
+    const ids = JSON.stringify(picker.replies[0]?.components);
+    for (const n of [1, 2, 3, 4, 5]) assert.match(ids, new RegExp(`rateval:${listing.id}:${n}`));
+  } finally { await sql.end(); }
+});
+
+test("market:rateval writes the rating; out-of-range and non-member clicks refused", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const listing = await makeListingRow(store, "u-creator2");
+
+    const rate = stubButton({ customId: `market:rateval:${listing.id}:4`, userId: "u-rater" });
+    await handleMemoryButton(rate.interaction, store);
+    assert.match(updates_content(rate.updates), /★★★★/);
+    assert.deepEqual(await store.listingRatingStats(listing.id), { avg: 4, count: 1 });
+
+    // Forged star value — the picker only emits 1–5 but customIds aren't proof.
+    const forged = stubButton({ customId: `market:rateval:${listing.id}:9`, userId: "u-rater2" });
+    await handleMemoryButton(forged.interaction, store);
+    assert.match(updates_content(forged.updates), /isn't valid/i);
+    assert.equal((await store.listingRatingStats(listing.id)).count, 1, "forged rating must not write");
+
+    // House gate: without the Member role the click is refused.
+    const saved = { g: config.houseGuildId, r: config.houseMemberRoleId };
+    config.houseGuildId = "g1";
+    config.houseMemberRoleId = "r-member";
+    try {
+      const outsider = stubButton({ customId: `market:rate:${listing.id}`, userId: "u-outsider", member: { roles: { cache: { has: () => false } } } });
+      await handleMemoryButton(outsider.interaction, store);
+      assert.match(outsider.replies[0]?.content ?? "", /Verify your Characterly account/i);
+
+      const member = stubButton({ customId: `market:rate:${listing.id}`, userId: "u-member", member: { roles: { cache: { has: (id: string) => id === "r-member" } } } });
+      await handleMemoryButton(member.interaction, store);
+      assert.match(member.replies[0]?.content ?? "", /treating you/i, "verified Member gets the picker");
+
+      // Marketplace staff may rate without Member (they may not carry it).
+      const mod = stubButton({ customId: `market:rate:${listing.id}`, userId: "u-mod", admin: true, member: { roles: { cache: { has: () => false } } } });
+      await handleMemoryButton(mod.interaction, store);
+      assert.match(mod.replies[0]?.content ?? "", /treating you/i);
+    } finally { Object.assign(config, saved); }
+  } finally { await sql.end(); }
+});
+
+// ── Marketplace: comment reports ─────────────────────────────────────────────
+
+test("market:commentcat files the report and pings mods with quoted content + mod buttons", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const listing = await makeListingRow(store, "u-creator3");
+    await store.setListingThread(listing.id, "t-1");
+
+    const modSent: Array<{ content?: string; components?: unknown[]; allowedMentions?: unknown }> = [];
+    const target = { author: { id: "u-author" }, content: "@everyone free robux" };
+    const channels = {
+      "t-1": { messages: { fetch: async () => target } },
+      "c-mods": { isTextBased: () => true, send: async (p: (typeof modSent)[number]) => { modSent.push(p); } },
+    };
+    const saved = { m: config.marketplaceModChannelId };
+    config.marketplaceModChannelId = "c-mods";
+    try {
+      const ix = stubButton({ customId: `market:commentcat:t-1:m-1:spam`, userId: "u-reporter", channels });
+      await handleMemoryButton(ix.interaction, store);
+      assert.match(updates_content(ix.updates), /report is with the mods/i);
+      assert.equal(modSent.length, 1);
+      const ping = modSent[0];
+      assert.match(ping.content ?? "", /u-author/);
+      assert.match(ping.content ?? "", /https:\/\/discord\.com\/channels\/g1\/t-1\/m-1/);
+      assert.match(JSON.stringify(ping.components), /market:modmsg:(keep|del|timeout)/);
+      // The quoted comment must not be able to ping — parse is suppressed.
+      assert.deepEqual((ping.allowedMentions as { parse: string[] }).parse, []);
+    } finally { Object.assign(config, saved); }
+
+    const row = await store.commentReportFor("m-1");
+    assert.equal(row?.authorUserId, "u-author");
+
+    // Same reporter re-filing on the same comment is deduped.
+    const again = stubButton({ customId: `market:commentcat:t-1:m-1:hate`, userId: "u-reporter", channels });
+    await handleMemoryButton(again.interaction, store);
+    assert.match(updates_content(again.updates), /already reported/i);
+  } finally { await sql.end(); }
+});
+
+test("market:commentcat refuses self-reports and sanitizes forged categories", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const listing = await makeListingRow(store, "u-creator4");
+    await store.setListingThread(listing.id, "t-2");
+    const channels = {
+      "t-2": { messages: { fetch: async () => ({ author: { id: "u-me" }, content: "hi" }) } },
+    };
+    const self = stubButton({ customId: `market:commentcat:t-2:m-2:spam`, userId: "u-me", channels });
+    await handleMemoryButton(self.interaction, store);
+    assert.match(updates_content(self.updates), /own comment/i);
+
+    // Forged category string — allowlisted down to 'other' before any write.
+    const modSent2: Array<{ content?: string }> = [];
+    const channels2 = {
+      "t-2": { messages: { fetch: async () => ({ author: { id: "u-author2" }, content: "ok" }) } },
+      "c-mods": { isTextBased: () => true, send: async (p: { content?: string }) => { modSent2.push(p); } },
+    };
+    const saved = config.marketplaceModChannelId;
+    config.marketplaceModChannelId = "c-mods";
+    try {
+      const forged = stubButton({ customId: `market:commentcat:t-2:m-3:@everyone`, userId: "u-r", channels: channels2 });
+      await handleMemoryButton(forged.interaction, store);
+      assert.match(updates_content(forged.updates), /Something else|report is with the mods/i);
+      assert.equal(modSent2.length, 1);
+      assert.match(modSent2[0].content ?? "", /Something else/);
+      assert.doesNotMatch(modSent2[0].content ?? "", /@everyone/);
+    } finally { config.marketplaceModChannelId = saved; }
+    const rows = await sql<Array<{ category: string }>>`SELECT category FROM comment_reports WHERE message_id = 'm-3'`;
+    assert.equal(rows[0]?.category, "other");
+  } finally { await sql.end(); }
+});
+
+test("market:modmsg — mod gate, keep/del/timeout actions resolve the report row", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const listing = await makeListingRow(store, "u-creator5");
+    await store.setListingThread(listing.id, "t-3");
+    await store.reportComment({ listingId: listing.id, threadId: "t-3", messageId: "m-9", authorUserId: "u-real-author", reporterUserId: "u-r" });
+
+    // Non-mod refused.
+    const denied = stubButton({ customId: `market:modmsg:keep:t-3:m-9:u-real-author`, userId: "u-rando" });
+    await handleMemoryButton(denied.interaction, store);
+    assert.match(denied.replies[0]?.content ?? "", /Moderator role/i);
+
+    // Keep dismisses with an audit stamp.
+    const keep = stubButton({ customId: `market:modmsg:keep:t-3:m-9:u-real-author`, userId: "u-mod", admin: true, message: { content: "report ping" } });
+    await handleMemoryButton(keep.interaction, store);
+    assert.match(updates_content(keep.updates), /Comment kept.*u-mod/s);
+
+    // Delete removes the comment through the channel it was reported in.
+    let deleted = false;
+    const delChannels = { "t-3": { messages: { fetch: async () => ({ delete: async () => { deleted = true; } }) } } };
+    const del = stubButton({ customId: `market:modmsg:del:t-3:m-9:u-real-author`, userId: "u-mod", admin: true, message: { content: "report ping" }, channels: delChannels });
+    await handleMemoryButton(del.interaction, store);
+    assert.equal(deleted, true);
+    assert.match(updates_content(del.updates), /deleted/i);
+
+    // Timeout resolves the author from the report row — a forged authorId in
+    // the customId ("u-fake") must not be trusted over the stored row.
+    const edits: Array<{ userId: string; data: unknown }> = [];
+    const timeout = stubButton({
+      customId: `market:modmsg:timeout:t-3:m-9:u-fake`, userId: "u-mod", admin: true,
+      message: { content: "report ping" },
+      onMemberEdit: async (userId: string, data: unknown) => { edits.push({ userId, data }); return {}; },
+    });
+    await handleMemoryButton(timeout.interaction, store);
+    assert.equal(edits.length, 1);
+    assert.equal(edits[0].userId, "u-real-author", "author resolved from comment_reports, not the button");
+    assert.ok(String((edits[0].data as { communicationDisabledUntil?: string }).communicationDisabledUntil ?? "").length > 0);
+    assert.match(updates_content(timeout.updates), /timed out/i);
+  } finally { await sql.end(); }
+});
+
+// ── "Report message" context command ─────────────────────────────────────────
+
+function stubCtxMenu(opts: {
+  userId?: string; guildId?: string;
+  target: { id: string; author: { id: string; bot?: boolean }; channel: { id: string; parentId?: string | null; isThread?: () => boolean }; content?: string };
+}): { interaction: MessageContextMenuCommandInteraction; replies: Replies } {
+  const replies: Replies = [];
+  const channel = { isThread: () => true, ...opts.target.channel };
+  const interaction = {
+    guildId: opts.guildId ?? "g1",
+    user: { id: opts.userId ?? "u-user" },
+    commandName: "Report message",
+    targetMessage: { id: opts.target.id, author: opts.target.author, content: opts.target.content ?? "hi", channel },
+    channel,
+    reply: async (r: (typeof replies)[number]) => { replies.push(r); return r; },
+  };
+  return { interaction: interaction as unknown as MessageContextMenuCommandInteraction, replies };
+}
+
+test("Report message: only marketplace-thread comments are reportable", async () => {
+  const saved = { g: config.houseGuildId, f: config.marketplaceChannelId };
+  config.houseGuildId = "g1";
+  config.marketplaceChannelId = "c-forum";
+  try {
+    // Outside the house guild entirely.
+    const foreign = stubCtxMenu({ guildId: "g-other", target: { id: "m1", author: { id: "u-a" }, channel: { id: "t-x", parentId: "c-forum" } } });
+    await handleReportMessageCommand(foreign.interaction);
+    assert.match(foreign.replies[0]?.content ?? "", /only works on comments inside marketplace/i);
+
+    // A regular (non-thread, or other-parent) channel in the house.
+    const channelMsg = stubCtxMenu({ target: { id: "m1", author: { id: "u-a" }, channel: { id: "c-chat", parentId: null, isThread: () => false } } });
+    await handleReportMessageCommand(channelMsg.interaction);
+    assert.match(channelMsg.replies[0]?.content ?? "", /only works/i);
+
+    // A thread in some other forum.
+    const otherThread = stubCtxMenu({ target: { id: "m1", author: { id: "u-a" }, channel: { id: "t-y", parentId: "c-elsewhere" } } });
+    await handleReportMessageCommand(otherThread.interaction);
+    assert.match(otherThread.replies[0]?.content ?? "", /only works/i);
+
+    // Own comment + bot messages refused.
+    const self = stubCtxMenu({ userId: "u-a", target: { id: "m1", author: { id: "u-a" }, channel: { id: "t-1", parentId: "c-forum" } } });
+    await handleReportMessageCommand(self.interaction);
+    assert.match(self.replies[0]?.content ?? "", /own comment/i);
+    const bot = stubCtxMenu({ target: { id: "m1", author: { id: "b-1", bot: true }, channel: { id: "t-1", parentId: "c-forum" } } });
+    await handleReportMessageCommand(bot.interaction);
+    assert.match(bot.replies[0]?.content ?? "", /system message/i);
+
+    // A real comment in a listing thread → ephemeral category picker carrying
+    // the thread + message ids forward to market:commentcat.
+    const ok = stubCtxMenu({ target: { id: "m-77", author: { id: "u-author" }, channel: { id: "t-1", parentId: "c-forum" } } });
+    await handleReportMessageCommand(ok.interaction);
+    assert.equal(ok.replies[0]?.ephemeral, true);
+    assert.match(JSON.stringify(ok.replies[0]?.components), /market:commentcat:t-1:m-77:/);
+  } finally { Object.assign(config, saved); }
 });
