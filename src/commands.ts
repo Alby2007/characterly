@@ -486,7 +486,9 @@ export async function tagPickerRow(client: Client, listingId: number): Promise<A
       .setCustomId(`market:tagsel:${listingId}`)
       .setPlaceholder("Tag this listing")
       .setMinValues(0)
-      .setMaxValues(Math.min(5, pickable.length))
+      // Three picks, same as c.ai's category cap — keeps the taxonomy
+      // meaningful instead of everything wearing every tag.
+      .setMaxValues(Math.min(3, pickable.length))
       .setOptions(pickable.map(t => ({ label: t.name, value: t.id }))),
   );
 }
@@ -3147,7 +3149,7 @@ export async function handleMarketSelect(interaction: StringSelectMenuInteractio
   const available = channel && channel.type === ChannelType.GuildForum ? channel.availableTags ?? [] : [];
   const pickable = new Set(available.filter(t => !t.moderated).map(t => t.id));
   const moderated = new Set(available.filter(t => t.moderated).map(t => t.id));
-  const picks = interaction.values.filter(v => pickable.has(v)).slice(0, 5);
+  const picks = interaction.values.filter(v => pickable.has(v)).slice(0, 3);
   // Curated badges are preserved across a re-tag — only the creator's own
   // selections are replaced by `picks`.
   const keep = (thread.appliedTags ?? []).filter(t => moderated.has(t));

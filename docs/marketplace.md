@@ -114,7 +114,12 @@ forum channel's `availableTags` **live by name** — no ids are stored, so a
 tag renamed or deleted in Discord self-heals (a deleted id just drops out of
 the next `setAppliedTags` write):
 
-- **Creator tags** — every *non-moderated* tag on the forum is pickable.
+- **Creator tags** — every *non-moderated* tag on the forum is pickable, up
+  to three per listing (the same cap c.ai puts on categories — keeps tags
+  meaningful instead of everything wearing every tag). The seeded taxonomy:
+  Romance, Anime, Games, Fandom, Fantasy, Sci-Fi, Horror, OC, RPG,
+  Companion, Helpers, Comedy, Historical, Slice of Life, Adventure —
+  roughly c.ai's biggest categories compressed into forum-tag budget.
   Publishing, republishing, and relisting attach an ephemeral multi-select
   (`market:tagsel:<listingId>`) to the success reply, and the card's **Tags**
   button (`market:tags:<id>`, creator-only) reopens it for re-tagging later.
