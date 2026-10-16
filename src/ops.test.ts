@@ -229,14 +229,41 @@ test("ensureVerifyGate posts the card once; existing card is a no-op", async () 
   assert.ok(card, "card posted to the gate channel");
   assert.match(JSON.stringify(card.payload.components), /house:verify/);
 
-  // Channel now returns our own card in message history → no repost.
+  // Real discord.js message fetches return a Collection — iterating yields
+  // [snowflake, msg] pairs, NOT messages. The dedupe must unwrap them or it
+  // can never match (the repost-per-boot regression).
   const deps2 = makeDeps({
     fetchChannel: async () => ({
       send: async () => {},
-      messages: { fetch: async () => [{ author: { id: "bot-1" }, components: card.payload.components }] },
+      messages: { fetch: async () => new Map([["m-card", { author: { id: "bot-1" }, components: card.payload.components }]]) },
     }),
   });
   assert.equal(await ensureVerifyGate(deps2), false, "existing card detected — no repost");
+});
+
+test("ensureVerifyGate deletes duplicate cards but leaves other messages", async () => {
+  const deps = makeDeps();
+  await ensureVerifyGate(deps);
+  const card = deps.sent.find(s => s.id === "c-verify");
+  const deleted: string[] = [];
+  const msg = (id: string, author: string, withCard = true) => ({
+    author: { id: author },
+    components: withCard ? card!.payload.components : [],
+    delete: async () => { deleted.push(id); },
+  });
+  const deps2 = makeDeps({
+    fetchChannel: async () => ({
+      send: async () => {},
+      // Collection shape: pairs. Two bot cards + a human message in between.
+      messages: { fetch: async () => new Map<string, unknown>([
+        ["m-new", msg("m-new", "bot-1")],
+        ["m-human", msg("m-human", "u-1", false)],
+        ["m-old", msg("m-old", "bot-1")],
+      ]) },
+    }),
+  });
+  assert.equal(await ensureVerifyGate(deps2), false);
+  assert.deepEqual(deleted, ["m-old"], "only the duplicate bot card is deleted");
 });
 
 const makeButtonIx = (over: any = {}) => {

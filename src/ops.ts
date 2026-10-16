@@ -228,18 +228,24 @@ export async function handleHouseMemberRemove(member: MemberLike, deps: OpsDeps)
 
 const VERIFY_CUSTOM_ID = "house:verify";
 
-/** Post the verify card if the gate channel doesn't already carry one. */
+/** Post the verify card if the gate channel doesn't already carry one —
+ *  and delete duplicate copies of it while we're looking. */
 export async function ensureVerifyGate(deps: OpsDeps): Promise<boolean> {
   if (!config.houseVerifyChannelId) return false;
   const ch = await deps.fetchChannel(config.houseVerifyChannelId).catch(() => null);
   if (!ch) return false;
   const recent = await ch.messages?.fetch({ limit: 20 }).catch(() => null);
   if (recent) {
-    for (const m of recent) {
-      if (m.author?.id === deps.botId && JSON.stringify(m.components ?? []).includes(VERIFY_CUSTOM_ID)) {
-        return false; // card already up
-      }
+    let kept = false;
+    for (const entry of recent) {
+      // discord.js message fetches return a Collection — iterating yields
+      // [snowflake, Message] pairs, not messages. Unwrap before probing.
+      const m = (Array.isArray(entry) ? entry[1] : entry) as { author?: { id?: string }; components?: unknown[]; delete?(): Promise<unknown> };
+      if (m.author?.id !== deps.botId || !JSON.stringify(m.components ?? []).includes(VERIFY_CUSTOM_ID)) continue;
+      if (kept) await m.delete?.().catch(() => {}); // stale duplicate card — self-heal
+      else kept = true;
     }
+    if (kept) return false; // card already up
   }
   await ch.send({
     embeds: [new EmbedBuilder()
