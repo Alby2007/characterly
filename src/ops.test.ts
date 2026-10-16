@@ -569,13 +569,15 @@ test("ensureHouseLayout copies the category's overwrites to created channels", a
 
 test("ensureHouseLayout denies Member typing on readOnly surfaces; synced children inherit", async () => {
   const edits: Array<{ target: string; id: string; perms: Record<string, unknown> }> = [];
-  // Overwrite fake: edits mutate the stored allow/deny so a second run no-ops.
+  // Overwrite fake: edits upsert a per-role entry so a second run no-ops.
   const mkOw = (tag: string, deny = 0n) => {
-    const ow = { id: "r-member", allow: 1024n, deny };
+    const ows: Array<{ id: string; allow: bigint; deny: bigint }> = [{ id: "r-member", allow: 1024n, deny }];
     return {
-      cache: [ow],
+      cache: ows,
       edit: async (id: string, perms: Record<string, unknown>) => {
         edits.push({ target: tag, id, perms });
+        let ow = ows.find(o => o.id === id);
+        if (!ow) { ow = { id, allow: 0n, deny: 0n }; ows.push(ow); }
         for (const [k, v] of Object.entries(perms)) {
           const bit = PermissionFlagsBits[k as keyof typeof PermissionFlagsBits] as bigint;
           if (v === false) ow.deny |= bit; else if (v === true) ow.allow |= bit;
@@ -625,8 +627,15 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
     assert.equal(e!.perms.SendMessagesInThreads, false);
     assert.equal(e!.perms.ViewChannel, true);
   }
+  // #welcome is a lobby channel — the deny lands on @everyone (guild id), so
+  // unverified arrivals can't post either, matching #rules/#log-in.
+  const welcomeEdit = edits.find(x => x.target === "welcome");
+  assert.ok(welcomeEdit, "#welcome should get a typing deny");
+  assert.equal(welcomeEdit!.id, "g-house", "welcome deny must be on @everyone, not Member");
+  assert.equal(welcomeEdit!.perms.SendMessages, false);
+  assert.equal(welcomeEdit!.perms.ViewChannel, true);
   // Open surfaces stay open.
-  for (const t of ["welcome", "characters", "cat:SYSTEM", "cat:SERVICES", "mods-chat"]) {
+  for (const t of ["characters", "cat:SYSTEM", "cat:SERVICES", "mods-chat"]) {
     assert.ok(!edits.some(e => e.target === t), `${t} must not get a Member deny`);
   }
 

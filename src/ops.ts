@@ -539,12 +539,14 @@ export const WANTED_LAYOUT: Array<{
   /** Members get view-but-no-type on the whole category (enforced at the
    *  category level so synced children inherit and stay synced). */
   readOnly?: boolean;
-  channels: Array<{ name: string; type: ChannelType; readOnly?: boolean }>;
+  /** readOnly: "member" (default when true) denies the Member role; "everyone"
+   *  denies @everyone — for lobby channels the unverified can see. */
+  channels: Array<{ name: string; type: ChannelType; readOnly?: true | "member" | "everyone" }>;
 }> = [
   {
     category: "SYSTEM",
     channels: [
-      { name: "welcome", type: ChannelType.GuildText },
+      { name: "welcome", type: ChannelType.GuildText, readOnly: "everyone" },
       { name: "announcements", type: ChannelType.GuildAnnouncement, readOnly: true },
       { name: "rules", type: ChannelType.GuildText },
       { name: "log-in", type: ChannelType.GuildText }, // the verify gate lives here
@@ -608,11 +610,12 @@ function denyHas(deny: unknown, bit: bigint): boolean {
   return typeof d?.has === "function" && d.has(bit);
 }
 
-/** Deny the Member role's typing perms on a channel/category while keeping
- *  its ViewChannel. Scoped to Member so mods/admins/the bot retain posting —
- *  member-facing announcements go through the bot (`/ops announce`) anyway. */
-async function ensureReadOnly(ch: GuildChannelLike, created: string[], label: string): Promise<void> {
-  const roleId = config.houseMemberRoleId;
+/** Deny a role's typing perms on a channel/category while keeping
+ *  ViewChannel. Member-scoped denies leave mods/admins/the bot posting —
+ *  member-facing announcements go through the bot (`/ops announce`) anyway.
+ *  @everyone-scoped denies are for lobby channels the unverified can see;
+ *  there only Administrator holders (the bot, admin role) can still post. */
+async function ensureReadOnly(ch: GuildChannelLike, created: string[], label: string, roleId: string | undefined): Promise<void> {
   const overwrites = ch.permissionOverwrites;
   if (!roleId || typeof overwrites?.edit !== "function") return;
   const cur = [...(overwrites.cache ?? [])].find(o => o.id === roleId);
@@ -646,7 +649,7 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
         const ch = guild.channels.cache.find(c => normName(c.name) === normName(wanted.name));
         if (ch) syncBefore.set(normName(wanted.name), ch.permissionsLocked === true);
       }
-      await ensureReadOnly(cat, created, `📁 ${group.category}`);
+      await ensureReadOnly(cat, created, `📁 ${group.category}`, config.houseMemberRoleId);
     }
     for (const wanted of group.channels) {
       const exists = guild.channels.cache.find(c => normName(c.name) === normName(wanted.name));
@@ -672,8 +675,10 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
       }
       // Explicit readOnly channels (mixed parents like SYSTEM) and children
       // that weren't synced to a readOnly parent need their own deny.
-      if (target && (wanted.readOnly === true || (group.readOnly === true && syncBefore.get(normName(wanted.name)) !== true))) {
-        await ensureReadOnly(target, created, `#${wanted.name}`);
+      // "everyone" targets the @everyone role — its id is the guild id.
+      if (target && (wanted.readOnly || (group.readOnly === true && syncBefore.get(normName(wanted.name)) !== true))) {
+        const roleId = wanted.readOnly === "everyone" ? guild.id : config.houseMemberRoleId;
+        await ensureReadOnly(target, created, `#${wanted.name}`, roleId);
       }
     }
   }
