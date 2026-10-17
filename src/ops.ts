@@ -1299,15 +1299,15 @@ function markedEmbeds(post: { channel: string; version: number; embeds(): EmbedB
 export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds(): EmbedBuilder[] }> = [
   {
     channel: "what-is-characterly",
-    version: 1,
+    version: 2,
     embeds: () => [new EmbedBuilder()
       .setTitle("What is Characterly?")
       .setDescription(
         "Characterly is a marketplace of AI companions that lives inside Discord.\n\n" +
-        `Browse **#characters**, pick someone you like, and hit **Add** — they're yours to talk to in DMs, or to summon into your servers. Every companion keeps its own private memory of *you*, so your version of a character is yours alone.\n\n` +
+        `Browse **#characters**, pick someone you like, and hit **Add** — they get their own private thread under **#adoptees** just for the two of you, and you can summon them into your servers too. Every companion keeps its own private memory of *you*, so your version of a character is yours alone.\n\n` +
         "**For everyone**\n" +
         "• Browse a gallery of characters — cover art, genre tags, ratings, and community picks\n" +
-        "• One click to adopt — they start the conversation in your DMs\n" +
+        "• One click to adopt — a private thread opens for the two of you in **#adoptees**\n" +
         "• Ratings and comments keep the shelf honest\n\n" +
         "**For creators**\n" +
         "• Publish your own characters — your name stays on the card\n" +
@@ -1350,7 +1350,10 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
     embeds: () => [new EmbedBuilder()
       .setTitle("Privacy — the short version")
       .setDescription(
-        `The full policy is at [${config.siteUrl.replace(/\/+$/, "").replace(/^https?:\/\//, "")}/privacy](${PRIVACY_URL}). The day-to-day version:\n\n` +
+        (config.siteUrl
+          ? `The full policy is at [${config.siteUrl.replace(/\/+$/, "").replace(/^https?:\/\//, "")}/privacy](${PRIVACY_URL}). `
+          : "") +
+        "The day-to-day version:\n\n" +
         "• **Servers see nothing until enabled** — no messages are archived until a server admin runs `/memory-resume`\n" +
         "• **Personal memory is opt-in** — derived facts, profile attributes, and relationship notes only exist for members who run `/profile-build` or `/opt-in`\n" +
         "• **Retention is bounded** — raw messages are held 30 days, then permanently deleted\n" +
@@ -1379,7 +1382,7 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
   },
   {
     channel: "faqs",
-    version: 1,
+    version: 2,
     embeds: () => [
       new EmbedBuilder()
         .setTitle("Getting started")
@@ -1415,7 +1418,7 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
           "**Can it read my messages?**\n" +
           "Only where admins allow it. Servers see nothing until someone runs `/memory-resume`, facts about *you* only form after you opt in (`/profile-build` or `/opt-in`), and raw messages are deleted after 30 days anyway.\n\n" +
           "**Who sees my companion's memories?**\n" +
-          "Just you. Whatever your companion learns in your DMs stays in your DMs — it never leaks into servers or to other people's versions of the same character.\n\n" +
+          "Just you. Whatever your companion learns in your DMs or your private **#adoptees** thread stays scoped to that conversation — it never leaks into servers or to other people's versions of the same character.\n\n" +
           "**How do I delete my data?**\n" +
           "`/opt-out` wipes everything derived about you, `/forget` removes one specific memory, and the dashboard's Delete section closes the whole account if you want a clean break.\n\n" +
           "**Something broken?**\n" +
