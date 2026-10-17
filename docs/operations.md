@@ -130,8 +130,8 @@ SELECT kind, sum(delta) FROM credit_ledger
 | `DATABASE_URL` | VM `.env` | Restart after change; pooler password rotation also rotates the Supabase DB password. |
 | `GROQ_API_KEY` | VM `.env` | Operator fallback key only — BYOK users unaffected. |
 | `KEY_ENCRYPTION_SECRET` | VM `.env` | **Rotating orphans every `guild_keys` row** — users must re-run `/companion action:key`. |
-| Supabase service-role key | website worker `cf secret` (`SUPABASE_SERVICE_ROLE_KEY`) | Publishable key only in `website/src/config.js` (safe by design — RLS enforces); the service key is server-side only, used by `/discord/events` → `record_app_install`. Rotate via Supabase → API keys → `cf secret`. |
-| `DISCORD_APP_PUBLIC_KEY` | website worker `cf secret` | App's public key (dev portal → General Information) — verifies Discord's signed webhook events. Rotates with the app key; not secret-grade but required for the endpoint. |
+| Supabase service-role key | website worker secret (`SUPABASE_SERVICE_ROLE_KEY`) | Publishable key only in `website/src/config.js` (safe by design — RLS enforces); the service key is server-side only, used by `/discord/events` → `record_app_install`. Rotate via Supabase → API keys, then re-set the worker secret (dashboard → Variables and Secrets, or the per-secret API `PUT` in the install-greeting runbook below). |
+| `DISCORD_APP_PUBLIC_KEY` | website worker secret | App's public key (dev portal → General Information) — verifies Discord's signed webhook events. Rotates with the app key; not secret-grade but required for the endpoint. |
 | `STRIPE_WEBHOOK_SECRET` | Supabase fn secrets | Missing → webhook 500s, Stripe retries; rotating = update endpoint + secret together. |
 | `STRIPE_SECRET_KEY` | Supabase fn secrets | Restricted key (`rk_live_…`, Checkout Sessions write only). Rotate in Stripe → Developers → API keys; no session flow works until re-set. |
 | `SITE_URL` | Supabase fn secrets | Checkout return URLs + CORS origin for `create-checkout`. |
@@ -163,10 +163,18 @@ Users who add the app *to their account* get a welcome DM automatically (no user
 
 One-time setup — **deploy order matters** (Discord health-checks the URL when you save it):
 
-1. `cd website && cf secret DISCORD_APP_PUBLIC_KEY` — the app's **Public Key** from dev portal → General Information (used for Ed25519 verify).
-2. `cf secret SUPABASE_URL` and `cf secret SUPABASE_SERVICE_ROLE_KEY` — same values as the Supabase project; the service key stays server-side only.
-3. `npm run deploy` — ships `website/worker.ts` (assets still serve; only `/discord/events` hits the worker code).
-4. Dev portal → **General Information → Webhooks** → set **Webhook Events URL** to `https://<site-domain>/discord/events` and save. Discord probes it with deliberately invalid signatures — **401 is the correct answer**; a 2xx to a bad sig gets the endpoint removed.
+1. Set the three worker secrets. `cf workers secrets bulk` silently no-ops in the beta and Wrangler needs its own auth — the reliable paths are the **dashboard** (Workers → `characterly-website` → Settings → Variables and Secrets → + Add, type `Secret`) or a per-secret API `PUT`:
+   - `DISCORD_APP_PUBLIC_KEY` — the app's **Public Key** from dev portal → General Information (Ed25519 verify).
+   - `SUPABASE_URL` — `https://tfukkoektmsrolykliop.supabase.co`.
+   - `SUPABASE_SERVICE_ROLE_KEY` — service key stays server-side only.
+   ```bash
+   # API path (uses cf's stored OAuth token — run per secret):
+   PUT https://api.cloudflare.com/client/v4/accounts/<acct>/workers/scripts/characterly-website/secrets
+   { "name": "DISCORD_APP_PUBLIC_KEY", "text": "<value>", "type": "secret_text" }
+   ```
+   Verify with `cf workers secrets list --worker characterly-website` — should show all three names.
+2. `npm run deploy` — ships `website/worker.ts` (assets still serve; only `/discord/events` hits the worker code).
+3. Dev portal → **General Information → Webhooks** → set **Webhook Events URL** to `https://<site-domain>/discord/events` and save. Discord probes it with deliberately invalid signatures — **401 is the correct answer**; a 2xx to a bad sig gets the endpoint removed.
 
 Slash-command registration now tags install contexts (`scopedCommandDefinitions`): DM-safe commands are invocable in the App DM on user installs; server-only commands stay guild-scoped. No portal action needed beyond the URL — but note user installs only grant the `applications.commands` scope, so anything needing a bot scope stays guild-side.
 
