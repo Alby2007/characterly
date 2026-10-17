@@ -96,7 +96,9 @@ export interface GuildChannelLike {
    *  post-edit. */
   permissionsLocked?: boolean | null;
   permissionOverwrites?: {
-    cache?: Iterable<{ id: string; allow: unknown; deny: unknown }>;
+    // Real discord.js Collections iterate [id, overwrite] tuples; fakes pass
+    // bare overwrite arrays — overwriteEntries() below normalizes both.
+    cache?: Iterable<unknown>;
     edit?(id: string, perms: { [perm: string]: boolean | null }): Promise<unknown>;
   };
 }
@@ -1124,6 +1126,15 @@ function permHas(perms: unknown, bit: bigint): boolean {
   return typeof d?.has === "function" && d.has(bit);
 }
 
+/** Normalize a permissionOverwrites cache to overwrite objects — discord.js
+ *  Collections iterate [id, overwrite] tuples, test fakes pass bare arrays. */
+function overwriteEntries(overwrites: GuildChannelLike["permissionOverwrites"]): Array<{ id: string; allow: unknown; deny: unknown }> {
+  return [...(overwrites?.cache ?? [])].map(o => {
+    const t = o as unknown[];
+    return (Array.isArray(t) ? t[1] : o) as { id: string; allow: unknown; deny: unknown };
+  });
+}
+
 /** Deny a role's typing perms on a channel/category while keeping
  *  ViewChannel. Member-scoped denies leave mods/admins/the bot posting —
  *  member-facing announcements go through the bot (`/ops announce`) anyway.
@@ -1132,7 +1143,7 @@ function permHas(perms: unknown, bit: bigint): boolean {
 async function ensureReadOnly(ch: GuildChannelLike, created: string[], label: string, roleId: string | undefined): Promise<void> {
   const overwrites = ch.permissionOverwrites;
   if (!roleId || typeof overwrites?.edit !== "function") return;
-  const cur = [...(overwrites.cache ?? [])].find(o => o.id === roleId);
+  const cur = overwriteEntries(overwrites).find(o => o.id === roleId);
   // Requires the ViewChannel allow too — a deny-all overwrite (e.g. a synced
   // category's @everyone hide) must still get ViewChannel written, or a
   // "everyone" readOnly channel stays invisible instead of visible-silent.
@@ -1148,7 +1159,7 @@ async function ensureReadOnly(ch: GuildChannelLike, created: string[], label: st
 async function ensureHiddenFromEveryone(ch: GuildChannelLike, created: string[], label: string, roleId: string | undefined): Promise<void> {
   const overwrites = ch.permissionOverwrites;
   if (!roleId || typeof overwrites?.edit !== "function") return;
-  const cur = [...(overwrites.cache ?? [])].find(o => o.id === roleId);
+  const cur = overwriteEntries(overwrites).find(o => o.id === roleId);
   if (cur && permHas(cur.deny, PermissionFlagsBits.ViewChannel)
     && READONLY_DENY_BITS.every(b => permHas(cur.deny, b))) return;
   await overwrites.edit(roleId, { ViewChannel: false, ...READONLY_DENY_PERMS })
@@ -1166,7 +1177,7 @@ async function ensureStaffOnly(ch: GuildChannelLike, created: string[], label: s
   for (const name of ["Mod", "Admin"]) {
     const role = guild.roles?.cache?.find(r => normName(r.name) === normName(name));
     if (!role) continue;
-    const cur = [...(overwrites.cache ?? [])].find(o => o.id === role.id);
+    const cur = overwriteEntries(overwrites).find(o => o.id === role.id);
     if (cur && permHas(cur.allow, PermissionFlagsBits.SendMessages)) continue;
     await overwrites.edit(role.id, { ViewChannel: true, SendMessages: true, SendMessagesInThreads: true })
       .then(() => { created.push(`✍️ ${label} → ${name}`); })
@@ -1181,7 +1192,7 @@ async function ensureStaffOnly(ch: GuildChannelLike, created: string[], label: s
 async function ensureMemberThreadChat(ch: GuildChannelLike, created: string[], label: string, roleId: string | undefined): Promise<void> {
   const overwrites = ch.permissionOverwrites;
   if (!roleId || typeof overwrites?.edit !== "function") return;
-  const cur = [...(overwrites.cache ?? [])].find(o => o.id === roleId);
+  const cur = overwriteEntries(overwrites).find(o => o.id === roleId);
   if (cur && permHas(cur.allow, PermissionFlagsBits.SendMessagesInThreads)
     && permHas(cur.deny, PermissionFlagsBits.CreatePrivateThreads)) return;
   await overwrites.edit(roleId, {
@@ -1211,7 +1222,7 @@ async function ensureStaffModerate(
   for (const name of HOUSE_STAFF_ROLES) {
     const role = guild.roles?.cache?.find(r => normName(r.name) === normName(name));
     if (!role) continue;
-    const cur = [...(overwrites.cache ?? [])].find(o => o.id === role.id);
+    const cur = overwriteEntries(overwrites).find(o => o.id === role.id);
     if (!grantNames.some(n => normName(n) === normName(name))) {
       if (cur && (permHas(cur.allow, PermissionFlagsBits.ManageThreads) || permHas(cur.allow, PermissionFlagsBits.SendMessagesInThreads))) {
         await overwrites.edit(role.id, { ManageThreads: false, SendMessagesInThreads: false })
@@ -1265,7 +1276,7 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
         // New channels inherit the category's overwrites — a fresh
         // mods/ops channel must not come up with default (public) perms.
         const overwrites = cat.permissionOverwrites?.cache
-          ? [...cat.permissionOverwrites.cache].map(o => ({ id: o.id, allow: o.allow, deny: o.deny }))
+          ? overwriteEntries(cat.permissionOverwrites).map(o => ({ id: o.id, allow: o.allow, deny: o.deny }))
           : undefined;
         target = await guild.channels.create({ name: wanted.name, type: wanted.type, parent: cat.id, permissionOverwrites: overwrites });
         created.push(`#${wanted.name}`);
