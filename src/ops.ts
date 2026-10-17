@@ -613,13 +613,17 @@ export async function automodMessage(message: AutomodMessage, deps: OpsDeps): Pr
 
 export const WANTED_LAYOUT: Array<{
   category: string;
-  /** Members get view-but-no-type on the whole category (enforced at the
-   *  category level so synced children inherit and stay synced). */
-  readOnly?: boolean;
-  /** readOnly: "member" (default when true) denies the Member role; "everyone"
-   *  denies @everyone — for channels the unverified can see (lobby, and #faqs:
-   *  the channel overwrite allows ViewChannel where the category denies it). */
-  channels: Array<{ name: string; type: ChannelType; readOnly?: true | "member" | "everyone" }>;
+  /** readOnly: true/"member" denies typing for the Member role at the category
+   *  level (synced children inherit); "everyone" instead writes @everyone
+   *  ViewChannel-allow + typing denies — a category the unverified can read
+   *  but nobody posts in. */
+  readOnly?: boolean | "member" | "everyone";
+  /** Channel readOnly: "member" (default when true) denies the Member role;
+   *  "everyone" denies @everyone — for channels the unverified can see (lobby,
+   *  and #faqs: the channel overwrite allows ViewChannel where the category
+   *  denies it). `hidden` is the inverse: @everyone loses ViewChannel on that
+   *  channel — used to keep select channels gated inside a visible category. */
+  channels: Array<{ name: string; type: ChannelType; readOnly?: true | "member" | "everyone"; hidden?: true }>;
 }> = [
   {
     category: "SYSTEM",
@@ -637,14 +641,16 @@ export const WANTED_LAYOUT: Array<{
     channels: [{ name: "characters", type: ChannelType.GuildForum }],
   },
   {
+    // Visible pre-verify — the shelf tour prospective members read before
+    // linking. get-companionly + how-to-publish-bots stay gated (post-verify).
     category: "RESOURCES",
-    readOnly: true,
+    readOnly: "everyone",
     channels: [
       { name: "what-is-characterly", type: ChannelType.GuildText },
       { name: "what-is-companionly", type: ChannelType.GuildText },
-      { name: "get-characterly", type: ChannelType.GuildText },
+      { name: "get-companionly", type: ChannelType.GuildText, hidden: true },
       { name: "privacy-policy", type: ChannelType.GuildText },
-      { name: "how-to-publish-bots", type: ChannelType.GuildText },
+      { name: "how-to-publish-bots", type: ChannelType.GuildText, hidden: true },
     ],
   },
   {
@@ -706,6 +712,20 @@ async function ensureReadOnly(ch: GuildChannelLike, created: string[], label: st
     .catch(() => {});
 }
 
+/** Inverse of ensureReadOnly for visible categories: deny @everyone
+ *  ViewChannel (+ typing — an invisible channel can't be posted in anyway,
+ *  and it stays silent if a stray allow ever re-exposes it). */
+async function ensureHiddenFromEveryone(ch: GuildChannelLike, created: string[], label: string, roleId: string | undefined): Promise<void> {
+  const overwrites = ch.permissionOverwrites;
+  if (!roleId || typeof overwrites?.edit !== "function") return;
+  const cur = [...(overwrites.cache ?? [])].find(o => o.id === roleId);
+  if (cur && permHas(cur.deny, PermissionFlagsBits.ViewChannel)
+    && READONLY_DENY_BITS.every(b => permHas(cur.deny, b))) return;
+  await overwrites.edit(roleId, { ViewChannel: false, ...READONLY_DENY_PERMS })
+    .then(() => { created.push(`🙈 ${label}`); })
+    .catch(() => {});
+}
+
 /** Create missing categories + channels by name. Idempotent — returns the
  * names of what it created ([] when the layout is already complete). */
 export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
@@ -730,7 +750,12 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
         const ch = guild.channels.cache.find(c => normName(c.name) === normName(wanted.name));
         if (ch) syncBefore.set(normName(wanted.name), ch.permissionsLocked === true);
       }
-      await ensureReadOnly(cat, created, `📁 ${group.category}`, config.houseMemberRoleId);
+      // "everyone" categories are unverified-readable: @everyone gets
+      // ViewChannel + typing denies at the parent — one overwrite covers
+      // unverified readers and members alike (no Member send-allow exists
+      // anywhere that could override it).
+      const readOnlyRoleId = group.readOnly === "everyone" ? guild.id : config.houseMemberRoleId;
+      await ensureReadOnly(cat, created, `📁 ${group.category}`, readOnlyRoleId);
     }
     for (const wanted of group.channels) {
       const exists = guild.channels.cache.find(c => normName(c.name) === normName(wanted.name));
@@ -761,6 +786,10 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
         const roleId = wanted.readOnly === "everyone" ? guild.id : config.houseMemberRoleId;
         await ensureReadOnly(target, created, `#${wanted.name}`, roleId);
       }
+      // `hidden` overrides a visible category: the channel gets its own
+      // @everyone ViewChannel deny (desyncing it), so it stays gated until
+      // the Member role lands while its siblings stay readable.
+      if (target && wanted.hidden) await ensureHiddenFromEveryone(target, created, `#${wanted.name}`, guild.id);
     }
   }
   return created;
@@ -814,10 +843,10 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
       )],
   },
   {
-    channel: "get-characterly",
+    channel: "get-companionly",
     version: 1,
     embeds: () => [new EmbedBuilder()
-      .setTitle("Get Characterly")
+      .setTitle("Get Companionly")
       .setDescription(
         "Everything starts in DMs — here's the five-minute path.\n\n" +
         `**1. Verify** — click **Verify** in ${config.houseVerifyChannelId ? `<#${config.houseVerifyChannelId}>` : "**#log-in**"}. It links your free Characterly account (that's what moderation and your data controls hang off) and unlocks the server.\n` +

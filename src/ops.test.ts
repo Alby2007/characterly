@@ -767,7 +767,7 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
     mkCh("announcements", "cat-system", false), mkCh("events", "cat-system", false), mkCh("updates", "cat-system", false),
     mkCh("rules", "cat-system", true), mkCh("log-in", "cat-system", true),
     mkCh("characters", "cat-character marketplace", true, 15),
-    ...["what-is-characterly", "what-is-companionly", "get-characterly", "privacy-policy", "how-to-publish-bots"]
+    ...["what-is-characterly", "what-is-companionly", "get-companionly", "privacy-policy", "how-to-publish-bots"]
       .map(n => mkCh(n, "cat-resources", true)),
     mkCh("faqs", "cat-help", true), mkCh("support-ticket", "cat-help", true), mkCh("suggest-a-feature", "cat-help", true),
     mkCh("admins-chat", "cat-services", true), mkCh("mods-chat", "cat-services", true),
@@ -782,16 +782,30 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
 
   await ensureHouseLayout(guild as any);
 
-  // Category-level denies for the fully read-only categories.
-  for (const cat of ["cat:RESOURCES", "cat:HELP"]) {
-    const e = edits.find(x => x.target === cat && x.id === "r-member");
-    assert.ok(e, `${cat} should get the Member typing deny`);
-    assert.equal(e!.perms.SendMessages, false);
-    assert.equal(e!.perms.ViewChannel, true, "members keep view access");
-  }
+  // HELP keeps the Member typing deny (hidden pre-verify); RESOURCES is an
+  // "everyone" category — @everyone gets ViewChannel + typing denies instead.
+  const helpCat = edits.find(x => x.target === "cat:HELP" && x.id === "r-member");
+  assert.ok(helpCat, "HELP should get the Member typing deny");
+  assert.equal(helpCat!.perms.SendMessages, false);
+  assert.equal(helpCat!.perms.ViewChannel, true, "members keep view access");
+  const resCat = edits.find(x => x.target === "cat:RESOURCES" && x.id === "g-house");
+  assert.ok(resCat, "RESOURCES should get the @everyone visible-read-only overwrite");
+  assert.equal(resCat!.perms.ViewChannel, true, "unverified can read RESOURCES");
+  assert.equal(resCat!.perms.SendMessages, false, "…but nobody types there");
+  assert.ok(!edits.some(x => x.target === "cat:RESOURCES" && x.id === "r-member"),
+    "RESOURCES doesn't need a separate Member deny — @everyone's covers it");
   // Synced children are left alone — they inherit the parent deny.
-  for (const n of ["support-ticket", "suggest-a-feature", "privacy-policy", "how-to-publish-bots"]) {
+  for (const n of ["support-ticket", "suggest-a-feature", "privacy-policy", "what-is-characterly", "what-is-companionly"]) {
     assert.ok(!edits.some(e => e.target === n), `synced #${n} inherits the category deny — no per-channel write`);
+  }
+  // The two gated RESOURCES channels get their own @everyone hide overwrite —
+  // channel-level deny overrides the now-visible category.
+  for (const n of ["get-companionly", "how-to-publish-bots"]) {
+    const e = edits.find(x => x.target === n);
+    assert.ok(e, `#${n} needs its own @everyone hide`);
+    assert.equal(e!.id, "g-house", `#${n} hide targets @everyone (guild id)`);
+    assert.equal(e!.perms.ViewChannel, false, `#${n} invisible until Member`);
+    assert.equal(e!.perms.SendMessages, false);
   }
   // #faqs is the pre-verify exception: its channel-level @everyone overwrite
   // allows ViewChannel over the category's hide, while denying its typing.
@@ -865,7 +879,7 @@ test("ensureResourcePosts posts marked embeds once; dedupes extras; edits stale 
       messages: { fetch: async () => (chanMsgs[id] ?? []).map(m => msgsById.get(m)!).filter(Boolean) },
     }),
   });
-  const names = ["what-is-characterly", "what-is-companionly", "get-characterly", "privacy-policy", "how-to-publish-bots", "faqs"];
+  const names = ["what-is-characterly", "what-is-companionly", "get-companionly", "privacy-policy", "how-to-publish-bots", "faqs"];
   const chans = names.map(n => ({ id: `c-${n}`, name: n, type: 0 }));
   const guild = { id: HOUSE, channels: { cache: { find: (fn: (c: any) => boolean) => chans.find(fn) } } };
 
