@@ -818,9 +818,10 @@ async function doRelist(
   );
 }
 
-/** Where non-members are pointed to meet their adopted companions. */
-function houseInviteRef(): string {
-  return config.houseInviteUrl ?? config.siteUrl;
+/** Where non-members are pointed to meet their adopted companions — null when
+ *  neither env is configured so copy degrades instead of printing "undefined". */
+function houseInviteRef(): string | null {
+  return config.houseInviteUrl ?? config.siteUrl ?? null;
 }
 
 /** Adopt-time thread setup shared by every adoption path — creates/reopens the
@@ -840,7 +841,7 @@ async function adopteeThreadResult(
  *  generic pointer when creation failed or the user hasn't joined yet. */
 function adoptPointerCopy(t: { thread?: string; needsInvite?: true }): string {
   return t.thread ? ` they're waiting for you in ${t.thread}.`
-    : t.needsInvite ? ` join the Characterly server to meet them — ${houseInviteRef()}`
+    : t.needsInvite ? ` join the Characterly server to meet them${houseInviteRef() ? ` — ${houseInviteRef()}` : ""}`
     : ` I'll open your private thread under #adoptees shortly.`;
 }
 
@@ -1814,7 +1815,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         const ad = await store.adoptionForCompanion(c.id).catch(() => null);
         lines.push(ad?.chatThreadId
           ? `• **${c.name}** — <#${ad.chatThreadId}>`
-          : `• **${c.name}** — join the Characterly server to open your thread: ${houseInviteRef()}`);
+          : `• **${c.name}** — join the Characterly server to open your thread${houseInviteRef() ? `: ${houseInviteRef()}` : ""}`);
       }
       // Adopted-only users can't reach awakening through the DM chat path —
       // surface the affordance here so the permanent bond stays discoverable.
