@@ -38,6 +38,7 @@ import { isSafeUrl } from "./tools.js";
 import { BudgetExceeded, meteredClient } from "./budget.js";
 import { runExtractJob, type ExtractJobPayload } from "./extract-job.js";
 import { runJournalJob, type JournalJobPayload } from "./journal-job.js";
+import { runChatImportJob, type ChatImportJobPayload } from "./chat-import-job.js";
 import { selectCompanionForTurn } from "./scene-router.js";
 import { sendAsCompanion } from "./webhooks.js";
 import { isSelfHarmSignal, CRISIS_RESPONSE, SAFE_REFUSAL } from "./safety.js";
@@ -237,6 +238,11 @@ async function init() {
       }
       if (job.type === "journal-write") {
         return runJournalJob(job.guild_id, job.payload as JournalJobPayload, journalDeps);
+      }
+      if (job.type === "chat-import") {
+        return runChatImportJob(
+          job.guild_id, job.payload as ChatImportJobPayload, chatImportDeps, job.attempts,
+        );
       }
       // Unknown types are a code bug, not a transient fault — dead-letter
       // immediately rather than retrying something that can never succeed.
@@ -787,6 +793,19 @@ const journalDeps = {
   get store() { return store; },
   brainFor,
   get botId() { return client.user!.id; },
+};
+
+// Chat-import jobs — transcript distillation off the import path. sendDm is
+// the completion note; users.send fetches first so a cold cache still lands.
+const chatImportDeps = {
+  get store() { return store; },
+  brainFor,
+  maxWindows: config.chatImportMaxWindows,
+  windowSize: 30,
+  sendDm: async (userId: string, content: string) => {
+    const u = await client.users.fetch(userId);
+    await u.send(content);
+  },
 };
 
 // House ops — same deps-injection pattern. exec/exit are real here, faked in

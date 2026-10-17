@@ -17,6 +17,9 @@ import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js"
 import { handleOpsCommand, handleHouseButton, isHouse, isMarketplaceThread } from "./ops.js";
 import { CURATED_TAGS, postListingThread, buildListingCard, buildListingComponents } from "./marketplace.js";
 import { parseCardFile, cardToPersona, cardImportMeta, cardFileHash, CARD_MAX_BYTES, type ImportPersona, type CardImportMeta, type ParsedCard } from "./charcard.js";
+import { parseChatFile, chatImportMeta, chatFileHash, type ParsedChat, type ChatImportMeta } from "./chathist.js";
+import { enqueue } from "./jobs.js";
+import { sql } from "./db.js";
 
 export const ONBOARDING_ARCHETYPES: Record<
   string,
@@ -965,7 +968,7 @@ export const commandDefinitions = [
     ] },
     { name: "avatar_url", description: "Public http(s) image URL when action is avatar", type: 3, required: false },
     { name: "avatar_file", description: "Uploaded image when action is avatar — also used as the marketplace cover", type: 11, required: false },
-    { name: "card_file", description: "Character card file when action is import (.png card or .json)", type: 11, required: false },
+    { name: "card_file", description: "File to import (.png/.json character card, or .jsonl/.json chat export)", type: 11, required: false },
     { name: "user", description: "Member whose companion to inspect (card) or remove (kick)", type: 6, required: false }
   ] },
   // In a server this is the guild-scope key (admin only); in DMs it stores the
@@ -1008,6 +1011,9 @@ let serverBuildRunning = false;
 /** Parsed character cards awaiting the user's confirm click. In-memory only —
  *  a restart just expires the preview (the button explains itself). */
 const pendingImports = new Map<string, { persona: ImportPersona; meta: CardImportMeta; avatarUrl: string | null; card: ParsedCard; expires: number }>();
+/** Parsed chat histories awaiting the user's companion pick — keeps the raw
+ *  bytes so the companion's name can re-resolve flagless speaker names. */
+const pendingChatImports = new Map<string, { bytes: Uint8Array; filename: string; sha256: string; chat: ParsedChat; meta: ChatImportMeta; expires: number }>();
 const PENDING_IMPORT_TTL_MS = 15 * 60 * 1000;
 /** One profile build per member at a time — claimed synchronously before any
  * await so a double-invoke can't slip past the check and double the LLM spend. */
@@ -1371,17 +1377,18 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       const file = interaction.options.getAttachment?.("card_file") ?? null;
       if (!file) {
         return interaction.reply({
-          content: "Attach a character card as `card_file` — a `.png` card or `.json` export from wherever the character lived before.",
+          content: "Attach a file as `card_file` — a `.png` card or `.json` character export, or a `.jsonl`/`.json` chat export from wherever they lived before.",
           ephemeral: true,
         });
       }
       if (file.size > CARD_MAX_BYTES) {
-        return interaction.reply({ content: "That file is over 8 MB — character cards are small; export a fresh copy and try again.", ephemeral: true });
+        return interaction.reply({ content: "That file is over 8 MB — export a fresh copy (or a shorter slice, for a chat history) and try again.", ephemeral: true });
       }
       const isPng = file.contentType === "image/png" || /\.png$/i.test(file.name ?? "");
       const isJson = /\.json$/i.test(file.name ?? "") || file.contentType === "application/json";
-      if (!isPng && !isJson) {
-        return interaction.reply({ content: "I can read `.png` character cards and `.json` exports — that file is neither.", ephemeral: true });
+      const isHistFile = /\.(jsonl|txt)$/i.test(file.name ?? "");
+      if (!isPng && !isJson && !isHistFile) {
+        return interaction.reply({ content: "I can read `.png`/`.json` character cards and `.jsonl` chat exports — that file is none of them.", ephemeral: true });
       }
       if (!file.url || !isSafeUrl(file.url)) {
         return interaction.reply({ content: "That upload didn't give me a usable file URL — try exporting the card again.", ephemeral: true });
@@ -1399,14 +1406,72 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       if (!bytes) {
         return interaction.reply({ content: "Couldn't fetch that upload — try re-attaching the file.", ephemeral: true });
       }
-      const parsed = parseCardFile(bytes, file.name ?? "card");
+      // History exports route to the transcript flow: .jsonl/.txt always,
+      // .json only when it isn't a card.
+      const chatRes = isHistFile || !isPng ? parseChatFile(bytes, file.name ?? "chat") : null;
+      const parsed = chatRes?.ok ? null : isHistFile ? null : parseCardFile(bytes, file.name ?? "card");
+      if (chatRes?.ok) {
+        const chat = chatRes.chat;
+        const sha256 = await chatFileHash(bytes);
+        const dupe = await store.findChatImportByHash(interaction.user.id, sha256).catch(() => undefined);
+        if (dupe === undefined) {
+          return interaction.reply({ content: "Couldn't check your previous imports right now — try again in a moment.", ephemeral: true });
+        }
+        if (dupe) {
+          const state = dupe.status === "done" ? "already part of them"
+            : dupe.status === "failed" ? "failed last time — ask me to retry by re-uploading isn't supported yet"
+            : "still being distilled";
+          return interaction.reply({ content: `You've already imported this file — it's ${state}.`, ephemeral: true });
+        }
+        const active = await store.activeChatImportCount(interaction.user.id).catch(() => -1);
+        if (active < 0) {
+          return interaction.reply({ content: "Couldn't check your imports right now — try again in a moment.", ephemeral: true });
+        }
+        if (active >= config.chatImportCap) {
+          return interaction.reply({ content: `You've got ${config.chatImportCap} imports queued or distilling already — wait for one to finish first.`, ephemeral: true });
+        }
+        const roster = await store.listCompanionsForUser(interaction.user.id).catch(() => []);
+        if (!roster.length) {
+          return interaction.reply({ content: "You need a companion to give this history to — awaken one, adopt one, or import their card first.", ephemeral: true });
+        }
+        const meta = chatImportMeta(chat, { filename: file.name ?? "chat", sha256, importedVia: "discord" });
+        pendingChatImports.set(interaction.user.id, { bytes, filename: file.name ?? "chat", sha256, chat, meta, expires: Date.now() + PENDING_IMPORT_TTL_MS });
+        for (const [k, v] of pendingChatImports) if (v.expires < Date.now()) pendingChatImports.delete(k);
+        const span = chat.firstTs && chat.lastTs
+          ? `${chat.firstTs.slice(0, 10)} → ${chat.lastTs.slice(0, 10)}`
+          : "dates unknown";
+        const buttons = roster.slice(0, 4).map(c => new ButtonBuilder()
+          .setCustomId(`market:histimp:${c.id}`)
+          .setLabel(`${c.name} (${c.kind === "awakened" ? "awakened" : "adopted"})`)
+          .setStyle(c.kind === "awakened" ? ButtonStyle.Primary : ButtonStyle.Success));
+        const embed = new EmbedBuilder()
+          .setTitle(`Import this chat history?`)
+          .setDescription(
+            `I found **${chat.turns.length}** usable turns${chat.turns.length < chat.totalTurns ? ` (of ${chat.totalTurns})` : ""} between **${escapeMarkdown(chat.userName)}** and **${escapeMarkdown(chat.charName)}** (${span}).` +
+            (chat.droppedOthers ? `\n*${chat.droppedOthers} lines from other speakers were skipped — only yours and the character's come over.*` : "") +
+            `\n\nI'll read through, journal the moments that mattered as *their* memories — private, just for you — then delete the transcript itself. Pick who this history belongs to:`,
+          )
+          .setFooter({ text: "Distillation runs in the background — I'll DM you when the memories settle." });
+        return interaction.reply({ ephemeral: true, embeds: [embed], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons)] });
+      }
+      if (isHistFile) {
+        const why = chatRes
+          ? chatRes.error === "bad_json"
+            ? "That file looks like a chat export but the data inside is damaged — export a fresh copy and try again."
+            : "That file isn't a chat export I can read — export a `.jsonl` (Tavern/chat) or a supported `.json` transcript."
+          : "That file isn't a chat export I can read.";
+        return interaction.reply({ content: why, ephemeral: true });
+      }
+      if (!parsed) {
+        return interaction.reply({ content: "That file isn't a character card or a chat export I can read — export a `.png`/`.json` card or a `.jsonl` transcript.", ephemeral: true });
+      }
       if (!parsed.ok) {
         const why =
           parsed.error === "no_card_in_png"
             ? "That PNG doesn't have character data inside it — cards carry the persona embedded in the image. Export the card (not just the picture) and try again."
             : parsed.error === "bad_json"
               ? "The data inside that file is damaged — export a fresh copy and try again."
-              : "That file isn't a character card I can read — export a `.png` card or `.json` and try again.";
+              : "That file isn't a character card or chat export I can read — a `.png` card, `.json` card, or `.jsonl` transcript all work.";
         return interaction.reply({ content: why, ephemeral: true });
       }
       const persona = cardToPersona(parsed.card);
@@ -2616,6 +2681,38 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
     // Publish picker — "own" runs the normal awakened flow; a listing id
     // opens the import-publish modal. Errors reply ephemeral so the picker
     // message survives; modals can't replace it anyway.
+    // Chat-history import: the picker chose which companion the transcript
+    // belongs to — re-parse with their name (flagless exports resolve better),
+    // create the import row, hand off to the distillation worker.
+    if (sub === "histimp") {
+      const companionId = Number(parts[2]);
+      const pending = pendingChatImports.get(userId);
+      if (!pending || pending.expires < Date.now()) {
+        pendingChatImports.delete(userId);
+        return interaction.update({ content: "That import preview expired — run `/companion action:import` again.", components: [] });
+      }
+      const roster = await store.listCompanionsForUser(userId).catch(() => []);
+      const target = roster.find(c => c.id === companionId);
+      if (!target) {
+        return interaction.update({ content: "That companion isn't on your roster — pick again.", components: [] });
+      }
+      pendingChatImports.delete(userId);
+      const reParsed = parseChatFile(pending.bytes, pending.filename, { charName: target.name });
+      const chat = reParsed.ok ? reParsed.chat : pending.chat;
+      const meta = { ...pending.meta, companionName: target.name };
+      const created = await store.createChatImport(userId, target.id, {
+        filename: pending.filename, sha256: pending.sha256, format: chat.format,
+        turns: chat.turns,
+        speakers: { user: chat.userName, char: chat.charName },
+        meta,
+      });
+      await enqueue(sql, `dm:${userId}`, "chat-import", { importId: created.id });
+      return interaction.update({
+        content: `**${pending.filename}** queued — I'll distill the memories into **${target.name}** a few turns at a time and DM you when they're settled. Their journal stays private to you.`,
+        components: [],
+      });
+    }
+
     if (sub === "pubpick") {
       const pick = parts[2];
       if (pick === "own") {

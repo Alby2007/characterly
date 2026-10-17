@@ -1106,6 +1106,29 @@ input.toggle:focus-visible { outline: 2px solid var(--gold-hi); outline-offset: 
 }
 .import-done a { color: var(--gold-hi); text-underline-offset: 3px; }
 .import-done .plate-note { margin-top: 8px; }
+
+/* ── Chat-history import (dashboard) ─────────────────────────────────────── */
+.plate-rule { border: 0; border-top: 1px solid var(--rule); margin: 26px 0 20px; }
+.plate-sub { font-family: var(--serif); font-size: 21px; font-weight: 450; color: var(--paper); margin: 0 0 8px; }
+.field-label { display: block; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--paper-3); margin: 14px 0 6px; }
+.hist-select {
+  width: 100%; max-width: 320px; padding: 9px 12px; font-size: 14.5px;
+  color: var(--paper); background: rgba(239, 229, 209, 0.04);
+  border: 1px solid var(--rule-2); border-radius: 4px; font-family: inherit;
+}
+.hist-select:focus { outline: none; border-color: var(--gold); }
+.hist-select option { background: var(--bg); color: var(--paper); }
+.hist-status-list { margin-top: 18px; display: flex; flex-direction: column; gap: 6px; }
+.hist-status-row {
+  display: flex; justify-content: space-between; gap: 14px; align-items: baseline;
+  font-size: 13.5px; padding: 8px 12px; border: 1px solid var(--rule);
+  border-radius: 4px; background: rgba(239, 229, 209, 0.02);
+}
+.hist-file { color: var(--paper-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist-state { flex: none; font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; color: var(--paper-3); }
+.hist-state.hist-done { color: var(--ghost); }
+.hist-state.hist-failed { color: var(--ember); }
+.hist-state.hist-distilling { color: var(--gold-hi); }
 @media (max-width: 520px) {
   .import-preview { flex-direction: column; }
   .import-actions { flex-direction: row; }

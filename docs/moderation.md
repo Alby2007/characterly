@@ -123,6 +123,15 @@ than vibes. Importing someone's public card *for personal companionship* is
 allowed; republishing it is where the machinery bites — the hash also makes
 repeat uploads of the same source file trivially matchable across creators.
 
+**Imported chat histories (v44)** are a private-only surface: the transcript
+never publishes, distills into the importer's own companion journal
+(`source='import'` + `import_id` provenance on every entry), and the raw turns
+are deleted at completion — there is no stored corpus to exfiltrate or
+re-publish. A failed import retracts its partial journal by `import_id`. The
+moderation boundary is ingestion, not display: third-party speakers in group
+exports are dropped before storage, and the distill prompt paraphrases rather
+than quotes.
+
 ### Comment moderation (v37)
 
 Listing threads are the comment surface — readable by everyone, writable by

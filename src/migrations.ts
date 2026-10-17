@@ -3166,6 +3166,255 @@ const migrations: Migration[] = [
       await sql`ALTER TABLE companion_listings DROP COLUMN IF EXISTS published_at`;
     },
   },
+  {
+    version: 44,
+    name: "v44_chat_import",
+    up: async (sql) => {
+      // Chat-history imports: the transcript lands as normalized turns on this
+      // row, a 'chat-import' job distills it into companion_journal, then the
+      // turns are cleared — distill-and-discard, we keep the memory not the
+      // corpus. Provenance + progress live here; the row survives 'done' so
+      // journal entries stay attributable to their import.
+      await sql`
+        CREATE TABLE IF NOT EXISTS chat_imports (
+          id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          owner_user_id   TEXT NOT NULL,
+          companion_id    BIGINT NOT NULL REFERENCES companions(id) ON DELETE CASCADE,
+          filename        TEXT NOT NULL DEFAULT '',
+          sha256          TEXT NOT NULL,
+          format          TEXT NOT NULL DEFAULT '',
+          status          TEXT NOT NULL DEFAULT 'queued',
+          turns           JSONB NOT NULL DEFAULT '[]',
+          speakers        JSONB NOT NULL DEFAULT '{}',
+          message_count   INTEGER NOT NULL DEFAULT 0,
+          kept_count      INTEGER NOT NULL DEFAULT 0,
+          processed_turns INTEGER NOT NULL DEFAULT 0,
+          error           TEXT,
+          meta            JSONB,
+          created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(owner_user_id, sha256)
+        )
+      `;
+      await sql`CREATE INDEX IF NOT EXISTS chat_imports_owner ON chat_imports(owner_user_id, status)`;
+      // Same lockdown as every public table — the site reaches imports only
+      // through the security-definer RPCs below.
+      await sql`ALTER TABLE chat_imports ENABLE ROW LEVEL SECURITY`;
+
+      // Journal provenance: entries written by a live reply are 'live';
+      // distilled ones carry 'import' + the import they came from. Cascade
+      // means deleting the import record retracts its memories too.
+      await addColumn(sql, "companion_journal", "source TEXT NOT NULL DEFAULT 'live'");
+      await addColumn(sql, "companion_journal", "import_id BIGINT REFERENCES chat_imports(id) ON DELETE CASCADE");
+
+      await sql`
+        DO $web$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'web_profiles') THEN
+            -- Roster for the website's companion picker — awakened + active
+            -- adoptions, nothing else. auth.uid()-keyed, returns own rows only.
+            EXECUTE $dfn$
+              CREATE OR REPLACE FUNCTION public.my_companions()
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RETURN '[]'::json; END IF;
+                RETURN coalesce((
+                  SELECT jsonb_agg(jsonb_build_object(
+                    'id', c.id, 'name', c.name, 'kind', c.kind, 'avatar_url', c.avatar_url))
+                  FROM public.companions c
+                  WHERE c.owner_user_id = did
+                    AND (c.kind = 'awakened' OR EXISTS (
+                      SELECT 1 FROM public.companion_adoptions a
+                      WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL))
+                ), '[]'::jsonb)::json;
+              END
+              $body$
+            $dfn$;
+            -- Status poll for the import plate — own imports, newest first.
+            EXECUTE $dfn2$
+              CREATE OR REPLACE FUNCTION public.my_chat_imports()
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RETURN '[]'::json; END IF;
+                RETURN coalesce((
+                  SELECT jsonb_agg(jsonb_build_object(
+                    'id', i.id, 'companion_id', i.companion_id, 'status', i.status,
+                    'filename', i.filename, 'format', i.format,
+                    'message_count', i.message_count, 'kept_count', i.kept_count,
+                    'processed_turns', i.processed_turns, 'error', i.error,
+                    'created_at', i.created_at) ORDER BY i.created_at DESC)
+                  FROM public.chat_imports i WHERE i.owner_user_id = did
+                ), '[]'::jsonb)::json;
+              END
+              $body$
+            $dfn2$;
+            -- Create + enqueue a chat-history import. Client supplies the
+            -- normalized turns + meta; the server re-bounds everything,
+            -- validates the companion is on the caller's roster, dedupes on
+            -- sha256, and enqueues the distill job itself (INSERT into jobs +
+            -- pg_notify — the worker picks it up like any other enqueue).
+            EXECUTE $dfn3$
+              CREATE OR REPLACE FUNCTION public.import_chat_history(p_payload jsonb)
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+                v_companion bigint;
+                v_count int;
+                v_id bigint;
+                v_job bigint;
+                v_sha text;
+                v_turns jsonb;
+                v_turn jsonb;
+                v_bounded jsonb := '[]'::jsonb;
+                v_i int;
+                v_speaker text;
+                v_status text;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RAISE EXCEPTION 'discord not linked'; END IF;
+
+                v_companion := CASE WHEN (p_payload->>'companion_id') ~ '^[0-9]+$'
+                  THEN (p_payload->>'companion_id')::bigint ELSE 0 END;
+                IF v_companion = 0 OR NOT EXISTS (
+                  SELECT 1 FROM public.companions c
+                  WHERE c.id = v_companion AND c.owner_user_id = did
+                    AND (c.kind = 'awakened' OR EXISTS (
+                      SELECT 1 FROM public.companion_adoptions a
+                      WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL))
+                ) THEN RAISE EXCEPTION 'not your companion'; END IF;
+
+                -- Re-bound the turns server-side — the client's parse is a
+                -- preview, not a trusted input. Keep in sync with
+                -- CHAT_MAX_TURNS / CHAT_MAX_TURN_CHARS in src/chathist.ts.
+                v_turns := coalesce(p_payload->'turns', '[]'::jsonb);
+                IF jsonb_typeof(v_turns) <> 'array' THEN v_turns := '[]'::jsonb; END IF;
+                FOR v_i IN 0..least(jsonb_array_length(v_turns), 4000) - 1 LOOP
+                  v_turn := v_turns->v_i;
+                  v_speaker := v_turn->>'speaker';
+                  IF v_speaker NOT IN ('user', 'char') THEN CONTINUE; END IF;
+                  IF length(coalesce(v_turn->>'text', '')) = 0 THEN CONTINUE; END IF;
+                  v_bounded := v_bounded || jsonb_build_object(
+                    'speaker', v_speaker,
+                    'text', left(v_turn->>'text', 1500),
+                    'ts', left(coalesce(v_turn->>'ts', ''), 40)
+                  );
+                END LOOP;
+                IF jsonb_array_length(v_bounded) = 0 THEN RAISE EXCEPTION 'no usable turns'; END IF;
+
+                v_sha := left(coalesce(p_payload->>'meta'->>'sha256', ''), 80);
+
+                -- Same file twice → the existing row, whatever its state.
+                SELECT i.id, i.status INTO v_id, v_status FROM public.chat_imports i
+                  WHERE i.owner_user_id = did AND i.sha256 = v_sha AND v_sha <> '';
+                IF v_id IS NOT NULL THEN
+                  RETURN json_build_object('import_id', v_id, 'status', v_status, 'reused', true);
+                END IF;
+
+                -- Pending cap — keep in sync with CHAT_IMPORT_CAP.
+                SELECT COUNT(*) INTO v_count FROM public.chat_imports
+                  WHERE owner_user_id = did AND status IN ('queued', 'distilling');
+                IF v_count >= 3 THEN RAISE EXCEPTION 'import busy'; END IF;
+
+                INSERT INTO public.chat_imports (
+                  owner_user_id, companion_id, filename, sha256, format, status,
+                  turns, speakers, message_count, meta, created_at, updated_at
+                ) VALUES (
+                  did, v_companion,
+                  left(coalesce(p_payload->>'filename', ''), 200), v_sha,
+                  left(coalesce(p_payload->>'format', ''), 10), 'queued',
+                  v_bounded,
+                  jsonb_build_object(
+                    'user', left(coalesce(p_payload->'speakers'->>'user', ''), 120),
+                    'char', left(coalesce(p_payload->'speakers'->>'char', ''), 120),
+                    'dropped', CASE WHEN (p_payload->'speakers'->>'dropped') ~ '^[0-9]+$'
+                      THEN (p_payload->'speakers'->>'dropped')::int ELSE 0 END
+                  ),
+                  jsonb_array_length(v_bounded),
+                  jsonb_build_object(
+                    'source', 'chat_history',
+                    'format', left(coalesce(p_payload->>'format', ''), 10),
+                    'userName', left(coalesce(p_payload->'speakers'->>'user', ''), 120),
+                    'charName', left(coalesce(p_payload->'speakers'->>'char', ''), 120),
+                    'filename', left(coalesce(p_payload->>'filename', ''), 200),
+                    'sha256', v_sha,
+                    'firstTs', left(coalesce(p_payload->'meta'->>'firstTs', ''), 40),
+                    'lastTs', left(coalesce(p_payload->'meta'->>'lastTs', ''), 40),
+                    'importedVia', 'web',
+                    'importedAt', now()
+                  ),
+                  now(), now()
+                ) RETURNING id INTO v_id;
+
+                INSERT INTO public.jobs (guild_id, type, payload, run_after)
+                VALUES ('dm:' || did, 'chat-import', jsonb_build_object('importId', v_id), now())
+                RETURNING id INTO v_job;
+                PERFORM pg_notify('jobs', v_job::text);
+
+                RETURN json_build_object('import_id', v_id, 'status', 'queued', 'reused', false);
+              END
+              $body$
+            $dfn3$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.my_companions() FROM PUBLIC';
+            EXECUTE 'REVOKE ALL ON FUNCTION public.my_chat_imports() FROM PUBLIC';
+            EXECUTE 'REVOKE ALL ON FUNCTION public.import_chat_history(jsonb) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.my_companions() FROM anon';
+              EXECUTE 'REVOKE ALL ON FUNCTION public.my_chat_imports() FROM anon';
+              EXECUTE 'REVOKE ALL ON FUNCTION public.import_chat_history(jsonb) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.my_companions() TO authenticated';
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.my_chat_imports() TO authenticated';
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.import_chat_history(jsonb) TO authenticated';
+            END IF;
+          END IF;
+        END $web$
+      `;
+    },
+    down: async (sql) => {
+      await sql`DROP FUNCTION IF EXISTS public.my_companions()`;
+      await sql`DROP FUNCTION IF EXISTS public.my_chat_imports()`;
+      await sql`DROP FUNCTION IF EXISTS public.import_chat_history(jsonb)`;
+      // Refuse to silently drop import records + their provenance — same
+      // data-decision guard as v41/v42.
+      await sql`
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM chat_imports) THEN
+            RAISE EXCEPTION 'v44 rollback refused: chat imports exist';
+          END IF;
+        END $$
+      `;
+      await sql`ALTER TABLE companion_journal DROP COLUMN IF EXISTS import_id`;
+      await sql`ALTER TABLE companion_journal DROP COLUMN IF EXISTS source`;
+      await sql`DROP TABLE IF EXISTS chat_imports`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

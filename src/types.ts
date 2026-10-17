@@ -369,12 +369,16 @@ export type JournalEntry = {
   id: number;
   companionId: number;
   originScope: string;
-  kind: "moment" | "opinion" | "inside_joke" | "promise";
+  kind: "moment" | "opinion" | "inside_joke" | "promise" | "bond";
   content: string;
   aboutSubjectIds: string[];
   importance: number;
   status: "active" | "forgotten";
   sourceMessageId?: string | null;
+  /** 'live' = written after a real reply; 'import' = distilled from an
+   *  uploaded chat history (import_id traces it back). */
+  source?: "live" | "import";
+  importId?: number | null;
   createdAt: string;
 };
 
@@ -383,6 +387,27 @@ export type JournalCandidate = {
   content: string;
   importance?: number;
   aboutSubjects?: string[];
+};
+
+/** A queued/running/finished chat-history import (v44). The transcript lives
+ *  in `turns` only until status='done' — distill-and-discard. */
+export type ChatImport = {
+  id: number;
+  ownerUserId: string;
+  companionId: number;
+  filename: string;
+  sha256: string;
+  format: string;
+  status: "queued" | "distilling" | "done" | "failed";
+  turns: Array<{ speaker: "user" | "char"; text: string; ts: string | null }>;
+  speakers: { user?: string; char?: string; dropped?: number };
+  messageCount: number;
+  keptCount: number;
+  processedTurns: number;
+  error: string | null;
+  meta: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type CompanionPersona = {

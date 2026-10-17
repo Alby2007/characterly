@@ -102,6 +102,10 @@ const env = z.object({
   // Character-card imports: private unlisted listings a user can hold at once.
   // The adopted clones they spawn still consume normal adoption slots.
   CHARACTER_IMPORT_CAP: z.coerce.number().int().min(1).default(25),
+  // Chat-history imports: pending/active distill jobs a user can hold, and the
+  // max ~30-turn windows one transcript distills through (bounds hosted spend).
+  CHAT_IMPORT_CAP: z.coerce.number().int().min(1).default(3),
+  CHAT_IMPORT_MAX_WINDOWS: z.coerce.number().int().min(1).default(50),
   // Safety classifier model — defaults to the hosted reply model; a small
   // fast model is fine (the verdict schema is tiny).
   SAFETY_MODEL: z.string().optional(),
@@ -228,6 +232,8 @@ export const config = {
   marketTrendingCount: env.MARKET_TRENDING_COUNT,
   marketTrendingWindowH: env.MARKET_TRENDING_WINDOW_H,
   characterImportCap: env.CHARACTER_IMPORT_CAP,
+  chatImportCap: env.CHAT_IMPORT_CAP,
+  chatImportMaxWindows: env.CHAT_IMPORT_MAX_WINDOWS,
   safetyModel: env.SAFETY_MODEL ?? env.GROQ_MODEL,
   // House ops — see ops.ts. houseGuildId unset disables the whole layer
   // (intents, listeners, watchdog never activate).

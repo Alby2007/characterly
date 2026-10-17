@@ -168,6 +168,35 @@
           <div class="import-done" id="import-done" hidden></div>
         </div>
         <p class="plate-note" id="import-locked" hidden>Link Discord above to import a character — companions live in your DMs.</p>
+
+        <div class="plate-rule" aria-hidden="true"></div>
+        <h3 class="plate-sub">Import a chat history</h3>
+        <p class="plate-desc">Bring an exported conversation — a <code>.jsonl</code> transcript or supported <code>.json</code> export. The companion reads through, keeps the moments that mattered as their own private memories, and the transcript itself is discarded.</p>
+        <div id="hist-body" hidden>
+          <div class="drop-zone" id="hist-drop" role="button" tabindex="0" aria-label="Drop a chat export, or press to choose a file">
+            <input type="file" id="hist-file" accept=".jsonl,.txt,.json,application/json,text/plain" hidden />
+            <p class="drop-title">Drop a chat export here</p>
+            <p class="drop-sub">or click to browse — <code>.jsonl</code> or <code>.json</code>, up to 8&nbsp;MB</p>
+          </div>
+          <div class="import-preview" id="hist-preview" hidden>
+            <div class="import-fields">
+              <h3 id="hist-title"></h3>
+              <p class="import-voice" id="hist-detail"></p>
+              <p class="import-traits" id="hist-others" hidden></p>
+              <label class="field-label" for="hist-companion">These memories belong to</label>
+              <select class="hist-select" id="hist-companion"></select>
+            </div>
+            <div class="import-actions">
+              <button class="btn btn-primary" id="hist-confirm" type="button">Distill the memories</button>
+              <button class="btn btn-ghost btn-sm" id="hist-cancel" type="button">Pick another</button>
+            </div>
+            <p class="plate-note">Distillation runs in the background — the transcript is read in windows, journaled, then discarded. Memories stay private to you.</p>
+          </div>
+          <div class="form-error" id="hist-msg" role="alert" hidden></div>
+          <div class="import-done" id="hist-done" hidden></div>
+          <div class="hist-status-list" id="hist-status-list" hidden></div>
+        </div>
+        <p class="plate-note" id="hist-locked" hidden>Link Discord above to import a chat history — companions live in your DMs.</p>
       </section>
 
       <section class="plate rv" id="billing" aria-labelledby="billing-h">

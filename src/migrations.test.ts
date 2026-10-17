@@ -775,3 +775,42 @@ test("migration v43 adds published_at and backfills live listings only", async (
     assert.equal(gone.length, 0, "rollback drops published_at");
   } finally { await sql.end(); }
 });
+
+test("migration v44 adds chat_imports + journal provenance; RPCs skipped outside Supabase; guarded rollback", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any);
+
+    const t = await sql`SELECT to_regclass('public.chat_imports') AS r`;
+    assert.ok(t[0].r, "chat_imports exists");
+    const cols = await sql<Array<{ column_name: string }>>`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'companion_journal' AND column_name IN ('source', 'import_id')`;
+    assert.equal(cols.length, 2, "journal gets source + import_id");
+
+    // Auth-gated RPCs — plain Postgres gets none of them.
+    const fns = await sql`SELECT proname FROM pg_proc
+      WHERE proname IN ('my_companions', 'my_chat_imports', 'import_chat_history')`;
+    assert.equal(fns.length, 0, "RPCs shouldn't exist outside Supabase auth");
+
+    // Rollback refuses while import rows exist.
+    const c = await sql`INSERT INTO companions
+      (owner_user_id, name, voice_persona, core_traits, owner_dynamic, backstory,
+       onboarding_state, onboarding_turns, kind, created_at, updated_at)
+      VALUES ('u-ci', 'Nyx', 'p', '{}', 'd', 'b', 'active', 0, 'awakened', NOW(), NOW())
+      RETURNING id`;
+    await sql`INSERT INTO chat_imports (owner_user_id, companion_id, sha256)
+      VALUES ('u-ci', ${c[0].id}, 'x')`;
+    await assert.rejects(runMigrations(sql as any, 43), "rollback must refuse while imports exist");
+
+    await sql`DELETE FROM chat_imports`;
+    await runMigrations(sql as any, 43);
+    const gone = await sql`SELECT to_regclass('public.chat_imports') AS r`;
+    assert.equal(gone[0].r, null, "clean rollback drops chat_imports");
+    const jcols = await sql<Array<{ column_name: string }>>`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'companion_journal' AND column_name IN ('source', 'import_id')`;
+    assert.equal(jcols.length, 0, "clean rollback drops journal provenance columns");
+  } finally { await sql.end(); }
+});

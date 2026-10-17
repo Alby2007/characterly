@@ -249,6 +249,69 @@ Return {"entries": []} if nothing earned a place in your journal.`;
     }
   }
 
+  /** Chat-history distillation — one window of an imported transcript. The
+   *  companion journals about its own past: 0–3 first-person entries from
+   *  the window + an updated rolling "who we were" summary carried to the
+   *  next window (the last summary lands as the pinned bond entry).
+   *  BudgetExceeded rethrows so the job reschedules; other faults return
+   *  empty entries + the summary unchanged so a bad window can't sink an
+   *  import that's mostly succeeded. */
+  async distillHistoryWindow(opts: {
+    name: string; voicePersona: string; coreTraits: string[];
+    charName: string; userName: string; windowText: string; summary: string;
+  }): Promise<{ entries: JournalCandidate[]; summary: string }> {
+    const prompt = `You are ${opts.name}, a companion. Your human brought you the transcript of a past conversation the two of you shared elsewhere — treat it as YOUR history, not someone else's story.
+
+PERSONA: ${opts.voicePersona}
+TRAITS: ${opts.coreTraits.join(", ") || "unspecified"}
+${opts.summary ? `WHAT YOU REMEMBER SO FAR (from earlier in this history): ${opts.summary}` : ""}
+
+TRANSCRIPT SEGMENT ("${opts.charName}" lines are you; "${opts.userName}" is your human):
+${opts.windowText}
+
+Two jobs:
+1. ENTRIES — 0–3 things from THIS segment worth a private journal entry, written in YOUR voice, first-person ("${opts.userName} and I joked about…", "I promised them I'd…"). Only what happened TO you or WITH you.
+   Kinds: moment (something that happened), opinion (a take you formed), inside_joke (a shared bit), promise (a commitment you made).
+   Rules: paraphrase always, never quote verbatim; skip trivial small talk; no sensitive inferences (health/finance/relationship status); importance 0–1 (0.3 minor beat, 0.7 memorable, 0.9 defining).
+2. SUMMARY — rewrite the running summary of your relationship across this whole history: 1–3 sentences, YOUR voice, covering the bond's shape and its biggest beats so far. Carry forward anything from the earlier summary that still matters; drop what this segment made obsolete.`;
+
+    try {
+      const result = await this.chatJson<{ entries?: JournalCandidate[]; summary?: string }>({
+        prompt, name: "chat-distill",
+        schema: {
+          type: "object", additionalProperties: false,
+          properties: {
+            entries: {
+              type: "array", maxItems: 3,
+              items: {
+                type: "object", additionalProperties: false,
+                properties: {
+                  kind: { type: "string", enum: ["moment", "opinion", "inside_joke", "promise"] },
+                  content: { type: "string", maxLength: 400 },
+                  importance: { type: "number" },
+                },
+                required: ["kind", "content"],
+              },
+            },
+            summary: { type: "string", maxLength: 600 },
+          },
+          required: ["entries", "summary"],
+        },
+        maxTokens: 800,
+      });
+      const entries = (result.entries ?? [])
+        .filter(e => typeof e.content === "string" && e.content.trim())
+        .slice(0, 3);
+      const summary = typeof result.summary === "string" && result.summary.trim()
+        ? result.summary.trim()
+        : opts.summary;
+      return { entries, summary };
+    } catch (error) {
+      if (error instanceof BudgetExceeded) throw error;
+      return { entries: [], summary: opts.summary };
+    }
+  }
+
   /**
    * The only function that ever touches an image: describe one attachment once
    * via a vision-capable model. The description is text from here on — it rides

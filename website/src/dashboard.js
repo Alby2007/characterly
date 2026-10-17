@@ -8,6 +8,7 @@ import {
   getBotSettings, saveBotSettings, getByokStatus, getCreditLedger, ensureConsent,
 } from "./auth.js";
 import { initImportCard } from "./import-card.js";
+import { initImportHistory } from "./import-history.js";
 
 const $ = sel => document.querySelector(sel);
 const guard = (p, ms = 8000) => withTimeout(p, ms).catch(e => console.warn("dashboard section failed:", e));
@@ -350,6 +351,7 @@ for (const [sel, key] of [["#set-c2c", "c2c_enabled"], ["#set-alerts", "low_cred
 await guard(renderTokens());
 await guard(renderBotSettings());
 initImportCard({ linked: Boolean(profile?.discord_user_id), uid: user.id });
+initImportHistory({ linked: Boolean(profile?.discord_user_id), uid: user.id });
 
 // ── Password change ────────────────────────────────────────────────────────
 $("#form-password").addEventListener("submit", async e => {

@@ -74,6 +74,19 @@ action:publish` offers an unlisted-import picker before the awakened modal;
 and content screen. An imported card gets a subtle "Imported character card"
 line on its marketplace card — authorship is never asserted, only provenance.
 
+### Path D: import a chat history — same command, transcript files
+
+`/companion action:import` and the dashboard plate also accept exported
+**transcripts** (`.jsonl` Tavern format, `.json` Oobabooga pairs or generic
+message-arrays — `src/chathist.ts`). Unlike card imports these are **never
+publishable**: the transcript distills into the chosen roster companion's
+private journal — first-person entries stamped `source='import'` +
+`import_id`, backdated to the conversation's real timestamps, plus a pinned
+`kind='bond'` summary of the relationship — then the transcript itself is
+deleted (`chat_imports.turns` cleared at done). A failed import retracts its
+partial journal via `import_id`. Third-party speakers in group exports are
+dropped before anything is stored.
+
 ### What the bot does with a publish (all paths)
 
 1. Writes/updates the `companion_listings` row (`upsertListing` /

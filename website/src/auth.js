@@ -154,6 +154,14 @@ export const uploadCardAvatar = (uid, sha256, bytes) =>
   });
 export const cardAvatarUrl = path => supabase.storage.from("card-avatars").getPublicUrl(path).data.publicUrl;
 
+// ── Chat-history import ─────────────────────────────────────────────────────
+// The client parses the transcript (shared parser), picks a companion, and
+// sends normalized turns — the server re-bounds them, validates roster
+// ownership, dedupes on sha256, and enqueues the distill job in one shot.
+export const myCompanions = () => supabase.rpc("my_companions");
+export const myChatImports = () => supabase.rpc("my_chat_imports");
+export const importChatHistory = payload => supabase.rpc("import_chat_history", { p_payload: payload });
+
 // ── Terms/Privacy consent ────────────────────────────────────────────────────
 // The consent_events table is RLS-locked; both calls go through security
 // definer RPCs keyed on auth.uid(). The version constant lives in config.js

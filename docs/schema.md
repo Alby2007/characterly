@@ -502,17 +502,40 @@ A companion's own first-person episodic memory (v25) — what *it* experienced (
 | `id` | BIGINT PK | Identity |
 | `companion_id` | BIGINT | FK → `companions.id ON DELETE CASCADE` |
 | `origin_scope` | TEXT | `<guildId>` or `dm:<userId>` — recall is scoped to where the entry formed |
-| `kind` | TEXT | `moment` · `opinion` · `inside_joke` · `promise` |
+| `kind` | TEXT | `moment` · `opinion` · `inside_joke` · `promise` · `bond` (v44 — the pinned "what we were" summary; written only by the chat-import path) |
 | `content` | TEXT | First-person journal text |
 | `about_subject_ids` | TEXT[] | Subjects the entry mentions — consent-gated at write *and* read time |
 | `importance` | DOUBLE | 0–1, ranks recall order and prune eviction |
 | `status` | TEXT | `active` · `forgotten` |
 | `source_message_id` | TEXT NULL | The companion's own reply that produced the entry (provenance + idempotency key) |
+| `source` | TEXT | `'live'` (default — written after a reply) or `'import'` (v44 — distilled from an uploaded transcript) |
+| `import_id` | BIGINT NULL | FK → `chat_imports.id ON DELETE CASCADE` (v44) — the import that wrote the entry; retracted with the import |
 | `created_at` / `updated_at` | TIMESTAMPTZ | |
 | `last_recalled_at` | TIMESTAMPTZ NULL | Stamped on each `journalFor` hit — drives the 30-day decay in `pruneJournal` |
 | `embedding` | VECTOR NULL | Semantic-recall vector (v40) — powers `semanticJournal` alongside `journalFor` |
 
-**Unique constraint:** `(companion_id, origin_scope, source_message_id, kind, content)` — a crashed job resaving identical output can't stack rows. **Indexes:** `companion_journal_lookup (companion_id, origin_scope, status, importance DESC)`; `companion_journal_about` GIN on `about_subject_ids`. RLS enabled (v25) with no policies — Data-API deny-all. Write-time trgm dedup drops paraphrases (similarity ≥ 0.75); nightly `pruneJournal` caps 200 active entries per (companion, scope).
+**Unique constraint:** `(companion_id, origin_scope, source_message_id, kind, content)` — a crashed job resaving identical output can't stack rows. **Indexes:** `companion_journal_lookup (companion_id, origin_scope, status, importance DESC)`; `companion_journal_about` GIN on `about_subject_ids`. RLS enabled (v25) with no policies — Data-API deny-all. Write-time trgm dedup drops paraphrases (similarity ≥ 0.75); nightly `pruneJournal` caps 200 active entries per (companion, scope). Imported entries (v44) carry `created_at` backdated to their transcript window's end so `[age]` reads honestly in recall.
+
+---
+
+### `chat_imports`
+
+A queued/running/finished chat-history import (v44). The normalized transcript lives in `turns` only while the `chat-import` job distills it — on `done` or `failed` the turns are cleared: **distill-and-discard, we keep the memory not the corpus**.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT PK | Identity |
+| `owner_user_id` | TEXT | The importer's Discord user id |
+| `companion_id` | BIGINT | FK → `companions.id ON DELETE CASCADE` — the roster companion receiving the history (dies with it) |
+| `filename` / `sha256` / `format` | TEXT | Source file name, content hash, detected format (`jsonl`/`json`) |
+| `status` | TEXT | `queued` → `distilling` → `done` · `failed` |
+| `turns` | JSONB | `{speaker: 'user'|'char', text, ts}` — cleared at `done`/`failed` |
+| `speakers` | JSONB | `{user, char, dropped}` — resolved names + skipped third-party count |
+| `message_count` / `processed_turns` / `kept_count` | INT | Total turns, windows checkpoint (resume point), journal entries written |
+| `error` | TEXT NULL | Failure reason |
+| `meta` | JSONB | Provenance + the rolling `rollingSummary` carried between windows (and across job retries) |
+
+**Unique constraint:** `(owner_user_id, sha256)` — the same file re-imported by the same user dedupes to the original row. **Index:** `chat_imports_owner (owner_user_id, status)`. RLS deny-all — the site reaches imports through `my_companions` / `my_chat_imports` / `import_chat_history` security-definer RPCs (auth-gated, created only when `auth` + `web_profiles` exist). `import_chat_history` re-bounds turns server-side, validates the companion is on the caller's roster, and enqueues the job itself (INSERT into `jobs` + `pg_notify`). `failChatImport` retracts the partial journal (`DELETE … WHERE import_id`) — a half-imported memory is worse than none. Rollback refuses while rows exist.
 
 ---
 
@@ -817,3 +840,4 @@ Version tracking for the migration system.
 | 41 | `v41_web_consent` | `consent_events.discord_user_id` → nullable (web signups have no Discord id yet), `consent_events_account_doc` index, RLS enabled (fail-closed to PostgREST) + auth-gated `my_consent`/`record_consent` security-definer RPCs — the site's `web_signup` write path |
 | 42 | `v42_character_import` | `persona_source`/`import_meta` on `companions` + `companion_listings` (import provenance), auth-gated `import_companion_card` security-definer RPC (private `unlisted` listing + adopted clone + DM-pick claim, idempotent on `sha256`), `card-avatars` storage bucket with uid-folder policies; rollback refuses while imports exist |
 | 43 | `v43_import_hardening` | `companion_listings.published_at` (first-live stamp — the daily publish cap counts this, not `created_at`; live rows backfilled from `created_at`), hardened `import_companion_card` (reuse branch pays cooldown/slot/daily-adopt checks like `adoptListing`, card tags carried into provenance), `card_avatars_update` gains `WITH CHECK` so objects can't be renamed into another uid's folder |
+| 44 | `v44_chat_import` | `chat_imports` (transcript → journal distillation pipeline: `turns` cleared at done/failed — distill-and-discard), `companion_journal.source`/`import_id` (import provenance + retraction scope), `kind='bond'` for the pinned "what we were" summary, auth-gated `my_companions`/`my_chat_imports`/`import_chat_history` security-definer RPCs; rollback refuses while imports exist |

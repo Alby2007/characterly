@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto";
-import type { AttributeStatus, Companion, CompanionAdoption, CompanionListing, CompanionSpec, EvidenceEffect, EvidenceType, GuildCompanion, JournalCandidate, JournalEntry, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, VerificationVerdict, WebhookMessageRecord } from "./types.js";
+import type { AttributeStatus, ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, EvidenceEffect, EvidenceType, GuildCompanion, JournalCandidate, JournalEntry, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, VerificationVerdict, WebhookMessageRecord } from "./types.js";
 import { sql as defaultSql, type Sql } from "./db.js";
 import { runMigrations } from "./migrations.js";
 import { findMentionedUsers } from "./entity-resolution.js";
@@ -3507,6 +3507,51 @@ export class MemoryStore {
     return saved;
   }
 
+  /** Distilled-import entries — same consent + trgm-dedup rules as live
+   *  writes, but stamped source='import' + import_id and backdated to
+   *  `createdAt` (the window's end timestamp, so [age] reads honestly in
+   *  recall). 'bond' is allowed only on this path — the final
+   *  "what we were" summary kind live entries never write. */
+  async saveImportedJournalEntries(
+    companionId: number,
+    scope: string,
+    candidates: JournalCandidate[],
+    importId: number,
+    createdAt: string,
+    isConsented: (subjectId: string) => Promise<boolean>,
+  ): Promise<Array<{ id: number; content: string }>> {
+    const saved: Array<{ id: number; content: string }> = [];
+    const at = createdAt;
+    for (const c of candidates) {
+      const content = c.content?.trim();
+      if (!content) continue;
+      const kind = ["moment", "opinion", "inside_joke", "promise", "bond"].includes(c.kind) ? c.kind : "moment";
+      const aboutIds = [...new Set(c.aboutSubjects ?? [])];
+      let blocked = false;
+      for (const s of aboutIds) {
+        if (!(await isConsented(s))) { blocked = true; break; }
+      }
+      if (blocked) continue;
+      const dup = await this.sql<Array<{ id: number }>>`
+        SELECT id FROM companion_journal
+        WHERE companion_id = ${companionId} AND origin_scope = ${scope} AND status = 'active'
+          AND similarity(content, ${content}) >= 0.75
+        LIMIT 1
+      `;
+      if (dup.length) continue;
+      const importance = Number.isFinite(Number(c.importance))
+        ? Math.max(0, Math.min(1, Number(c.importance)))
+        : 0.5;
+      const rows = await this.sql<Array<{ id: number }>>`
+        INSERT INTO companion_journal (companion_id, origin_scope, kind, content, about_subject_ids, importance, source_message_id, source, import_id, created_at)
+        VALUES (${companionId}, ${scope}, ${kind}, ${content}, ${aboutIds}, ${importance}, NULL, 'import', ${importId}, ${at})
+        RETURNING id
+      `;
+      if (rows.length) saved.push({ id: Number(rows[0].id), content });
+    }
+    return saved;
+  }
+
   async setJournalEmbedding(id: number, vector: string): Promise<void> {
     await this.sql`UPDATE companion_journal SET embedding = ${vector}::vector WHERE id = ${id} AND embedding IS NULL`;
   }
@@ -3639,8 +3684,128 @@ export class MemoryStore {
       importance: Number(r.importance),
       status: r.status,
       sourceMessageId: r.source_message_id,
+      source: r.source === "import" ? "import" : "live",
+      importId: r.import_id != null ? Number(r.import_id) : null,
       createdAt: ts(r.created_at),
     };
+  }
+
+  // ── Chat-history imports (v44) ───────────────────────────────────────────
+  // Transcript rows the 'chat-import' job distills into companion_journal.
+  // RLS deny-all — the site writes/reads via security-definer RPCs; the bot
+  // owns the lifecycle directly. turns clears at done (distill-and-discard).
+
+  private rowToChatImport(r: any): ChatImport {
+    return {
+      id: Number(r.id),
+      ownerUserId: r.owner_user_id,
+      companionId: Number(r.companion_id),
+      filename: r.filename ?? "",
+      sha256: r.sha256 ?? "",
+      format: r.format ?? "",
+      status: r.status,
+      turns: Array.isArray(r.turns) ? r.turns : [],
+      speakers: r.speakers ?? {},
+      messageCount: Number(r.message_count),
+      keptCount: Number(r.kept_count),
+      processedTurns: Number(r.processed_turns),
+      error: r.error ?? null,
+      meta: r.meta ?? null,
+      createdAt: ts(r.created_at),
+      updatedAt: ts(r.updated_at),
+    };
+  }
+
+  /** Queue an import (Discord path — the site goes through the RPC). */
+  async createChatImport(
+    ownerUserId: string,
+    companionId: number,
+    data: { filename: string; sha256: string; format: string; turns: ChatImport["turns"]; speakers: ChatImport["speakers"]; meta: Record<string, unknown> },
+  ): Promise<ChatImport> {
+    try {
+      const rows = await this.sql<Array<any>>`
+        INSERT INTO chat_imports (owner_user_id, companion_id, filename, sha256, format, status, turns, speakers, message_count, meta, created_at, updated_at)
+        VALUES (${ownerUserId}, ${companionId}, ${data.filename}, ${data.sha256}, ${data.format}, 'queued',
+          ${this.sql.json(data.turns as never)}, ${this.sql.json(data.speakers as never)}, ${data.turns.length},
+          ${this.sql.json(data.meta as never)}, NOW(), NOW())
+        RETURNING *
+      `;
+      return this.rowToChatImport(rows[0]);
+    } catch (e) {
+      // UNIQUE(owner_user_id, sha256) — a double-submit returns the original.
+      if (typeof e === "object" && e !== null && (e as { code?: string }).code === "23505") {
+        const existing = await this.findChatImportByHash(ownerUserId, data.sha256);
+        if (existing) return existing;
+      }
+      throw e;
+    }
+  }
+
+  async chatImportById(importId: number): Promise<ChatImport | null> {
+    const rows = await this.sql<Array<any>>`SELECT * FROM chat_imports WHERE id = ${importId}`;
+    return rows[0] ? this.rowToChatImport(rows[0]) : null;
+  }
+
+  /** sha256 dedupe — same file re-imported by the same user is a no-op. */
+  async findChatImportByHash(ownerUserId: string, sha256: string): Promise<ChatImport | null> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM chat_imports WHERE owner_user_id = ${ownerUserId} AND sha256 = ${sha256} LIMIT 1
+    `;
+    return rows[0] ? this.rowToChatImport(rows[0]) : null;
+  }
+
+  /** Pending+running imports — the per-user cap (keep aligned with
+   *  CHAT_IMPORT_CAP and the RPC's hardcoded value). */
+  async activeChatImportCount(ownerUserId: string): Promise<number> {
+    const rows = await this.sql<[{ n: number | string }]>`
+      SELECT COUNT(*) AS n FROM chat_imports
+      WHERE owner_user_id = ${ownerUserId} AND status IN ('queued', 'distilling')
+    `;
+    return Number(rows[0].n);
+  }
+
+  /** queued → distilling. Returns false if the row moved on (retry safety —
+   *  a doubly-claimed job sees the row already running and stops). */
+  async claimChatImport(importId: number): Promise<boolean> {
+    const rows = await this.sql<Array<{ id: number }>>`
+      UPDATE chat_imports SET status = 'distilling', updated_at = NOW()
+      WHERE id = ${importId} AND status = 'queued'
+      RETURNING id
+    `;
+    return rows.length > 0;
+  }
+
+  /** Progress checkpoint — turns processed, memories kept, and the rolling
+   *  summary (a retried job resumes distillation with prior context intact). */
+  async updateChatImportProgress(importId: number, processedTurns: number, keptDelta: number, rollingSummary?: string): Promise<void> {
+    await this.sql`
+      UPDATE chat_imports SET processed_turns = ${processedTurns},
+        kept_count = kept_count + ${keptDelta},
+        meta = CASE WHEN ${rollingSummary ?? null}::text IS NULL THEN meta
+                    ELSE coalesce(meta, '{}'::jsonb) || jsonb_build_object('rollingSummary', ${rollingSummary ?? null}::text) END,
+        updated_at = NOW()
+      WHERE id = ${importId}
+    `;
+  }
+
+  /** Done — the transcript is discarded; provenance + counts stay. */
+  async completeChatImport(importId: number): Promise<void> {
+    await this.sql`
+      UPDATE chat_imports SET status = 'done', turns = '[]'::jsonb, updated_at = NOW()
+      WHERE id = ${importId}
+    `;
+  }
+
+  /** Failed — transcript discarded AND the partial journal retracted: a
+   *  half-imported memory is worse than none. Rows are import_id-scoped so
+   *  this can't touch anything the import didn't write. */
+  async failChatImport(importId: number, error: string): Promise<void> {
+    await this.sql`
+      UPDATE chat_imports SET status = 'failed', error = ${error.slice(0, 400)},
+        turns = '[]'::jsonb, updated_at = NOW()
+      WHERE id = ${importId}
+    `;
+    await this.sql`DELETE FROM companion_journal WHERE import_id = ${importId}`;
   }
 
   async recordWebhookMessage(
