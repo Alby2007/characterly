@@ -1254,15 +1254,20 @@ test("market_cover submit — sets the cover and re-renders the OP card in place
     const listing = await makeListingRow(store, "u-cover2");
     await store.setListingThread(listing.id, "t-99");
 
-    const { interaction, replies, edits } = stubCoverSubmit({
-      listingId: listing.id, userId: "u-cover2", coverUrl: "https://example.com/art.png",
-    });
-    await handleCompanionModal(interaction, store);
-    assert.match(replies[0]?.content ?? "", /Cover updated/i);
-    assert.equal((await store.listingById(listing.id))!.avatarUrl, "https://example.com/art.png");
-    assert.equal(edits.length, 1, "starter message must be edited in place — not reposted");
-    const embed = (edits[0] as { embeds: { data: { image?: { url?: string } } }[] }).embeds[0];
-    assert.equal(embed.data.image?.url, "https://example.com/art.png");
+    // refreshListingCard no-ops without a configured marketplace forum.
+    const savedF = config.marketplaceChannelId;
+    config.marketplaceChannelId = "c-forum";
+    try {
+      const { interaction, replies, edits } = stubCoverSubmit({
+        listingId: listing.id, userId: "u-cover2", coverUrl: "https://example.com/art.png",
+      });
+      await handleCompanionModal(interaction, store);
+      assert.match(replies[0]?.content ?? "", /Cover updated/i);
+      assert.equal((await store.listingById(listing.id))!.avatarUrl, "https://example.com/art.png");
+      assert.equal(edits.length, 1, "starter message must be edited in place — not reposted");
+      const embed = (edits[0] as { embeds: { data: { image?: { url?: string } } }[] }).embeds[0];
+      assert.equal(embed.data.image?.url, "https://example.com/art.png");
+    } finally { config.marketplaceChannelId = savedF; }
   } finally { await sql.end(); }
 });
 
