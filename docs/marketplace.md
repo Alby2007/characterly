@@ -50,7 +50,31 @@ persona** button on the success reply fills them in, and **Cover image** adds
 the art. `create` does *not* require an awakened companion — a pure creator
 can join, link, and stock the shelf.
 
-### What the bot does with a publish (both paths)
+### Path C: import a character card — `/companion action:import` or the dashboard
+
+Users can bring a standard **character card** (`.json` or a `.png` card with an
+embedded `tEXt`/`ccv3` payload — the portable v1/v2/v3 format shared by
+character tools and card libraries). The shared parser (`src/charcard.ts`,
+bundled into the website too) normalizes the card into persona fields and
+stamps `persona_source='card_import'` + `import_meta` (spec, claimed creator,
+filename, `sha256` of the source bytes) on both rows.
+
+**Private by default.** An import creates a `status='unlisted'` listing plus an
+adopted clone owned by the importer — invisible to marketplace queries and live
+listing caps, adoptable only by its creator. First import claims the DM pick;
+the awakened companion is never touched. Discord: preview → confirm. Website:
+the dashboard's "Import a character" plate parses the file client-side, shows a
+preview, uploads an extracted PNG avatar to the `card-avatars` bucket, and
+creates the pair via the `import_companion_card` RPC (idempotent on `sha256` —
+re-importing the same file reuses the row).
+
+**Publishing an import** goes through the normal flow: `/companion
+action:publish` offers an unlisted-import picker before the awakened modal;
+`publishListing` flips `unlisted → active` with the usual slot cap, daily cap,
+and content screen. An imported card gets a subtle "Imported character card"
+line on its marketplace card — authorship is never asserted, only provenance.
+
+### What the bot does with a publish (all paths)
 
 1. Writes/updates the `companion_listings` row (`upsertListing` /
    `createListing`) and snapshots the persona into `companion_persona_versions`

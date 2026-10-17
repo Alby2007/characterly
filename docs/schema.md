@@ -27,6 +27,8 @@ Each user awakens **one permanent companion per account** in 1:1 DMs (`dm:<owner
 | `kind` | TEXT | `'awakened'` (default — the permanent bond) or `'adopted'` (marketplace clone synced from its listing) |
 | `adopted_from_listing_id` | BIGINT NULL | For adopted clones: the `companion_listings` row they were cloned from |
 | `listing_version` | INTEGER | Persona version the adopted clone was last synced to (0 for awakened) |
+| `persona_source` | TEXT | `'authored'` (default — conversation-grown persona) or `'card_import'` (v42 — cloned from an imported character card) |
+| `import_meta` | JSONB NULL | Import provenance: card spec/specVersion, claimed creator, filename, `sha256` of the source file, `importedVia` (`web`/`discord`), `importedAt` |
 | `created_at` / `updated_at` | TIMESTAMPTZ | Creation and last-update timestamps |
 
 **Indexes:** `companions_one_awakened` partial unique `(owner_user_id) WHERE kind='awakened'`; `companions_owner (owner_user_id)`; `companions_adopted_from (adopted_from_listing_id) WHERE adopted_from_listing_id IS NOT NULL`.
@@ -629,7 +631,9 @@ The marketplace's publishable persona (v34): a creator's awakened companion proj
 | `avatar_url` | TEXT NULL | |
 | `forum_thread_id` | TEXT NULL | The bot-created forum post (its embed card owns the Add/Report buttons) |
 | `version` | INTEGER | Increments on every upsert; each version is snapshotted in `companion_persona_versions` |
-| `status` | TEXT | `'active'` → `'flagged'` (auto at report threshold — a moderation hold: creators can't delist/relist/republish it away) → `'delisted'` (unpublish/mod; clones keep working) or `'banned'` (mod kill switch — clones freeze everywhere via the `adopted_from_listing_id` join). Non-active statuses block new adoptions |
+| `status` | TEXT | `'unlisted'` (v42 — private import draft: creator-only adoption, invisible to marketplace queries and listing caps) → `'active'` → `'flagged'` (auto at report threshold — a moderation hold: creators can't delist/relist/republish it away) → `'delisted'` (unpublish/mod; clones keep working) or `'banned'` (mod kill switch — clones freeze everywhere via the `adopted_from_listing_id` join). Non-active statuses block non-creator adoptions |
+| `persona_source` | TEXT | `'authored'` (default) or `'card_import'` (v42 — created from an imported character card) |
+| `import_meta` | JSONB NULL | Import provenance: card spec/specVersion, claimed creator, filename, `sha256` of the source file, `importedVia`, `importedAt`. Surfaces in moderation report alerts; powers `findUnlistedByHash` dedupe |
 | `report_count` / `add_count` | INTEGER | Denormalized counters |
 | `created_at` / `updated_at` | TIMESTAMPTZ | |
 
@@ -810,3 +814,4 @@ Version tracking for the migration system.
 | 39 | `v39_consent_events` | `consent_events` — append-only Terms/Privacy clickwrap log (`discord_user_id`, `account_id`, `document`, `version`, `source`, `accepted_at`) backing the verify-gate acceptance step and the sweep's unconsented-member revocation |
 | 40 | `v40_semantic_recall` | `vector` extension + un-dimensioned `embedding` columns on `memories` and `companion_journal` — hybrid semantic recall, dims enforced in code (`EMBED_DIMS`), no ANN index (guild-scope scans are tiny) |
 | 41 | `v41_web_consent` | `consent_events.discord_user_id` → nullable (web signups have no Discord id yet), `consent_events_account_doc` index, RLS enabled (fail-closed to PostgREST) + auth-gated `my_consent`/`record_consent` security-definer RPCs — the site's `web_signup` write path |
+| 42 | `v42_character_import` | `persona_source`/`import_meta` on `companions` + `companion_listings` (import provenance), auth-gated `import_companion_card` security-definer RPC (private `unlisted` listing + adopted clone + DM-pick claim, idempotent on `sha256`), `card-avatars` storage bucket with uid-folder policies; rollback refuses while imports exist |

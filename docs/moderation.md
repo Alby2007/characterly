@@ -114,6 +114,15 @@ action buttons — **Keep up** (unflag: `flagged→active`, mod-delisted→
 gated to `MARKETPLACE_MOD_ROLE_IDS` (fallback: ManageGuild). Every mod
 action writes a `moderation_events` row with the actor, action, and note.
 
+**Imported personas.** Character-card imports (v42) stamp `persona_source` /
+`import_meta` at ingest — card spec, claimed creator, source filename, and
+the `sha256` of the imported file — on both the listing and the adopter's
+clone. Report pings on an imported listing include that provenance line so a
+stolen-persona report (`theft` category) comes with evidence attached rather
+than vibes. Importing someone's public card *for personal companionship* is
+allowed; republishing it is where the machinery bites — the hash also makes
+repeat uploads of the same source file trivially matchable across creators.
+
 ### Comment moderation (v37)
 
 Listing threads are the comment surface — readable by everyone, writable by

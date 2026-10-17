@@ -142,6 +142,18 @@ export const getBotSettings = () => supabase.rpc("my_bot_settings");
 export const saveBotSettings = patch => supabase.rpc("upsert_my_settings", { patch });
 export const getByokStatus = () => supabase.rpc("my_byok_status");
 
+// ── Character-card import ───────────────────────────────────────────────────
+// Creates the private unlisted listing + adopted companion in one security-
+// definer transaction. The client supplies the already-mapped persona fields;
+// the server re-bounds everything and stamps provenance itself.
+export const importCompanionCard = payload => supabase.rpc("import_companion_card", { p_payload: payload });
+export const uploadCardAvatar = (uid, sha256, bytes) =>
+  supabase.storage.from("card-avatars").upload(`${uid}/${sha256}.png`, bytes, {
+    contentType: "image/png",
+    upsert: true,
+  });
+export const cardAvatarUrl = path => supabase.storage.from("card-avatars").getPublicUrl(path).data.publicUrl;
+
 // ── Terms/Privacy consent ────────────────────────────────────────────────────
 // The consent_events table is RLS-locked; both calls go through security
 // definer RPCs keyed on auth.uid(). The version constant lives in config.js

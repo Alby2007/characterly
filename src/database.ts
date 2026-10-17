@@ -2273,6 +2273,7 @@ export class MemoryStore {
     voice_persona: string; core_traits: string[] | null; owner_dynamic: string;
     backstory: string; onboarding_state: string; onboarding_turns: number;
     kind?: string; adopted_from_listing_id?: number | string | null; listing_version?: number;
+    persona_source?: string; import_meta?: Record<string, unknown> | null;
     created_at: Date | string; updated_at: Date | string;
   }): Companion {
     return {
@@ -2289,6 +2290,8 @@ export class MemoryStore {
       kind: (r.kind === "adopted" ? "adopted" : "awakened"),
       adoptedFromListingId: r.adopted_from_listing_id != null ? Number(r.adopted_from_listing_id) : null,
       listingVersion: Number(r.listing_version ?? 0),
+      personaSource: r.persona_source ?? "authored",
+      importMeta: r.import_meta ?? null,
       createdAt: ts(r.created_at),
       updatedAt: ts(r.updated_at),
     };
@@ -2524,6 +2527,8 @@ export class MemoryStore {
       forumThreadId: r.forum_thread_id,
       version: Number(r.version),
       status: r.status,
+      personaSource: r.persona_source ?? "authored",
+      importMeta: r.import_meta ?? null,
       reportCount: Number(r.report_count),
       addCount: Number(r.add_count),
       createdAt: ts(r.created_at),
@@ -2585,7 +2590,7 @@ export class MemoryStore {
         if (opts.maxListings != null && (!existing || existing.status === "delisted")) {
           const countRows = await sql<[{ n: number | string }]>`
             SELECT COUNT(*) AS n FROM companion_listings
-            WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted'
+            WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted' AND status <> 'unlisted'
           `;
           if (Number(countRows[0].n) >= opts.maxListings) return { ok: false as const, reason: "cap" as const };
         }
@@ -2658,15 +2663,16 @@ export class MemoryStore {
   async createListing(
     creatorUserId: string,
     spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
-    opts: { maxListings?: number; maxDailyPublish?: number } = {},
+    opts: { maxListings?: number; maxDailyPublish?: number; status?: "active" | "unlisted"; personaSource?: string; importMeta?: Record<string, unknown> | null } = {},
   ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "cap" | "daily_cap" }> {
+    const status = opts.status ?? "active";
     return this.sql.begin(async sql => {
       if (opts.maxListings != null || opts.maxDailyPublish != null) {
         await sql`SELECT pg_advisory_xact_lock(hashtext(${`listing:${creatorUserId}`}))`;
         if (opts.maxListings != null) {
           const countRows = await sql<[{ n: number | string }]>`
             SELECT COUNT(*) AS n FROM companion_listings
-            WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted'
+            WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted' AND status <> 'unlisted'
           `;
           if (Number(countRows[0].n) >= opts.maxListings) return { ok: false as const, reason: "cap" as const };
         }
@@ -2679,12 +2685,12 @@ export class MemoryStore {
         }
       }
       const rows = await sql<Array<any>>`
-        INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, avatar_url, version, status, created_at, updated_at)
+        INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, avatar_url, version, status, persona_source, import_meta, created_at, updated_at)
         VALUES (
           ${creatorUserId}, NULL,
           ${spec.name}, ${spec.tagline}, ${spec.voicePersona}, ${spec.coreTraits},
           ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${spec.avatarUrl},
-          1, 'active', NOW(), NOW()
+          1, ${status}, ${opts.personaSource ?? "authored"}, ${opts.importMeta ? sql.json(opts.importMeta as never) : null}, NOW(), NOW()
         )
         RETURNING *
       `;
@@ -2739,7 +2745,7 @@ export class MemoryStore {
       if (modRows.length) return { ok: false as const, reason: "moderated" as const };
       const countRows = await sql<[{ n: number | string }]>`
         SELECT COUNT(*) AS n FROM companion_listings
-        WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted'
+        WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted' AND status <> 'unlisted'
       `;
       if (Number(countRows[0].n) >= maxListings) return { ok: false as const, reason: "cap" as const };
       const updated = await sql<Array<any>>`
@@ -2807,7 +2813,7 @@ export class MemoryStore {
   async activeListingCount(creatorUserId: string): Promise<number> {
     const rows = await this.sql<[{ n: number | string }]>`
       SELECT COUNT(*) AS n FROM companion_listings
-      WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted'
+      WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted' AND status <> 'unlisted'
     `;
     return Number(rows[0].n);
   }
@@ -2857,6 +2863,108 @@ export class MemoryStore {
       WHERE id = ${listingId} AND status = 'active'
     `;
     return result.count > 0;
+  }
+
+  /** The creator's private imports — unlisted rows only ever become public
+   *  through publishListing. */
+  async listUnlistedListings(creatorUserId: string): Promise<CompanionListing[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM companion_listings
+      WHERE creator_user_id = ${creatorUserId} AND status = 'unlisted'
+      ORDER BY created_at ASC
+    `;
+    return rows.map(r => this.rowToListing(r));
+  }
+
+  /** Same source file → same row. Idempotent import retries and dedupe. */
+  async findUnlistedByHash(creatorUserId: string, sha256: string): Promise<CompanionListing | null> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM companion_listings
+      WHERE creator_user_id = ${creatorUserId} AND status = 'unlisted'
+        AND import_meta->>'sha256' = ${sha256}
+      LIMIT 1
+    `;
+    return rows[0] ? this.rowToListing(rows[0]) : null;
+  }
+
+  /** Remove a private import row that never adopted (failed/cancelled
+   *  import cleanup). Refuses anything that isn't still unlisted — a
+   *  published row can never reach this path. Persona versions cascade. */
+  async deleteUnlistedListing(listingId: number, creatorUserId: string): Promise<boolean> {
+    const result = await this.sql`
+      DELETE FROM companion_listings
+      WHERE id = ${listingId} AND creator_user_id = ${creatorUserId} AND status = 'unlisted'
+        AND NOT EXISTS (
+          SELECT 1 FROM companion_adoptions a
+          WHERE a.listing_id = ${listingId} AND a.dropped_at IS NULL
+        )
+    `;
+    return result.count > 0;
+  }
+
+  /** Publish a private import: unlisted → active, persona fields updated to
+   *  the (possibly edited) spec, version bump, persona_version row, clone
+   *  propagation — everything a normal listing write does, plus the
+   *  live-listing cap since the row becomes public. Provenance columns are
+   *  immutable — they ride into the marketplace unchanged. */
+  async publishListing(
+    listingId: number,
+    creatorUserId: string,
+    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
+    maxListings: number,
+  ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "not_found" | "not_unlisted" | "cap" | "moderated" }> {
+    const res = (await this.sql.begin(async sql => {
+      await sql`SELECT pg_advisory_xact_lock(hashtext(${`listing:${creatorUserId}`}))`;
+      const rows = await sql<Array<any>>`
+        SELECT * FROM companion_listings WHERE id = ${listingId} AND creator_user_id = ${creatorUserId}
+        FOR UPDATE
+      `;
+      const listing = rows[0];
+      if (!listing) return { ok: false as const, reason: "not_found" as const };
+      if (listing.status !== "unlisted") return { ok: false as const, reason: "not_unlisted" as const };
+      // Same guard as relist: a mod-caused takedown isn't reversible by the
+      // creator — though 'unlisted' rows shouldn't be reachable by mods, the
+      // check is cheap insurance against status bugs.
+      const modRows = await sql<Array<{ x: number }>>`
+        SELECT 1 AS x FROM moderation_events me
+        WHERE me.listing_id = ${listingId}
+          AND me.action IN ('delist', 'ban', 'ban_creator')
+          AND me.created_at > COALESCE(
+            (SELECT MAX(me2.created_at) FROM moderation_events me2
+             WHERE me2.listing_id = ${listingId} AND me2.action = 'unflag'),
+            '-infinity'::timestamptz)
+        LIMIT 1
+      `;
+      if (modRows.length) return { ok: false as const, reason: "moderated" as const };
+      const countRows = await sql<[{ n: number | string }]>`
+        SELECT COUNT(*) AS n FROM companion_listings
+        WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted' AND status <> 'unlisted'
+      `;
+      if (Number(countRows[0].n) >= maxListings) return { ok: false as const, reason: "cap" as const };
+      const newVersion = Number(listing.version) + 1;
+      const updated = await sql<Array<any>>`
+        UPDATE companion_listings SET
+          name = ${spec.name}, tagline = ${spec.tagline},
+          voice_persona = ${spec.voicePersona}, core_traits = ${spec.coreTraits},
+          owner_dynamic = ${spec.ownerDynamic}, backstory = ${spec.backstory},
+          greeting = ${spec.greeting}, avatar_url = ${spec.avatarUrl},
+          version = ${newVersion}, status = 'active', updated_at = NOW()
+        WHERE id = ${listingId}
+        RETURNING *
+      `;
+      await sql`
+        INSERT INTO companion_persona_versions (listing_id, version, persona_json)
+        VALUES (${listingId}, ${newVersion}, ${JSON.stringify({
+          name: spec.name, tagline: spec.tagline, voicePersona: spec.voicePersona,
+          coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
+          backstory: spec.backstory, greeting: spec.greeting, avatarUrl: spec.avatarUrl,
+        })})
+        ON CONFLICT (listing_id, version) DO NOTHING
+      `;
+      return { ok: true as const, listing: this.rowToListing(updated[0]) };
+    })) as { ok: true; listing: CompanionListing } | { ok: false; reason: "not_found" | "not_unlisted" | "cap" | "moderated" };
+    if (res.ok) await this.propagateListingVersion(res.listing.id);
+    return res;
   }
 
   /** File a categorized report. The anti-bombing daily cap (`maxDaily`)
@@ -3150,6 +3258,18 @@ export class MemoryStore {
     `;
   }
 
+  /** First import claims the DM slot; later imports leave the user's pick
+   *  alone. Mirrors the WHERE clause in import_companion_card (v42). */
+  async claimDmCompanionIfUnset(userId: string, companionId: number): Promise<void> {
+    await this.sql`
+      INSERT INTO user_bot_settings (discord_user_id, active_dm_companion_id, updated_at)
+      VALUES (${userId}, ${companionId}, NOW())
+      ON CONFLICT (discord_user_id) DO UPDATE
+        SET active_dm_companion_id = EXCLUDED.active_dm_companion_id, updated_at = NOW()
+        WHERE user_bot_settings.active_dm_companion_id IS NULL
+    `;
+  }
+
   /** Active adoptions that actually occupy a slot — clones of banned
    *  listings are frozen and hidden (the user can't drop what they can't
    *  see), so they don't consume the slot while the ban stands. */
@@ -3199,8 +3319,12 @@ export class MemoryStore {
       `;
       const listing = listings[0];
       if (!listing) return { ok: false as const, reason: "not_found" as const };
-      if (listing.status !== "active") return { ok: false as const, reason: "delisted" as const };
-      if (listing.creator_user_id === userId) return { ok: false as const, reason: "own_listing" as const };
+      // Unlisted = a private import: adoptable only by its own creator — the
+      // own_listing rule exists for public listings; importing your own card
+      // is the entire point of that status.
+      const selfImport = listing.status === "unlisted" && listing.creator_user_id === userId;
+      if (listing.status !== "active" && !selfImport) return { ok: false as const, reason: "delisted" as const };
+      if (listing.creator_user_id === userId && !selfImport) return { ok: false as const, reason: "own_listing" as const };
 
       const existingRows = await sql<Array<any>>`
         SELECT * FROM companion_adoptions WHERE user_id = ${userId} AND listing_id = ${listingId}
@@ -3258,11 +3382,12 @@ export class MemoryStore {
         `;
       } else {
         const compRows = await sql<Array<any>>`
-          INSERT INTO companions (owner_user_id, name, avatar_url, voice_persona, core_traits, owner_dynamic, backstory, onboarding_state, onboarding_turns, kind, adopted_from_listing_id, listing_version, created_at, updated_at)
+          INSERT INTO companions (owner_user_id, name, avatar_url, voice_persona, core_traits, owner_dynamic, backstory, onboarding_state, onboarding_turns, kind, adopted_from_listing_id, listing_version, persona_source, import_meta, created_at, updated_at)
           VALUES (
             ${userId}, ${listing.name}, ${listing.avatar_url}, ${listing.voice_persona},
             ${listing.core_traits}, ${listing.owner_dynamic}, ${listing.backstory},
-            'active', 0, 'adopted', ${listingId}, ${listing.version}, NOW(), NOW()
+            'active', 0, 'adopted', ${listingId}, ${listing.version},
+            ${listing.persona_source ?? "authored"}, ${listing.import_meta ?? null}, NOW(), NOW()
           )
           RETURNING *
         `;
@@ -3273,7 +3398,8 @@ export class MemoryStore {
         `;
         // Only a fresh adoption counts — re-adopts resume an existing
         // relationship and must not inflate the listing's "adopted by" stat.
-        await sql`UPDATE companion_listings SET add_count = add_count + 1 WHERE id = ${listingId}`;
+        // Private unlisted rows never move the public counter.
+        await sql`UPDATE companion_listings SET add_count = add_count + 1 WHERE id = ${listingId} AND status = 'active'`;
       }
       const adoption = this.rowToAdoption(
         (await sql<Array<any>>`SELECT * FROM companion_adoptions WHERE user_id = ${userId} AND listing_id = ${listingId}`)[0],

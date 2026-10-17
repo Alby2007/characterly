@@ -7,6 +7,7 @@ const listing = (over: Partial<CompanionListing> = {}): CompanionListing => ({
   id: 1, creatorUserId: "u1", sourceCompanionId: null, name: "Test", tagline: "t",
   voicePersona: "v", coreTraits: [], ownerDynamic: "d", backstory: "b", greeting: "g",
   avatarUrl: null, version: 1, status: "active", addCount: 0, reportCount: 0, forumThreadId: null,
+  personaSource: "authored", importMeta: null,
   createdAt: "2026-01-01", updatedAt: "2026-01-01", ...over,
 });
 

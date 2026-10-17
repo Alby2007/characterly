@@ -16,6 +16,7 @@ import { config } from "./config.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
 import { handleOpsCommand, handleHouseButton, isHouse, isMarketplaceThread } from "./ops.js";
 import { CURATED_TAGS, postListingThread, buildListingCard, buildListingComponents } from "./marketplace.js";
+import { parseCardFile, cardToPersona, cardImportMeta, cardFileHash, CARD_MAX_BYTES, type ImportPersona, type CardImportMeta, type ParsedCard } from "./charcard.js";
 
 export const ONBOARDING_ARCHETYPES: Record<
   string,
@@ -421,6 +422,53 @@ export function buildPublishModal(companion: Companion, listing: CompanionListin
     .setPlaceholder("https://… image URL — becomes the gallery cover");
   const prefillCover = listing?.avatarUrl ?? companion.avatarUrl;
   if (prefillCover) coverInput.setValue(prefillCover.slice(0, 400));
+
+  modal.addComponents(
+    new ActionRowBuilder<TextInputBuilder>().addComponents(nameInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(taglineInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(greetingInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(coverInput),
+  );
+  return modal;
+}
+
+/** Publish modal for a private import — the listing row is the source of
+ *  truth (there's no awakened companion behind it). Same fields as
+ *  buildPublishModal minus the persona internals, which stay as imported. */
+export function buildImportPublishModal(listing: CompanionListing): ModalBuilder {
+  const modal = new ModalBuilder()
+    .setCustomId(`market_pubimp:${listing.id}`)
+    .setTitle("Publish Imported Character");
+
+  const nameInput = new TextInputBuilder()
+    .setCustomId("listing-name")
+    .setLabel("Display name")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(64)
+    .setValue(listing.name.slice(0, 64));
+  const taglineInput = new TextInputBuilder()
+    .setCustomId("listing-tagline")
+    .setLabel("Tagline (shown on the listing card)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(120)
+    .setValue(listing.tagline.slice(0, 120));
+  const greetingInput = new TextInputBuilder()
+    .setCustomId("listing-greeting")
+    .setLabel("Greeting — first DM the character sends")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true)
+    .setMaxLength(1000)
+    .setValue(listing.greeting.slice(0, 1000));
+  const coverInput = new TextInputBuilder()
+    .setCustomId("listing-cover")
+    .setLabel("Cover image URL (optional)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false)
+    .setMaxLength(400)
+    .setPlaceholder("https://… image URL — becomes the gallery cover");
+  if (listing.avatarUrl) coverInput.setValue(listing.avatarUrl.slice(0, 400));
 
   modal.addComponents(
     new ActionRowBuilder<TextInputBuilder>().addComponents(nameInput),
@@ -913,9 +961,11 @@ export const commandDefinitions = [
       { name: "relist — Bring back an unpublished listing", value: "relist" },
       { name: "switch — Choose which companion answers in your DMs", value: "switch" },
       { name: "drop — Give up an adopted companion (12h re-adopt cooldown)", value: "drop" },
+      { name: "import — Bring in a character card (.png/.json) from another platform", value: "import" },
     ] },
     { name: "avatar_url", description: "Public http(s) image URL when action is avatar", type: 3, required: false },
     { name: "avatar_file", description: "Uploaded image when action is avatar — also used as the marketplace cover", type: 11, required: false },
+    { name: "card_file", description: "Character card file when action is import (.png card or .json)", type: 11, required: false },
     { name: "user", description: "Member whose companion to inspect (card) or remove (kick)", type: 6, required: false }
   ] },
   // In a server this is the guild-scope key (admin only); in DMs it stores the
@@ -954,6 +1004,11 @@ const OPT_IN_HINT_OTHER = "That member hasn't opted in to profiles.";
 /** One server build at a time — the routine is heavy and its archive marks are
  * not re-entrant across overlapping runs. */
 let serverBuildRunning = false;
+
+/** Parsed character cards awaiting the user's confirm click. In-memory only —
+ *  a restart just expires the preview (the button explains itself). */
+const pendingImports = new Map<string, { persona: ImportPersona; meta: CardImportMeta; avatarUrl: string | null; card: ParsedCard; expires: number }>();
+const PENDING_IMPORT_TTL_MS = 15 * 60 * 1000;
 /** One profile build per member at a time — claimed synchronously before any
  * await so a double-invoke can't slip past the check and double the LLM spend. */
 const profileBuildsRunning = new Set<string>();
@@ -997,7 +1052,9 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
   // Everything else — reads, privacy/data, admin, key entry — stays open.
   const gatedAction =
     interaction.commandName === "profile-build" ||
-    (interaction.commandName === "companion" && interaction.options.getString("action") === "summon");
+    (interaction.commandName === "companion" &&
+      (interaction.options.getString("action") === "summon" ||
+        interaction.options.getString("action") === "import"));
   if (gatedAction && store.creditsSupported) {
     // BYOK is exempt — a personal key means their lane never spends tokens.
     const [account, ownKey] = await Promise.all([
@@ -1310,11 +1367,130 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       }
       return interaction.reply({ content: `Updated **${updated.name || "your companion"}**'s avatar — it'll show as the marketplace cover next time you publish (or use the listing's **Cover image** button).`, ephemeral: true });
     }
+    if (action === "import") {
+      const file = interaction.options.getAttachment?.("card_file") ?? null;
+      if (!file) {
+        return interaction.reply({
+          content: "Attach a character card as `card_file` — a `.png` card or `.json` export from wherever the character lived before.",
+          ephemeral: true,
+        });
+      }
+      if (file.size > CARD_MAX_BYTES) {
+        return interaction.reply({ content: "That file is over 8 MB — character cards are small; export a fresh copy and try again.", ephemeral: true });
+      }
+      const isPng = file.contentType === "image/png" || /\.png$/i.test(file.name ?? "");
+      const isJson = /\.json$/i.test(file.name ?? "") || file.contentType === "application/json";
+      if (!isPng && !isJson) {
+        return interaction.reply({ content: "I can read `.png` character cards and `.json` exports — that file is neither.", ephemeral: true });
+      }
+      if (!file.url || !isSafeUrl(file.url)) {
+        return interaction.reply({ content: "That upload didn't give me a usable file URL — try exporting the card again.", ephemeral: true });
+      }
+      const bytes = await fetch(file.url)
+        .then(r => (r.ok ? r.arrayBuffer() : null))
+        .then(b => (b ? new Uint8Array(b) : null))
+        .catch(() => null);
+      if (!bytes) {
+        return interaction.reply({ content: "Couldn't fetch that upload — try re-attaching the file.", ephemeral: true });
+      }
+      const parsed = parseCardFile(bytes, file.name ?? "card");
+      if (!parsed.ok) {
+        const why =
+          parsed.error === "no_card_in_png"
+            ? "That PNG doesn't have character data inside it — cards carry the persona embedded in the image. Export the card (not just the picture) and try again."
+            : parsed.error === "bad_json"
+              ? "The data inside that file is damaged — export a fresh copy and try again."
+              : "That file isn't a character card I can read — export a `.png` card or `.json` and try again.";
+        return interaction.reply({ content: why, ephemeral: true });
+      }
+      const persona = cardToPersona(parsed.card);
+      const screened = checkListingFields({ ...persona });
+      if (!screened.ok) {
+        return interaction.reply({ content: `I can't import this card — its ${screened.field} trips the **${screened.category}** content rule.`, ephemeral: true });
+      }
+      const sha256 = await cardFileHash(bytes);
+      // The same file re-imported is a no-op — revive/reuse the private row
+      // instead of stacking duplicate companions.
+      const dupe = await store.findUnlistedByHash(interaction.user.id, sha256).catch(() => null);
+      if (dupe) {
+        const account = await store.accountForDiscordUser(interaction.user.id).catch(() => null);
+        const maxSlots = !store.creditsSupported || account?.plan === "premium" ? 1_000_000 : config.freeAdoptionSlots;
+        const res = await store.adoptListing(interaction.user.id, dupe.id, { maxSlots, maxDaily: config.marketAdoptDailyCap });
+        if (!res.ok) {
+          const msg = res.reason === "cap"
+            ? `Your roster is full — drop a companion with \`/companion action:drop\` (or go Premium) to bring **${dupe.name}** back.`
+            : "You've already imported this card, and it can't rejoin your roster right now — try again later.";
+          return interaction.reply({ content: msg, ephemeral: true });
+        }
+        const greeted = res.adoption && !res.adoption.dmIntroducedAt
+          ? await sendAdoptionGreeting(interaction.user, res.companion, dupe.greeting)
+          : false;
+        if (greeted && res.adoption) await store.markDmIntroduced(res.adoption.id);
+        return interaction.reply({
+          ephemeral: true,
+          content: `You've already imported this card — **${res.companion.name}** is ${res.reused ? "still on your roster" : "back on your roster"}.${greeted ? " They said hello in your DMs." : ""}`,
+        });
+      }
+      const meta = cardImportMeta(parsed.card, { filename: file.name ?? "card", sha256, importedVia: "discord" });
+      pendingImports.set(interaction.user.id, {
+        persona, meta, card: parsed.card,
+        avatarUrl: isPng ? file.url : null,
+        expires: Date.now() + PENDING_IMPORT_TTL_MS,
+      });
+      const card = parsed.card;
+      const embed = new EmbedBuilder()
+        .setTitle(`Import ${persona.name}?`)
+        .setDescription(
+          `Here's what the card says. Confirming adds **${persona.name}** to your companions — *private to you* unless you later publish them to the marketplace.` +
+          (card.creator ? `\n\n*Card credits: ${escapeMarkdown(card.creator)}*` : ""),
+        )
+        .addFields(
+          { name: "Voice & Vibe", value: persona.voicePersona.slice(0, 300) || "*(blank)*", inline: false },
+          ...(persona.coreTraits.length ? [{ name: "Traits", value: persona.coreTraits.join(", "), inline: false }] : []),
+          ...(persona.greeting ? [{ name: "They'll say", value: persona.greeting.slice(0, 300), inline: false }] : []),
+          { name: "Card format", value: `${card.spec || "unknown"}${card.specVersion ? ` v${card.specVersion}` : ""}`, inline: true },
+          { name: "Source file", value: file.name ?? "card", inline: true },
+        )
+        .setFooter({ text: "Imported personas keep their provenance — claimed creator + file hash are recorded for moderation." });
+      if (isPng) embed.setThumbnail(file.url);
+      return interaction.reply({
+        ephemeral: true,
+        embeds: [embed],
+        components: [
+          new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder().setCustomId("market:imp:confirm").setLabel("Bring them in").setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId("market:imp:cancel").setLabel("Cancel").setStyle(ButtonStyle.Secondary),
+          ),
+        ],
+      });
+    }
     if (action === "publish") {
       if (!config.marketplaceChannelId) {
         return interaction.reply({ content: "The marketplace isn't configured yet — check back soon.", ephemeral: true });
       }
       const companion = await store.getCompanionByOwner(interaction.user.id);
+      // Private imports are publishable too — when both exist, ask which.
+      const unlisted = await store.listUnlistedListings(interaction.user.id).catch(() => []);
+      if (unlisted.length) {
+        const buttons: ButtonBuilder[] = [];
+        if (companion?.onboardingState === "active") {
+          buttons.push(new ButtonBuilder()
+            .setCustomId("market:pubpick:own")
+            .setLabel(`${companion.name || "Your companion"} (awakened)`)
+            .setStyle(ButtonStyle.Primary));
+        }
+        for (const l of unlisted.slice(0, 4)) {
+          buttons.push(new ButtonBuilder()
+            .setCustomId(`market:pubpick:${l.id}`)
+            .setLabel(`${l.name || "Imported"} (imported)`)
+            .setStyle(ButtonStyle.Success));
+        }
+        return interaction.reply({
+          ephemeral: true,
+          content: "What are you putting on the marketplace?",
+          components: [new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons)],
+        });
+      }
       if (!companion || companion.onboardingState !== "active") {
         return promptUnawakenedCompanion(interaction, "You need an awakened companion before you can publish them.", brainFor);
       }
@@ -2015,6 +2191,86 @@ export async function handleCompanionModal(
     });
   }
 
+  // market_pubimp:<listingId> — publish a private import. Persona internals
+  // (voice/traits/dynamic/backstory) come from the listing row, not the
+  // modal — the modal only collects the public-facing fields.
+  if (interaction.customId.startsWith("market_pubimp:")) {
+    const listingId = Number(interaction.customId.slice("market_pubimp:".length));
+    const userId = interaction.user.id;
+    const prior = await store.listingById(listingId);
+    if (!prior || prior.creatorUserId !== userId || prior.status !== "unlisted") {
+      return interaction.reply({ content: "That import isn't yours to publish.", ephemeral: true });
+    }
+    const account = await store.accountForDiscordUser(userId).catch(() => null);
+    if (!account) {
+      return interaction.reply({ content: `Publishing requires a linked account — create one at ${config.siteUrl} and run \`/link\`.`, ephemeral: true });
+    }
+    const channel = await interaction.client.channels.fetch(config.marketplaceChannelId!).catch(() => null);
+    if (!channel || channel.type !== ChannelType.GuildForum) {
+      return interaction.reply({ content: "The marketplace channel isn't reachable — tell a moderator to check MARKETPLACE_CHANNEL_ID.", ephemeral: true });
+    }
+    const name = interaction.fields.getTextInputValue("listing-name").trim().slice(0, 64) || prior.name;
+    const tagline = interaction.fields.getTextInputValue("listing-tagline").trim().slice(0, 120);
+    const greeting = interaction.fields.getTextInputValue("listing-greeting").trim().slice(0, 1000);
+    const coverField = interaction.fields.getTextInputValue("listing-cover").trim().slice(0, 400);
+    let avatarUrl: string | null = null;
+    if (coverField) {
+      if (!isSafeUrl(coverField) || await resolvesToPrivateAddress(new URL(coverField).hostname)) {
+        return interaction.reply({ content: "That cover image URL isn't a valid public `http(s)` URL.", ephemeral: true });
+      }
+      avatarUrl = coverField;
+    }
+    if (!tagline || !greeting) {
+      return interaction.reply({ content: "Tagline and greeting are both required.", ephemeral: true });
+    }
+    // The persona internals are the imported fields — screen the whole thing;
+    // publishing is where private content becomes our public surface.
+    const screenError = await screenListingFields({
+      name, tagline, greeting,
+      voicePersona: prior.voicePersona,
+      coreTraits: prior.coreTraits,
+      ownerDynamic: prior.ownerDynamic,
+      backstory: prior.backstory,
+    });
+    if (screenError) return interaction.reply({ content: screenError, ephemeral: true });
+    const res = await store.publishListing(listingId, userId, {
+      name, tagline, greeting, avatarUrl,
+      voicePersona: prior.voicePersona,
+      coreTraits: prior.coreTraits,
+      ownerDynamic: prior.ownerDynamic,
+      backstory: prior.backstory,
+    }, listingCapFor(store, account));
+    if (!res.ok) {
+      return interaction.reply({
+        ephemeral: true,
+        content: res.reason === "cap" ? LISTING_CAP_MSG
+          : res.reason === "moderated" ? `**${prior.name}** was taken down by a moderator — only they can bring it back.`
+          : "That import isn't available to publish anymore.",
+      });
+    }
+    const listing = res.listing;
+    const threadId = await postListingThread(interaction, listing, store);
+    if (!threadId) {
+      await store.delistListing(listing.id);
+      return interaction.reply({ content: "I couldn't create the forum post — check my permissions in the marketplace channel.", ephemeral: true });
+    }
+    await store.setListingThread(listing.id, threadId);
+    inc("market.published");
+    inc("market.import_published");
+    const manageRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(`market:editmodal:${listing.id}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`market:cover:${listing.id}`).setLabel("Cover image").setStyle(ButtonStyle.Secondary),
+    );
+    const tagRow = await tagPickerRow(interaction.client, listing.id);
+    return interaction.reply({
+      ephemeral: true,
+      content:
+        `**${listing.name}** is live in <#${config.marketplaceChannelId}>! Its import provenance stays attached for moderation.` +
+        (tagRow ? " Pick the tags that fit it below." : ""),
+      components: [manageRow, ...(tagRow ? [tagRow] : [])],
+    });
+  }
+
   // market_publish:<companionId> — create/republish the listing, then the bot
   // posts the forum card itself so listings can't be faked.
   if (interaction.customId.startsWith("market_publish:")) {
@@ -2276,6 +2532,102 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
   if (parts[0] === "market") {
     const sub = parts[1];
     const userId = interaction.user.id;
+
+    // Character-card import confirm/cancel — the parsed card waits in
+    // pendingImports; the button id alone carries nothing.
+    if (sub === "imp") {
+      const act = parts[2];
+      const pending = pendingImports.get(userId);
+      if (act === "cancel") {
+        pendingImports.delete(userId);
+        return interaction.update({ content: "Import cancelled — nothing was created.", components: [] });
+      }
+      if (!pending || pending.expires < Date.now()) {
+        pendingImports.delete(userId);
+        return interaction.update({ content: "That import preview expired — run `/companion action:import` again.", components: [] });
+      }
+      pendingImports.delete(userId);
+      const account = await store.accountForDiscordUser(userId).catch(() => null);
+      const maxSlots = !store.creditsSupported || account?.plan === "premium" ? 1_000_000 : config.freeAdoptionSlots;
+      const held = await store.listUnlistedListings(userId).catch(() => []);
+      if (held.length >= config.characterImportCap) {
+        return interaction.update({
+          content: `You're holding ${config.characterImportCap} imported characters already — publish one to the marketplace or delete one before importing more.`,
+          components: [],
+        });
+      }
+      const created = await store.createListing(userId, { ...pending.persona, avatarUrl: pending.avatarUrl }, {
+        status: "unlisted",
+        personaSource: "card_import",
+        importMeta: pending.meta as unknown as Record<string, unknown>,
+      });
+      if (!created.ok) {
+        return interaction.update({ content: "Couldn't save the import — try again in a moment.", components: [] });
+      }
+      const res = await store.adoptListing(userId, created.listing.id, { maxSlots, maxDaily: config.marketAdoptDailyCap });
+      if (!res.ok) {
+        // Adoption failed → the private row is orphaned; clean it up so a
+        // retry isn't told "already imported".
+        await store.deleteUnlistedListing(created.listing.id, userId).catch(() => {});
+        const msg = res.reason === "cap"
+          ? `Your companion roster is full — free accounts hold ${config.freeAdoptionSlots} adopted companion${config.freeAdoptionSlots === 1 ? "" : "s"}. Drop one with \`/companion action:drop\` or go Premium, then import again: ${config.siteUrl}/dashboard#billing`
+          : res.reason === "daily_cap"
+            ? "That's a lot of new companions today — try again tomorrow."
+            : "Couldn't bring that character in — try again in a moment.";
+        return interaction.update({ content: msg, components: [] });
+      }
+      if (!res.reused) await store.claimDmCompanionIfUnset(userId, res.companion.id);
+      const greeted = res.adoption && !res.adoption.dmIntroducedAt
+        ? await sendAdoptionGreeting(interaction.user, res.companion, created.listing.greeting)
+        : false;
+      if (greeted && res.adoption) await store.markDmIntroduced(res.adoption.id);
+      inc("market.imported");
+      return interaction.update({
+        content:
+          `**${res.companion.name}** is here! ${greeted ? "They've just introduced themselves in your DMs." : "Say hi in your DMs — or pick them up anytime with `/companion action:switch`."}` +
+          `\n\n*Imported personas stay private — publishing to the marketplace is a separate choice (\`/companion action:publish\`).*`,
+        components: [],
+      });
+    }
+
+    // Publish picker — "own" runs the normal awakened flow; a listing id
+    // opens the import-publish modal. Errors reply ephemeral so the picker
+    // message survives; modals can't replace it anyway.
+    if (sub === "pubpick") {
+      const pick = parts[2];
+      if (pick === "own") {
+        const companion = await store.getCompanionByOwner(userId);
+        if (!companion || companion.onboardingState !== "active") {
+          return interaction.reply({ content: "You need an awakened companion before you can publish them.", ephemeral: true });
+        }
+        const account = await store.accountForDiscordUser(userId).catch(() => null);
+        if (!account) {
+          return interaction.reply({ content: `Publishing requires a linked Characterly account — create one at ${config.siteUrl} and run \`/link\` first.`, ephemeral: true });
+        }
+        const listing = await store.listingForCompanion(companion.id);
+        const gateError = await publishGateError(store, userId, !listing);
+        if (gateError) return interaction.reply({ content: gateError, ephemeral: true });
+        if (!listing || listing.status === "delisted") {
+          const slotError = await listingSlotError(store, userId, account);
+          if (slotError) return interaction.reply({ content: slotError, ephemeral: true });
+        }
+        return interaction.showModal(buildPublishModal(companion, listing));
+      }
+      const listingId = Number(pick);
+      if (!Number.isFinite(listingId)) return interaction.reply({ content: "That button is no longer valid.", ephemeral: true });
+      const listing = await store.listingById(listingId);
+      if (!listing || listing.creatorUserId !== userId || listing.status !== "unlisted") {
+        return interaction.reply({ content: "That import isn't available to publish.", ephemeral: true });
+      }
+      const account = await store.accountForDiscordUser(userId).catch(() => null);
+      if (!account) {
+        return interaction.reply({ content: `Publishing requires a linked Characterly account — create one at ${config.siteUrl} and run \`/link\` first.`, ephemeral: true });
+      }
+      if (await store.creatorBan(userId).catch(() => null)) {
+        return interaction.reply({ content: BANNED_CREATOR_MSG, ephemeral: true });
+      }
+      return interaction.showModal(buildImportPublishModal(listing));
+    }
 
     // Moderator actions on a listing — role-gated, audit-logged.
     if (sub === "mod") {
@@ -2634,10 +2986,15 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         const catLabel = REPORT_CATEGORIES.find(([c]) => c === category)?.[1] ?? category;
         const modChannel = await interaction.client.channels.fetch(config.marketplaceModChannelId).catch(() => null);
         if (modChannel?.isTextBased() && "send" in modChannel) {
+          // Imported personas carry their claimed creator + file hash — a
+          // theft report can be judged against the card's own stamp.
+          const provenance = listing.personaSource === "card_import" && listing.importMeta
+            ? `\nImported card · claimed creator: **${String(listing.importMeta.creator || "unknown")}** · spec: ${String(listing.importMeta.spec || "?")} · sha256: \`${String(listing.importMeta.sha256 || "?").slice(0, 12)}…\``
+            : "";
           await (modChannel as TextChannel).send({
             content:
               `🚩 **${catLabel}** report on **${listing.name}** (id ${listing.id}, creator <@${listing.creatorUserId}>) — ` +
-              `${count} report${count === 1 ? "" : "s"} total${flagged ? " — **auto-flagged, new Adds blocked**" : ""}.`,
+              `${count} report${count === 1 ? "" : "s"} total${flagged ? " — **auto-flagged, new Adds blocked**" : ""}.${provenance}`,
             components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
               new ButtonBuilder().setCustomId(`market:mod:unflag:${id}`).setLabel("Keep up").setStyle(ButtonStyle.Success),
               new ButtonBuilder().setCustomId(`market:mod:delist:${id}`).setLabel("Delist").setStyle(ButtonStyle.Secondary),

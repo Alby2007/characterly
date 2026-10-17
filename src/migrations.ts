@@ -2411,6 +2411,299 @@ const migrations: Migration[] = [
       await sql`ALTER TABLE consent_events ALTER COLUMN discord_user_id SET NOT NULL`;
     },
   },
+
+  // ── v42: character-card import ────────────────────────────────────────────
+  // Imported personas are adopted companions behind a private 'unlisted'
+  // listing row — provenance (persona_source + import_meta) is stamped on
+  // both so a later marketplace publish carries the card's claimed creator
+  // and content hash into moderation. The web surface writes through the
+  // import_companion_card RPC (a plpgsql port of adoptListing's insert
+  // sequence — keep the two in lockstep); the Discord path uses the same
+  // tables via the TS store. card-avatars is a public Storage bucket for
+  // card PNGs as avatar URLs — only reachable on Supabase.
+  {
+    version: 42,
+    name: "v42_character_import",
+    up: async (sql) => {
+      await addColumn(sql, "companions", "persona_source TEXT NOT NULL DEFAULT 'authored'");
+      await addColumn(sql, "companions", "import_meta JSONB");
+      await addColumn(sql, "companion_listings", "persona_source TEXT NOT NULL DEFAULT 'authored'");
+      await addColumn(sql, "companion_listings", "import_meta JSONB");
+
+      await sql`
+        DO $web$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'web_profiles') THEN
+            EXECUTE $dfn$
+              CREATE OR REPLACE FUNCTION public.import_companion_card(p_payload jsonb)
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+                v_plan text;
+                v_max_slots int;
+                v_count int;
+                v_listing bigint;
+                v_companion bigint;
+                v_name text;
+                v_tagline text;
+                v_voice text;
+                v_traits text[];
+                v_dynamic text;
+                v_backstory text;
+                v_greeting text;
+                v_avatar text;
+                v_meta jsonb;
+                v_row record;
+              BEGIN
+                IF uid IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                SELECT discord_user_id, plan INTO did, v_plan
+                  FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN
+                  RAISE EXCEPTION 'discord not linked';
+                END IF;
+
+                -- Pull + bound the mapped persona fields. The client supplies
+                -- already-normalized fields; the server re-caps everything.
+                v_name := left(btrim(coalesce(p_payload->>'name', '')), 64);
+                IF v_name = '' THEN
+                  RAISE EXCEPTION 'name required';
+                END IF;
+                v_tagline := left(coalesce(p_payload->>'tagline', ''), 200);
+                v_voice := left(coalesce(p_payload->>'voice_persona', ''), 2000);
+                v_dynamic := left(coalesce(p_payload->>'owner_dynamic', ''), 300);
+                v_backstory := left(coalesce(p_payload->>'backstory', ''), 4000);
+                v_greeting := left(coalesce(p_payload->>'greeting', ''), 2000);
+                v_avatar := left(coalesce(p_payload->>'avatar_url', ''), 500);
+                IF v_avatar <> '' AND v_avatar NOT LIKE 'https://%' AND v_avatar NOT LIKE 'http://%' THEN
+                  v_avatar := '';
+                END IF;
+                SELECT coalesce(array_agg(left(t, 48)), '{}'::text[]) INTO v_traits
+                  FROM (SELECT jsonb_array_elements_text(
+                                 coalesce(p_payload->'core_traits', '[]'::jsonb)) AS t
+                        LIMIT 8) s;
+                -- The stamp is server-controlled: only the card's claimed
+                -- metadata fields come from the payload, all bounded.
+                v_meta := jsonb_build_object(
+                  'source', 'character_card',
+                  'spec', left(coalesce(p_payload->'import_meta'->>'spec', ''), 40),
+                  'specVersion', left(coalesce(p_payload->'import_meta'->>'specVersion', ''), 20),
+                  'creator', left(coalesce(p_payload->'import_meta'->>'creator', ''), 120),
+                  'characterVersion', left(coalesce(p_payload->'import_meta'->>'characterVersion', ''), 40),
+                  'filename', left(coalesce(p_payload->'import_meta'->>'filename', ''), 200),
+                  'sha256', left(coalesce(p_payload->'import_meta'->>'sha256', ''), 80),
+                  'importedVia', 'web',
+                  'importedAt', now()
+                );
+
+                PERFORM pg_advisory_xact_lock(hashtext('adopt:' || did));
+
+                -- Idempotent: the same file imported twice reuses its unlisted
+                -- listing — an active adoption returns as-is, a dropped one
+                -- revives, a listing without an adoption just gets its clone.
+                SELECT l.id INTO v_listing FROM public.companion_listings l
+                  WHERE l.creator_user_id = did AND l.status = 'unlisted'
+                    AND l.import_meta->>'sha256' =
+                        coalesce(p_payload->'import_meta'->>'sha256', '~~~')
+                  LIMIT 1;
+                IF v_listing IS NOT NULL THEN
+                  SELECT a.companion_id INTO v_companion FROM public.companion_adoptions a
+                    WHERE a.user_id = did AND a.listing_id = v_listing;
+                  IF v_companion IS NULL THEN
+                    SELECT l.* INTO v_row FROM public.companion_listings l WHERE l.id = v_listing;
+                    INSERT INTO public.companions (
+                      owner_user_id, name, avatar_url, voice_persona, core_traits,
+                      owner_dynamic, backstory, onboarding_state, onboarding_turns,
+                      kind, adopted_from_listing_id, listing_version, persona_source,
+                      import_meta, created_at, updated_at
+                    ) VALUES (
+                      did, v_row.name, v_row.avatar_url, v_row.voice_persona,
+                      v_row.core_traits, v_row.owner_dynamic, v_row.backstory,
+                      'active', 0, 'adopted', v_listing, v_row.version,
+                      'card_import', v_row.import_meta, now(), now()
+                    )
+                    RETURNING id INTO v_companion;
+                    INSERT INTO public.companion_adoptions (user_id, listing_id, companion_id, adopted_at)
+                    VALUES (did, v_listing, v_companion, now());
+                    RETURN json_build_object(
+                      'companion_id', v_companion, 'listing_id', v_listing,
+                      'name', v_row.name, 'reused', true);
+                  END IF;
+                  UPDATE public.companion_adoptions
+                    SET dropped_at = NULL, cooldown_until = NULL, adopted_at = now()
+                    WHERE user_id = did AND listing_id = v_listing AND dropped_at IS NOT NULL;
+                  SELECT c.name INTO v_name FROM public.companions c WHERE c.id = v_companion;
+                  RETURN json_build_object(
+                    'companion_id', v_companion, 'listing_id', v_listing,
+                    'name', v_name, 'reused', true);
+                END IF;
+
+                -- Private-import ceiling — keep in sync with CHARACTER_IMPORT_CAP.
+                SELECT COUNT(*) INTO v_count FROM public.companion_listings
+                 WHERE creator_user_id = did AND status = 'unlisted';
+                IF v_count >= 25 THEN
+                  RAISE EXCEPTION 'import cap reached';
+                END IF;
+
+                -- Adoption slots — mirrors adoptListing's count (free 1,
+                -- premium effectively uncapped). Keep in sync with
+                -- FREE_ADOPTION_SLOTS.
+                v_max_slots := CASE WHEN v_plan = 'premium' THEN 100 ELSE 1 END;
+                SELECT COUNT(*) INTO v_count FROM public.companion_adoptions a
+                  LEFT JOIN public.companion_listings l ON l.id = a.listing_id
+                  WHERE a.user_id = did AND a.dropped_at IS NULL
+                    AND (l.id IS NULL OR l.status <> 'banned');
+                IF v_count >= v_max_slots THEN
+                  RAISE EXCEPTION 'adoption slot full';
+                END IF;
+
+                INSERT INTO public.companion_listings (
+                  creator_user_id, source_companion_id, name, tagline, voice_persona,
+                  core_traits, owner_dynamic, backstory, greeting, avatar_url,
+                  version, status, persona_source, import_meta, created_at, updated_at
+                ) VALUES (
+                  did, NULL, v_name, v_tagline, v_voice, v_traits, v_dynamic,
+                  v_backstory, v_greeting, nullif(v_avatar, ''),
+                  1, 'unlisted', 'card_import', v_meta, now(), now()
+                )
+                RETURNING id INTO v_listing;
+
+                INSERT INTO public.companion_persona_versions (listing_id, version, persona_json)
+                VALUES (v_listing, 1, jsonb_build_object(
+                  'name', v_name, 'tagline', v_tagline, 'voicePersona', v_voice,
+                  'coreTraits', v_traits, 'ownerDynamic', v_dynamic,
+                  'backstory', v_backstory, 'greeting', v_greeting,
+                  'avatarUrl', nullif(v_avatar, '')))
+                ON CONFLICT (listing_id, version) DO NOTHING;
+
+                INSERT INTO public.companions (
+                  owner_user_id, name, avatar_url, voice_persona, core_traits,
+                  owner_dynamic, backstory, onboarding_state, onboarding_turns,
+                  kind, adopted_from_listing_id, listing_version, persona_source,
+                  import_meta, created_at, updated_at
+                ) VALUES (
+                  did, v_name, nullif(v_avatar, ''), v_voice, v_traits, v_dynamic,
+                  v_backstory, 'active', 0, 'adopted', v_listing, 1,
+                  'card_import', v_meta, now(), now()
+                )
+                RETURNING id INTO v_companion;
+
+                INSERT INTO public.companion_adoptions (user_id, listing_id, companion_id, adopted_at)
+                VALUES (did, v_listing, v_companion, now());
+
+                -- First import claims the DM slot; later imports leave the
+                -- user's existing pick alone.
+                INSERT INTO public.user_bot_settings (discord_user_id, active_dm_companion_id)
+                VALUES (did, v_companion)
+                ON CONFLICT (discord_user_id) DO UPDATE
+                  SET active_dm_companion_id = EXCLUDED.active_dm_companion_id
+                  WHERE public.user_bot_settings.active_dm_companion_id IS NULL;
+
+                RETURN json_build_object(
+                  'companion_id', v_companion, 'listing_id', v_listing, 'name', v_name);
+              END
+              $body$
+            $dfn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.import_companion_card(jsonb) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.import_companion_card(jsonb) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.import_companion_card(jsonb) TO authenticated';
+            END IF;
+          END IF;
+        END $web$
+      `;
+
+      // card-avatars bucket — public reads (avatar URLs must render in
+      // Discord embeds), authenticated writes namespaced to the uploader's
+      // own uid folder. Only exists on Supabase (storage schema).
+      await sql`
+        DO $sto$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'storage')
+             AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'storage' AND tablename = 'buckets') THEN
+            EXECUTE $ins$
+              INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+              VALUES ('card-avatars', 'card-avatars', true, 8388608,
+                      ARRAY['image/png','image/jpeg','image/webp'])
+              ON CONFLICT (id) DO NOTHING
+            $ins$;
+            IF NOT EXISTS (SELECT 1 FROM pg_policies
+                           WHERE schemaname = 'storage' AND tablename = 'objects'
+                             AND policyname = 'card_avatars_insert') THEN
+              EXECUTE $pol$
+                CREATE POLICY card_avatars_insert ON storage.objects
+                FOR INSERT TO authenticated
+                WITH CHECK (bucket_id = 'card-avatars'
+                            AND (storage.foldername(name))[1] = auth.uid()::text)
+              $pol$;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_policies
+                           WHERE schemaname = 'storage' AND tablename = 'objects'
+                             AND policyname = 'card_avatars_update') THEN
+              EXECUTE $pol$
+                CREATE POLICY card_avatars_update ON storage.objects
+                FOR UPDATE TO authenticated
+                USING (bucket_id = 'card-avatars'
+                       AND (storage.foldername(name))[1] = auth.uid()::text)
+              $pol$;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_policies
+                           WHERE schemaname = 'storage' AND tablename = 'objects'
+                             AND policyname = 'card_avatars_delete') THEN
+              EXECUTE $pol$
+                CREATE POLICY card_avatars_delete ON storage.objects
+                FOR DELETE TO authenticated
+                USING (bucket_id = 'card-avatars'
+                       AND (storage.foldername(name))[1] = auth.uid()::text)
+              $pol$;
+            END IF;
+          END IF;
+        END $sto$
+      `;
+    },
+    down: async (sql) => {
+      await sql`DROP FUNCTION IF EXISTS public.import_companion_card(jsonb)`;
+      await sql`
+        DO $sto$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'storage') THEN
+            EXECUTE 'DROP POLICY IF EXISTS card_avatars_insert ON storage.objects';
+            EXECUTE 'DROP POLICY IF EXISTS card_avatars_update ON storage.objects';
+            EXECUTE 'DROP POLICY IF EXISTS card_avatars_delete ON storage.objects';
+            BEGIN
+              EXECUTE 'DELETE FROM storage.buckets WHERE id = ''card-avatars''';
+            EXCEPTION WHEN foreign_key_violation THEN
+              NULL; -- objects still live in the bucket — keep it.
+            END;
+          END IF;
+        END $sto$
+      `;
+      // Refuse to silently strip provenance off live imports — same
+      // data-decision guard as v41's web-consent rollback.
+      await sql`
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM companions WHERE import_meta IS NOT NULL)
+             OR EXISTS (SELECT 1 FROM companion_listings WHERE import_meta IS NOT NULL) THEN
+            RAISE EXCEPTION 'v42 rollback refused: imported personas exist';
+          END IF;
+        END $$
+      `;
+      await sql`ALTER TABLE companion_listings DROP COLUMN IF EXISTS import_meta`;
+      await sql`ALTER TABLE companion_listings DROP COLUMN IF EXISTS persona_source`;
+      await sql`ALTER TABLE companions DROP COLUMN IF EXISTS import_meta`;
+      await sql`ALTER TABLE companions DROP COLUMN IF EXISTS persona_source`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

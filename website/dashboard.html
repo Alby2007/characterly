@@ -141,6 +141,35 @@
         <div class="form-error" id="botset-msg" role="alert" hidden></div>
       </section>
 
+      <section class="plate rv" id="import" aria-labelledby="import-h">
+        <div class="plate-head"><h2 id="import-h">Import a character</h2></div>
+        <p class="plate-desc">Bring a character card from another platform — a <code>.png</code> card or <code>.json</code> export. The persona becomes a companion in your Discord DMs, private to you unless you publish it there.</p>
+        <div id="import-body" hidden>
+          <div class="drop-zone" id="import-drop" role="button" tabindex="0" aria-label="Drop a character card, or press to choose a file">
+            <input type="file" id="import-file" accept=".png,.json,image/png,application/json" hidden />
+            <p class="drop-title">Drop a character card here</p>
+            <p class="drop-sub">or click to browse — <code>.png</code> card or <code>.json</code>, up to 8&nbsp;MB</p>
+          </div>
+          <div class="import-preview" id="import-preview" hidden>
+            <img class="import-thumb" id="import-thumb" alt="" hidden />
+            <div class="import-fields">
+              <h3 id="import-name"></h3>
+              <p class="import-voice" id="import-voice"></p>
+              <p class="import-traits" id="import-traits" hidden></p>
+              <p class="import-creator" id="import-creator" hidden></p>
+            </div>
+            <div class="import-actions">
+              <button class="btn btn-primary" id="import-confirm" type="button">Bring them in</button>
+              <button class="btn btn-ghost btn-sm" id="import-cancel" type="button">Pick another</button>
+            </div>
+            <p class="plate-note">Imported personas keep their provenance — the card's claimed creator and content hash are recorded for moderation.</p>
+          </div>
+          <div class="form-error" id="import-msg" role="alert" hidden></div>
+          <div class="import-done" id="import-done" hidden></div>
+        </div>
+        <p class="plate-note" id="import-locked" hidden>Link Discord above to import a character — companions live in your DMs.</p>
+      </section>
+
       <section class="plate rv" id="billing" aria-labelledby="billing-h">
         <div class="plate-head">
           <h2 id="billing-h">Billing</h2>

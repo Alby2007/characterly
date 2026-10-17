@@ -53,6 +53,7 @@ Alongside the bot, `website/` is a Vite multi-page site (landing page, account s
 | `src/contest.ts` | `runContestCheck` | Bot-addressed denial/correction detection — `contestCue` gate → `Brain.detectContest` → `contradict`/`support` evidence |
 | `src/metrics.ts` | `inc`, `metricsSnapshot` | In-process operational counters (uptime + named counts), surfaced to admins via `/status` |
 | `src/retry.ts` | `withRetry` | Shared retry helper for LLM calls — honors Groq's `x-ratelimit-reset` headers, exponential backoff on transient failures |
+| `src/charcard.ts` | `parseCardBytes`, `cardToPersona`, `cardToImportMeta`, `sha256Hex` | Shared character-card parser (pure TS, no Node deps — bundled into the website): normalizes `.json` and PNG `tEXt`/`ccv3` v1/v2/v3 cards + CAI Tools aliases into bounded persona fields and provenance metadata; feeds `/companion action:import` and the dashboard import plate |
 | `src/db.ts` | `sql` | Shared postgres.js connection singleton |
 
 ---

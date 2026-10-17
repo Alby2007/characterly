@@ -294,6 +294,13 @@ export type Companion = {
   adoptedFromListingId: number | null;
   /** Persona version the adopted clone was last synced to. */
   listingVersion: number;
+  /** 'authored' = written here; 'card_import' = parsed from an uploaded
+   *  character card. Carried onto marketplace listings on publish so the
+   *  provenance survives into moderation. */
+  personaSource: string;
+  /** Provenance snapshot for imports — claimed creator, spec, filename,
+   *  sha256 of the source file. Not shown as authoritative authorship. */
+  importMeta: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -318,7 +325,11 @@ export type CompanionListing = {
   avatarUrl: string | null;
   forumThreadId: string | null;
   version: number;
-  status: "active" | "flagged" | "delisted" | "banned";
+  /** 'unlisted' = private import — browsable nowhere, adoptable only by its
+   *  creator, free of the live-listing cap until published. */
+  status: "active" | "flagged" | "delisted" | "banned" | "unlisted";
+  personaSource: string;
+  importMeta: Record<string, unknown> | null;
   reportCount: number;
   addCount: number;
   createdAt: string;

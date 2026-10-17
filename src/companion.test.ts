@@ -55,6 +55,8 @@ function makeCompanion(id: number, ownerUserId: string, name: string): GuildComp
     kind: "awakened",
     adoptedFromListingId: null,
     listingVersion: 0,
+    personaSource: "authored",
+    importMeta: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     guildId: "g1",

@@ -43,6 +43,11 @@ export function buildListingCard(listing: CompanionListing, creatorName: string,
       { name: "Rating", value: stats && stats.count > 0 ? `★ ${stats.avg.toFixed(1)} · ${stats.count} rating${stats.count === 1 ? "" : "s"}` : "No ratings yet", inline: true },
     )
     .setFooter({ text: `by ${creatorName} · Characterly Marketplace · v${listing.version}` });
+  // Imported personas say so on the card — the community seeing the provenance
+  // is what makes "stolen card" reports meaningful.
+  if (listing.personaSource === "card_import") {
+    embed.addFields({ name: "Provenance", value: "Imported character card", inline: true });
+  }
   // The LARGE image, not the thumbnail: Discord derives a forum post's Gallery
   // cover from the OP message's embed image / attachments — thumbnails don't
   // count. So a creator's avatar URL doubles as the cover art.

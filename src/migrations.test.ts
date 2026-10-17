@@ -709,3 +709,38 @@ test("migration v41 makes consent_events discord_user_id nullable + locks RLS, g
     assert.equal(col2.is_nullable, "NO", "rollback restores NOT NULL once clean");
   } finally { await sql.end(); }
 });
+
+test("migration v42 adds provenance columns; RPC/storage skipped outside Supabase; guarded rollback", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any);
+
+    const cols = await sql<Array<{ table_name: string; column_name: string }>>`
+      SELECT table_name, column_name FROM information_schema.columns
+      WHERE column_name IN ('persona_source', 'import_meta')
+        AND table_name IN ('companions', 'companion_listings')
+      ORDER BY table_name, column_name`;
+    assert.equal(cols.length, 4, "both tables get both provenance columns");
+
+    // The web RPC + storage bucket are auth/storage-schema-gated — plain
+    // Postgres gets neither.
+    const fns = await sql`SELECT proname FROM pg_proc WHERE proname = 'import_companion_card'`;
+    assert.equal(fns.length, 0, "RPC shouldn't exist outside Supabase auth");
+
+    // Rollback refuses while provenance rows exist — data decision, not loss.
+    const c = await sql`INSERT INTO companions
+      (owner_user_id, name, voice_persona, core_traits, owner_dynamic, backstory,
+       onboarding_state, onboarding_turns, kind, persona_source, import_meta, created_at, updated_at)
+      VALUES ('u-x', 'Imp', 'p', '{}', 'd', 'b', 'active', 0, 'adopted', 'card_import',
+              '{"sha256":"x"}'::jsonb, NOW(), NOW()) RETURNING id`;
+    assert.ok(c.length === 1);
+    await assert.rejects(runMigrations(sql as any, 41), "rollback must refuse while imports exist");
+    await sql`DELETE FROM companions WHERE owner_user_id = 'u-x'`;
+    await runMigrations(sql as any, 41);
+    const gone = await sql<Array<{ column_name: string }>>`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'companions' AND column_name IN ('persona_source', 'import_meta')`;
+    assert.equal(gone.length, 0, "clean rollback drops both columns");
+  } finally { await sql.end(); }
+});

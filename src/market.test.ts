@@ -928,3 +928,142 @@ test("tag sweep feeds: thread-scoped listings, bulk rating stats, adoption veloc
   const wide = await store.recentAdoptionCounts(30 * 24 * HOUR);
   assert.equal(wide.get(l1.id), 3);
 });
+
+// ── Character-card imports ───────────────────────────────────────────────────
+
+const IMPORT_SPEC = {
+  name: "Lirael",
+  tagline: "A librarian who talks to the dead",
+  voicePersona: "curious, soft-spoken",
+  coreTraits: ["curious", "brave"],
+  ownerDynamic: "Companion",
+  backstory: "The Old Kingdom",
+  greeting: "*looks up* oh — you're alive. Good.",
+  avatarUrl: null,
+};
+
+test("unlisted import: creator self-adopts, strangers refused, provenance stamped", async () => {
+  const { store } = await freshStore();
+  const meta = { source: "character_card", creator: "some-author", sha256: "abc123", spec: "chara_card_v2" };
+  const created = await store.createListing("u-importer", IMPORT_SPEC, {
+    status: "unlisted", personaSource: "card_import", importMeta: meta,
+  });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const listing = created.listing;
+  assert.equal(listing.status, "unlisted");
+  assert.equal(listing.personaSource, "card_import");
+  assert.deepEqual(listing.importMeta!.sha256, "abc123");
+
+  // A stranger can't adopt a private import.
+  const stranger = await store.adoptListing("u-stranger", listing.id, { maxSlots: 10 });
+  assert.equal(stranger.ok, false);
+  if (!stranger.ok) assert.equal(stranger.reason, "delisted");
+
+  // The creator can — the whole point of unlisted.
+  const res = await store.adoptListing("u-importer", listing.id, { maxSlots: 1 });
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.companion.kind, "adopted");
+  assert.equal(res.companion.personaSource, "card_import");
+  assert.equal((res.companion.importMeta as any).creator, "some-author");
+  assert.equal(res.companion.adoptedFromListingId, listing.id);
+
+  // Roster + DM resolve include the import.
+  const roster = await store.listCompanionsForUser("u-importer");
+  assert.equal(roster.length, 1);
+  assert.equal(roster[0].id, res.companion.id);
+  const picked = await store.resolveDmCompanion("u-importer");
+  assert.equal(picked, null); // no pick yet + no awakened → nothing resolves
+  await store.claimDmCompanionIfUnset("u-importer", res.companion.id);
+  assert.equal((await store.resolveDmCompanion("u-importer"))?.id, res.companion.id);
+
+  // Self-adopt doesn't move the public counter.
+  const after = await store.listingById(listing.id);
+  assert.equal(after!.addCount, 0);
+});
+
+test("unlisted rows stay out of the live-listing cap; publishListing flips + propagates", async () => {
+  const { store } = await freshStore();
+  // Two live listings already — free cap is 2.
+  const c = await awakenedCompanion(store, "u-pub", "Pub");
+  await makeListing(store, "u-pub", c.id, "Pub");
+  const created1 = await store.createListing("u-pub", { ...IMPORT_SPEC, name: "I1" }, {});
+  assert.equal(created1.ok, true);
+  // Unlisted imports don't count toward the cap.
+  const imp = await store.createListing("u-pub", { ...IMPORT_SPEC, name: "Imp" }, {
+    status: "unlisted", personaSource: "card_import", importMeta: { sha256: "h1" },
+  });
+  assert.equal(imp.ok, true);
+  if (!imp.ok) return;
+  assert.equal(await store.activeListingCount("u-pub"), 2);
+
+  // Adopt + publish.
+  await store.adoptListing("u-pub", imp.listing.id, { maxSlots: 10 });
+  const published = await store.publishListing(imp.listing.id, "u-pub", {
+    ...IMPORT_SPEC, name: "Imp", tagline: "now public",
+  }, 3);
+  assert.equal(published.ok, true);
+  if (!published.ok) return;
+  assert.equal(published.listing.status, "active");
+  assert.equal(published.listing.version, 2);
+  assert.equal(published.listing.personaSource, "card_import");
+
+  // Clone synced to the published persona.
+  const roster = await store.listCompanionsForUser("u-pub");
+  const clone = roster.find(x => x.adoptedFromListingId === imp.listing.id);
+  assert.equal(clone?.name, "Imp");
+  assert.equal(clone?.listingVersion, 2);
+  assert.equal(await store.activeListingCount("u-pub"), 3);
+});
+
+test("publishListing enforces the live cap and refuses non-unlisted rows", async () => {
+  const { store } = await freshStore();
+  const c = await awakenedCompanion(store, "u-cap", "A");
+  await makeListing(store, "u-cap", c.id, "A");
+  const c2 = await awakenedCompanion(store, "u-cap2", "B");
+  await makeListing(store, "u-cap2", c2.id, "B");
+  const imp = await store.createListing("u-cap", { ...IMPORT_SPEC, name: "Imp" }, {
+    status: "unlisted", personaSource: "card_import", importMeta: { sha256: "h2" },
+  });
+  assert.equal(imp.ok, true);
+  if (!imp.ok) return;
+
+  // u-cap already holds 1 live listing; cap=1 → publish refused.
+  const blocked = await store.publishListing(imp.listing.id, "u-cap", { ...IMPORT_SPEC, name: "Imp" }, 1);
+  assert.equal(blocked.ok, false);
+  if (!blocked.ok) assert.equal(blocked.reason, "cap");
+
+  // Active listings can't re-enter the path.
+  const live = (await store.listMyListings("u-cap")).find(l => l.status === "active")!;
+  const again = await store.publishListing(live.id, "u-cap", { ...IMPORT_SPEC }, 10);
+  assert.equal(again.ok, false);
+  if (!again.ok) assert.equal(again.reason, "not_unlisted");
+});
+
+test("findUnlistedByHash dedupes; deleteUnlistedListing only removes untouched rows", async () => {
+  const { store } = await freshStore();
+  const a = await store.createListing("u-d", { ...IMPORT_SPEC, name: "One" }, {
+    status: "unlisted", personaSource: "card_import", importMeta: { sha256: "samehash" },
+  });
+  assert.equal(a.ok, true);
+  if (!a.ok) return;
+  assert.equal((await store.findUnlistedByHash("u-d", "samehash"))?.id, a.listing.id);
+  assert.equal(await store.findUnlistedByHash("u-d", "other"), null);
+  assert.equal(await store.findUnlistedByHash("u-other", "samehash"), null); // creator-scoped
+
+  // Can't delete once adopted.
+  await store.adoptListing("u-d", a.listing.id, { maxSlots: 5 });
+  assert.equal(await store.deleteUnlistedListing(a.listing.id, "u-d"), false);
+
+  // An un-adopted unlisted row deletes (persona_version row cascades).
+  const b = await store.createListing("u-d", { ...IMPORT_SPEC, name: "Two" }, {
+    status: "unlisted", personaSource: "card_import", importMeta: { sha256: "h3" },
+  });
+  assert.equal(b.ok, true);
+  if (!b.ok) return;
+  assert.equal(await store.deleteUnlistedListing(b.listing.id, "u-stranger"), false); // not yours
+  assert.equal(await store.deleteUnlistedListing(b.listing.id, "u-d"), true);
+  const vers = await sql`SELECT COUNT(*) AS n FROM companion_persona_versions WHERE listing_id = ${b.listing.id}`;
+  assert.equal(Number(vers[0].n), 0);
+});

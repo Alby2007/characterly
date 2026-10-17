@@ -99,6 +99,9 @@ const env = z.object({
   MARKET_TOP_RATING_MIN: z.coerce.number().int().min(1).default(5),
   MARKET_TRENDING_COUNT: z.coerce.number().int().min(1).default(5),
   MARKET_TRENDING_WINDOW_H: z.coerce.number().int().min(1).default(72),
+  // Character-card imports: private unlisted listings a user can hold at once.
+  // The adopted clones they spawn still consume normal adoption slots.
+  CHARACTER_IMPORT_CAP: z.coerce.number().int().min(1).default(25),
   // Safety classifier model — defaults to the hosted reply model; a small
   // fast model is fine (the verdict schema is tiny).
   SAFETY_MODEL: z.string().optional(),
@@ -224,6 +227,7 @@ export const config = {
   marketTopRatingMin: env.MARKET_TOP_RATING_MIN,
   marketTrendingCount: env.MARKET_TRENDING_COUNT,
   marketTrendingWindowH: env.MARKET_TRENDING_WINDOW_H,
+  characterImportCap: env.CHARACTER_IMPORT_CAP,
   safetyModel: env.SAFETY_MODEL ?? env.GROQ_MODEL,
   // House ops — see ops.ts. houseGuildId unset disables the whole layer
   // (intents, listeners, watchdog never activate).
