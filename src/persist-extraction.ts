@@ -1,5 +1,8 @@
 import type { MemoryStore } from "./database.js";
+import { defaultEmbedder, vectorLiteral } from "./embeddings.js";
 import { resolveSubject, type AliasMap } from "./entity-resolution.js";
+import { inc } from "./metrics.js";
+import { logError } from "./secrets.js";
 import { config } from "./config.js";
 import type { ExtractionResult, MessageEvent } from "./types.js";
 
@@ -50,6 +53,11 @@ export async function persistExtraction(
     const saved = await store.saveMemory(event, memory, config.candidateConfidenceThreshold);
     savedIds.push(saved.id);
     ctx.onMemorySaved?.(saved.id);
+    // Semantic-recall embedding — fire-and-forget so a dead endpoint can't
+    // stall extraction; the 15-min backfill sweep repairs misses (v40 col).
+    void defaultEmbedder().embed(saved.content)
+      .then(v => (v ? store.setMemoryEmbedding(saved.id, vectorLiteral(v)) : undefined))
+      .catch(e => { inc("embed.error"); logError("memory embed failed", e); });
   }
 
   for (const rel of result.relationships) {

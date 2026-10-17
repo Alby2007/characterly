@@ -81,7 +81,7 @@ test("journal entries persist first-person, recall only in their origin scope", 
     const saved = await store.saveJournalEntries(comp.id, "g1", [
       { kind: "moment", content: "Bob dared me to rap about the server rules and I did", importance: 0.8, aboutSubjects: ["u-bob"] },
     ], "reply-1", alwaysConsent);
-    assert.equal(saved, 1);
+    assert.equal(saved.length, 1);
 
     const g1Entries = await store.journalFor(comp.id, "g1");
     assert.equal(g1Entries.length, 1);
@@ -107,7 +107,7 @@ test("write-time consent filter drops entries about non-consenting humans; compa
       { kind: "moment", content: "Alice and I rebuilt the tier list again", aboutSubjects: ["u-alice", "companion:9"] },
       { kind: "opinion", content: "quiet night, just me thinking", aboutSubjects: [] },
     ], "reply-2", isConsented);
-    assert.equal(saved, 2);
+    assert.equal(saved.length, 2);
     const entries = await store.journalFor(comp.id, "g1");
     assert.equal(entries.length, 2);
     assert.ok(!entries.some(e => e.aboutSubjectIds.includes("u-bob")));
@@ -282,4 +282,33 @@ test("Brain.reply renders the journal block as first-person entries with hedging
   assert.match(lastInput, /Your journal/);
   assert.match(lastInput, /Alice and I roasted her tea take/);
   assert.match(lastInput, /hedge older or lower-importance/);
+});
+
+test("semanticJournal ranks by distance inside the origin scope and honors opt-out", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const comp = await seedCompanion(store);
+    await store.setMemberOptIn("g1", "u-bob", true);
+    const [pizza, boss] = await store.saveJournalEntries(comp.id, "g1", [
+      { kind: "moment", content: "Bob and I argued about pizza toppings", aboutSubjects: ["u-bob"] },
+      { kind: "moment", content: "I finally beat the raid boss", aboutSubjects: [] },
+    ], "r-sem", alwaysConsent);
+    await store.saveJournalEntries(comp.id, "dm:u-alice", [{ kind: "moment", content: "Alice's DM entry", aboutSubjects: ["u-alice"] }], "r-sem2", alwaysConsent);
+    await store.setJournalEmbedding(pizza.id, "[1,0,0]");
+    await store.setJournalEmbedding(boss.id, "[0,1,0]");
+    // Entries saved before embedding sit on the backfill list.
+    assert.ok((await store.unembeddedJournal(10)).length >= 1);
+
+    const hits = await store.semanticJournal(comp.id, "g1", "[1,0,0]", { maxDistance: 0.55 });
+    assert.deepEqual(hits.map(h => h.id), [pizza.id], "aligned vector wins; orthogonal is past the ceiling");
+    // Scope isolation mirrors journalFor — the DM entry never crosses.
+    assert.equal((await store.semanticJournal(comp.id, "g1", "[0,0,1]", { maxDistance: 1 })).every(h => h.originScope === "g1"), true);
+    assert.equal((await store.semanticJournal(comp.id, "g-zombie", "[1,0,0]", { maxDistance: 1 })).length, 0);
+
+    // Opt-out filters semantic recall the same as the static leg.
+    await store.setMemberOptOut("g1", "u-bob", true);
+    const afterOptOut = await store.semanticJournal(comp.id, "g1", "[1,0,0]", { maxDistance: 0.55 });
+    assert.equal(afterOptOut.length, 0, "opted-out subject drops out of semantic recall too");
+  } finally { await sql.end(); }
 });

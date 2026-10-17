@@ -110,6 +110,7 @@ One row per curated fact, preference, episode, or piece of server lore. The core
 | `contradiction_count` | INTEGER | Number of contradicting evidence rows |
 | `status` | TEXT | See lifecycle states below |
 | `superseded_by` | INTEGER | FK → `memories.id` of the replacement, when superseded |
+| `embedding` | VECTOR NULL | Semantic-recall vector (v40) — written at save time or by the backfill sweep; un-dimensioned by design, dims enforced in code via `EMBED_DIMS` |
 | `supersedes_memory_id` | INTEGER | FK → `memories.id` of the memory this one replaced |
 | `net_score` | REAL | Age-weighted support−contradiction score; only set during `contested` (v2) |
 | `frozen_confidence` | REAL | Confidence snapshot taken when memory first entered `contested`; cleared on resolution (v2) |
@@ -507,6 +508,7 @@ A companion's own first-person episodic memory (v25) — what *it* experienced (
 | `source_message_id` | TEXT NULL | The companion's own reply that produced the entry (provenance + idempotency key) |
 | `created_at` / `updated_at` | TIMESTAMPTZ | |
 | `last_recalled_at` | TIMESTAMPTZ NULL | Stamped on each `journalFor` hit — drives the 30-day decay in `pruneJournal` |
+| `embedding` | VECTOR NULL | Semantic-recall vector (v40) — powers `semanticJournal` alongside `journalFor` |
 
 **Unique constraint:** `(companion_id, origin_scope, source_message_id, kind, content)` — a crashed job resaving identical output can't stack rows. **Indexes:** `companion_journal_lookup (companion_id, origin_scope, status, importance DESC)`; `companion_journal_about` GIN on `about_subject_ids`. RLS enabled (v25) with no policies — Data-API deny-all. Write-time trgm dedup drops paraphrases (similarity ≥ 0.75); nightly `pruneJournal` caps 200 active entries per (companion, scope).
 

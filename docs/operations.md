@@ -138,7 +138,7 @@ SELECT kind, sum(delta) FROM credit_ledger
 
 - **Job worker** — `LISTEN`/`NOTIFY` + 3s poll; per-guild serial, global cap 8, 10-min claim lease, dead-letter at 5 attempts.
 - **Nightly maintenance** — retention purge, memory lifecycle, verification/dedup, event maintenance, profile rebuilds, journal prune, pair-analysis enqueue.
-- **15-min sweep** — missed-signal triage reconciliation (`repairQueuedMarks`).
+- **15-min sweep** — missed-signal triage reconciliation (`repairQueuedMarks`), embedding backfill (bounded batch of NULL-embedding memories/journal rows per tick).
 
 Ops utilities (run via `npx tsx scripts/<name>.mjs` with env loaded): `maintain.mjs`, `build-profiles.mjs`, `verify-memories.mjs`, `contest-sweep.mjs`, `backfill-relationships.mjs`, `purge-nonopted.mjs` (**destructive — `PURGE_CONFIRM=1`**), `requeue-dead-jobs.mjs`.
 
@@ -153,6 +153,25 @@ Listings live in a **forum channel in the hub Discord server**. One-time setup:
 Related env (defaults are sane): `ADOPTION_COOLDOWN_MS=43200000` (12h re-adopt cooldown), `FREE_ADOPTION_SLOTS=1` (Premium is uncapped in code), `FREE_LISTING_SLOTS=2` (live listings per free account — Premium uncapped), `MARKETPLACE_REPORT_FLAG_THRESHOLD=3`, `MARKET_PUBLISH_DAILY_CAP=5` / `MARKET_REPORT_DAILY_CAP=20` / `MARKET_ADOPT_DAILY_CAP=20` (per-UTC-day rate limits), `SAFETY_MODEL` (defaults to `GROQ_MODEL` — the listing/reply classifier).
 
 Moderation policy + runbook (freeze SQL, unban, audit): `docs/moderation.md`.
+
+## Semantic recall (v40) — embeddings via local Ollama
+
+Memories and journal entries carry `vector` columns powering the semantic recall legs (`semanticMemories`, `semanticJournal`) — paraphrase-aware retrieval alongside the lexical legs. The feature is **opt-in**: unset `EMBED_BASE_URL` disables it cleanly.
+
+One-time setup on the VM:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull all-minilm          # ~45MB, 384-dim MiniLM-L6
+ollama list                     # verify the model landed
+```
+
+Then in `~/characterly/.env`: `EMBED_BASE_URL=http://127.0.0.1:11434/v1` (defaults cover model/dims/key) and `systemctl restart characterly`. The first 15-min sweep tick starts backfilling the existing corpus — watch the `embed.backfilled` counter and `embed.error`/`embed.backfill_error` in `/ops logs`. New saves embed inline at persist time.
+
+- **Hosted alternative** — `EMBED_BASE_URL=https://api.openai.com/v1`, `EMBED_MODEL=text-embedding-3-small`, `EMBED_API_KEY=sk-…`, `EMBED_DIMS=1536`. Same code path (any OpenAI-compatible endpoint works: vLLM, LM Studio, Together).
+- **`EMBED_MAX_DISTANCE=0.55`** — cosine-distance ceiling for semantic hits. Raise toward 0.65 if semantic recall rarely fires on live traffic; lower if off-topic memories dilute prompts.
+- **Model change caveat** — switching `EMBED_MODEL` to a *different dimensionality* leaves stale vectors that must be cleared or queries error: `UPDATE memories SET embedding=NULL; UPDATE companion_journal SET embedding=NULL;` — the next sweep re-embeds everything with the new model. Same-dim swaps need no clear.
+- **RAM** — all-minilm idles under ~300MB; confirm headroom on the free tier (`free -h`).
 
 Moderation state is all in Postgres — `companion_listings.status` (`active`/`flagged`/`delisted`) and `listing_reports`. Delisting/unlisting is a status flip, so it can be done by SQL if the bot is down: `UPDATE companion_listings SET status='delisted' WHERE id=<listing>` blocks new Adds immediately. Existing adopters keep their companions either way.
 

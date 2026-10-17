@@ -2309,6 +2309,25 @@ const migrations: Migration[] = [
       await sql`DROP TABLE IF EXISTS consent_events`;
     },
   },
+
+  // ── v40: semantic recall embeddings ──────────────────────────────────────
+  // Un-dimensioned `vector` columns — keeps model flexibility (a declared dim
+  // is required for ANN indexes, which guild-scoped scans don't need at this
+  // scale). Code enforces dims (EMBED_DIMS) at write time.
+  {
+    version: 40,
+    name: "v40_semantic_embeddings",
+    up: async (sql) => {
+      await sql`CREATE EXTENSION IF NOT EXISTS vector`;
+      await sql`ALTER TABLE memories ADD COLUMN IF NOT EXISTS embedding vector`;
+      await sql`ALTER TABLE companion_journal ADD COLUMN IF NOT EXISTS embedding vector`;
+    },
+    down: async (sql) => {
+      await sql`ALTER TABLE memories DROP COLUMN IF EXISTS embedding`;
+      await sql`ALTER TABLE companion_journal DROP COLUMN IF EXISTS embedding`;
+      // The vector extension stays — shared infra other features may rely on.
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

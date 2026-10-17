@@ -24,6 +24,16 @@ const env = z.object({
   REPLY_MODEL: z.string().optional(),
   REPLY_TOOLS: z.string().optional(),
   REPLY_EXIT: z.string().optional(),
+  // Semantic recall embeddings — any OpenAI-compatible /embeddings endpoint
+  // (local Ollama, OpenAI, vLLM, LM Studio). Unset URL = feature OFF; the
+  // lexical recall legs keep working untouched.
+  EMBED_BASE_URL: z.string().optional(),
+  EMBED_MODEL: z.string().default("all-minilm"),
+  EMBED_API_KEY: z.string().default("ollama"),
+  EMBED_DIMS: z.coerce.number().int().min(8).max(8192).default(384),
+  // Cosine-distance ceiling for semantic hits — below this, a "match" isn't
+  // about the same thing and would only dilute the prompt.
+  EMBED_MAX_DISTANCE: z.coerce.number().min(0).max(2).default(0.55),
   // Per-user reply budget: a troll spamming mentions or rapid follow-ups
   // drains the guild's daily LLM cap for everyone else. Burst allows natural
   // ping-pong, refill bounds the sustained drain (~1/refill per user).
@@ -153,6 +163,13 @@ export const config = {
   // No fallback: unset means image understanding is OFF. A text-only model
   // could silently drop the image block and store a hallucinated description.
   visionModel: env.VISION_MODEL,
+  // Embedding endpoint for hybrid recall — opt-in; unset disables the
+  // semantic legs entirely (writes skip, queries degrade to lexical).
+  embedBaseUrl: env.EMBED_BASE_URL,
+  embedModel: env.EMBED_MODEL,
+  embedApiKey: env.EMBED_API_KEY,
+  embedDims: env.EMBED_DIMS,
+  embedMaxDistance: env.EMBED_MAX_DISTANCE,
   // Vision may live on a different provider (Groq rotated its vision models
   // off) — defaults keep the Groq client so a future Groq vision model needs
   // only VISION_MODEL.

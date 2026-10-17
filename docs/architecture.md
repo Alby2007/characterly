@@ -46,6 +46,7 @@ Alongside the bot, `website/` is a Vite multi-page site (landing page, account s
 | `src/tools.ts` | `replyToolDefs`, `executeTool` | Never-throw tool dispatcher: SSRF-hardened web fetch + internal lookup routing |
 | `src/lookup-tools.ts` | `ToolCtx`, `executeLookupTool`, `buildPairContext` | Read-only internal lookup tools (person/relationship/memories/event) over the existing stores |
 | `src/reply-format.ts` | `formatReplyProfile`, `formatPairContext`, `formatAge` | Pure formatters shared by the reply prompt and tool outputs; `formatAge` renders relative timestamps ("~2w ago") for injected memories/journal |
+| `src/embeddings.ts` | `makeEmbedder`, `defaultEmbedder`, `vectorLiteral` | Opt-in OpenAI-compatible `/embeddings` client (Ollama, OpenAI, vLLM) for semantic recall; dim-validates, fails to null, never throws |
 | `src/vision.ts` | `qualifyingImages`, `formatImageContext` | Pure image-attachment gate (image/*, byte cap, ≤3/message) + observation-framed label |
 | `src/conversation.ts` | `ConversationTracker` | Per-channel and per-companion conversation objects: opens on addressed messages, closes when the last participant leaves; share-of-voice pacing is channel-level |
 | `src/journal-job.ts` | `runJournalJob`, `JournalJobPayload` | Deferred `journal-write` jobs: after a companion replies, writes 0–2 first-person journal entries origin-tagged to that scope, consent-gated like extraction |
@@ -176,12 +177,20 @@ Discord MessageCreate
         ▼
   brain.ts: reply()
   • recent channel context (<@id> tokens demangled to @names) + prompt
-    memories on two legs (promptMemories): the static spine
+    memories on three legs (promptMemories): the static spine
     (relevantMemories — top-N by importance×confidence) merged with
-    contextualMemories — turn-aware lexical recall that surfaces
-    below-the-cap rows when the current message names them. Both legs share
-    the same gates: active plus candidates with promotable primary evidence
-    types, consent-scoped subjects
+    contextualMemories (lexical recall — below-the-cap rows surface when
+    the message names them) and semanticMemories (pgvector cosine scan —
+    paraphrases ILIKE can't see). All legs share the same gates: active plus
+    candidates with promotable primary evidence types, consent-scoped
+    subjects. The semantic leg is opt-in — no EMBED_BASE_URL means the
+    lexical legs run exactly as before. Journal recall mirrors this:
+    promptJournal merges journalFor's static top-N with semanticJournal
+    hits inside the same origin scope + opt-out filter. Embeddings are
+    written inline at persist time (persist-extraction, journal-job) and a
+    bounded 15-min backfill sweep converges the pre-v40 corpus and any
+    failures — un-dimensioned `vector` columns, dims enforced in code via
+    EMBED_DIMS
   • memory and journal entries carry bracketed age annotations (formatAge —
     "today", "~2w ago") so the model can hedge stale claims and weigh
     recency; extraction supplies an importance 0–1 salience judgment that

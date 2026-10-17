@@ -1580,6 +1580,41 @@ export class MemoryStore {
     return rows.map(rowToMemory);
   }
 
+  /** Semantic recall: cosine-distance scan over embedded memories matching
+   * the turn's query vector — the leg that catches paraphrases ILIKE can't
+   * ("her dad" vs "father"). Same consent + candidate gates as the lexical
+   * legs; maxDistance bounds how loose a match can be. */
+  async semanticMemories(guildId: string, subjectId: string, vector: string, opts: { limit?: number; maxDistance?: number } = {}): Promise<Memory[]> {
+    const rows = await this.sql<MemoryRow[]>`
+      SELECT *, (embedding <=> ${vector}::vector) AS distance FROM memories
+      WHERE guild_id = ${guildId}
+        AND (status = 'active' OR (status = 'candidate' AND primary_evidence_type IN ('explicit_fact', 'clear_preference', 'correction')))
+        AND (subject_id = 'server' OR (subject_id = ${subjectId}
+          AND subject_id IN (SELECT user_id FROM members WHERE guild_id = ${guildId} AND opted_in = 1 AND opted_out = 0)))
+        AND embedding IS NOT NULL
+        AND embedding <=> ${vector}::vector < ${opts.maxDistance ?? 0.55}
+      ORDER BY distance ASC LIMIT ${opts.limit ?? 6}
+    `;
+    return rows.map(rowToMemory);
+  }
+
+  /** Store an embedding for a memory — NULL-guard keeps it idempotent and
+   * preserves the first write on near-dup merges into an already-embedded row. */
+  async setMemoryEmbedding(id: number, vector: string): Promise<void> {
+    await this.sql`UPDATE memories SET embedding = ${vector}::vector WHERE id = ${id} AND embedding IS NULL`;
+  }
+
+  /** Rows missing embeddings — the backfill sweep's work list. Candidates are
+   * included so promotable-but-unverified rows can surface semantically. */
+  async unembeddedMemories(limit: number): Promise<Array<{ id: number; content: string }>> {
+    const rows = await this.sql<Array<{ id: number; content: string }>>`
+      SELECT id, content FROM memories
+      WHERE embedding IS NULL AND status IN ('active', 'candidate')
+      ORDER BY created_at ASC LIMIT ${limit}
+    `;
+    return rows.map(r => ({ id: Number(r.id), content: r.content }));
+  }
+
   async allActiveMemories(guildId: string, subjectId: string): Promise<Memory[]> {
     const rows = await this.sql<MemoryRow[]>`
       SELECT * FROM memories WHERE guild_id = ${guildId} AND subject_id = ${subjectId} AND status = 'active'
@@ -3295,8 +3330,8 @@ export class MemoryStore {
     candidates: JournalCandidate[],
     sourceMessageId: string | null,
     isConsented: (subjectId: string) => Promise<boolean>,
-  ): Promise<number> {
-    let saved = 0;
+  ): Promise<Array<{ id: number; content: string }>> {
+    const saved: Array<{ id: number; content: string }> = [];
     for (const c of candidates) {
       const content = c.content?.trim();
       if (!content) continue;
@@ -3319,14 +3354,62 @@ export class MemoryStore {
       const importance = Number.isFinite(Number(c.importance))
         ? Math.max(0, Math.min(1, Number(c.importance)))
         : 0.5;
-      const res = await this.sql`
+      const rows = await this.sql<Array<{ id: number }>>`
         INSERT INTO companion_journal (companion_id, origin_scope, kind, content, about_subject_ids, importance, source_message_id)
         VALUES (${companionId}, ${scope}, ${kind}, ${content}, ${aboutIds}, ${importance}, ${sourceMessageId})
         ON CONFLICT (companion_id, origin_scope, source_message_id, kind, content) DO NOTHING
+        RETURNING id
       `;
-      saved += res.count;
+      if (rows.length) saved.push({ id: Number(rows[0].id), content });
     }
     return saved;
+  }
+
+  async setJournalEmbedding(id: number, vector: string): Promise<void> {
+    await this.sql`UPDATE companion_journal SET embedding = ${vector}::vector WHERE id = ${id} AND embedding IS NULL`;
+  }
+
+  /** Semantic journal recall — cosine scan within the entry's origin scope,
+   * then journalFor's exact opt-out filter and about-sort so read rules stay
+   * identical across both legs. */
+  async semanticJournal(
+    companionId: number,
+    scope: string,
+    vector: string,
+    opts: { aboutIds?: string[]; limit?: number; maxDistance?: number } = {},
+  ): Promise<JournalEntry[]> {
+    const limit = opts.limit ?? 6;
+    const rows = await this.sql<Array<any>>`
+      SELECT *, (embedding <=> ${vector}::vector) AS distance FROM companion_journal
+      WHERE companion_id = ${companionId} AND origin_scope = ${scope} AND status = 'active'
+        AND embedding IS NOT NULL
+        AND embedding <=> ${vector}::vector < ${opts.maxDistance ?? 0.55}
+      ORDER BY distance ASC LIMIT ${limit * 4}
+    `;
+    const entries = rows.map(r => this.rowToJournal(r));
+    const optedOut = new Set<string>();
+    for (const e of entries) {
+      for (const s of e.aboutSubjectIds) {
+        if (s.startsWith("companion:") || s === "server" || s === "unknown") continue;
+        const m = await this.getMember(scope, s);
+        if (m?.optedOut) optedOut.add(s);
+      }
+    }
+    const kept = entries.filter(e => !e.aboutSubjectIds.some(s => optedOut.has(s)));
+    const aboutSet = new Set(opts.aboutIds ?? []);
+    if (aboutSet.size) {
+      kept.sort((a, b) => Number(b.aboutSubjectIds.some(s => aboutSet.has(s))) - Number(a.aboutSubjectIds.some(s => aboutSet.has(s))));
+    }
+    return kept.slice(0, limit);
+  }
+
+  async unembeddedJournal(limit: number): Promise<Array<{ id: number; content: string }>> {
+    const rows = await this.sql<Array<{ id: number; content: string }>>`
+      SELECT id, content FROM companion_journal
+      WHERE embedding IS NULL AND status = 'active'
+      ORDER BY created_at ASC LIMIT ${limit}
+    `;
+    return rows.map(r => ({ id: Number(r.id), content: r.content }));
   }
 
   /** Recall this companion's active journal entries formed in this scope.

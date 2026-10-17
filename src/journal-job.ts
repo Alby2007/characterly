@@ -1,5 +1,6 @@
 import type { Brain } from "./brain.js";
 import type { MemoryStore } from "./database.js";
+import { defaultEmbedder, vectorLiteral } from "./embeddings.js";
 import { FatalJobError } from "./jobs.js";
 import { inc } from "./metrics.js";
 import { logError } from "./secrets.js";
@@ -79,7 +80,16 @@ export async function runJournalJob(scope: string, payload: JournalJobPayload, d
     const saved = await store.saveJournalEntries(
       payload.companionId, scope, entries, payload.replyMessageId, isConsented,
     );
-    if (saved) inc("journal.saved", saved);
+    if (saved.length) {
+      inc("journal.saved", saved.length);
+      // Embed inline — the backfill sweep repairs any failure. Non-fatal:
+      // a dead embed endpoint must never sink journal writes.
+      for (const e of saved) {
+        void defaultEmbedder().embed(e.content)
+          .then(v => (v ? store.setJournalEmbedding(e.id, vectorLiteral(v)) : undefined))
+          .catch(err => { inc("embed.error"); logError("journal embed failed", err); });
+      }
+    }
   } catch (error) {
     inc("journal.save_error");
     logError("Journal save failed", error);

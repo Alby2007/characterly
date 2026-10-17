@@ -52,7 +52,8 @@ import { exec as cpExec } from "node:child_process";
 import { promisify } from "node:util";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { gatherOwnerSubtextForServer, gatherServerDigestForDm } from "./cross-context.js";
-import type { CompanionPersona, MessageEvent, PairContext } from "./types.js";
+import { defaultEmbedder, vectorLiteral } from "./embeddings.js";
+import type { CompanionPersona, JournalEntry, MessageEvent, PairContext } from "./types.js";
 
 // Register every credential before any code path can log it — redactSecrets
 // scrubs all registered values plus auth-header-shaped tokens out of logs.
@@ -537,6 +538,27 @@ const SWEEP_WINDOW_MS = 2 * 60 * 60_000;
 const SWEEP_TRIAGE_BATCH = 10;
 
 setInterval(() => sweepMissedSignals(SWEEP_WINDOW_MS), SWEEP_INTERVAL_MS).unref();
+// Embedding backfill — bounded batch of NULL-embedding rows per tick, so the
+// pre-v40 corpus and any inline-embed failures converge without a one-shot job.
+setInterval(() => embedBackfill().catch(e => { inc("embed.backfill_error"); logError("embed backfill failed", e); }), SWEEP_INTERVAL_MS).unref();
+
+/** Backfill embeddings for rows saved before v40 or during embed outages.
+ * Bounded batch per sweep tick — large corpora converge over several ticks.
+ * No-op when the embedder is disabled. */
+async function embedBackfill(batchSize = 150): Promise<void> {
+  const emb = defaultEmbedder();
+  if (!emb.enabled) return;
+  let done = 0;
+  for (const row of await store.unembeddedMemories(batchSize)) {
+    const v = await emb.embed(row.content);
+    if (v) { await store.setMemoryEmbedding(row.id, vectorLiteral(v)); done++; }
+  }
+  for (const row of await store.unembeddedJournal(batchSize)) {
+    const v = await emb.embed(row.content);
+    if (v) { await store.setJournalEmbedding(row.id, vectorLiteral(v)); done++; }
+  }
+  if (done) inc("embed.backfilled", done);
+}
 
 // Live traffic that fails the durableSignals regex is never inspected inline —
 // this sweep gives it the same LLM triage ingest already uses, so durable
@@ -807,13 +829,14 @@ const opsDeps: OpsDeps = {
  * importance×confidence) merged with turn-aware contextual hits — a memory
  * below the spine cap still surfaces when the current message is about it.
  * The same consent/candidate gates apply on both legs. */
-async function promptMemories(scope: string, subjectId: string, text: string): Promise<Memory[]> {
+async function promptMemories(scope: string, subjectId: string, text: string, vec: number[] | null): Promise<Memory[]> {
   const spine = await store.relevantMemories(scope, subjectId);
   const terms = recallTerms(text);
   let contextual: Memory[] = [];
+  let semantic: Memory[] = [];
+  // try/catch (not .catch) — stubbed stores in tests may lack the methods
+  // entirely, which throws synchronously at the call site.
   if (terms.length) {
-    // try/catch (not .catch) — stubbed stores in tests may lack the method
-    // entirely, which throws synchronously at the call site.
     try {
       contextual = await store.contextualMemories(scope, subjectId, terms);
     } catch (e) {
@@ -821,8 +844,44 @@ async function promptMemories(scope: string, subjectId: string, text: string): P
       logError("contextual memory recall failed", e);
     }
   }
+  if (vec) {
+    try {
+      semantic = await store.semanticMemories(scope, subjectId, vectorLiteral(vec), { maxDistance: config.embedMaxDistance });
+    } catch (e) {
+      inc("recall.semantic_error");
+      logError("semantic memory recall failed", e);
+    }
+  }
   const seen = new Set(spine.map(m => m.id));
-  return [...spine, ...contextual.filter(m => !seen.has(m.id))];
+  const merged = [...spine];
+  for (const m of [...contextual, ...semantic]) {
+    if (!seen.has(m.id)) { seen.add(m.id); merged.push(m); }
+  }
+  return merged;
+}
+
+/** Journal recall: journalFor's static top-N plus semanticJournal hits
+ * against the current turn — a relevant moment below the importance cap
+ * still surfaces when the conversation drifts onto it. Origin scope and the
+ * opt-out filter are identical on both legs; embedder-disabled ⇒ spine only. */
+async function promptJournal(
+  companionId: number,
+  scope: string,
+  aboutIds: string[],
+  vec: number[] | null,
+): Promise<JournalEntry[]> {
+  const spine = await store.journalFor(companionId, scope, { aboutIds }).catch(() => [] as JournalEntry[]);
+  let semantic: JournalEntry[] = [];
+  if (vec) {
+    try {
+      semantic = await store.semanticJournal(companionId, scope, vectorLiteral(vec), { aboutIds, maxDistance: config.embedMaxDistance });
+    } catch (e) {
+      inc("recall.semantic_journal_error");
+      logError("semantic journal recall failed", e);
+    }
+  }
+  const seen = new Set(spine.map(j => j.id));
+  return [...spine, ...semantic.filter(j => !seen.has(j.id))].slice(0, 10);
 }
 
 async function handleDmMessage(
@@ -1108,7 +1167,9 @@ async function handleDmMessage(
       companion,
       gId => client.guilds.cache.get(gId)?.name,
     );
-    const journal = await store.journalFor(companion.id, dmScope, { aboutIds: [userId] }).catch(() => []);
+    // One embed call feeds both semantic legs — the query text is the same.
+    const queryVec = await defaultEmbedder().embed(`${event.content} ${replyToContent ?? ""}`).catch(() => null);
+    const journal = await promptJournal(companion.id, dmScope, [userId], queryVec);
     const persona: CompanionPersona = {
       companionId: companion.id,
       name: companion.name,
@@ -1159,7 +1220,7 @@ async function handleDmMessage(
     const { text } = await brain.reply(
       { ...event, authorName: freshOwnerName },
       context,
-      await promptMemories(dmScope, userId, `${event.content} ${replyToContent ?? ""}`),
+      await promptMemories(dmScope, userId, `${event.content} ${replyToContent ?? ""}`, queryVec),
       profiles,
       relationships,
       config.replyModel,
@@ -1564,7 +1625,8 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     const ownerSubtext = await gatherOwnerSubtextForServer(store, chosen.ownerUserId, chosen.id);
     // Origin-scoped journal: only entries formed in THIS guild — a dismissed
     // companion's dormant entries never surface elsewhere.
-    const journal = await store.journalFor(chosen.id, event.guildId, { aboutIds: [event.authorId, chosen.ownerUserId] }).catch(() => []);
+    const queryVec = await defaultEmbedder().embed(`${event.content} ${replyToContent ?? ""}`).catch(() => null);
+    const journal = await promptJournal(chosen.id, event.guildId, [event.authorId, chosen.ownerUserId], queryVec);
 
     const persona: CompanionPersona = {
       companionId: chosen.id,
@@ -1598,7 +1660,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     const { text, endConversation } = await companionBrain.reply(
       { ...event, authorName },
       context,
-      await promptMemories(event.guildId, event.authorId, `${event.content} ${replyToContent ?? ""}`),
+      await promptMemories(event.guildId, event.authorId, `${event.content} ${replyToContent ?? ""}`, queryVec),
       profiles,
       relationships,
       config.replyModel,

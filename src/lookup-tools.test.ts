@@ -248,6 +248,37 @@ test("contextualMemories matches any term, honors consent, and admits promotable
   } finally { await sql.end(); }
 });
 
+test("semanticMemories ranks by cosine distance under the same consent/candidate gates", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    await store.setMemberOptIn("g1", "u1", true);
+    const dog = await store.saveMemory(msg("x", { authorId: "u1" }), { subjectId: "u1", kind: "person_fact", content: "Has a dog named Biscuit", reason: "t", evidenceType: "explicit_fact", effect: "support" });
+    const job = await store.saveMemory(msg("y", { authorId: "u1" }), { subjectId: "u1", kind: "person_fact", content: "Works at a bakery", reason: "t", evidenceType: "explicit_fact", effect: "support" });
+    const unembedded = await store.saveMemory(msg("z", { authorId: "u1" }), { subjectId: "u1", kind: "person_fact", content: "Grew up in Leeds", reason: "t", evidenceType: "explicit_fact", effect: "support" });
+    // Orthogonal vectors: query [1,0,0] hits `dog` at distance 0, `job` at 1.0.
+    await store.setMemoryEmbedding(dog.id, "[1,0,0]");
+    await store.setMemoryEmbedding(job.id, "[0,1,0]");
+
+    const hits = await store.semanticMemories("g1", "u1", "[1,0,0]", { maxDistance: 0.55 });
+    assert.deepEqual(hits.map(h => h.id), [dog.id], "only the aligned vector is within the distance ceiling");
+    const both = await store.semanticMemories("g1", "u1", "[0.7,0.7,0]", { maxDistance: 0.55 });
+    assert.equal(both.length, 2, "45° query is within distance of both embedded rows");
+    assert.equal(unembedded.id !== undefined && hits.every(h => h.id !== unembedded.id), true, "unembedded rows are invisible to the semantic leg");
+
+    // NULL-guard: a second write can't overwrite the first embedding.
+    await store.setMemoryEmbedding(dog.id, "[0,0,1]");
+    const again = await store.semanticMemories("g1", "u1", "[1,0,0]", { maxDistance: 0.55 });
+    assert.deepEqual(again.map(h => h.id), [dog.id], "re-embed skipped — first write wins");
+
+    await store.setMemberOptIn("g1", "u1", false);
+    assert.equal((await store.semanticMemories("g1", "u1", "[1,0,0]")).length, 0, "opt-out hides subject rows");
+
+    const pending = await store.unembeddedMemories(10);
+    assert.ok(pending.some(r => r.id === unembedded.id), "unembedded rows land on the backfill list");
+  } finally { await sql.end(); }
+});
+
 test("saveMemory clamps extractor importance into [0.05, 1] and falls back to the kind default", async () => {
   const sql = makeTestSql();
   try {
