@@ -3808,6 +3808,30 @@ export class MemoryStore {
     await this.sql`DELETE FROM companion_journal WHERE import_id = ${importId}`;
   }
 
+  /** Recent imports for the Discord manager — newest first, with the
+   *  companion's name for display. */
+  async listChatImports(ownerUserId: string, limit = 8): Promise<Array<ChatImport & { companionName: string }>> {
+    const rows = await this.sql<Array<any>>`
+      SELECT i.*, c.name AS companion_name FROM chat_imports i
+      JOIN companions c ON c.id = i.companion_id
+      WHERE i.owner_user_id = ${ownerUserId}
+      ORDER BY i.created_at DESC LIMIT ${limit}
+    `;
+    return rows.map(r => ({ ...this.rowToChatImport(r), companionName: r.companion_name ?? "" }));
+  }
+
+  /** Undo an import — owner-scoped delete; ON DELETE CASCADE retracts every
+   *  journal entry it wrote. Returns the row for the confirm message (null =
+   *  not theirs / already gone). Safe mid-distill: the import_id FK rejects
+   *  further journal writes and the worker drops the stale job. */
+  async deleteChatImport(ownerUserId: string, importId: number): Promise<ChatImport | null> {
+    const rows = await this.sql<Array<any>>`
+      DELETE FROM chat_imports WHERE id = ${importId} AND owner_user_id = ${ownerUserId}
+      RETURNING *
+    `;
+    return rows[0] ? this.rowToChatImport(rows[0]) : null;
+  }
+
   async recordWebhookMessage(
     messageId: string,
     guildId: string,

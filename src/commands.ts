@@ -11,7 +11,7 @@ import { runProfileBuild, PROFILE_BUILD_COOLDOWN_MS } from "./profile-build.js";
 import { runServerIngest } from "./server-ingest.js";
 import { pauseGuildClaims, resumeGuildClaims, waitForGuildIdle } from "./jobs.js";
 import { inc, metricsSnapshot } from "./metrics.js";
-import type { Companion, CompanionListing, CompanionSpec, MessageEvent } from "./types.js";
+import type { ChatImport, Companion, CompanionListing, CompanionSpec, MessageEvent } from "./types.js";
 import { config } from "./config.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
 import { handleOpsCommand, handleHouseButton, isHouse, isMarketplaceThread } from "./ops.js";
@@ -965,6 +965,7 @@ export const commandDefinitions = [
       { name: "switch — Choose which companion answers in your DMs", value: "switch" },
       { name: "drop — Give up an adopted companion (12h re-adopt cooldown)", value: "drop" },
       { name: "import — Bring in a character card (.png/.json) from another platform", value: "import" },
+      { name: "imports — View or undo your chat-history imports", value: "imports" },
     ] },
     { name: "avatar_url", description: "Public http(s) image URL when action is avatar", type: 3, required: false },
     { name: "avatar_file", description: "Uploaded image when action is avatar — also used as the marketplace cover", type: 11, required: false },
@@ -1015,6 +1016,38 @@ const pendingImports = new Map<string, { persona: ImportPersona; meta: CardImpor
  *  bytes so the companion's name can re-resolve flagless speaker names. */
 const pendingChatImports = new Map<string, { bytes: Uint8Array; filename: string; sha256: string; chat: ParsedChat; meta: ChatImportMeta; expires: number }>();
 const PENDING_IMPORT_TTL_MS = 15 * 60 * 1000;
+
+/** `/companion action:imports` + the "keep" path of the undo confirm — the
+ *  user's import rows as an embed with per-row undo/cancel buttons. */
+async function buildImportsManager(store: MemoryStore, userId: string) {
+  const imports = await store.listChatImports(userId).catch(() => [] as Array<ChatImport & { companionName: string }>);
+  if (!imports.length) {
+    return {
+      content: "No chat-history imports yet — `/companion action:import` with a `.jsonl` or `.json` export brings them over.",
+      embeds: [] as EmbedBuilder[],
+      components: [] as ActionRowBuilder<ButtonBuilder>[],
+    };
+  }
+  const lines = imports.map(i => {
+    const pct = i.messageCount > 0 ? Math.min(100, Math.round(100 * i.processedTurns / i.messageCount)) : 0;
+    const state = i.status === "queued" ? "queued"
+      : i.status === "distilling" ? `distilling — ${pct}%`
+      : i.status === "done" ? `done — ${i.keptCount} memories kept`
+      : `failed${i.error ? ` — ${i.error}` : ""}`;
+    return `**${escapeMarkdown(i.filename)}** → **${escapeMarkdown(i.companionName)}** · ${state}`;
+  });
+  const embed = new EmbedBuilder()
+    .setTitle("Your chat-history imports")
+    .setDescription(lines.join("\n") + "\n\n*Undoing removes every memory that import wrote — permanently.*")
+    .setFooter({ text: "Importing a new history: /companion action:import" });
+  const components = imports.slice(0, 4).map(i => new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`market:histundo:${i.id}`)
+      .setLabel(i.status === "done" || i.status === "failed" ? `Undo — ${i.filename.slice(0, 30)}` : `Cancel — ${i.filename.slice(0, 30)}`)
+      .setStyle(ButtonStyle.Danger),
+  ));
+  return { embeds: [embed], components };
+}
 /** One profile build per member at a time — claimed synchronously before any
  * await so a double-invoke can't slip past the check and double the LLM spend. */
 const profileBuildsRunning = new Set<string>();
@@ -1372,6 +1405,10 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         return interaction.reply({ content: "You haven't created a companion yet — send me a DM first!", ephemeral: true });
       }
       return interaction.reply({ content: `Updated **${updated.name || "your companion"}**'s avatar — it'll show as the marketplace cover next time you publish (or use the listing's **Cover image** button).`, ephemeral: true });
+    }
+    if (action === "imports") {
+      const view = await buildImportsManager(store, interaction.user.id);
+      return interaction.reply({ ephemeral: true, ...view });
     }
     if (action === "import") {
       const file = interaction.options.getAttachment?.("card_file") ?? null;
@@ -2711,6 +2748,43 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         content: `**${pending.filename}** queued — I'll distill the memories into **${target.name}** a few turns at a time and DM you when they're settled. Their journal stays private to you.`,
         components: [],
       });
+    }
+
+    // Undo a chat-history import — confirm step, then the owner-scoped delete
+    // cascades every journal entry the import wrote.
+    if (sub === "histundo") {
+      const importId = Number(parts[2]);
+      const imp = await store.chatImportById(importId);
+      if (!imp || imp.ownerUserId !== userId) {
+        return interaction.update({ content: "That import is already gone.", components: [] });
+      }
+      const companion = await store.getCompanionById(imp.companionId);
+      const what = imp.status === "done"
+        ? `the **${imp.keptCount} memories** **${companion?.name ?? "they"}** carried over`
+        : `whatever memories the import wrote so far (the rest stops too)`;
+      return interaction.update({
+        content: `Remove ${what} from **${imp.filename}**? The transcript's already gone — this retracts the memories, permanently.`,
+        embeds: [],
+        components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setCustomId(`market:histdo:${imp.id}`).setLabel("Remove the memories").setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId("market:histno").setLabel("Keep them").setStyle(ButtonStyle.Secondary),
+        )],
+      });
+    }
+    if (sub === "histdo") {
+      const importId = Number(parts[2]);
+      const removed = await store.deleteChatImport(userId, importId);
+      return interaction.update({
+        content: removed
+          ? `Done — everything **${removed.filename}** distilled is forgotten. The companion only knows what you've lived here now.`
+          : "That import is already gone.",
+        embeds: [],
+        components: [],
+      });
+    }
+    if (sub === "histno") {
+      const view = await buildImportsManager(store, userId);
+      return interaction.update({ content: null, ...view });
     }
 
     if (sub === "pubpick") {

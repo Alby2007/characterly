@@ -4,7 +4,7 @@
 // them, dedupes on sha256, and enqueues the distill job. Status polls
 // my_chat_imports while anything is queued/distilling.
 import { parseChatFile, chatImportMeta, chatFileHash } from "../../src/chathist.ts";
-import { myCompanions, myChatImports, importChatHistory, withTimeout } from "./auth.js";
+import { myCompanions, myChatImports, importChatHistory, deleteChatImport, withTimeout } from "./auth.js";
 
 const $ = sel => document.querySelector(sel);
 const MAX_BYTES = 8 * 1024 * 1024;
@@ -188,9 +188,31 @@ export function initImportHistory({ linked, uid }) {
         : i.status === "distilling" ? `distilling — ${pct}%`
         : i.status === "done" ? `done — ${i.kept_count} memories kept`
         : `failed${i.error ? ` — ${escapeHtml(i.error)}` : ""}`;
-      return `<div class="hist-status-row"><span class="hist-file">${escapeHtml(i.filename)}</span><span class="hist-state hist-${i.status}">${state}</span></div>`;
+      const action = i.status === "queued" || i.status === "distilling" ? "Cancel" : "Undo";
+      return `<div class="hist-status-row"><span class="hist-file">${escapeHtml(i.filename)}</span><span class="hist-state hist-${i.status}">${state}</span><button class="hist-undo" type="button" data-import-id="${i.id}">${action}</button></div>`;
     }).join("");
   }
+
+  statusList.addEventListener("click", async e => {
+    const btn = e.target.closest(".hist-undo");
+    if (!btn) return;
+    const id = Number(btn.dataset.importId);
+    if (!id) return;
+    const row = btn.closest(".hist-status-row");
+    const name = row?.querySelector(".hist-file")?.textContent ?? "this import";
+    if (!confirm(`Remove every memory ${name} distilled? The transcript's already gone — this retracts the memories, permanently.`)) return;
+    btn.disabled = true;
+    const { data, error } = await deleteChatImport(id).catch(() => ({ data: null, error: { message: "x" } }));
+    if (error || !data) {
+      btn.disabled = false;
+      msg.textContent = "Couldn't remove the import — try again in a moment.";
+      msg.hidden = false;
+      return;
+    }
+    done.hidden = false;
+    done.innerHTML = `Done — everything <strong>${escapeHtml(data.filename)}</strong> distilled is forgotten.`;
+    pollStatus();
+  });
 
   async function pollStatus() {
     const { data, error } = await myChatImports().catch(() => ({ data: null, error: { message: "x" } }));

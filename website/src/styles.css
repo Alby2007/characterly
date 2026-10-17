@@ -1129,6 +1129,13 @@ input.toggle:focus-visible { outline: 2px solid var(--gold-hi); outline-offset: 
 .hist-state.hist-done { color: var(--ghost); }
 .hist-state.hist-failed { color: var(--ember); }
 .hist-state.hist-distilling { color: var(--gold-hi); }
+.hist-undo {
+  flex: none; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--paper-3); background: none;
+  border: 1px solid var(--rule-2); border-radius: 3px; padding: 3px 8px; cursor: pointer;
+}
+.hist-undo:hover { color: var(--ember); border-color: var(--ember); }
+.hist-undo:disabled { opacity: 0.5; cursor: wait; }
 @media (max-width: 520px) {
   .import-preview { flex-direction: column; }
   .import-actions { flex-direction: row; }

@@ -125,12 +125,15 @@ repeat uploads of the same source file trivially matchable across creators.
 
 **Imported chat histories (v44)** are a private-only surface: the transcript
 never publishes, distills into the importer's own companion journal
-(`source='import'` + `import_id` provenance on every entry), and the raw turns
-are deleted at completion — there is no stored corpus to exfiltrate or
-re-publish. A failed import retracts its partial journal by `import_id`. The
-moderation boundary is ingestion, not display: third-party speakers in group
-exports are dropped before storage, and the distill prompt paraphrases rather
-than quotes.
+(`source='import'` + `import_id` provenance + the owner stamped as
+`aboutSubjects` on every entry — opt-out deletion covers them like live
+entries), and the raw turns are deleted at completion — there is no stored
+corpus to exfiltrate or re-publish. A failed import retracts its partial
+journal by `import_id`; the user can also retract a finished import outright
+(`delete_chat_import`, `/companion action:imports`, or the dashboard Undo
+button — the row delete cascades every memory it wrote). The moderation
+boundary is ingestion, not display: third-party speakers in group exports are
+dropped before storage, and the distill prompt paraphrases rather than quotes.
 
 ### Comment moderation (v37)
 

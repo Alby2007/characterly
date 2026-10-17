@@ -814,3 +814,19 @@ test("migration v44 adds chat_imports + journal provenance; RPCs skipped outside
     assert.equal(jcols.length, 0, "clean rollback drops journal provenance columns");
   } finally { await sql.end(); }
 });
+
+test("migration v45 adds delete_chat_import RPC (auth-gated, skipped outside Supabase)", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any);
+
+    const fns = await sql`SELECT proname FROM pg_proc WHERE proname = 'delete_chat_import'`;
+    assert.equal(fns.length, 0, "RPC shouldn't exist outside Supabase auth");
+
+    await runMigrations(sql as any, 44);
+    // Down is a plain function drop — nothing to guard, just gone (or absent).
+    const still = await sql`SELECT proname FROM pg_proc WHERE proname = 'delete_chat_import'`;
+    assert.equal(still.length, 0);
+  } finally { await sql.end(); }
+});

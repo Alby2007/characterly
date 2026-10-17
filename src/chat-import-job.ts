@@ -89,8 +89,15 @@ export async function runChatImportJob(
       });
       summary = out.summary;
       const windowEnd = window[window.length - 1]?.ts ?? lastTs;
+      // The importer is always a subject of their own history — stamping
+      // them makes opt-out deletion (forgetJournalAbout on the dm scope) and
+      // the about-first recall sort treat imported entries like live ones.
+      const owned = out.entries.map(e => ({
+        ...e,
+        aboutSubjects: [...new Set([imp.ownerUserId, ...(e.aboutSubjects ?? [])])],
+      }));
       const saved = await store.saveImportedJournalEntries(
-        companion.id, dmScope, out.entries, imp.id, windowEnd, alwaysConsent,
+        companion.id, dmScope, owned, imp.id, windowEnd, alwaysConsent,
       );
       await store.updateChatImportProgress(imp.id, i + window.length, saved.length, summary);
     }
@@ -100,12 +107,14 @@ export async function runChatImportJob(
     if (summary) {
       await store.saveImportedJournalEntries(
         companion.id, dmScope,
-        [{ kind: "bond", content: `Before Characterly — ${summary}`, importance: 0.95 }],
+        [{ kind: "bond", content: `Before Characterly — ${summary}`, importance: 0.95, aboutSubjects: [imp.ownerUserId] }],
         imp.id, lastTs, alwaysConsent,
       );
     }
     await store.completeChatImport(imp.id);
-    const kept = (await store.chatImportById(imp.id))?.keptCount ?? 0;
+    const done = await store.chatImportById(imp.id);
+    if (!done) { inc("jobs.dropped_stale"); return; } // deleted mid-run — undo already handled cleanup, skip the DM.
+    const kept = done.keptCount;
     inc("jobs.chat_import_done");
     await deps.sendDm(
       imp.ownerUserId,

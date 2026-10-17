@@ -275,13 +275,20 @@ test("Brain.reply renders the journal block as first-person entries with hedging
       companion: {
         companionId: 1, name: "Nyx", ownerUserId: "u-alice", voicePersona: "dry",
         coreTraits: [], ownerDynamic: "", backstory: "",
-        journal: [{ id: 1, companionId: 1, originScope: "g1", kind: "inside_joke", content: "Alice and I roasted her tea take", aboutSubjectIds: ["u-alice"], importance: 0.7, status: "active", createdAt: "" }],
+        journal: [
+          { id: 1, companionId: 1, originScope: "g1", kind: "inside_joke", content: "Alice and I roasted her tea take", aboutSubjectIds: ["u-alice"], importance: 0.7, status: "active", createdAt: "" },
+          { id: 2, companionId: 1, originScope: "g1", kind: "bond", content: "Before Characterly — they were my whole evening", aboutSubjectIds: ["u-alice"], importance: 0.95, status: "active", source: "import" as const, importId: 7, createdAt: "" },
+        ],
       },
     },
   );
   assert.match(lastInput, /Your journal/);
   assert.match(lastInput, /Alice and I roasted her tea take/);
   assert.match(lastInput, /hedge older or lower-importance/);
+  // Imported entries carry the "before" tag so the model can tell carried-over
+  // memories from lived ones — the live entry doesn't get it.
+  assert.match(lastInput, /\[.*· before\] Before Characterly/);
+  assert.doesNotMatch(lastInput, /· before\] Alice and I roasted/);
 });
 
 test("semanticJournal ranks by distance inside the origin scope and honors opt-out", async () => {

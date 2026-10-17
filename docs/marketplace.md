@@ -84,8 +84,10 @@ private journal — first-person entries stamped `source='import'` +
 `import_id`, backdated to the conversation's real timestamps, plus a pinned
 `kind='bond'` summary of the relationship — then the transcript itself is
 deleted (`chat_imports.turns` cleared at done). A failed import retracts its
-partial journal via `import_id`. Third-party speakers in group exports are
-dropped before anything is stored.
+partial journal via `import_id`, and the importer can undo a finished import
+at any time (`/companion action:imports` or the dashboard Undo button — the
+row delete cascades every memory it wrote). Third-party speakers in group
+exports are dropped before anything is stored.
 
 ### What the bot does with a publish (all paths)
 

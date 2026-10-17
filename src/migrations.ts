@@ -3415,6 +3415,58 @@ const migrations: Migration[] = [
       await sql`DROP TABLE IF EXISTS chat_imports`;
     },
   },
+  {
+    version: 45,
+    name: "v45_chat_import_undo",
+    up: async (sql) => {
+      // Undo an import — the row's journal cascade retracts every memory it
+      // wrote (companion_journal.import_id ON DELETE CASCADE, v44). Returns
+      // the deleted row so the site can say what was removed.
+      await sql`
+        DO $web$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'web_profiles') THEN
+            EXECUTE $dfn$
+              CREATE OR REPLACE FUNCTION public.delete_chat_import(p_id bigint)
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+                v_row public.chat_imports%ROWTYPE;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RETURN NULL; END IF;
+                DELETE FROM public.chat_imports
+                  WHERE id = p_id AND owner_user_id = did
+                  RETURNING * INTO v_row;
+                IF v_row.id IS NULL THEN RETURN NULL; END IF;
+                RETURN json_build_object(
+                  'import_id', v_row.id, 'filename', v_row.filename,
+                  'kept_count', v_row.kept_count, 'companion_id', v_row.companion_id);
+              END
+              $body$
+            $dfn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.delete_chat_import(bigint) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.delete_chat_import(bigint) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.delete_chat_import(bigint) TO authenticated';
+            END IF;
+          END IF;
+        END $web$
+      `;
+    },
+    down: async (sql) => {
+      await sql`DROP FUNCTION IF EXISTS public.delete_chat_import(bigint)`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

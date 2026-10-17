@@ -248,3 +248,49 @@ test("job — terminal failure marks the import failed and retracts journal", as
   assert.equal(cur?.status, "failed");
   assert.equal(cur?.turns.length, 0);
 });
+
+test("job — imported entries carry the owner as subject (opt-out + about-sort coverage)", async () => {
+  const { store } = await freshStore();
+  const comp = await awakenedCompanion(store, "u-subj");
+  const imp = await store.createChatImport("u-subj", comp.id, importOpts());
+  await runChatImportJob("dm:u-subj", { importId: imp.id }, jobDeps(store, fakeBrain()));
+
+  const about = await store.journalAboutSubject("dm:u-subj", "u-subj");
+  assert.equal(about.length, 4); // 3 windows + bond — the owner is on every one
+
+  // forgetJournalAbout is what opt-out calls on the dm scope — imported
+  // entries must die with the rest of the owner's derived data.
+  const deleted = await store.forgetJournalAbout("dm:u-subj", "u-subj");
+  assert.equal(deleted, 4);
+  assert.equal((await store.journalAboutSubject("dm:u-subj", "u-subj")).length, 0);
+});
+
+test("listChatImports + deleteChatImport — manager view, owner guard, journal cascade", async () => {
+  const { store } = await freshStore();
+  const compA = await awakenedCompanion(store, "u-own", "Nyx");
+  const compB = await awakenedCompanion(store, "u-other", "Kestrel");
+  const a = await store.createChatImport("u-own", compA.id, importOpts("a.jsonl"));
+  await store.createChatImport("u-other", compB.id, importOpts("b.jsonl"));
+
+  const list = await store.listChatImports("u-own");
+  assert.equal(list.length, 1);
+  assert.equal(list[0].id, a.id);
+  assert.equal(list[0].companionName, "Nyx");
+
+  // Not theirs — no delete, no leak.
+  assert.equal(await store.deleteChatImport("u-other", a.id), null);
+  assert.ok(await store.chatImportById(a.id));
+
+  // Theirs — row gone and every memory it wrote retracted by the FK cascade.
+  await store.saveImportedJournalEntries(
+    compA.id, "dm:u-own",
+    [{ kind: "moment", content: "a carried-over memory about to be undone", importance: 0.6, aboutSubjects: ["u-own"] }],
+    a.id, "2024-05-02T00:00:00Z", async () => true,
+  );
+  const removed = await store.deleteChatImport("u-own", a.id);
+  assert.equal(removed?.id, a.id);
+  assert.equal(await store.chatImportById(a.id), null);
+  const journal = await sql<[{ c: number | string }]>`
+    SELECT COUNT(*) AS c FROM companion_journal WHERE import_id = ${a.id}`;
+  assert.equal(Number(journal[0].c), 0);
+});

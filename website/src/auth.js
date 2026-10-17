@@ -161,6 +161,7 @@ export const cardAvatarUrl = path => supabase.storage.from("card-avatars").getPu
 export const myCompanions = () => supabase.rpc("my_companions");
 export const myChatImports = () => supabase.rpc("my_chat_imports");
 export const importChatHistory = payload => supabase.rpc("import_chat_history", { p_payload: payload });
+export const deleteChatImport = p_id => supabase.rpc("delete_chat_import", { p_id });
 
 // ── Terms/Privacy consent ────────────────────────────────────────────────────
 // The consent_events table is RLS-locked; both calls go through security
