@@ -8,6 +8,7 @@ import type { Brain } from "./brain.js";
 import {
   buildApiKeyOnboardingPayload,
   buildAwakenedCompanionPayload,
+  buildCompanionDmPayload,
   buildOnboardingDraftComponents,
   buildOnboardingDraftEmbed,
   buildOnboardingWelcomePayload,
@@ -1312,7 +1313,16 @@ async function handleDmMessage(
       }
     }
     if (dmReplyText) {
-      const sent = await message.reply({ content: dmReplyText, allowedMentions: { parse: [], repliedUser: false } });
+      // The companion's reply renders as a CV2 persona block (name + avatar)
+      // — bots can't impersonate per-message in DMs, so identity rides in the
+      // body. Plain-text fallback if the CV2 send rejects.
+      const sent = await message.reply({
+        ...buildCompanionDmPayload(companion, dmReplyText),
+        allowedMentions: { parse: [], repliedUser: false },
+      }).catch(() => message.reply({
+        content: `**${companion.name}**\n${dmReplyText}`,
+        allowedMentions: { parse: [], repliedUser: false },
+      }));
       dmReplied = true;
       inc("reply.sent");
       await store.recordMessage({

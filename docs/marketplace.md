@@ -288,6 +288,15 @@ Forum card → **Add** → `store.adoptListing` in one transaction:
   The DM routing gate uses `isAwakenedCompanionActive(existing)` — an adopted
   pick never suppresses the awakening flow.
 
+DM replies carry a per-message identity — `buildCompanionDmPayload` sends every
+companion reply as a Components V2 message: a bold name header + reply text in
+a Section with the companion's avatar as a Thumbnail accessory (avatarless
+companions get bare text displays — sections require an accessory; send
+failures fall back to plain `**name**\ntext`). Bots can't impersonate
+per-message in DMs (webhooks are guild-only), so this is how the answering
+companion is visible. System/onboarding replies stay classic text+embeds —
+the visual split between persona bubbles and bot chrome is intentional.
+
 Roster commands: `switch` (pick who answers DMs), `drop` (picker →
 `market:drop`), `summon`/`dismiss` (pickers when >1), `card`, `status`.
 

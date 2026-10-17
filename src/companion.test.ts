@@ -1,7 +1,7 @@
 import "dotenv/config";
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ChatInputCommandInteraction } from "discord.js";
+import { ComponentType, MessageFlags, type ChatInputCommandInteraction } from "discord.js";
 import { Brain, type LlmClient } from "./brain.js";
 import { createBrainResolver } from "./brains.js";
 import { ConversationTracker } from "./conversation.js";
@@ -14,6 +14,7 @@ import {
   buildCompanionEditModal,
   buildOnboardingDraftComponents,
   buildOnboardingDraftEmbed,
+  buildCompanionDmPayload,
   buildOnboardingWelcomePayload,
   buildUserApiKeyModal,
   handleCompanionModal,
@@ -984,6 +985,38 @@ test("DM lane: awakening owns DMs until the permanent companion is active — ad
     const hasNudge = Boolean(replied?.components?.length);
     assert.equal(hasNudge, nudge, `awaken nudge button should ${nudge ? "" : "not "}be offered`);
   }
+});
+
+test("DM persona header: CV2 payload carries name + avatar, degrades without one", () => {
+  // With an avatar: section holds the bold name header, the reply text, and a
+  // thumbnail accessory — the whole message is Components V2 (no `content`).
+  const withAvatar = buildCompanionDmPayload({ name: "Wren", avatarUrl: "https://cdn.discordapp.com/a.png" }, "hello there");
+  assert.equal(withAvatar.flags, MessageFlags.IsComponentsV2);
+  assert.equal("content" in withAvatar, false, "CV2 forbids a content field");
+  const section = withAvatar.components[0].toJSON();
+  assert.equal(section.type, ComponentType.Section);
+  assert.equal(section.components.length, 2);
+  assert.equal(section.components[0].type, ComponentType.TextDisplay);
+  assert.match(section.components[0].content, /\*\*Wren\*\*/);
+  assert.equal(section.components[1].content, "hello there");
+  assert.equal(section.accessory?.type, ComponentType.Thumbnail);
+  assert.equal((section.accessory as any)?.media?.url ?? (section.accessory as any)?.url, "https://cdn.discordapp.com/a.png");
+
+  // No avatar → no accessory, so no Section (Discord requires one per section);
+  // bare text displays carry the name header instead.
+  const bare = buildCompanionDmPayload({ name: "Nyx", avatarUrl: null }, "hi");
+  assert.equal(bare.flags, MessageFlags.IsComponentsV2);
+  assert.equal(bare.components.length, 2);
+  const bareJson = bare.components.map(c => c.toJSON() as { type: ComponentType; content: string });
+  assert.equal(bareJson[0].type, ComponentType.TextDisplay);
+  assert.match(bareJson[0].content, /\*\*Nyx\*\*/);
+  assert.equal(bareJson[1].content, "hi");
+
+  // Markdown in a companion name can't break the header; empty name falls back.
+  const tricky = buildCompanionDmPayload({ name: "Wre**n_1", avatarUrl: null }, "x");
+  assert.match((tricky.components[0].toJSON() as { content: string }).content, /Wre\\\*\\\*n\\_1/);
+  const unnamed = buildCompanionDmPayload({ name: "  ", avatarUrl: null }, "x");
+  assert.match((unnamed.components[0].toJSON() as { content: string }).content, /\*\*Companion\*\*/);
 });
 
 // ── DB-backed integration tests ───────────────────────────────────────────────

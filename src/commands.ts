@@ -1,4 +1,4 @@
-import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonInteraction, ButtonStyle, ChannelType, ChatInputCommandInteraction, EmbedBuilder, escapeMarkdown, ModalBuilder, ModalSubmitInteraction, PermissionFlagsBits, StringSelectMenuBuilder, TextInputBuilder, TextInputStyle, type Client, type MessageContextMenuCommandInteraction, type StringSelectMenuInteraction, type TextChannel } from "discord.js";
+import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonInteraction, ButtonStyle, ChannelType, ChatInputCommandInteraction, EmbedBuilder, escapeMarkdown, MessageFlags, ModalBuilder, ModalSubmitInteraction, PermissionFlagsBits, SectionBuilder, StringSelectMenuBuilder, TextDisplayBuilder, TextInputBuilder, TextInputStyle, ThumbnailBuilder, type Client, type MessageContextMenuCommandInteraction, type StringSelectMenuInteraction, type TextChannel } from "discord.js";
 import type { Brain } from "./brain.js";
 import { MemoryStore, type Memory } from "./database.js";
 import { EventStore } from "./events.js";
@@ -103,6 +103,25 @@ export function buildOnboardingWelcomePayload(userId: string) {
  *  true; `resolveDmCompanion` still decides who *answers* after that. */
 export function isAwakenedCompanionActive(awakened: Companion | null): boolean {
   return awakened?.onboardingState === "active";
+}
+
+/** DM companion reply payload — Components V2 persona block. Bots can't
+ *  impersonate per-message in DMs (webhooks are guild-only), so identity rides
+ *  in the message body: bold name header + reply text + avatar thumbnail when
+ *  the companion has one. System replies stay classic chrome — the visual
+ *  split is intentional. CV2 forbids content/embeds; the caller's send must
+ *  not set them. */
+export function buildCompanionDmPayload(companion: Pick<Companion, "name" | "avatarUrl">, text: string) {
+  const header = new TextDisplayBuilder().setContent(`**${escapeMarkdown(companion.name?.trim() || "Companion")}**`);
+  const body = new TextDisplayBuilder().setContent(text);
+  // Sections require an accessory (Discord API), so avatarless companions get
+  // bare text displays — same CV2 identity, minus the thumbnail.
+  const components = companion.avatarUrl
+    ? [new SectionBuilder()
+        .addTextDisplayComponents(header, body)
+        .setThumbnailAccessory(new ThumbnailBuilder().setURL(companion.avatarUrl))]
+    : [header, body];
+  return { flags: MessageFlags.IsComponentsV2 as const, components };
 }
 
 export function buildOnboardingDraftEmbed(spec: Partial<CompanionSpec>, turnCount: number): EmbedBuilder {
