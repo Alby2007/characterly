@@ -235,7 +235,7 @@ export async function handleHouseMemberRemove(member: MemberLike, deps: OpsDeps)
 // ── Verify gate ──────────────────────────────────────────────────────────────
 // Member = verified: a persistent card in HOUSE_VERIFY_CHANNEL_ID carries the
 // house:verify button; clicking it checks for a linked Characterly account and
-// grants the role. The lobby (welcome/rules/gate) is all @everyone sees, so
+// grants the role. The lobby + #faqs is all @everyone sees, so
 // the card must read sensibly to members still pending rules screening.
 
 const VERIFY_CUSTOM_ID = "house:verify";
@@ -617,7 +617,8 @@ export const WANTED_LAYOUT: Array<{
    *  category level so synced children inherit and stay synced). */
   readOnly?: boolean;
   /** readOnly: "member" (default when true) denies the Member role; "everyone"
-   *  denies @everyone — for lobby channels the unverified can see. */
+   *  denies @everyone — for channels the unverified can see (lobby, and #faqs:
+   *  the channel overwrite allows ViewChannel where the category denies it). */
   channels: Array<{ name: string; type: ChannelType; readOnly?: true | "member" | "everyone" }>;
 }> = [
   {
@@ -650,7 +651,7 @@ export const WANTED_LAYOUT: Array<{
     category: "HELP",
     readOnly: true,
     channels: [
-      { name: "faqs", type: ChannelType.GuildText },
+      { name: "faqs", type: ChannelType.GuildText, readOnly: "everyone" },
       { name: "support-ticket", type: ChannelType.GuildText },
       { name: "suggest-a-feature", type: ChannelType.GuildText },
     ],
@@ -681,9 +682,9 @@ const READONLY_DENY_PERMS = {
   CreatePrivateThreads: false,
 };
 
-function denyHas(deny: unknown, bit: bigint): boolean {
-  if (typeof deny === "bigint") return (deny & bit) === bit;
-  const d = deny as { has?(b: bigint): boolean } | null | undefined;
+function permHas(perms: unknown, bit: bigint): boolean {
+  if (typeof perms === "bigint") return (perms & bit) === bit;
+  const d = perms as { has?(b: bigint): boolean } | null | undefined;
   return typeof d?.has === "function" && d.has(bit);
 }
 
@@ -696,7 +697,10 @@ async function ensureReadOnly(ch: GuildChannelLike, created: string[], label: st
   const overwrites = ch.permissionOverwrites;
   if (!roleId || typeof overwrites?.edit !== "function") return;
   const cur = [...(overwrites.cache ?? [])].find(o => o.id === roleId);
-  if (cur && READONLY_DENY_BITS.every(b => denyHas(cur.deny, b))) return;
+  // Requires the ViewChannel allow too — a deny-all overwrite (e.g. a synced
+  // category's @everyone hide) must still get ViewChannel written, or a
+  // "everyone" readOnly channel stays invisible instead of visible-silent.
+  if (cur && READONLY_DENY_BITS.every(b => permHas(cur.deny, b)) && permHas(cur.allow, PermissionFlagsBits.ViewChannel)) return;
   await overwrites.edit(roleId, { ViewChannel: true, ...READONLY_DENY_PERMS })
     .then(() => { created.push(`🔒 ${label}`); })
     .catch(() => {});

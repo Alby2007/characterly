@@ -790,9 +790,16 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
     assert.equal(e!.perms.ViewChannel, true, "members keep view access");
   }
   // Synced children are left alone — they inherit the parent deny.
-  for (const n of ["faqs", "support-ticket", "suggest-a-feature", "privacy-policy", "how-to-publish-bots"]) {
+  for (const n of ["support-ticket", "suggest-a-feature", "privacy-policy", "how-to-publish-bots"]) {
     assert.ok(!edits.some(e => e.target === n), `synced #${n} inherits the category deny — no per-channel write`);
   }
+  // #faqs is the pre-verify exception: its channel-level @everyone overwrite
+  // allows ViewChannel over the category's hide, while denying its typing.
+  const faqsEdit = edits.find(e => e.target === "faqs");
+  assert.ok(faqsEdit, "#faqs needs its own @everyone overwrite to unhide it");
+  assert.equal(faqsEdit!.id, "g-house", "faqs overwrite targets @everyone (guild id)");
+  assert.equal(faqsEdit!.perms.ViewChannel, true, "unverified can read it");
+  assert.equal(faqsEdit!.perms.SendMessages, false, "…but can't post in it");
   // SYSTEM's readOnly channels are individually flagged (mixed category).
   for (const n of ["announcements", "events", "updates"]) {
     const e = edits.find(x => x.target === n && x.id === "r-member");
