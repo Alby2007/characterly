@@ -84,6 +84,9 @@ export interface GuildLike {
     cache: { find(fn: (c: GuildChannelLike) => boolean): GuildChannelLike | undefined };
     create(opts: { name: string; type: number; parent?: string; permissionOverwrites?: Array<{ id: string; allow: unknown; deny: unknown }> }): Promise<GuildChannelLike>;
   };
+  roles?: {
+    cache?: { find(fn: (r: { id: string; name: string }) => boolean): { id: string; name: string } | undefined };
+  };
 }
 
 export interface MemberLike {
@@ -621,9 +624,10 @@ export const WANTED_LAYOUT: Array<{
   /** Channel readOnly: "member" (default when true) denies the Member role;
    *  "everyone" denies @everyone — for channels the unverified can see (lobby,
    *  and #faqs: the channel overwrite allows ViewChannel where the category
-   *  denies it). `hidden` is the inverse: @everyone loses ViewChannel on that
+   *  denies it); "staff" is "everyone" plus send-access for the Mod/Admin
+   *  roles. `hidden` is the inverse: @everyone loses ViewChannel on that
    *  channel — used to keep select channels gated inside a visible category. */
-  channels: Array<{ name: string; type: ChannelType; readOnly?: true | "member" | "everyone"; hidden?: true }>;
+  channels: Array<{ name: string; type: ChannelType; readOnly?: true | "member" | "everyone" | "staff"; hidden?: true }>;
 }> = [
   {
     category: "SYSTEM",
@@ -634,6 +638,8 @@ export const WANTED_LAYOUT: Array<{
       { name: "log-in", type: ChannelType.GuildText }, // the verify gate lives here
       { name: "updates", type: ChannelType.GuildText, readOnly: true },
       { name: "events", type: ChannelType.GuildText, readOnly: true },
+      // Staff-posted billboard — everyone reads, Mods/Admins write.
+      { name: "characterly-web", type: ChannelType.GuildText, readOnly: "staff" },
     ],
   },
   {
@@ -726,6 +732,24 @@ async function ensureHiddenFromEveryone(ch: GuildChannelLike, created: string[],
     .catch(() => {});
 }
 
+/** "Staff" surface — everyone reads, only Mod/Admin write: @everyone gets the
+ *  visible-silent overwrite, then each staff role (looked up by name — the
+ *  house's are canonical) gets an explicit send allow that overrides the deny. */
+async function ensureStaffOnly(ch: GuildChannelLike, created: string[], label: string, guild: GuildLike): Promise<void> {
+  await ensureReadOnly(ch, created, label, guild.id);
+  const overwrites = ch.permissionOverwrites;
+  if (typeof overwrites?.edit !== "function") return;
+  for (const name of ["Mod", "Admin"]) {
+    const role = guild.roles?.cache?.find(r => normName(r.name) === normName(name));
+    if (!role) continue;
+    const cur = [...(overwrites.cache ?? [])].find(o => o.id === role.id);
+    if (cur && permHas(cur.allow, PermissionFlagsBits.SendMessages)) continue;
+    await overwrites.edit(role.id, { ViewChannel: true, SendMessages: true, SendMessagesInThreads: true })
+      .then(() => { created.push(`✍️ ${label} → ${name}`); })
+      .catch(() => {});
+  }
+}
+
 /** Create missing categories + channels by name. Idempotent — returns the
  * names of what it created ([] when the layout is already complete). */
 export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
@@ -782,7 +806,9 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
       // Explicit readOnly channels (mixed parents like SYSTEM) and children
       // that weren't synced to a readOnly parent need their own deny.
       // "everyone" targets the @everyone role — its id is the guild id.
-      if (target && (wanted.readOnly || (group.readOnly === true && syncBefore.get(normName(wanted.name)) !== true))) {
+      if (target && wanted.readOnly === "staff") {
+        await ensureStaffOnly(target, created, `#${wanted.name}`, guild);
+      } else if (target && (wanted.readOnly || (group.readOnly === true && syncBefore.get(normName(wanted.name)) !== true))) {
         const roleId = wanted.readOnly === "everyone" ? guild.id : config.houseMemberRoleId;
         await ensureReadOnly(target, created, `#${wanted.name}`, roleId);
       }
@@ -933,6 +959,20 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
           "**#support-ticket** gets a human. Got an idea instead? **#suggest-a-feature** — we actually read it.",
         ),
     ],
+  },
+  {
+    channel: "characterly-web",
+    version: 1,
+    embeds: () => [new EmbedBuilder()
+      .setTitle("Characterly on the web")
+      .setDescription(
+        `Everything your account does lives at **[${config.siteUrl.replace(/\/+$/, "").replace(/^https?:\/\//, "")}](${config.siteUrl})** —\n\n` +
+        "• **Dashboard** — token balance, Premium, token packs\n" +
+        "• **Imports** — upload a character card or a chat transcript and your companion becomes them / remembers it\n" +
+        "• **Settings** — memory preferences, consent, your linked Discord\n" +
+        "• **Delete** — your data, gone on request\n\n" +
+        "Your Discord ↔ web link is what ties it together — `/link` in my DMs if you haven't yet.",
+      )],
   },
 ];
 

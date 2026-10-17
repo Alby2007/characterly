@@ -765,7 +765,7 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
     mkCat("SYSTEM"), mkCat("CHARACTER MARKETPLACE"), mkCat("RESOURCES"), mkCat("HELP"), mkCat("SERVICES"),
     mkCh("welcome", "cat-system", true),
     mkCh("announcements", "cat-system", false), mkCh("events", "cat-system", false), mkCh("updates", "cat-system", false),
-    mkCh("rules", "cat-system", true), mkCh("log-in", "cat-system", true),
+    mkCh("rules", "cat-system", true), mkCh("log-in", "cat-system", true), mkCh("characterly-web", "cat-system", true),
     mkCh("characters", "cat-character marketplace", true, 15),
     ...["what-is-characterly", "what-is-companionly", "get-companionly", "privacy-policy", "how-to-publish-bots"]
       .map(n => mkCh(n, "cat-resources", true)),
@@ -778,6 +778,7 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
       cache: { find: (fn: (c: any) => boolean) => existing.find(fn) },
       create: async (o: any) => ({ id: `n-${o.name}`, ...o, parentId: o.parent }),
     },
+    roles: { cache: { find: (fn: (r: any) => boolean) => [{ id: "r-mod", name: "Mod" }, { id: "r-admin", name: "Admin" }].find(fn) } },
   };
 
   await ensureHouseLayout(guild as any);
@@ -814,6 +815,16 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
   assert.equal(faqsEdit!.id, "g-house", "faqs overwrite targets @everyone (guild id)");
   assert.equal(faqsEdit!.perms.ViewChannel, true, "unverified can read it");
   assert.equal(faqsEdit!.perms.SendMessages, false, "…but can't post in it");
+  // #characterly-web is staff-posted: @everyone visible-silent, Mod+Admin write.
+  const webLock = edits.find(e => e.target === "characterly-web" && e.id === "g-house");
+  assert.ok(webLock, "#characterly-web needs the @everyone visible-silent overwrite");
+  assert.equal(webLock!.perms.ViewChannel, true);
+  assert.equal(webLock!.perms.SendMessages, false);
+  for (const rid of ["r-mod", "r-admin"]) {
+    const e = edits.find(x => x.target === "characterly-web" && x.id === rid);
+    assert.ok(e, `#characterly-web needs a send allow for ${rid}`);
+    assert.equal(e!.perms.SendMessages, true, "staff can post");
+  }
   // SYSTEM's readOnly channels are individually flagged (mixed category).
   for (const n of ["announcements", "events", "updates"]) {
     const e = edits.find(x => x.target === n && x.id === "r-member");
@@ -879,12 +890,12 @@ test("ensureResourcePosts posts marked embeds once; dedupes extras; edits stale 
       messages: { fetch: async () => (chanMsgs[id] ?? []).map(m => msgsById.get(m)!).filter(Boolean) },
     }),
   });
-  const names = ["what-is-characterly", "what-is-companionly", "get-companionly", "privacy-policy", "how-to-publish-bots", "faqs"];
+  const names = ["what-is-characterly", "what-is-companionly", "get-companionly", "privacy-policy", "how-to-publish-bots", "faqs", "characterly-web"];
   const chans = names.map(n => ({ id: `c-${n}`, name: n, type: 0 }));
   const guild = { id: HOUSE, channels: { cache: { find: (fn: (c: any) => boolean) => chans.find(fn) } } };
 
   const out = await ensureResourcePosts(deps, guild as any);
-  assert.equal(out.filter(s => s.startsWith("📝")).length, 4, "posts the 4 channels lacking a marked post");
+  assert.equal(out.filter(s => s.startsWith("📝")).length, 5, "posts the 5 channels lacking a marked post");
   assert.deepEqual(deleted, ["m-dup"], "older duplicate deleted, newest kept");
   assert.deepEqual(edited, ["m-stale"], "stale post edited in place, not reposted");
   const staleAfter = msgsById.get("m-stale")!.embeds;
