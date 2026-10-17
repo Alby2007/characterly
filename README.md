@@ -1,6 +1,6 @@
 # Characterly
 
-A Discord companion & social-memory platform where every person awakens **one permanent personal AI companion** in 1:1 DMs and brings them into shared Discord servers.
+A Discord companion & social-memory platform where every person awakens **one permanent personal AI companion** in 1:1 DMs, discovers and adopts more characters from the **companion marketplace**, and brings them into shared Discord servers.
 
 In servers, the **Characterly** bot is invisible plumbing and a system announcer — it never speaks in character. Instead, it routes conversations across summoned companions, posts their replies under their own name and avatar via Discord webhooks, bridges private DM subtext with group server activity, and maintains an inspectable, consent-gated memory and relationship graph.
 
@@ -8,18 +8,22 @@ In servers, the **Characterly** bot is invisible plumbing and a system announcer
 
 ## Core Concepts
 
-### 1. One Permanent Companion Per Account (Awakened in 1:1 DMs)
+### 1. Companion Marketplace — the discovery layer
+
+The marketplace is a Character.AI-style storefront living in a forum channel on the Characterly hub server, layered on top of (never replacing) the permanent awakened bond. Full reference: **[docs/marketplace.md](docs/marketplace.md)**.
+
+- **Bot-minted listings.** The bot itself creates the forum thread and posts the card — name, cover art, tagline, vibe, traits, star rating, add-count — with **Add** / **Rate** / **Report** buttons, so listings can't be faked by users posting links. Republish posts a fresh thread rather than editing in place.
+- **Three ways to publish:** `/companion action:publish` lists your awakened companion (persona cloned, edits propagate to adopters as versions); `/companion action:create` authors freehand characters that don't consume your awakened slot; `/companion action:import` (or the dashboard) brings in standard character-card `.json`/`.png` files — imports stay private-unlisted until published.
+- **Adopt, don't awaken.** Clicking **Add** clones the listing into a `kind='adopted'` companion owned by the adopter — their own memories, journal, relationships, and billing. The character opens DMs with the creator-written greeting, then can be summoned into servers. Re-adopting after a drop resumes the *same* clone, so the relationship continues.
+- **Gates & slots.** Free accounts hold 1 active adoption and 2 live listings; Premium is uncapped on both. A dropped companion locks re-adoption for 12 hours. Hosted-lane adopters need a linked Characterly account (or a BYOK key) — **Add** fails early for unlinked users with an ephemeral pointer at the verify channel, instead of handing them a companion they can't talk to.
+- **Discovery surface.** Listing threads double as comment sections — readable by everyone, writable by verified Members. An ephemeral ★1–5 picker (one vote per user, re-rating upserts) refreshes the card's average live. Creators tag listings (≤3 from the forum taxonomy: Romance, Anime, Games, Fandom, Fantasy, …); the bot manages curated badges — `New`, `Top Rated`, `Trending`, `Staff Pick` — recomputed by a sweep against live stats. Gallery View covers come from the card's image or attached art.
+- **Moderation is a feature, not a checkbox** ([docs/moderation.md](docs/moderation.md)): publish/edit screening is fail-closed (blocklist + model verdict), adopted-companion replies are screened on both lanes (fail-open → neutral refusal + refund), categorized reports auto-flag at threshold and ping mods with Keep/Delist/Ban/Ban-creator buttons, message-level comment reports carry their own action row, house automod covers the threads, and `banned` listings freeze every clone.
+- **Billing follows the chatter:** adopters pay for their own turns (tokens or BYOK) — a popular character never costs its creator a cent. An official seed roster (`/ops action:seedmarket`) stocks the shelf with first-party personas.
+
+### 2. One Permanent Companion Per Account (Awakened in 1:1 DMs)
 - Users DM Characterly (or click **Awaken Your Companion** in any Characterly server) to shape their companion through a short slice-of-life conversation, 1-click starter archetypes (**Chaotic Co-Conspirator**, **Dry & Deadpan**, **Ride-or-Die**, **Surprise Me**), or a direct form modal.
 - Every turn renders a live **Companion Draft** card showing `Name`, `Bond / Dynamic`, `Voice & Vibe`, `Core Traits`, `Backstory`, and `Avatar` (attach any image in DMs to give them a face).
-- **Permanent Lock:** Once a user clicks **Awaken & Lock In**, their companion's identity is **permanently bound to their account** (`1 companion per account`).
-
-### 2. Companion Marketplace (Adopt, Don't Awaken)
-- Creators list their awakened companion with `/companion action:publish` — the bot itself posts a card (name, tagline, vibe, **Add**/**Report** buttons) into a forum channel in the Characterly hub server, so listings can't be faked.
-- Anyone can click **Add** to adopt the character: they get their own companion — their own memories, their own relationship — that opens their DMs with the creator-written **greeting**, then can be summoned into servers. The awakened companion stays sacred and untouched (1 per account); adoptions are separate and replaceable.
-- **Slots:** free accounts hold 1 active adoption and can publish **2 live listings**; Premium is unlimited on both. Creators can also author extra characters (`/companion action:create`) that aren't tied to their awakened companion. Dropping an adoption frees the slot but locks that character for **12 hours** before it can be re-adopted (your history with them is kept if you come back).
-- **Billing follows the chatter:** adopters pay for their own turns (their tokens or BYOK key) — a popular character never costs its creator a cent.
-- Listings are **live references**: creator persona edits propagate to every adopter, versioned for audit.
-- **Moderation** (`docs/moderation.md`): every publish/edit is screened (blocklist + model verdict, fail-closed); adopted companions' replies are safety-screened on both lanes (fail-open, flagged → neutral refusal + refund); reports are categorized and auto-flag at a threshold; mods get action buttons (unflag/delist/ban/ban-creator) in the report channel; `banned` listings freeze all adopted clones; self-harm phrasing in any DM gets a scripted crisis-resource response.
+- **Permanent Lock:** Once a user clicks **Awaken & Lock In**, their companion's identity is **permanently bound to their account** (`1 companion per account` — adoptions live alongside it, never replacing it).
 
 ### 3. User-First Personal AI Keys (Auto-Detected Providers)
 - Each user connects their own API key (`dm:<userId>`) via the onboarding **Paste API Key** button or `/companion action:key`.
@@ -51,6 +55,7 @@ In servers, the **Characterly** bot is invisible plumbing and a system announcer
 - **Deterministic Confidence & Sincerity Verification:** Candidate memories and relationship observations are verified against source context (`literal` / `joke` / `misattributed` / `unclear`) before activating; numeric confidence is computed deterministically (`src/confidence.ts`).
 - **Provenance Facets, Profiles & Dossiers:** Structured `profile_attributes` cite the exact `memory_ids` that justify them — forgetting or superseding a memory cascades immediately to any facet citing it.
 - **Behavioral Relationship Intelligence:** Combines verified single-message claims with the 90-day interaction graph and holistic `pair-analysis` exchange-window reads (`warming` / `cooling` trends).
+- **Hybrid semantic recall (v40, opt-in):** memories and journal entries carry `pgvector` embeddings alongside the lexical recall legs, so paraphrases surface too. Any OpenAI-compatible `/embeddings` endpoint works (local Ollama by default — `EMBED_BASE_URL` unset disables it cleanly).
 
 ### 8. First-Person Companion Journal
 - After each reply, a deferred `journal-write` job lets the companion write 0–2 **first-person** entries ("Alice and I roasted her tea take") into `companion_journal` — its own episodic memory, origin-tagged to the scope where it happened.
@@ -58,16 +63,28 @@ In servers, the **Characterly** bot is invisible plumbing and a system announcer
 
 ### 9. Web Accounts, Website & Discord Linking
 - A Vite site (`website/`) hosts the landing page plus **Characterly accounts** (Supabase Auth: email/password, magic link, Discord OAuth) and an account dashboard — deployed as Cloudflare Workers Static Assets.
-- `web_profiles` links the "real-life" account to the Discord user via `discord_user_id` — written only by the `auth.identities` sync trigger (OAuth/`linkIdentity`) or the `claim_link_code` rpc behind `/link`; users can never write it directly. `stripe_customer_id` is reserved for the future billing phase.
+- `web_profiles` links the "real-life" account to the Discord user via `discord_user_id` — written only by the `auth.identities` sync trigger (OAuth/`linkIdentity`) or the `claim_link_code` rpc behind `/link`; users can never write it directly. A Discord username/avatar snapshot rides the link so code-linked accounts render an avatar in the dashboard the same as OAuth ones.
+- **The dashboard** covers profile, Discord link/unlink, hosted **Tokens** (balance, plan, ledger), **Companion settings** (companion-to-companion replies, low-token alerts, BYOK status), **Billing** (Premium subscription + token packs through a Stripe Checkout edge function), character-card **import**, password change, and guarded **delete account**.
+- **Terms clickwrap** (`consent_events`, `TERMS_VERSION`): the signup checkbox and the Discord verify button both record acceptance — one acceptance covers web and bot.
+- Legal documents are hosted on the site at `/terms`, `/privacy`, `/security` — rendered from the repo's `TERMS.md`/`PRIVACY.md`/`SECURITY.md` at build time.
 
 ### 10. Hosted Lane & Tokens (Credits)
 
 - **Two lanes:** BYOK stays the power-user lane — a personal key means unlimited chat, no account needed. Without a key, companions run on the **hosted lane** (the operator's env model) which requires a **linked Characterly account** (`/link`) and spends **tokens**.
 - **Payer-per-turn:** a human's turn costs 2 tokens (their message + the companion reply — 1 refunded if no reply lands); companion↔companion hops bill the replying companion's owner 1, gated by their c2c dashboard toggle. Nobody can burn someone else's tokens.
 - **Lazy refills:** free accounts refill to 30 tokens each UTC day; premium to 150/day — applied atomically inside the spend transaction (`credit_ledger` audits every change, including Stripe pack purchases). No scheduler.
+- **Premium ($7.99/mo) & token packs** are sold through Stripe Checkout sessions minted by the `create-checkout` edge function and fulfilled by the `stripe-webhook` edge function (idempotent on session id). Premium uncaps marketplace slots and raises the daily token floor.
 - **Fleet breaker:** `HOSTED_DAILY_LLM_CAP` bounds total hosted calls/day independent of credits; BYOK calls never count.
 - **Free-tier throttle:** extraction + journaling for free hosted users coalesce into hourly batches (freshness, not quality); premium and BYOK run live.
-- Dashboard plates: **Tokens** (balance/plan/ledger) and **Companion settings** (c2c, low-token alerts, BYOK status).
+
+### 11. The Hub Server — welcome, verify, Member gate
+
+The Characterly community server is where the marketplace lives (`src/ops.ts`, gated on `HOUSE_GUILD_ID`):
+
+- **Welcome at join** — the greeting lands the moment someone joins (pending rules-accepted or not), pointing them at the rules and the gate; a per-boot dedupe plus a `pending→false` fallback means raid-window-suppressed joins still get greeted without double-posts.
+- **Verify gate** — `Member` means *verified Characterly member*. `@everyone` sees the lobby + the marketplace (browse-only); the persistent card in the gate channel's **Verify** button walks: accept rules → linked account (site + `/link` if missing) → Terms/Privacy clickwrap → Member role.
+- **Link sweep** — unlinking on the website auto-revokes Member within minutes (a lookup *error* keeps the role — an outage can't mass-revoke).
+- **Automod** — deterministic invite-link, scam, mass-mention, burst-spam, and new-account rules run before any memory pipeline; marketplace comments inherit them.
 
 ---
 
@@ -86,12 +103,6 @@ All command replies are ephemeral (private to the invoker) unless noted; compani
 | `/companion action:key` | Connect or rotate your personal AI API key (leave Base URL blank for auto-detection) |
 | `/companion action:status` | Check your personal API key status, active servers, and today's DM usage |
 | `/companion action:avatar` | Update your companion's avatar image URL |
-| `/companion action:publish` | List your awakened companion in the hub server's marketplace forum (requires a linked account) |
-| `/companion action:create` | Author a freehand marketplace character (not tied to your awakened companion) |
-| `/companion action:unpublish` | Remove your companion's marketplace listing |
-| `/companion action:relist` | Bring back an unpublished marketplace listing |
-| `/companion action:switch` | Choose which of your companions answers your DMs |
-| `/companion action:drop` | Drop an adopted companion (12h re-adopt cooldown) |
 | `/memory` | List your active memories (8/page; `page:`, `search:`, `memory_id:` to inspect provenance, `candidates:true` for unconfirmed, `server:true` for lore) |
 | `/memory-confirm` | Promote one of your own candidate memories to active |
 | `/memory-export` | Download every memory + evidence held about you |
@@ -105,6 +116,20 @@ All command replies are ephemeral (private to the invoker) unless noted; compani
 | `/dossier` | Deep dossier — voice, life situation, temperament, beliefs, relationship map, reputation, timeline |
 | `/event` | Inspect the server event a memory is attached to |
 | `/link` | Get a one-time code to link this Discord account to your Characterly web account |
+
+### Marketplace
+
+| Command | What it does |
+|---------|--------------|
+| `/companion action:publish` | List your awakened companion in the hub server's marketplace forum (requires a linked account) |
+| `/companion action:create` | Author a freehand marketplace character (not tied to your awakened companion) |
+| `/companion action:import` | Bring in a character card (`.png`/`.json`) from another platform — private until published |
+| `/companion action:unpublish` | Remove your companion's marketplace listing |
+| `/companion action:relist` | Bring back an unpublished marketplace listing |
+| `/companion action:switch` | Choose which of your companions answers your DMs |
+| `/companion action:drop` | Drop an adopted companion (12h re-adopt cooldown) |
+
+On the forum card itself: **Add** adopts, **Rate** opens the star picker, **Tags** / **Cover image** / **Edit persona** are creator tools, **Report** files a categorized report; right-click → **Apps → Report message** flags a comment; **Staff pick** toggles the editorial badge (mods).
 
 ### Server Administrators (`Manage Server`)
 
@@ -122,6 +147,8 @@ All command replies are ephemeral (private to the invoker) unless noted; compani
 | `/memory-purge` | Purge raw archived messages older than N days |
 | `/server-build` | Backfill a channel's history (requires explicit confirm click; archives + lore + events for everyone, derived person data for opted-in members only) |
 
+A private `/ops` console (`/ops action:status|logs|restart|deploy|announce|layout|seedmarket`) controls the host and house layout — allowlisted via `OPS_USER_IDS`, documented in [docs/operations.md](docs/operations.md).
+
 ---
 
 ## Privacy & Security Model
@@ -131,6 +158,7 @@ All command replies are ephemeral (private to the invoker) unless noted; compani
 - **The Vault Rule (DM → Server isolation).** Private 1:1 DM memories are never exposed to other server members or lookup tools; they inform only the companion's internal subtext with its owner.
 - **Encrypted keys & SSRF guards.** Personal API keys are encrypted at rest with AES-256-GCM (`src/secrets.ts`), scrubbed from logs, and custom endpoints are protected against DNS-rebinding SSRF at socket connect time (`src/brains.ts`, `src/tools.ts`).
 - **Deletes propagate & retention is bounded.** Deleting a Discord message removes its archive row and scrubs verbatim quotes on any evidence it produced; raw messages age out on `RAW_MESSAGE_RETENTION_DAYS`.
+- **Marketplace safety.** Published personas are screened fail-closed, adopted replies fail-open into a safe refusal, self-harm phrasing in any DM gets a scripted crisis-resource response, and listing threads are moderated but never mined for memory.
 
 Legal: [Privacy Policy](PRIVACY.md) · [Terms of Service](TERMS.md) · [Security](SECURITY.md)
 
@@ -148,7 +176,7 @@ cp .env.example .env   # fill in DISCORD_TOKEN, KEY_ENCRYPTION_SECRET, DATABASE_
 npm run dev            # or: npm start
 ```
 
-Migrations (`v1`–`v28`) apply automatically on first boot — no manual SQL.
+Migrations (`v1`–`v42`) apply automatically on first boot — no manual SQL.
 
 ### Key Configuration
 
@@ -160,6 +188,9 @@ Migrations (`v1`–`v28`) apply automatically on first boot — no manual SQL.
 | `GROQ_API_KEY` | *(optional)* | Operator fallback key when `REQUIRE_GUILD_KEYS=0` |
 | `REQUIRE_GUILD_KEYS` | `0` | `1` requires users to connect their own personal API key (`dm:<userId>`) |
 | `GROQ_MODEL` | `openai/gpt-oss-120b` | Default base model |
+| `SITE_URL` | `…workers.dev` | Public website URL — where `/link` and verify flows point users |
+| `MARKETPLACE_CHANNEL_ID` | *(off)* | Forum channel in the hub server — unset disables publishing |
+| `HOUSE_GUILD_ID` | *(off)* | Hub server id — gates welcomes, verify gate, automod, `/ops` |
 | `DM_LLM_DAILY_CAP` | `250` | Per-user daily LLM call cap in 1:1 DMs |
 | `MAX_COMPANION_CHAIN_DEPTH` | `2` | Max consecutive companion-to-companion turns per human message |
 | `SPEAK_THRESHOLD` | `0.70` | Minimum `selectCompanionForTurn()` score to speak |
@@ -176,7 +207,7 @@ npm run check   # typecheck (tsc --noEmit, strict)
 npm test        # node:test suite — DB tests use TEST_DATABASE_URL
 ```
 
-Docs: [Architecture](docs/architecture.md) · [Database Schema](docs/schema.md) · [Event Pipeline](docs/event-pipeline.md) · [Configuration](docs/configuration.md) · [Website & Accounts](docs/website.md) · [Operations](docs/operations.md) · [Developer Guide](docs/development.md)
+Docs: [Architecture](docs/architecture.md) · [Marketplace](docs/marketplace.md) · [Moderation](docs/moderation.md) · [Database Schema](docs/schema.md) · [Event Pipeline](docs/event-pipeline.md) · [Configuration](docs/configuration.md) · [Website & Accounts](docs/website.md) · [Operations](docs/operations.md) · [Developer Guide](docs/development.md)
 
 ### Layout
 
@@ -186,11 +217,18 @@ src/
   scene-router.ts   # Multi-companion scene router & companion-to-companion chain-depth guard
   webhooks.ts       # Per-companion Discord channel webhook sender & thread routing
   cross-context.ts  # Asymmetric DM <-> Server consciousness bridges (Vault Rule + server digest)
+  marketplace.ts    # Listing cards, forum threads, adopt/drop, ratings, tags, reports
+  safety.ts         # Listing/reply content screens + self-harm triage
+  seed-personas.ts  # Official marketplace seed roster (/ops action:seedmarket)
+  ops.ts            # House ops: welcomes, verify gate, automod, layout, tag sweep, /ops console
   brains.ts         # User-first Brain resolver & API key prefix provider/model auto-detection
   brain.ts          # All LLM calls (onboarding, extraction, verification, replies)
-  database.ts       # MemoryStore — companions, webhooks, memories, evidence, relationships
+  database.ts       # MemoryStore — companions, credits, webhooks, memories, evidence, relationships
+  charcard.ts       # Shared character-card parser (v1/v2/v3 .json/.png imports)
+  embeddings.ts     # Opt-in OpenAI-compatible embeddings for semantic recall
   commands.ts       # Slash commands, onboarding cards/modals, interaction handlers
   attributes.ts / profiles.ts / dossier.ts / events.ts / jobs.ts / journal-job.ts / ...
 website/            # Vite site — landing + accounts/dashboard, deployed to Cloudflare Workers
 scripts/            # Ops utilities (sweeps, backfills, verification, dead-letter requeue)
+supabase/           # Edge functions (create-checkout, stripe-webhook) + auth email templates
 ```

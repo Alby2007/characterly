@@ -232,7 +232,7 @@ characterly/
 │   ├── db.ts                 # Shared postgres.js connection singleton
 │   ├── database.ts           # MemoryStore (Postgres: companions, journal, link codes, memories, edges)
 │   ├── events.ts             # EventStore (Postgres)
-│   ├── migrations.ts         # Versioned schema migrations (v1–v28)
+│   ├── migrations.ts         # Versioned schema migrations (v1–v42)
 │   ├── confidence.ts         # Deterministic confidence formulas
 │   ├── perception.ts         # Pre-filter regex, wake words, dismissals, tool cues
 │   ├── event-detection.ts    # EventPipeline — heuristic + LLM continuity
@@ -251,6 +251,12 @@ characterly/
 │   ├── server-ingest.ts      # Server-level historical build (ingest + /server-build)
 │   ├── ingest.ts             # CLI wrapper for runServerIngest
 │   ├── guild-lifecycle.ts    # Join disclosure card, 1-click enable, two-step decline opt-out, kick-purge
+│   ├── ops.ts                # House ops (HOUSE_GUILD_ID): welcomes, verify gate, automod, layout, tag sweep, /ops console
+│   ├── marketplace.ts        # Listing card embed/components, forum thread posting, curated-tag names
+│   ├── safety.ts             # Listing/comment blocklists, self-harm triage, safe refusal, safety classifier client
+│   ├── seed-personas.ts      # Official marketplace seed roster (/ops seedmarket)
+│   ├── charcard.ts           # Character-card (.json/.png) parser shared with the website
+│   ├── embeddings.ts         # Opt-in embeddings client for semantic recall (EMBED_*)
 │   ├── commands.ts           # Slash commands, onboarding cards/modals, interaction handlers
 │   ├── speech-gate.ts        # Standalone speak/silence evaluator for tests
 │   ├── reply-throttle.ts     # Per-user reply token bucket
@@ -261,14 +267,15 @@ characterly/
 │   ├── metrics.ts            # In-process operational counters (/status)
 │   ├── retry.ts              # Shared LLM retry helper (rate-limit aware)
 │   ├── test-helpers.ts       # Shared Postgres test utilities (TEST_DATABASE_URL)
-│   └── *.test.ts             # 30 test files, co-located with source
+│   └── *.test.ts             # 39 test files, co-located with source
 ├── website/
 │   ├── index.html            # Landing page
 │   ├── account.html          # Sign in / sign up / magic link / recovery
-│   ├── dashboard.html        # Profile, Discord link card, password, account deletion
+│   ├── dashboard.html        # Profile, Discord link card, tokens, companion settings, import, billing, password, account deletion
+│   ├── terms.html / privacy.html / security.html   # Legal pages (rendered from the repo's .md files)
 │   ├── 404.html              # Not-found page (Worker 404-page handling)
 │   ├── public/               # favicon.svg, mark.svg (brand mark), seal.svg (wax seal)
-│   ├── src/                  # base.js (shared entry), main.js, account.js, dashboard.js, auth.js, config.js, supabase.js, styles.css
+│   ├── src/                  # base.js (shared entry), main.js, account.js, dashboard.js, auth.js, legal.js, import-card.js, config.js, supabase.js, styles.css
 │   ├── cloudflare.config.ts  # characterly-website Worker (static assets)
 │   └── vite.config.js        # Multi-page inputs + @cloudflare/vite-plugin
 ├── .github/workflows/
@@ -276,9 +283,11 @@ characterly/
 ├── scripts/                  # Operational one-shots (see table above)
 ├── docs/
 │   ├── architecture.md       # Module map, companions, journal, web accounts, data flow
-│   ├── schema.md             # Database schema reference (through v28)
+│   ├── schema.md             # Database schema reference (through v42)
 │   ├── event-pipeline.md     # Event detection explainer
 │   ├── configuration.md      # Env var + website config reference
+│   ├── marketplace.md        # Marketplace end-to-end: publish/adopt, ratings, comments, tags, moderation
+│   ├── moderation.md         # Marketplace content policy + enforcement spec
 │   ├── website.md            # Web stack: pages, Supabase Auth setup, linking, deploy
 │   ├── operations.md         # Runbook: deploys, VM/systemd, DB access, failure modes, secrets
 │   ├── development.md        # This file

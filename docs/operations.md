@@ -78,7 +78,7 @@ When `HOUSE_GUILD_ID` is set, `src/ops.ts` runs a private operator layer: member
 Supabase dashboard → SQL Editor, or `psql "$DATABASE_URL"`. The bot connects as `postgres` (bypasses RLS). Useful checks:
 
 ```sql
-SELECT * FROM schema_migrations ORDER BY version;          -- migration state (latest: 31)
+SELECT * FROM schema_migrations ORDER BY version;          -- migration state (latest: 42)
 SELECT type, count(*), max(attempts) FROM jobs
   GROUP BY type;                                         -- queue depth
 SELECT * FROM jobs WHERE attempts >= 5;                  -- dead letters

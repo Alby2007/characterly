@@ -23,7 +23,7 @@ Characterly is configured through environment variables validated at startup by 
 | `KEY_ENCRYPTION_SECRET` | unset | Master passphrase encrypting user API keys at rest (AES-256-GCM, SHA-256-derived). Required for `/companion action:key`, `/setup`, and the onboarding **Paste API Key** modal. When users leave Base URL blank, Characterly auto-detects Groq (`gsk_...`), OpenRouter (`sk-or-...`), OpenAI (`sk-...`), or xAI (`xai-...`). Any string; rotating it orphans existing `guild_keys` rows (recovery = re-run `/companion action:key` or `/setup`). |
 | `REQUIRE_GUILD_KEYS` | `0` | Hosted BYOK mode: `1` disables the operator `GROQ_API_KEY` fallback so companions and servers run strictly on user-supplied personal keys (`dm:<userId>`) — a keyless guild goes fully dormant (no archive, no replies, no LLM spend). Self-hosters leave this off. Note this is a *key* gate, orthogonal to the consent posture: every guild also starts dormant (`memory_enabled=0`) until an admin runs `/memory-resume`. |
 | `DM_LLM_DAILY_CAP` | `250` | Per-user daily LLM call cap for 1:1 DMs (`dm:<userId>` scope, resets at UTC midnight). |
-| `FREE_DAILY_CREDITS` | `20` | Free-plan hosted accounts refill to this balance each UTC day (hosted lane only). Applied lazily inside `spendCredits` — no scheduler. A refill tops up to the floor; a balance already above it keeps its headroom (grants don't stack). |
+| `FREE_DAILY_CREDITS` | `30` | Free-plan hosted accounts refill to this balance each UTC day (hosted lane only). Applied lazily inside `spendCredits` — no scheduler. A refill tops up to the floor; a balance already above it keeps its headroom (grants don't stack). |
 | `PREMIUM_DAILY_CREDITS` | `150` | Daily refill floor for premium accounts — high enough to feel unlimited (≈75 turns/day) while remaining metered so an abusive account stays bounded. |
 | `HOSTED_DAILY_LLM_CAP` | `20000` | Fleet-wide circuit breaker: max hosted (env-key) LLM calls per UTC day across all users. BYOK calls never count. When tripped, hosted chats get the capacity notice until UTC midnight. |
 | `LOW_CREDIT_ALERT` | `5` | Balance threshold for the once-per-day low-token DM (skippable via the dashboard Companion settings toggle). |
@@ -54,6 +54,41 @@ Characterly is configured through environment variables validated at startup by 
 | `REPLY_EXIT` | `1` | Honor the reply model's `end_conversation` flag — when the model reads a wrap-up ("ok cool thanks that's all") the human leaves the conversation, so wrap-ups the dismissal regex can't parse don't keep the +0.70 bonus alive for the full TTL. `0` ignores the flag; regex dismissal keeps working regardless. |
 | `ENGAGEMENT_TTL_MS` | `120000` | How long a participant stays "in conversation" after their last addressed message. Range 10s–1h. Longer = chattier mid-flow but slower to drop out. |
 | `PROACTIVE`, `PROACTIVE_DELAY_MS`, `PROACTIVE_DAILY_CAP`, `PROACTIVE_RESPONSE_WINDOW_MS`, `PROACTIVE_BACKOFF_MS` | — | **Legacy no-ops.** The proactive-speaking feature was removed (the bot is pure plumbing and never speaks unprompted). These variables are still parsed so old `.env` files don't fail validation, but nothing reads them — setting any of them has no effect. Same for `server_settings.proactive_enabled`. |
+
+### Companion marketplace
+
+The marketplace lives in a forum channel on the hub server. **`MARKETPLACE_CHANNEL_ID` unset disables publishing entirely** (`/companion action:publish`/`create` refuse; adoption and chat are unaffected). Behavior detail in [marketplace.md](marketplace.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `MARKETPLACE_CHANNEL_ID` | (off) | Forum channel where the bot posts listing threads. Needs **Create Public Threads** (+ **Manage Threads** for clean archiving). |
+| `MARKETPLACE_MOD_CHANNEL_ID` | unset | Text channel pinged on listing + comment reports, with mod action buttons. |
+| `MARKETPLACE_MOD_ROLE_IDS` | (ManageGuild) | Comma-separated role ids allowed to act on report pings — the marketplace-mod lane exists because mods may not hold Member/ManageGuild. |
+| `FREE_ADOPTION_SLOTS` | `1` | Active adoptions per free account (Premium uncapped; enforced atomically in `adoptListing`). |
+| `FREE_LISTING_SLOTS` | `2` | Live listings per free creator account (Premium uncapped; enforced inside the write transactions). |
+| `ADOPTION_COOLDOWN_MS` | `43200000` | Re-adopt lockout after a drop (min 1h, default 12h); the freed slot is usable by *other* listings immediately. |
+| `MARKETPLACE_REPORT_FLAG_THRESHOLD` | `3` | Reports that auto-flag a listing (moderation hold — only a mod action clears it). |
+| `MARKET_PUBLISH_DAILY_CAP` | `5` | New listings per creator per UTC day (republishes/relists don't consume it). |
+| `MARKET_REPORT_DAILY_CAP` | `20` | Reports per user per day — shared across listing and comment reports. |
+| `MARKET_ADOPT_DAILY_CAP` | `20` | Adoptions per user per day (anti-farming — inflates `add_count` otherwise). |
+| `MARKET_NEW_TAG_DAYS` | `7` | How long a fresh listing keeps the curated `New` badge. |
+| `MARKET_TOP_RATING_AVG` | `4.5` | Minimum average for the `Top Rated` badge. |
+| `MARKET_TOP_RATING_MIN` | `5` | Minimum rating count for `Top Rated`. |
+| `MARKET_TRENDING_COUNT` | `5` | Adoptions inside the window that earn `Trending`. |
+| `MARKET_TRENDING_WINDOW_H` | `72` | `Trending` window in hours. |
+| `SAFETY_MODEL` | `GROQ_MODEL` | Classifier model for listing publish/edit screens and adopted-companion reply screens. |
+
+### Semantic recall (embeddings)
+
+Opt-in hybrid retrieval — unset `EMBED_BASE_URL` disables the semantic legs cleanly and the lexical legs run as before. Any OpenAI-compatible `/embeddings` endpoint works (local Ollama, OpenAI, vLLM). Setup notes in [operations.md](operations.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `EMBED_BASE_URL` | (off) | OpenAI-compatible endpoint root (e.g. `http://127.0.0.1:11434/v1` for Ollama). |
+| `EMBED_MODEL` | `all-minilm` | Embedding model id. **Different dimensionality requires clearing stale vectors** (`UPDATE memories SET embedding=NULL; UPDATE companion_journal SET embedding=NULL;`). |
+| `EMBED_API_KEY` | `ollama` | Endpoint API key (any string for keyless local servers). |
+| `EMBED_DIMS` | `384` | Expected vector dimensionality — enforced in code since the columns are un-dimensioned `vector`. |
+| `EMBED_MAX_DISTANCE` | `0.55` | Cosine-distance ceiling for semantic hits — raise toward 0.65 if recall rarely fires. |
 
 ### House ops (private layer — our community server + this host)
 
