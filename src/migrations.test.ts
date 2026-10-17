@@ -830,3 +830,28 @@ test("migration v45 adds delete_chat_import RPC (auth-gated, skipped outside Sup
     assert.equal(still.length, 0);
   } finally { await sql.end(); }
 });
+
+test("migration v46 adds server_settings.quiet_channels, rolls back cleanly", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any);
+
+    const cols = await sql<Array<{ column_default: string | null }>>`
+      SELECT column_default FROM information_schema.columns
+      WHERE table_name = 'server_settings' AND column_name = 'quiet_channels'`;
+    assert.equal(cols.length, 1, "quiet_channels column missing");
+    assert.match(cols[0].column_default ?? "", /\{\}/, "default should be the empty array");
+
+    // Functional: a fresh guild row picks up the empty-list default.
+    await sql`INSERT INTO server_settings (guild_id) VALUES ('g-v46')`;
+    const [r] = await sql`SELECT quiet_channels FROM server_settings WHERE guild_id = 'g-v46'`;
+    assert.deepEqual(r.quiet_channels, []);
+
+    await runMigrations(sql as any, 45);
+    const gone = await sql<Array<{ column_name: string }>>`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'server_settings' AND column_name = 'quiet_channels'`;
+    assert.equal(gone.length, 0, "rollback should drop quiet_channels");
+  } finally { await sql.end(); }
+});

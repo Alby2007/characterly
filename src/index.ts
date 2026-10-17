@@ -1394,12 +1394,23 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   // sweep skips paused guilds anyway, so archive-during-pause rows would be
   // orphaned the moment they're written.
   if (!settings.memoryEnabled && !settings.replyEnabled) return;
+  // Threads inherit their parent channel's listing, so check both — a thread
+  // inside an ignored/quiet channel follows the parent (and can be listed on
+  // its own). isThread() (not parentId) keeps categories out of the match — a
+  // text channel's parentId is its category, and a category id in the list
+  // must not darken everything under it.
+  const parentChannelId = (message.channel as { isThread?: () => boolean; parentId?: string | null }).isThread?.()
+    ? (message.channel as { parentId?: string | null }).parentId
+    : null;
   // Ignored channels are truly invisible: no archive, no replies, no member
   // writes — checked before brainFor/recordMessage so nothing at all happens.
-  if (settings.ignoredChannels.includes(event.channelId)) return;
+  if (settings.ignoredChannels.includes(event.channelId) || (parentChannelId != null && settings.ignoredChannels.includes(parentChannelId))) return;
+  // Quiet channels suppress only companion speech (and companion system
+  // cards) — archiving and extraction below keep running.
+  const quiet = settings.quietChannels.includes(event.channelId) || (parentChannelId != null && settings.quietChannels.includes(parentChannelId));
   // Pure companion mode: only user-summoned companions speak in guild channels.
   const guildCompanions = await store.listGuildCompanions(event.guildId);
-  if (!senderCompanion && settings.replyEnabled && event.mentionsBot && noCompanionNoticeOnce(event.channelId)) {
+  if (!senderCompanion && settings.replyEnabled && !quiet && event.mentionsBot && noCompanionNoticeOnce(event.channelId)) {
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId("onboard:start")
@@ -1502,7 +1513,8 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   // Replies need summoned companions AND a resolvable brain — but archiving
   // and extraction above do not, so an enabled guild with zero companions
   // still builds memory (and /privacy's "Observing" status stays honest).
-  if (!settings.replyEnabled || !guildCompanions.length || !brain) return;
+  // Quiet channels end here too: memory continues, companions don't speak.
+  if (!settings.replyEnabled || quiet || !guildCompanions.length || !brain) return;
 
   const selection = selectCompanionForTurn(
     {

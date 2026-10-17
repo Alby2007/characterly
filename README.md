@@ -136,16 +136,17 @@ On the forum card itself: **Add** adopts, **Rate** opens the star picker, **Tags
 | Command | What it does |
 |---------|--------------|
 | `/companion action:kick user:@member` | Remove a member's companion from this server |
+| `/quiet-channel` / `/unquiet-channel` | Silence companions in a channel (defaults to the current one; threads inherit their parent) — Characterly still observes and remembers |
+| `/companions-pause` / `/companions-resume` | Silence companions server-wide — memory collection keeps running |
 | `/memory-pause` / `/memory-resume` | Pause or enable Characterly in this server — archiving included |
-| `/ignore-channel` / `/unignore-channel` | Make a channel invisible to Characterly — no archiving, no replies, no member writes, no `/server-build` scans |
-| `/memory-settings` | Show effective server settings (including ignored channels and daily LLM cap) |
+| `/ignore-channel` / `/unignore-channel` | Make a channel invisible to Characterly — no archiving, no replies, no member writes |
+| `/memory-settings` | Show effective server settings (including ignored and quiet channels and daily LLM cap) |
 | `/limits` | Set this server's daily LLM-call cap (0 = block all calls; usage resets each UTC day) |
 | `/status` | Uptime, operational counters, active summoned companions, queue health, today's LLM usage vs cap |
 | `/memory about:@member` | Inspect another member's memories |
 | `/memory stats:true` | Server memory counts |
 | `/memory-triage` | Newest memories across all members + contested attributes |
 | `/memory-purge` | Purge raw archived messages older than N days |
-| `/server-build` | Backfill a channel's history (requires explicit confirm click; archives + lore + events for everyone, derived person data for opted-in members only) |
 
 A private `/ops` console (`/ops action:status|logs|restart|deploy|announce|layout|seedmarket`) controls the host and house layout — allowlisted via `OPS_USER_IDS`, documented in [docs/operations.md](docs/operations.md).
 
@@ -153,7 +154,7 @@ A private `/ops` console (`/ops action:status|logs|restart|deploy|announce|layou
 
 ## Privacy & Security Model
 
-- **Dormant by default in servers.** New servers observe nothing until an admin clicks **Enable Characterly** or runs `/memory-resume`. Removing Characterly from a server deletes every row it stored there.
+- **Dormant by default in servers.** New servers observe nothing until an admin clicks **Enable Characterly** or runs `/memory-resume`. Removing Characterly from a server deletes every row it stored there. Admins then get a tiered dial per scope: **quiet** a channel (companions silent, still observed) → **pause companions** (silent server-wide) → **pause memory** (all off) → **ignore** a channel (fully invisible, no archive either).
 - **Derived data is opt-in.** Person memories, relationship observations, attributes, profiles, and dossiers form only for members who consent (`/opt-in`, `/profile-build`, or summoning a companion).
 - **The Vault Rule (DM → Server isolation).** Private 1:1 DM memories are never exposed to other server members or lookup tools; they inform only the companion's internal subtext with its owner.
 - **Encrypted keys & SSRF guards.** Personal API keys are encrypted at rest with AES-256-GCM (`src/secrets.ts`), scrubbed from logs, and custom endpoints are protected against DNS-rebinding SSRF at socket connect time (`src/brains.ts`, `src/tools.ts`).

@@ -129,7 +129,7 @@ One row per curated fact, preference, episode, or piece of server lore. The core
 
 **Indexes:** `memories_lookup (guild_id, subject_id, status, importance DESC)`; `memories_content_trgm` — GIN trigram index (v11) powering the near-duplicate fallback in `saveMemory()`: when the exact key misses, the best `similarity(content)` row in the same `(guild_id, subject_id, kind)` scope is reinforced instead. Matches and near-misses are audited in `memory_history` as `dedup_matched` / `dedup_near_miss`.
 
-**Semantic dedup:** the trigram path only catches lexically similar rephrasings. A nightly maintenance pass (`applyRetention`, also at end of ingest) hands each member's memory list to `Brain.dedupMemoriesBatch`, which returns `duplicate` groups and `contradicts` pairs. Confirmed duplicate groups merge via `applyDedupGroups`/`mergeDuplicate`: evidence moves to a deterministic canonical row (active > candidate, then confidence, then lowest id) — except rows colliding on `message_id`, which stay on the superseded loser because `memory_history.evidence_id` references them. The losers become `superseded` with `superseded_by` pointing at the canonical — never deleted. Canonical status/confidence are untouched (merging cannot promote). Guards drop groups that mix subjects, kinds, or non-live statuses; `episode` kind and `unknown` subjects are never offered. `contradicts` verdicts only log `dedup_contradiction` history rows — no status change.
+**Semantic dedup:** the trigram path only catches lexically similar rephrasings. A nightly maintenance pass (`applyRetention`) hands each member's memory list to `Brain.dedupMemoriesBatch`, which returns `duplicate` groups and `contradicts` pairs. Confirmed duplicate groups merge via `applyDedupGroups`/`mergeDuplicate`: evidence moves to a deterministic canonical row (active > candidate, then confidence, then lowest id) — except rows colliding on `message_id`, which stay on the superseded loser because `memory_history.evidence_id` references them. The losers become `superseded` with `superseded_by` pointing at the canonical — never deleted. Canonical status/confidence are untouched (merging cannot promote). Guards drop groups that mix subjects, kinds, or non-live statuses; `episode` kind and `unknown` subjects are never offered. `contradicts` verdicts only log `dedup_contradiction` history rows — no status change.
 
 #### Memory lifecycle statuses
 
@@ -203,10 +203,11 @@ One row per guild. Controls pause state and retention.
 | `proactive_enabled` | INTEGER | **Legacy/inert (v13).** The proactive-speaking feature was removed when the bot became pure plumbing; the column remains for schema compatibility but nothing reads it to send a message |
 | `raw_retention_days` | INTEGER | Rolling window for raw message purge |
 | `announced_at` | TIMESTAMPTZ NULL | Set once the join disclosure card posts — the idempotency marker for `announceIfNeeded` |
-| `ignored_channels` | TEXT[] | Channels excluded from archiving, replies, member writes, and historical ingest — managed via `/ignore-channel` / `/unignore-channel` |
+| `ignored_channels` | TEXT[] | Channels excluded from archiving, replies, and member writes — managed via `/ignore-channel` / `/unignore-channel` |
+| `quiet_channels` | TEXT[] | Channels where companions stay silent (no replies or system cards) while archiving/extraction continue — managed via `/quiet-channel` / `/unquiet-channel`; threads inherit their parent's listing |
 | `llm_daily_cap` | INTEGER | Per-guild LLM call budget per UTC day (default 1000; 0 = all calls blocked) — set via `/limits` |
 
-Row is created with dormant defaults (`memory_enabled=0`, `reply_enabled=0`) on first sight of a guild — an admin enables observation via `/memory-resume`. Administrators can override via `/memory-pause`, `/memory-resume`, and the `RAW_MESSAGE_RETENTION_DAYS` env variable.
+Row is created with dormant defaults (`memory_enabled=0`, `reply_enabled=0`) on first sight of a guild — an admin enables observation via `/memory-resume`. Administrators can override via `/memory-pause`, `/memory-resume`, `/companions-pause` (`reply_enabled` only), and the `RAW_MESSAGE_RETENTION_DAYS` env variable.
 
 ---
 
@@ -355,7 +356,7 @@ Which memories are linked to an event.
 
 ### `members`
 
-Member registry — one row per (guild, user). Built by `recordMessage()` so both the live bot and ingest populate it.
+Member registry — one row per (guild, user). Built by `recordMessage()` on the live path.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -842,3 +843,4 @@ Version tracking for the migration system.
 | 43 | `v43_import_hardening` | `companion_listings.published_at` (first-live stamp — the daily publish cap counts this, not `created_at`; live rows backfilled from `created_at`), hardened `import_companion_card` (reuse branch pays cooldown/slot/daily-adopt checks like `adoptListing`, card tags carried into provenance), `card_avatars_update` gains `WITH CHECK` so objects can't be renamed into another uid's folder |
 | 44 | `v44_chat_import` | `chat_imports` (transcript → journal distillation pipeline: `turns` cleared at done/failed — distill-and-discard), `companion_journal.source`/`import_id` (import provenance + retraction scope), `kind='bond'` for the pinned "what we were" summary, auth-gated `my_companions`/`my_chat_imports`/`import_chat_history` security-definer RPCs; rollback refuses while imports exist |
 | 45 | `v45_chat_import_undo` | auth-gated `delete_chat_import(p_id)` security-definer RPC — owner-scoped row delete; the `import_id` cascade retracts the distilled journal (the website's Undo button + `/companion action:imports`) |
+| 46 | `v46_quiet_channels` | `server_settings.quiet_channels TEXT[]` — companion silence without blindness: replies and system cards suppressed while archiving/extraction continue; threads inherit via `parentId` |

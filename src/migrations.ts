@@ -463,7 +463,7 @@ const migrations: Migration[] = [
     // guild_usage meters LLM calls per guild per UTC day; llm_daily_cap is the
     // per-guild bound enforced by the metered client in brains.ts.
     // ignored_channels: channels the bot treats as fully invisible — no
-    // archive, no replies, no member writes, excluded from server-build scans.
+    // archive, no replies, no member writes.
     up: async (sql) => {
       await sql`
         CREATE TABLE IF NOT EXISTS jobs (
@@ -3465,6 +3465,20 @@ const migrations: Migration[] = [
     },
     down: async (sql) => {
       await sql`DROP FUNCTION IF EXISTS public.delete_chat_import(bigint)`;
+    },
+  },
+  {
+    version: 46,
+    name: "v46_quiet_channels",
+    up: async (sql) => {
+      // quiet_channels = companion silence without blindness. Replies and
+      // companion system cards are suppressed there while archiving and
+      // memory extraction keep running — the middle tier between ignored
+      // (fully invisible) and normal. Threads inherit via parentId.
+      await sql`ALTER TABLE server_settings ADD COLUMN IF NOT EXISTS quiet_channels TEXT[] NOT NULL DEFAULT '{}'`;
+    },
+    down: async (sql) => {
+      await sql`ALTER TABLE server_settings DROP COLUMN IF EXISTS quiet_channels`;
     },
   },
 ];

@@ -2,7 +2,7 @@ import "dotenv/config";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { makeTestSql, makeStore } from "./test-helpers.js";
-import { enqueue, claimNext, startWorker, MAX_JOB_ATTEMPTS, FatalJobError, pauseGuildClaims, resumeGuildClaims, waitForGuildIdle, type Job } from "./jobs.js";
+import { enqueue, claimNext, startWorker, MAX_JOB_ATTEMPTS, FatalJobError, pauseGuildClaims, resumeGuildClaims, type Job } from "./jobs.js";
 import { BudgetExceeded, meteredClient } from "./budget.js";
 import { metricsSnapshot } from "./metrics.js";
 import type { LlmClient } from "./brain.js";
@@ -177,7 +177,7 @@ test("a transient failure on the last attempt surfaces as dead-lettered", async 
   } finally { await sql.end(); }
 });
 
-test("paused guilds are excluded from claims until resumed; waitForGuildIdle drains", async () => {
+test("paused guilds are excluded from claims until resumed", async () => {
   const sql = makeTestSql();
   try {
     await makeStore(sql);
@@ -197,29 +197,6 @@ test("paused guilds are excluded from claims until resumed; waitForGuildIdle dra
         assert.deepEqual(done.sort(), ["g-p", "g-q"], "resumed guild's jobs drain normally");
       } finally { await worker.stop(); }
     } finally { resumeGuildClaims("g-p"); }
-  } finally { await sql.end(); }
-});
-
-test("waitForGuildIdle resolves on drain, not before; timeout bounds the wait", async () => {
-  const sql = makeTestSql();
-  try {
-    await makeStore(sql);
-    let release!: () => void;
-    const gate = new Promise<void>(r => { release = r; });
-    let claimed = false;
-    const worker = startWorker({ sql: sql as any, pollMs: 20, handle: async () => { claimed = true; await gate; } });
-    try {
-      await enqueue(sql as any, "g-w", "extract", { n: 1 });
-      while (!claimed) await new Promise(r => setTimeout(r, 10));
-      let idle = false;
-      void waitForGuildIdle("g-w", 5000).then(() => { idle = true; });
-      await waitForGuildIdle("g-w", 30); // bounded — resolves even though the job is still gated
-      await new Promise(r => setTimeout(r, 50));
-      assert.equal(idle, false, "idle must not resolve while a job runs");
-      release();
-      await new Promise(r => setTimeout(r, 100));
-      assert.equal(idle, true, "idle resolves once the job drains");
-    } finally { await worker.stop(); }
   } finally { await sql.end(); }
 });
 

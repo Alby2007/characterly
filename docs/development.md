@@ -35,7 +35,6 @@ On first run the bot connects to Postgres, creates all tables, and applies migra
 |---------|-------------|
 | `npm run dev` | Start with live reload via `tsx watch`. Restart on every file save. |
 | `npm start` | Start once (no reload). Use for production. |
-| `npm run ingest` | Bulk-ingest historical messages from a Discord channel. Set `INGEST_CHANNEL=channel-name` before running. Safe to re-run — already-processed messages are skipped. |
 | `npm run check` | TypeScript type-check only (`tsc --noEmit`). No output = pass. |
 | `npm test` | Run the full test suite using Node's built-in test runner. |
 
@@ -48,7 +47,7 @@ One-shot operational scripts. They import `src/*.ts` sources directly, so run th
 | Script | Purpose |
 |--------|---------|
 | `maintain.mjs` | Runs the nightly maintenance pass on demand (memory lifecycle + event maintenance). |
-| `build-profiles.mjs` | Backfills the member registry from the archive, then runs `buildProfiles` — useful after ingest or schema changes. |
+| `build-profiles.mjs` | Backfills the member registry from the archive, then runs `buildProfiles` — useful after schema changes or consent events. |
 | `verify-memories.mjs` | Batch-runs sincerity verification over pending candidate memories (`VERIFY_MODEL`). |
 | `contest-sweep.mjs` | Retroactively applies bot-addressed denials/corrections as contest evidence on archived messages. |
 | `backfill-relationships.mjs` | One-off: re-extracts relationship observations over the archive, verifies, recomputes edges, rebuilds profiles. |
@@ -73,7 +72,7 @@ Tests live alongside source files as `*.test.ts`. Run them all with `npm test`.
 | `event.test.ts` | Heuristic scoring signals (reply chain, participant overlap, keyword overlap, recency, back-reference); `calculateSignificance` tier assignment; retroactive promotion threshold |
 | `brain.test.ts` | `decide()` scoring: direct mention overrides recency penalty; recency penalty applies to non-mention messages; unmentioned chatter stays below threshold. Extraction/contest/verification prompt parsing via an injected `LlmClient` stub |
 | `attributes.test.ts` | `normalizeValue`/`attributeHash` canonicalisation; `deriveAttributeStatus` precedence (contested > active > candidate > quarantined); `applyProposals` upsert-diff: exact revive, trgm fold, singular supersession, provenance cascades |
-| `commands.test.ts` | Slash-command authorization matrix: non-admin vs admin cross-member views, opt-out/forget ownership, confirm-button userId binding, admin-gated commands, opt-in consent flag, `/profile-build` + `/server-build` |
+| `commands.test.ts` | Slash-command authorization matrix: non-admin vs admin cross-member views, opt-out/forget ownership, confirm-button userId binding, admin-gated commands, opt-in consent flag, `/profile-build`, quiet/ignore channel lists, reply-only pause |
 | `dedup.test.ts` | Trigram near-duplicate merge: same-claim phrasing reinforces instead of duplicating; distinct content stays separate; episodes never fuzzy-merge |
 | `entity-resolution.test.ts` | `resolveSubject` mention/name/self-resolution; `buildAliasMap` from `known_names`; `findMentionedUsers` matching rules |
 | `perception.test.ts` | Durable-signal pre-filter patterns; bot-addressed bypass; `detectNamingRequest`/`detectSelfNaming` extraction and stopword rejection |
@@ -183,12 +182,9 @@ The bot writes no local files — all state lives in Postgres. (`data/` is gitig
 
 ## Debugging tips
 
-### Groq rate limits (ingest)
+### Groq rate limits (profile-build / batch passes)
 
-`server-ingest.ts` paces LLM calls with `BATCH_DELAY_MS = 3000` between extraction batches, `EVENT_DELAY_MS = 3000` between pipeline calls, and `TRIAGE_DELAY_MS = 1500` between triage calls. If you hit 429 errors:
-- The script reads the `x-ratelimit-reset-tokens` header and waits accordingly (shared `withRetry` in `src/retry.ts`).
-- Up to 6 retries are attempted with exponential backoff.
-- You can increase the `*_DELAY_MS` constants at the top of `server-ingest.ts` if your Groq tier has tighter limits.
+`/profile-build` and the batch scripts pace their LLM calls through `withRetry` (`src/retry.ts`), which reads the `x-ratelimit-reset-tokens` header and waits accordingly — up to 6 retries with exponential backoff. If you hit persistent 429s on a big corpus, the bounded scan cap (1000 messages) keeps a single run finite; per-guild `llm_daily_cap` still bounds total spend.
 
 ### Bot not responding to direct mentions
 
@@ -232,7 +228,7 @@ characterly/
 │   ├── db.ts                 # Shared postgres.js connection singleton
 │   ├── database.ts           # MemoryStore (Postgres: companions, journal, link codes, memories, edges)
 │   ├── events.ts             # EventStore (Postgres)
-│   ├── migrations.ts         # Versioned schema migrations (v1–v42)
+│   ├── migrations.ts         # Versioned schema migrations (v1–v46)
 │   ├── confidence.ts         # Deterministic confidence formulas
 │   ├── perception.ts         # Pre-filter regex, wake words, dismissals, tool cues
 │   ├── event-detection.ts    # EventPipeline — heuristic + LLM continuity
@@ -247,9 +243,7 @@ characterly/
 │   ├── profiles.ts           # ProfileStore — cards + dossiers
 │   ├── attributes.ts         # Structured provenance-backed profile facets
 │   ├── dossier.ts            # Per-section dossier input gathering
-│   ├── profile-build.ts      # /profile-build per-user scan
-│   ├── server-ingest.ts      # Server-level historical build (ingest + /server-build)
-│   ├── ingest.ts             # CLI wrapper for runServerIngest
+│   ├── profile-build.ts      # /profile-build per-user archive scan
 │   ├── guild-lifecycle.ts    # Join disclosure card, 1-click enable, two-step decline opt-out, kick-purge
 │   ├── ops.ts                # House ops (HOUSE_GUILD_ID): welcomes, verify gate, automod, layout, tag sweep, /ops console
 │   ├── marketplace.ts        # Listing card embed/components, forum thread posting, curated-tag names

@@ -1,6 +1,6 @@
 # Event Detection Pipeline
 
-The event pipeline (v0.2) groups related Discord messages into named, scored "events" — notable server incidents that can be recalled via `/event`. It runs after memory extraction on every processed message — inside the `extract` job worker (`src/extract-job.ts`) on the live path, and inline during `runServerIngest` — plus a nightly maintenance pass.
+The event pipeline (v0.2) groups related Discord messages into named, scored "events" — notable server incidents that can be recalled via `/event`. It runs after memory extraction on every processed message — inside the `extract` job worker (`src/extract-job.ts`) on the live path — plus a nightly maintenance pass.
 
 Source files: `src/event-detection.ts`, `src/event-significance.ts`, `src/events.ts`.
 
@@ -22,7 +22,7 @@ Individual memories record facts about people. Events capture *what happened*: t
 
 ### `EventPipeline.process(message, savedMemoryIds, eventStore, memoryStore, brain, replyToMessageId?)`
 
-Called from `src/extract-job.ts` (the deferred worker) after `saveMemory()` on every durable message, and inline by `server-ingest.ts` during historical builds. Returns `true` if an LLM call was made (used by ingest to pace requests).
+Called from `src/extract-job.ts` (the deferred worker) after `saveMemory()` on every durable message. Returns `true` if an LLM call was made.
 
 ### `EventPipeline.maintainEvents(guildId, eventStore, memoryStore, brain, maxAgeMs?)`
 

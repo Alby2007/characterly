@@ -69,10 +69,10 @@ type MessageRow = {
   author_name: string; content: string; created_at: Date | string;
 };
 
-type SettingsRow = { guild_id: string; memory_enabled: number; reply_enabled: number; proactive_enabled: number; raw_retention_days: number; announced_at: Date | string | null; ignored_channels: string[] | null; llm_daily_cap: number };
+type SettingsRow = { guild_id: string; memory_enabled: number; reply_enabled: number; proactive_enabled: number; raw_retention_days: number; announced_at: Date | string | null; ignored_channels: string[] | null; quiet_channels: string[] | null; llm_daily_cap: number };
 
 /** Public settings shape — server_settings projected to camelCase. */
-export type Settings = { guildId: string; memoryEnabled: number; replyEnabled: number; proactiveEnabled: number; rawRetentionDays: number; announcedAt: string | null; ignoredChannels: string[]; llmDailyCap: number };
+export type Settings = { guildId: string; memoryEnabled: number; replyEnabled: number; proactiveEnabled: number; rawRetentionDays: number; announcedAt: string | null; ignoredChannels: string[]; quietChannels: string[]; llmDailyCap: number };
 
 type MemberRow = {
   guild_id: string; user_id: string; known_names: string[];
@@ -183,9 +183,9 @@ export class MemoryStore {
     const cached = this.settingsCache.get(guildId);
     if (cached && Date.now() - cached.at < 60_000) return cached.value;
     await this.ensureSettings(guildId, defaultRetentionDays);
-    const rows = await this.sql<SettingsRow[]>`SELECT guild_id, memory_enabled, reply_enabled, proactive_enabled, raw_retention_days, announced_at, ignored_channels, llm_daily_cap FROM server_settings WHERE guild_id = ${guildId}`;
+    const rows = await this.sql<SettingsRow[]>`SELECT guild_id, memory_enabled, reply_enabled, proactive_enabled, raw_retention_days, announced_at, ignored_channels, quiet_channels, llm_daily_cap FROM server_settings WHERE guild_id = ${guildId}`;
     const r = rows[0];
-    const value = { guildId: r.guild_id, memoryEnabled: Number(r.memory_enabled), replyEnabled: Number(r.reply_enabled), proactiveEnabled: Number(r.proactive_enabled), rawRetentionDays: Number(r.raw_retention_days), announcedAt: r.announced_at ? ts(r.announced_at) : null, ignoredChannels: r.ignored_channels ?? [], llmDailyCap: Number(r.llm_daily_cap) };
+    const value = { guildId: r.guild_id, memoryEnabled: Number(r.memory_enabled), replyEnabled: Number(r.reply_enabled), proactiveEnabled: Number(r.proactive_enabled), rawRetentionDays: Number(r.raw_retention_days), announcedAt: r.announced_at ? ts(r.announced_at) : null, ignoredChannels: r.ignored_channels ?? [], quietChannels: r.quiet_channels ?? [], llmDailyCap: Number(r.llm_daily_cap) };
     this.settingsCache.set(guildId, { value, at: Date.now() });
     return value;
   }
@@ -205,11 +205,28 @@ export class MemoryStore {
     this.settingsCache.delete(guildId);
   }
 
+  /** Reply-only pause — silences summoned companions guild-wide while memory
+   * collection keeps running. `setPaused` is the full stop (both flags). */
+  async setReplyPaused(guildId: string, paused: boolean, defaultRetentionDays = 30): Promise<void> {
+    await this.ensureSettings(guildId, defaultRetentionDays);
+    await this.sql`UPDATE server_settings SET reply_enabled = ${paused ? 0 : 1} WHERE guild_id = ${guildId}`;
+    this.settingsCache.delete(guildId);
+  }
+
   /** Channels the bot treats as fully invisible — no archive, replies, or
-   * member writes there, and server-build scans skip them. */
+   * member writes there. */
   async setIgnoredChannels(guildId: string, channelIds: string[], defaultRetentionDays = 30): Promise<void> {
     await this.ensureSettings(guildId, defaultRetentionDays);
     await this.sql`UPDATE server_settings SET ignored_channels = ${channelIds} WHERE guild_id = ${guildId}`;
+    this.settingsCache.delete(guildId);
+  }
+
+  /** Channels where summoned companions stay silent — replies and companion
+   * system cards are suppressed, but archiving/extraction keep running so the
+   * server memory layer still sees the channel. */
+  async setQuietChannels(guildId: string, channelIds: string[], defaultRetentionDays = 30): Promise<void> {
+    await this.ensureSettings(guildId, defaultRetentionDays);
+    await this.sql`UPDATE server_settings SET quiet_channels = ${channelIds} WHERE guild_id = ${guildId}`;
     this.settingsCache.delete(guildId);
   }
 

@@ -23,11 +23,13 @@ function stubCommand(opts: {
   username?: string;
   admin?: boolean;
   options?: Record<string, unknown>;
+  channel?: { id: string; parentId?: string | null };
 }): { interaction: ChatInputCommandInteraction; replies: Replies } {
   const replies: Replies = [];
   const interaction = {
     guildId: "g1",
     channelId: "c1",
+    channel: opts.channel ?? { id: "c1" },
     id: "ix-1",
     commandName: opts.commandName,
     user: { id: opts.userId ?? "u-user", username: opts.username ?? "User" },
@@ -330,20 +332,6 @@ test("/profile-build opts the member in and reports the scan", async () => {
   } finally { await sql.end(); }
 });
 
-test("/server-build refuses non-admins and wants a channel from admins", async () => {
-  const sql = makeTestSql();
-  try {
-    const { store } = await makeStore(sql);
-    const denied = stubCommand({ commandName: "server-build", userId: "u-stranger" });
-    await handleMemoryCommand(denied.interaction, store, brainFor);
-    assert.match(denied.replies[0].content ?? "", /administrator/i);
-
-    const admin = stubCommand({ commandName: "server-build", userId: "u-admin", admin: true });
-    await handleMemoryCommand(admin.interaction, store, brainFor);
-    assert.match(admin.replies[0].content ?? "", /pick a text channel/i);
-  } finally { await sql.end(); }
-});
-
 // ── /setup (BYOK) ─────────────────────────────────────────────────────────────
 
 function stubModal(opts: { key?: string; baseUrl?: string; guildId?: string; admin?: boolean }) {
@@ -446,7 +434,7 @@ function updates_content(updates: Replies): string {
   return updates.map(u => u.content ?? "").join("\n");
 }
 
-// ── /privacy + /server-build consent gate ────────────────────────────────────
+// ── /privacy ────────────────────────────────────────────────────────────────────
 
 test("/privacy is ephemeral and reflects the caller's consent state", async () => {
   const sql = makeTestSql();
@@ -488,50 +476,6 @@ test("/privacy status reflects the effective posture, not just memory_enabled", 
     const live = stubCommand({ commandName: "privacy", userId: "u-x" });
     await handleMemoryCommand(live.interaction, store, brainFor);
     assert.match(JSON.stringify(live.replies[0].embeds), /Observing/);
-  } finally { await sql.end(); }
-});
-
-test("/server-build asks for consent instead of starting", async () => {
-  const sql = makeTestSql();
-  try {
-    const { store } = await makeStore(sql);
-    const channel = { id: "ch-1", type: 0, name: "general" };
-    const cmd = stubCommand({ commandName: "server-build", userId: "u-admin", admin: true, options: { channel } });
-    await handleMemoryCommand(cmd.interaction, store, brainFor);
-    assert.equal(cmd.replies[0].ephemeral, true);
-    assert.match(cmd.replies[0].content ?? "", /scans and archives|never consented/i);
-    assert.ok(cmd.replies[0].components?.length, "consent prompt must carry confirm/cancel buttons");
-    assert.doesNotMatch(cmd.replies[0].content ?? "", /build started/i, "the build must not start from the command");
-  } finally { await sql.end(); }
-});
-
-test("serverbuild buttons: wrong user rejected, cancel updates, confirm reaches the runner", async () => {
-  const sql = makeTestSql();
-  try {
-    const { store } = await makeStore(sql);
-    // Someone else clicking the confirm button is denied.
-    const stranger = stubButton({ customId: "serverbuild:confirm:g1:u-admin:ch-1", userId: "u-stranger", admin: true });
-    await handleMemoryButton(stranger.interaction, store, brainFor);
-    assert.match(stranger.replies[0]?.content ?? "", /not for you/i);
-    assert.equal(stranger.updates.length, 0);
-
-    // Cancel dismisses the prompt without starting anything.
-    const cancel = stubButton({ customId: "serverbuild:cancel:g1:u-admin", userId: "u-admin", admin: true });
-    await handleMemoryButton(cancel.interaction, store, brainFor);
-    assert.match(updates_content(cancel.updates), /cancelled/i);
-
-    // Non-admin (permissions revoked between prompt and click) is denied.
-    const demoted = stubButton({ customId: "serverbuild:confirm:g1:u-admin:ch-1", userId: "u-admin", admin: false });
-    await handleMemoryButton(demoted.interaction, store, brainFor);
-    assert.match(demoted.replies[0]?.content ?? "", /Manage Server/i);
-
-    // A real confirm claims the flag and reaches the runner — the stub channel
-    // fails the build almost immediately, but the "started" update proves the
-    // path; the flag releases in finally once the runner settles.
-    const confirm = stubButton({ customId: "serverbuild:confirm:g1:u-admin:ch-1", userId: "u-admin", admin: true });
-    await handleMemoryButton(confirm.interaction, store, brainFor);
-    assert.match(updates_content(confirm.updates), /Server build started/i);
-    await new Promise(r => setTimeout(r, 20)); // let the failed runner release the flag
   } finally { await sql.end(); }
 });
 
@@ -593,13 +537,81 @@ test("/ignore-channel + /unignore-channel manage the ignored set; /memory-settin
     await handleMemoryCommand(remove.interaction, store, brainFor);
     assert.match(remove.replies[0]?.content ?? "", /visible/i);
     assert.deepEqual((await store.settings("g1")).ignoredChannels, []);
+  } finally { await sql.end(); }
+});
 
-    // /server-build refuses an ignored channel before the consent prompt.
-    await store.setIgnoredChannels("g1", ["ch-1"]);
-    const build = stubCommand({ commandName: "server-build", userId: "u-admin", admin: true, options: { channel: { id: "ch-1", type: 0, name: "general" } } });
-    await handleMemoryCommand(build.interaction, store, brainFor);
-    assert.match(build.replies[0]?.content ?? "", /ignored/i);
-    assert.ok(!build.replies[0]?.components?.length, "no consent prompt for an ignored channel");
+test("/quiet-channel + /unquiet-channel manage the quiet set; /memory-settings lists it", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const deny = stubCommand({ commandName: "quiet-channel", userId: "u-stranger", options: { channel: { id: "ch-9" } } });
+    await handleMemoryCommand(deny.interaction, store, brainFor);
+    assert.match(deny.replies[0]?.content ?? "", /administrator/i);
+    assert.deepEqual((await store.settings("g1")).quietChannels, []);
+
+    // No channel option → defaults to the invoking channel.
+    const def = stubCommand({ commandName: "quiet-channel", userId: "u-admin", admin: true, channel: { id: "c1" } });
+    await handleMemoryCommand(def.interaction, store, brainFor);
+    assert.match(def.replies[0]?.content ?? "", /still observes|still observing/i);
+    assert.deepEqual((await store.settings("g1")).quietChannels, ["c1"]);
+
+    // Explicit target adds a second channel; re-quiet is idempotent.
+    const add = stubCommand({ commandName: "quiet-channel", userId: "u-admin", admin: true, options: { channel: { id: "ch-9" } } });
+    await handleMemoryCommand(add.interaction, store, brainFor);
+    assert.deepEqual((await store.settings("g1")).quietChannels, ["c1", "ch-9"]);
+    const again = stubCommand({ commandName: "quiet-channel", userId: "u-admin", admin: true, options: { channel: { id: "ch-9" } } });
+    await handleMemoryCommand(again.interaction, store, brainFor);
+    assert.match(again.replies[0]?.content ?? "", /already/i);
+    assert.equal((await store.settings("g1")).quietChannels.length, 2);
+
+    // /memory-settings distinguishes quiet (still observing) from ignored.
+    const view = stubCommand({ commandName: "memory-settings", userId: "u-admin", admin: true });
+    await handleMemoryCommand(view.interaction, store, brainFor);
+    assert.match(view.replies[0]?.content ?? "", /Quiet channels.*still observing/si);
+    assert.match(view.replies[0]?.content ?? "", /ch-9/);
+
+    const rm = stubCommand({ commandName: "unquiet-channel", userId: "u-admin", admin: true, options: { channel: { id: "ch-9" } } });
+    await handleMemoryCommand(rm.interaction, store, brainFor);
+    assert.match(rm.replies[0]?.content ?? "", /speak.*again/i);
+    assert.deepEqual((await store.settings("g1")).quietChannels, ["c1"]);
+
+    const notQuiet = stubCommand({ commandName: "unquiet-channel", userId: "u-admin", admin: true, options: { channel: { id: "ch-9" } } });
+    await handleMemoryCommand(notQuiet.interaction, store, brainFor);
+    assert.match(notQuiet.replies[0]?.content ?? "", /isn't quiet/i);
+  } finally { await sql.end(); }
+});
+
+test("/companions-pause flips only reply_enabled — memory keeps running; resume restores", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const deny = stubCommand({ commandName: "companions-pause", userId: "u-stranger" });
+    await handleMemoryCommand(deny.interaction, store, brainFor);
+    assert.match(deny.replies[0]?.content ?? "", /administrator/i);
+
+    // Guilds are dormant by default (v16) — enable first, as the enable
+    // button would, so the pause/resume deltas are observable.
+    await store.setPaused("g1", false);
+
+    const pause = stubCommand({ commandName: "companions-pause", userId: "u-admin", admin: true });
+    await handleMemoryCommand(pause.interaction, store, brainFor);
+    assert.match(pause.replies[0]?.content ?? "", /still observes|still.*remember/i);
+    let settings = await store.settings("g1");
+    assert.equal(settings.replyEnabled, 0, "replies silenced");
+    assert.equal(settings.memoryEnabled, 1, "memory collection must stay on");
+
+    const resume = stubCommand({ commandName: "companions-resume", userId: "u-admin", admin: true });
+    await handleMemoryCommand(resume.interaction, store, brainFor);
+    assert.equal((await store.settings("g1")).replyEnabled, 1);
+
+    // Independence both ways: a full pause then companions-resume must not
+    // resurrect memory collection.
+    await store.setPaused("g1", true);
+    const resume2 = stubCommand({ commandName: "companions-resume", userId: "u-admin", admin: true });
+    await handleMemoryCommand(resume2.interaction, store, brainFor);
+    settings = await store.settings("g1");
+    assert.equal(settings.replyEnabled, 1);
+    assert.equal(settings.memoryEnabled, 0, "companions-resume must not unpause memory");
   } finally { await sql.end(); }
 });
 

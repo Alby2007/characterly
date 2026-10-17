@@ -39,7 +39,6 @@ const env = z.object({
   // ping-pong, refill bounds the sustained drain (~1/refill per user).
   REPLY_BURST: z.coerce.number().int().min(1).max(50).default(4),
   REPLY_REFILL_MS: z.coerce.number().int().min(5_000).max(600_000).default(30_000),
-  INGEST_CHANNEL: z.string().optional(),
   VISION_MODEL: z.string().optional(),
   VISION_API_KEY: z.string().optional(),
   WAKE_WORD: z.string().optional(),
@@ -153,8 +152,7 @@ export const config = {
   speakThreshold: env.SPEAK_THRESHOLD,
   rawMessageRetentionDays: env.RAW_MESSAGE_RETENTION_DAYS,
   candidateConfidenceThreshold: env.CANDIDATE_CONFIDENCE_THRESHOLD,
-  // Model override chains — terminal default stays at each call site because
-  // index.ts and ingest.ts intentionally differ (config.model vs qwen).
+  // Model override chains — terminal default stays at each call site.
   verifyModel: env.VERIFY_MODEL ?? env.PROFILE_MODEL,
   profileModel: env.PROFILE_MODEL,
   dossierModel: env.DOSSIER_MODEL,
@@ -166,7 +164,6 @@ export const config = {
   // Kill switch for honoring the model's end_conversation flag — regex
   // dismissal keeps working regardless; this only governs the soft exit.
   replyExit: env.REPLY_EXIT !== "0",
-  ingestChannel: env.INGEST_CHANNEL ?? "general-chat",
   // No fallback: unset means image understanding is OFF. A text-only model
   // could silently drop the image block and store a hallucinated description.
   visionModel: env.VISION_MODEL,

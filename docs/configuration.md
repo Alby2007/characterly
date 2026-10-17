@@ -42,9 +42,8 @@ Characterly is configured through environment variables validated at startup by 
 | `PROFILE_MODEL` | `GROQ_MODEL` | Model for profile card synthesis. |
 | `DOSSIER_MODEL` | `GROQ_MODEL` | Model for dossier section synthesis. |
 | `CONTEST_MODEL` | `VERIFY_MODEL` → `INGEST_MODEL` → `GROQ_MODEL` | Model for contest/denial detection. |
-| `INGEST_MODEL` | `qwen/qwen3.8-27b` (ingest), `GROQ_MODEL` (sweep) | Model for batch memory extraction. |
-| `INGEST_TRIAGE_MODEL` | `qwen/qwen3.8-27b` (ingest), `GROQ_MODEL` (sweep) | Model for the durability triage pass. |
-| `INGEST_CHANNEL` | `general-chat` | Channel name `npm run ingest` backfills from; also the `/server-build` fallback when its `channel` option is omitted. |
+| `INGEST_MODEL` | `GROQ_MODEL` | Model for batched extraction passes (`/profile-build`) — also the `VERIFY_MODEL` fallback for sincerity checks. |
+| `INGEST_TRIAGE_MODEL` | `GROQ_MODEL` | Model for the message-durability triage pass. |
 | `VISION_MODEL` | (off) | Vision-capable model for image understanding (e.g. `gemini-2.5-flash` on Gemini's free tier). **Unset disables image handling entirely** — there is no fallback to `GROQ_MODEL`, since a text-only model could silently drop the image block and store a hallucinated description. When set, image attachments (`image/*` except GIFs, ≤`IMAGE_MAX_BYTES`, ≤3/message) are described once and the text rides the normal extraction/reply pipelines; URLs and bytes are never persisted. |
 | `VISION_API_KEY` | `GROQ_API_KEY` | API key for the vision provider — set only when `VISION_MODEL` lives off-Groq (e.g. a Gemini AI Studio key). |
 | `VISION_BASE_URL` | `GROQ_BASE_URL` | OpenAI-compatible endpoint for the vision provider (e.g. `https://generativelanguage.googleapis.com/v1beta/openai/` for Gemini). |
@@ -137,10 +136,14 @@ Administrators can adjust per-server behaviour at runtime without restarting the
 |---------|--------|
 | `/memory-pause` | Sets `memory_enabled=0` and `reply_enabled=0`. The bot stops observing and replying immediately. |
 | `/memory-resume` | Sets both back to 1. |
-| `/memory-settings` | Shows current values of `memory_enabled`, `reply_enabled`, `raw_retention_days`, `llm_daily_cap`, and the `ignored_channels` list. |
+| `/companions-pause` | Sets only `reply_enabled=0` — companions go silent server-wide while archiving and memory extraction keep running. |
+| `/companions-resume` | Sets `reply_enabled=1` without touching `memory_enabled`. |
+| `/memory-settings` | Shows current values of `memory_enabled`, `reply_enabled`, `raw_retention_days`, `llm_daily_cap`, and the `ignored_channels`/`quiet_channels` lists. |
 | `/limits daily_cap:N` | Sets `llm_daily_cap` — the per-guild LLM-call budget per UTC day (default 1000, range 0–100000). `0` blocks every LLM call for the guild; usage resets at UTC midnight. Deferrable work (extract jobs) reschedules to the next day rather than failing; a reply-path call at cap posts a one-per-channel-per-day notice. |
-| `/ignore-channel channel:#c` | Adds a channel to `ignored_channels` — fully invisible to the bot: no archiving, no replies, no member writes, no `/server-build` scans. |
+| `/ignore-channel channel:#c` | Adds a channel to `ignored_channels` — fully invisible to the bot: no archiving, no replies, no member writes. |
 | `/unignore-channel channel:#c` | Removes a channel from `ignored_channels`. |
+| `/quiet-channel [channel:#c]` | Adds a channel to `quiet_channels` (defaults to the current channel) — companions can't reply or post system cards there, but archiving and memory extraction continue. Threads inherit their parent channel's listing and can also be listed directly. |
+| `/unquiet-channel [channel:#c]` | Removes a channel from `quiet_channels`. |
 | `/memory-purge older_than_days:N` | Manually deletes raw messages older than N days for this server (regardless of the global retention setting). |
 | `/status` | Shows bot uptime, in-process operational counters, and today's LLM usage vs the guild's cap. |
 | `/memory-triage` | Shows the 15 most recently stored memories across all members, with status, kind, and subject. |
@@ -157,12 +160,6 @@ Administrators can adjust per-server behaviour at runtime without restarting the
 Deferrable cognition (`extract`, `journal-write`, and `pair-analysis` jobs — memory extraction, contest checks, event-pipeline processing, companion journaling, relationship reads) runs on a Postgres-backed queue rather than inside the live message handler. The constants are compile-time in `src/jobs.ts`, not env-configurable: global in-flight cap **8**, per-guild concurrency **1** (preserves event ordering), 3-second poll with `LISTEN`/`NOTIFY` wake hints, 10-minute claim lease, exponential backoff, dead-letter at **5** attempts. Jobs that hit `BudgetExceeded` reschedule to the next UTC midnight without consuming an attempt.
 
 ---
-
-## Ingest-only variable
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `INGEST_CHANNEL` | `general-chat` | Name of the channel to fetch history from when running `npm run ingest`. Only used by `src/ingest.ts`; ignored by the live bot. |
 
 ## Test-only variable
 

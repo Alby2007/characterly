@@ -26,37 +26,15 @@ export const MAX_JOB_ATTEMPTS = 5;
  * payload). Throwing this dead-letters immediately instead of burning retries. */
 export class FatalJobError extends Error {}
 
-// ── Guild pause / idle tracking ───────────────────────────────────────────────
-// Module-level so callers without a worker handle (e.g. /server-build in
-// commands.ts) can serialize against live extraction: ingest calls
-// pipeline.process outside the queue, and interleaving with a worker's
-// extract job would race the per-guild event ordering maxPerGuild protects.
+// ── Guild pause tracking ─────────────────────────────────────────────────────
+// Module-level so callers without a worker handle (kick-purge, decline-purge)
+// can stop new claims for a guild; in-flight jobs still finish.
 const pausedGuilds = new Set<string>();
 const guildInFlight = new Map<string, number>();
-const guildIdleWaiters = new Map<string, Array<() => void>>();
 
-/** Exclude a guild from new claims. Does not stop already-claimed jobs —
- * pair with waitForGuildIdle to fully drain before starting bulk work. */
+/** Exclude a guild from new claims. Does not stop already-claimed jobs. */
 export function pauseGuildClaims(guildId: string): void { pausedGuilds.add(guildId); }
 export function resumeGuildClaims(guildId: string): void { pausedGuilds.delete(guildId); }
-
-/** Resolves when the guild has no in-flight jobs, or after timeoutMs — a
- * wedged job must not hang a server build forever. */
-export function waitForGuildIdle(guildId: string, timeoutMs: number): Promise<void> {
-  if (!guildInFlight.get(guildId)) return Promise.resolve();
-  return new Promise(resolve => {
-    const wrapped = () => { clearTimeout(timer); resolve(); };
-    const timer = setTimeout(() => {
-      const list = guildIdleWaiters.get(guildId);
-      if (list) guildIdleWaiters.set(guildId, list.filter(w => w !== wrapped));
-      resolve();
-    }, timeoutMs);
-    timer.unref();
-    const waiters = guildIdleWaiters.get(guildId) ?? [];
-    waiters.push(wrapped);
-    guildIdleWaiters.set(guildId, waiters);
-  });
-}
 
 /** Insert a job and nudge the worker via NOTIFY (a wake hint only — the 3s
  * poll is the resilient baseline, so a missed notification costs one poll).
@@ -138,8 +116,7 @@ export function startWorker(deps: WorkerDeps): { stop: () => Promise<void> } {
   const pollMs = deps.pollMs ?? 3000;
   const onError = deps.onError ?? ((m: string, e: unknown) => logError(m, e));
   // Per-guild counts live in module-scope guildInFlight (shared across workers
-  // in the same process and observable by waitForGuildIdle); the global cap
-  // stays per-worker.
+  // in the same process); the global cap stays per-worker.
   let inFlight = 0;
   let stopped = false;
   let unlisten: (() => Promise<void>) | undefined;
@@ -216,8 +193,6 @@ export function startWorker(deps: WorkerDeps): { stop: () => Promise<void> } {
             guildInFlight.set(job.guild_id, left);
           } else {
             guildInFlight.delete(job.guild_id);
-            guildIdleWaiters.get(job.guild_id)?.forEach(r => r());
-            guildIdleWaiters.delete(job.guild_id);
           }
           if (stopped && inFlight === 0) drainWaiters.splice(0).forEach(r => r());
           else void tick(); // freed capacity — claim again immediately

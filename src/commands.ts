@@ -2,14 +2,11 @@ import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonInteraction, 
 import type { Brain } from "./brain.js";
 import { MemoryStore, type Memory } from "./database.js";
 import { EventStore } from "./events.js";
-import { EventPipeline } from "./event-detection.js";
 import { ProfileStore } from "./profiles.js";
 import { encryptSecret, logError, maskKey, validateLlmKey } from "./secrets.js";
 import { isSafeUrl, resolvesToPrivateAddress } from "./tools.js";
 import { detectProviderFromKey, guardedLlmFetch } from "./brains.js";
 import { runProfileBuild, PROFILE_BUILD_COOLDOWN_MS } from "./profile-build.js";
-import { runServerIngest } from "./server-ingest.js";
-import { pauseGuildClaims, resumeGuildClaims, waitForGuildIdle } from "./jobs.js";
 import { inc, metricsSnapshot } from "./metrics.js";
 import type { ChatImport, Companion, CompanionListing, CompanionSpec, MessageEvent } from "./types.js";
 import { config } from "./config.js";
@@ -18,7 +15,7 @@ import { handleOpsCommand, handleHouseButton, isHouse, isMarketplaceThread } fro
 import { CURATED_TAGS, postListingThread, buildListingCard, buildListingComponents } from "./marketplace.js";
 import { parseCardFile, cardToPersona, cardImportMeta, cardFileHash, CARD_MAX_BYTES, type ImportPersona, type CardImportMeta, type ParsedCard } from "./charcard.js";
 import { parseChatFile, chatImportMeta, chatFileHash, type ParsedChat, type ChatImportMeta } from "./chathist.js";
-import { enqueue } from "./jobs.js";
+import { enqueue, pauseGuildClaims } from "./jobs.js";
 import { sql } from "./db.js";
 
 export const ONBOARDING_ARCHETYPES: Record<
@@ -194,27 +191,46 @@ export function buildAwakenedCompanionPayload(
   return { embeds: [embed], components };
 }
 
+/** Companion system cards follow the same rule as replies: a channel (or its
+ * parent, for threads) on the quiet list gets none. Returns the resolved
+ * channel the card would land in so callers can check once. */
+async function channelIsQuiet(store: MemoryStore, guildId: string | null | undefined, channel: { id?: string; parentId?: string | null; isThread?: () => boolean } | null | undefined): Promise<boolean> {
+  if (!guildId || !channel?.id) return false;
+  const settings = await store.settings(guildId);
+  if (settings.quietChannels.includes(channel.id)) return true;
+  // Threads follow their parent channel; isThread() keeps categories out of
+  // the match (a text channel's parentId is its category).
+  return channel.isThread?.() === true
+    && channel.parentId != null
+    && settings.quietChannels.includes(channel.parentId);
+}
+
 export async function sendCompanionSystemMessage(
   channelOrGuild: unknown,
   companion: Companion,
   ownerName: string,
   event: "joined" | "left",
+  store?: MemoryStore,
+  guildId?: string | null,
 ): Promise<boolean> {
   if (!channelOrGuild || typeof channelOrGuild !== "object") return false;
   let sendFn: ((payload: unknown) => Promise<unknown>) | undefined;
   const candidate = channelOrGuild as {
     send?: (payload: unknown) => Promise<unknown>;
-    systemChannel?: { send?: (payload: unknown) => Promise<unknown> };
+    id?: string; parentId?: string | null;
+    systemChannel?: { send?: (payload: unknown) => Promise<unknown>; id?: string; parentId?: string | null };
   };
   // A channel is used directly; a bare Guild falls back to its system channel
   // only — picking an arbitrary cached text channel could announce a companion
   // in a private channel the owner can't see, which is worse than silence.
+  const resolved = typeof candidate.send === "function" ? candidate : candidate.systemChannel;
   if (typeof candidate.send === "function") {
     sendFn = candidate.send.bind(candidate);
   } else if (typeof candidate.systemChannel?.send === "function") {
     sendFn = candidate.systemChannel.send.bind(candidate.systemChannel);
   }
   if (!sendFn) return false;
+  if (store && await channelIsQuiet(store, guildId, resolved)) return false;
 
   if (event === "left") {
     const embed = new EmbedBuilder()
@@ -818,11 +834,14 @@ export async function summonPickedCompanion(interaction: ChatInputCommandInterac
     }
   }
   await store.summonCompanion(interaction.guildId, companion.id, interaction.user.id, interaction.user.username);
+  const quietHere = await channelIsQuiet(store, interaction.guildId, interaction.channel as { id?: string; parentId?: string | null } | null);
   await sendCompanionSystemMessage(
     (interaction as { channel?: unknown }).channel ?? (interaction as { guild?: unknown }).guild,
     companion,
     interaction.user.username,
     "joined",
+    store,
+    interaction.guildId,
   );
   const embed = new EmbedBuilder()
     .setTitle(`${companion.name} joined the server`)
@@ -830,7 +849,8 @@ export async function summonPickedCompanion(interaction: ChatInputCommandInterac
       `**${companion.name}** (${interaction.user.username}'s companion) is now hanging out in this server.\n\n` +
       `**Vibe:** ${companion.voicePersona || "Observant and candid"}\n` +
       `**Traits:** ${companion.coreTraits.length ? companion.coreTraits.join(", ") : "—"}\n` +
-      `**Bond with ${interaction.user.username}:** ${companion.ownerDynamic || "Close confidant"}`,
+      `**Bond with ${interaction.user.username}:** ${companion.ownerDynamic || "Close confidant"}` +
+      (quietHere ? "\n\n*Heads up — this channel is on the quiet list, so they can't speak here.*" : ""),
     );
   if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
   if (isButton) return (interaction as ButtonInteraction).update({ content: "Summoned.", embeds: [embed], components: [] });
@@ -848,6 +868,8 @@ export async function dismissPickedCompanion(interaction: ChatInputCommandIntera
       companion,
       interaction.user.username,
       "left",
+      store,
+      interaction.guildId,
     );
   }
   const content = removed
@@ -920,6 +942,8 @@ export const commandDefinitions = [
   { name: "memory-purge", description: "Admin: delete old raw messages for this server", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [{ name: "older_than_days", description: "Delete messages older than this many days", type: 4, required: true }] },
   { name: "memory-pause", description: "Admin: immediately pause Characterly in this server", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
   { name: "memory-resume", description: "Admin: enable or resume Characterly in this server", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
+  { name: "companions-pause", description: "Admin: silence companions server-wide — Characterly still observes and remembers", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
+  { name: "companions-resume", description: "Admin: let companions speak in this server again", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
   { name: "memory-settings", description: "Admin: view server memory and retention settings", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
   { name: "status", description: "Admin: server status, active companions, and operational counters", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
   { name: "memory-triage", description: "Admin: the most recent memories stored for any member", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
@@ -936,17 +960,20 @@ export const commandDefinitions = [
   { name: "opt-out", description: "Stop Characterly forming memories or a profile about you, and forget what it already holds" },
   { name: "opt-in", description: "Consent to memories and a profile about you — then run /profile-build to scan your history" },
   { name: "profile-build", description: "Opt in and build your profile: scans the archive for your messages and references to you" },
-  { name: "server-build", description: "Admin: run the server-level historical build on a channel", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
-    { name: "channel", description: "Text channel to build from (defaults to the configured ingest channel)", type: 7, required: false }
-  ] },
   { name: "limits", description: "Admin: set this server's daily LLM-call cap", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
     { name: "daily_cap", description: "Max LLM calls per day, 0–100000 — 0 blocks all calls (resets at midnight UTC)", type: 4, required: true }
   ] },
   { name: "ignore-channel", description: "Admin: make Characterly fully ignore a channel — no archive, no replies", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
-    { name: "channel", description: "Channel to ignore", type: 7, required: true }
+    { name: "channel", description: "Channel to ignore", type: 7, required: true, channel_types: [0, 5, 10, 11, 12, 15, 16] }
   ] },
   { name: "unignore-channel", description: "Admin: restore a channel Characterly was ignoring", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
-    { name: "channel", description: "Channel to restore", type: 7, required: true }
+    { name: "channel", description: "Channel to restore", type: 7, required: true, channel_types: [0, 5, 10, 11, 12, 15, 16] }
+  ] },
+  { name: "quiet-channel", description: "Admin: silence companions in a channel — Characterly still observes and remembers", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
+    { name: "channel", description: "Channel to quiet (default: this one — threads inherit their parent)", type: 7, required: false, channel_types: [0, 5, 10, 11, 12, 15, 16] }
+  ] },
+  { name: "unquiet-channel", description: "Admin: let companions speak in a channel again", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
+    { name: "channel", description: "Channel to unquiet (default: this one)", type: 7, required: false, channel_types: [0, 5, 10, 11, 12, 15, 16] }
   ] },
   { name: "companion", description: "Manage your personal AI companion and summon them into servers", options: [
     { name: "action", description: "Companion action", type: 3, required: true, choices: [
@@ -1005,10 +1032,6 @@ const confidence = (value: number | undefined) => {
 };
 const OPT_IN_HINT_SELF = "You haven't opted in yet — run /profile-build to consent and build your profile.";
 const OPT_IN_HINT_OTHER = "That member hasn't opted in to profiles.";
-/** One server build at a time — the routine is heavy and its archive marks are
- * not re-entrant across overlapping runs. */
-let serverBuildRunning = false;
-
 /** Parsed character cards awaiting the user's confirm click. In-memory only —
  *  a restart just expires the preview (the button explains itself). */
 const pendingImports = new Map<string, { persona: ImportPersona; meta: CardImportMeta; avatarUrl: string | null; card: ParsedCard; expires: number }>();
@@ -1058,8 +1081,9 @@ const NO_KEY_MSG = "No AI key is configured yet — connect your personal API ke
 
 const SERVER_ONLY_COMMANDS = new Set([
   "memory-purge", "memory-pause", "memory-resume", "memory-settings",
-  "status", "memory-triage", "server-build",
-  "limits", "ignore-channel", "unignore-channel",
+  "companions-pause", "companions-resume",
+  "status", "memory-triage",
+  "limits", "ignore-channel", "unignore-channel", "quiet-channel", "unquiet-channel",
 ]);
 
 export async function handleMemoryCommand(interaction: ChatInputCommandInteraction, store: MemoryStore, brainFor: BrainFor, evStore?: EventStore, profileStore: ProfileStore = new ProfileStore()) {
@@ -1296,6 +1320,8 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
             companion,
             targetUser.username,
             "left",
+            store,
+            interaction.guildId,
           );
         }
       }
@@ -1866,6 +1892,14 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     await store.setPaused(guildId, paused);
     return interaction.reply({ content: paused ? "Memory collection and bot replies are now paused for this server." : "Memory collection and bot replies are now enabled for this server.", ephemeral: true });
   }
+  if (interaction.commandName === "companions-pause" || interaction.commandName === "companions-resume") {
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can pause companions.", ephemeral: true });
+    const paused = interaction.commandName === "companions-pause";
+    await store.setReplyPaused(guildId, paused);
+    return interaction.reply({ content: paused
+      ? "Companions are silent in this server — Characterly still observes and remembers. (`/memory-pause` pauses everything.)"
+      : "Companions can speak in this server again.", ephemeral: true });
+  }
   if (interaction.commandName === "status") {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can view bot status.", ephemeral: true });
     const { uptimeSec, counts } = metricsSnapshot();
@@ -1879,7 +1913,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     const oldestMin = qstats.oldestPendingAt ? Math.max(0, Math.round((Date.now() - qstats.oldestPendingAt.getTime()) / 60_000)) : null;
     const queueLine = `**queue:** ${qstats.pending} job${qstats.pending === 1 ? "" : "s"} pending${oldestMin !== null ? ` (oldest ${oldestMin}m ago)` : ""}${qstats.dead ? ` · ${qstats.dead} dead-lettered — operator can re-drive with scripts/requeue-dead-jobs.mjs` : ""}`;
     const budgetLine = `**LLM usage:** ${usage.toLocaleString()}/${settings.llmDailyCap.toLocaleString()} calls today · ${queueLine}`;
-    const flagsLine = `**Flags:** memory ${settings.memoryEnabled ? "on" : "paused"} · companion replies ${settings.replyEnabled ? "on" : "paused"} · ignored channels ${settings.ignoredChannels.length}`;
+    const flagsLine = `**Flags:** memory ${settings.memoryEnabled ? "on" : "paused"} · companion replies ${settings.replyEnabled ? "on" : "paused"} · ignored channels ${settings.ignoredChannels.length} · quiet channels ${settings.quietChannels.length}`;
     return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle("Characterly server status").setDescription(`**Uptime:** ${uptime}\n\n${counterLines}\n\n${companionsLine}\n${flagsLine}\n${budgetLine}\n\n*${value.messages.toLocaleString()} raw messages · ${value.memories.toLocaleString()} active memories · ${value.lore.toLocaleString()} lore*`)] });
   }
   if (interaction.commandName === "memory-triage") {
@@ -1902,7 +1936,10 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     const ignored = settings.ignoredChannels.length
       ? settings.ignoredChannels.map(id => `<#${id}>`).join(", ")
       : "none";
-    return interaction.reply({ content: `Memory collection: **${settings.memoryEnabled ? "on" : "paused"}**\nCompanion replies: **${settings.replyEnabled ? "on" : "paused"}**\nRaw-message retention: **${settings.rawRetentionDays} days**\nIgnored channels: ${ignored}\nDaily LLM cap: **${settings.llmDailyCap.toLocaleString()} calls**`, ephemeral: true });
+    const quiet = settings.quietChannels.length
+      ? settings.quietChannels.map(id => `<#${id}>`).join(", ")
+      : "none";
+    return interaction.reply({ content: `Memory collection: **${settings.memoryEnabled ? "on" : "paused"}**\nCompanion replies: **${settings.replyEnabled ? "on" : "paused"}**\nRaw-message retention: **${settings.rawRetentionDays} days**\nIgnored channels: ${ignored}\nQuiet channels (companions silent, still observing): ${quiet}\nDaily LLM cap: **${settings.llmDailyCap.toLocaleString()} calls**`, ephemeral: true });
   }
   if (interaction.commandName === "limits") {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can change the LLM budget.", ephemeral: true });
@@ -1922,12 +1959,29 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       if (ignored.has(channel.id)) return interaction.reply({ content: `<#${channel.id}> is already ignored.`, ephemeral: true });
       ignored.add(channel.id);
       await store.setIgnoredChannels(guildId, [...ignored]);
-      return interaction.reply({ content: `<#${channel.id}> is now invisible to Characterly — nothing there is archived, answered, or scanned by \`/server-build\`. Restore it with \`/unignore-channel\`.`, ephemeral: true });
+      return interaction.reply({ content: `<#${channel.id}> is now invisible to Characterly — nothing there is archived or answered. (To silence just companions instead, use \`/quiet-channel\`.) Restore it with \`/unignore-channel\`.`, ephemeral: true });
     }
     if (!ignored.has(channel.id)) return interaction.reply({ content: `<#${channel.id}> isn't ignored.`, ephemeral: true });
     ignored.delete(channel.id);
     await store.setIgnoredChannels(guildId, [...ignored]);
     return interaction.reply({ content: `<#${channel.id}> is visible to Characterly again — messages there are archived and answered normally.`, ephemeral: true });
+  }
+  if (interaction.commandName === "quiet-channel" || interaction.commandName === "unquiet-channel") {
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can change quiet channels.", ephemeral: true });
+    const channel = interaction.options.getChannel("channel") ?? interaction.channel;
+    if (!channel) return interaction.reply({ content: "I couldn't determine which channel you mean — pass one with the `channel` option.", ephemeral: true });
+    const settings = await store.settings(guildId);
+    const quiet = new Set(settings.quietChannels);
+    if (interaction.commandName === "quiet-channel") {
+      if (quiet.has(channel.id)) return interaction.reply({ content: `<#${channel.id}> is already quiet.`, ephemeral: true });
+      quiet.add(channel.id);
+      await store.setQuietChannels(guildId, [...quiet]);
+      return interaction.reply({ content: `Companions won't speak in <#${channel.id}> anymore — Characterly still observes and remembers there. (Threads under it stay quiet too. For a full blackout use \`/ignore-channel\`.) Restore with \`/unquiet-channel\`.`, ephemeral: true });
+    }
+    if (!quiet.has(channel.id)) return interaction.reply({ content: `<#${channel.id}> isn't quiet.`, ephemeral: true });
+    quiet.delete(channel.id);
+    await store.setQuietChannels(guildId, [...quiet]);
+    return interaction.reply({ content: `Companions can speak in <#${channel.id}> again.`, ephemeral: true });
   }
   if (interaction.commandName === "event") {
     if (!evStore) return interaction.reply({ content: "Event inspection is not available right now.", ephemeral: true });
@@ -2117,34 +2171,6 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     } finally {
       profileBuildsRunning.delete(pbKey);
     }
-  }
-  if (interaction.commandName === "server-build") {
-    const isOwner = interaction.user.id === interaction.guild?.ownerId;
-    if (!isOwner && !interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
-      return interaction.reply({ content: "Only the server owner or an administrator can run a server build.", ephemeral: true });
-    }
-    if (serverBuildRunning) return interaction.reply({ content: "A server build is already running.", ephemeral: true });
-    const channelOpt = interaction.options.getChannel("channel");
-    const channel = (channelOpt ?? interaction.guild?.channels.cache.find(c => c.name === config.ingestChannel && c.type === ChannelType.GuildText)) ?? null;
-    if (!channel || channel.type !== ChannelType.GuildText) {
-      return interaction.reply({ content: "Pick a text channel to build from (or set INGEST_CHANNEL and omit the option).", ephemeral: true });
-    }
-    // Ignored means invisible — a historical scan over an ignored channel
-    // would archive exactly what the admin excluded.
-    const buildSettings = await store.settings(guildId);
-    if (buildSettings.ignoredChannels.includes(channel.id)) {
-      return interaction.reply({ content: `<#${channel.id}> is on the ignored list — nothing there is archived. Restore it with \`/unignore-channel\` first if you really want to scan it.`, ephemeral: true });
-    }
-    // Consent gate — this scans and archives channel history, including
-    // messages written before the bot arrived by people who never consented
-    // to it. The click-through is the consent artifact; the build itself
-    // only starts from the confirm button (handleMemoryButton).
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId(`serverbuild:confirm:${guildId}:${interaction.user.id}:${channel.id}`).setLabel("Scan channel history").setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId(`serverbuild:cancel:${guildId}:${interaction.user.id}`).setLabel("Cancel").setStyle(ButtonStyle.Secondary),
-    );
-    return interaction.reply({ ephemeral: true, components: [row],
-      content: `**This scans and archives #${channel.name} history** — including messages written before the bot arrived, by people who never consented to it. Only continue if the server expects this.` });
   }
   if (interaction.commandName === "setup") {
     if (interaction.guildId && !interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
@@ -3310,57 +3336,6 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
     return;
   }
 
-  // serverbuild:{confirm|cancel}:{guildId}:{userId}:{channelId?} — the
-  // /server-build consent gate. Same-user and ManageGuild are both re-checked:
-  // the prompt is ephemeral but button clicks are new interactions.
-  if (parts[0] === "serverbuild") {
-    const [, sub, guildId, userId, channelId] = parts;
-    if (interaction.user.id !== userId) return interaction.reply({ content: "That confirmation is not for you.", ephemeral: true });
-    if (sub === "cancel") return interaction.update({ content: "Server build cancelled — no history was scanned.", components: [] });
-    if (sub !== "confirm" || !channelId || interaction.guildId !== guildId) return interaction.reply({ content: "That confirmation is not valid.", ephemeral: true });
-    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "A server build requires the Manage Server permission.", ephemeral: true });
-    if (serverBuildRunning) return interaction.reply({ content: "A server build is already running.", ephemeral: true });
-    if (!brainFor) return interaction.reply({ content: "Server builds aren't available right now.", ephemeral: true });
-    const brain = await brainFor(guildId);
-    if (!brain) return interaction.reply({ content: NO_KEY_MSG, ephemeral: true });
-    const channel = interaction.guild?.channels.cache.get(channelId)
-      ?? await interaction.guild?.channels.fetch(channelId).catch(() => null);
-    if (!channel || channel.type !== ChannelType.GuildText) return interaction.update({ content: "That channel no longer exists — run /server-build again.", components: [] });
-    // Claim synchronously — the awaits below would otherwise let a second
-    // invocation slip past the check and start a parallel build.
-    serverBuildRunning = true;
-    let buildStarted = false;
-    try {
-      await interaction.update({ content: `Server build started for #${(channel as TextChannel).name} — this runs long; results post to this channel when done.`, components: [] });
-      buildStarted = true;
-      // Ingest calls pipeline.process outside the job queue — pause live
-      // extract claims for this guild and drain anything already claimed so
-      // the two can't interleave event-pipeline writes. The wait is bounded:
-      // a wedged job must not hang a build (the lease reclaims it anyway).
-      pauseGuildClaims(guildId);
-      waitForGuildIdle(guildId, 120_000).then(() => runServerIngest(channel as TextChannel, {
-        store, brain, eventStore: evStore ?? new EventStore(),
-        pipeline: new EventPipeline(), botId: interaction.client.user.id,
-      })).then(async s => {
-        const summary = `Server build done for #${(channel as TextChannel).name}: ${s.total.toLocaleString()} messages scanned · ${s.memoriesSaved} memories · ${s.relationshipsRecorded} relationship observations · ${s.eventsCreated} events · ${s.profilesBuilt} profiles built · ${s.llmErrors} LLM errors`;
-        await announce(summary);
-      }).catch(async err => {
-        logError("Server build failed", err);
-        await announce(`Server build for #${(channel as TextChannel).name} failed: ${(err as Error).message.slice(0, 180)}`);
-      }).finally(() => { serverBuildRunning = false; resumeGuildClaims(guildId); });
-      // Interaction tokens expire at ~15 min and a build can run longer — post
-      // to the invoking channel, with followUp as the short-run fallback.
-      async function announce(text: string) {
-        const ch = interaction.channel;
-        if (ch && "send" in ch) { await (ch.send as (t: string) => Promise<unknown>)(text).catch(() => {}); return; }
-        await interaction.followUp(text).catch(() => {});
-      }
-      return;
-    } finally {
-      if (!buildStarted) serverBuildRunning = false;
-    }
-  }
-
   if (parts[0] === "companionreset") {
     const [, , userId] = parts;
     if (interaction.user.id !== userId) return interaction.reply({ content: "That confirmation is not for you.", ephemeral: true });
@@ -3542,6 +3517,8 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
             existing,
             ownerName,
             "joined",
+            store,
+            interaction.guildId,
           );
           return interaction.reply({
             content: `**${existing.name}** is now hanging out in this server!`,
@@ -3704,7 +3681,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         return interaction.reply({ content: `You've left **${targetGuild.name}** — rejoin it before summoning ${companion.name} there.`, ephemeral: true });
       }
       await store.summonCompanion(targetGuildId, companion.id, userId, ownerName);
-      await sendCompanionSystemMessage(targetGuild, companion, ownerName, "joined");
+      await sendCompanionSystemMessage(targetGuild, companion, ownerName, "joined", store, targetGuildId);
       const guildName = targetGuild?.name ?? "the server";
       return interaction.reply({
         content: `**${companion.name}** has been summoned to **${guildName}**! Say their name there anytime to bring them into the conversation.`,
