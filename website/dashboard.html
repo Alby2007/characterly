@@ -184,6 +184,19 @@
     </div>
   </main>
 
+  <div class="modal-overlay" id="consent-gate" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="cg-h">
+      <img class="seal" src="/seal.svg" alt="" width="48" height="48" />
+      <h2 id="cg-h">Before you continue</h2>
+      <p>Read the <a href="/terms" target="_blank" rel="noopener noreferrer">Terms of Service</a> and <a href="/privacy" target="_blank" rel="noopener noreferrer">Privacy Policy</a>, then confirm you're in.</p>
+      <div class="form-error" id="consent-error" role="alert" hidden></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="consent-signout" type="button">Sign out</button>
+        <button class="btn btn-primary" id="consent-accept" type="button">I agree — continue</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="delete-modal" hidden>
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="del-h">
       <h2 id="del-h">Delete your account?</h2>

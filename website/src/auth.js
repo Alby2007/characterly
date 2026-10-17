@@ -141,6 +141,46 @@ export const claimLinkCode = code => supabase.rpc("claim_link_code", { p_code: c
 export const getBotSettings = () => supabase.rpc("my_bot_settings");
 export const saveBotSettings = patch => supabase.rpc("upsert_my_settings", { patch });
 export const getByokStatus = () => supabase.rpc("my_byok_status");
+
+// ── Terms/Privacy consent ────────────────────────────────────────────────────
+// The consent_events table is RLS-locked; both calls go through security
+// definer RPCs keyed on auth.uid(). The version constant lives in config.js
+// and must stay in sync with TERMS_VERSION in the bot's src/ops.ts.
+export const getConsent = () => supabase.rpc("my_consent", { p_document: "terms" });
+export const recordConsent = version =>
+  supabase.rpc("record_consent", { p_document: "terms", p_version: version });
+
+/** Post-auth clickwrap gate: resolves immediately when the account already
+ * accepted ≥ TERMS_VERSION, else shows the #consent-gate overlay and holds
+ * until acceptance is recorded. Covers OAuth + magic-link signups that never
+ * see the email form's checkbox. Call once per authed page load. */
+export async function ensureConsent(currentVersion) {
+  const { data, error } = await getConsent();
+  // PGRST202 = RPC missing — the consent infra isn't deployed yet, so there is
+  // nothing to enforce. Fail open rather than lock accounts out mid-rollout.
+  if (error?.code === "PGRST202") return true;
+  if (!error && (data ?? 0) >= currentVersion) return true;
+  const gate = document.getElementById("consent-gate");
+  if (!gate) return true; // Page without the gate markup — nothing to block on.
+  gate.hidden = false;
+  return new Promise(resolve => {
+    const btn = document.getElementById("consent-accept");
+    const err = document.getElementById("consent-error");
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      err.hidden = true;
+      const { error: recErr } = await recordConsent(currentVersion);
+      btn.disabled = false;
+      if (recErr) {
+        err.textContent = "Couldn't record that — try again in a moment.";
+        err.hidden = false;
+        return;
+      }
+      gate.hidden = true;
+      resolve(true);
+    }, { once: false });
+  });
+}
 export const getCreditLedger = (limit = 8) =>
   supabase.from("credit_ledger")
     .select("delta,kind,reason,balance_after,created_at")

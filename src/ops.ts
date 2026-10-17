@@ -246,8 +246,10 @@ const VERIFY_CUSTOM_ID = "house:verify";
 // honest even if a stale ephemeral survives a doc update. URLs mirror
 // website/src/config.js LINKS — keep them in step.
 export const TERMS_VERSION = 1;
-export const TERMS_URL = "https://github.com/Alby2007/characterly/blob/main/TERMS.md";
-export const PRIVACY_URL = "https://github.com/Alby2007/characterly/blob/main/PRIVACY.md";
+// Hosted charter pages on the site (rendered from the repo's TERMS.md /
+// PRIVACY.md at build time — content stays single-sourced there).
+export const TERMS_URL = `${config.siteUrl.replace(/\/+$/, "")}/terms`;
+export const PRIVACY_URL = `${config.siteUrl.replace(/\/+$/, "")}/privacy`;
 const CONSENT_CUSTOM_ID = "house:consent";
 
 /** Post the verify card if the gate channel doesn't already carry one —
@@ -341,7 +343,9 @@ export async function handleHouseButton(interaction: ButtonInteraction): Promise
   }
 
   // Consent gate — applies to verify clicks AND post-record consent clicks.
-  const acceptance = await deps.store.tosAcceptance(interaction.user.id).catch(() => undefined);
+  // account.id is passed so a web-signup acceptance on the linked account
+  // counts here — one acceptance covers the whole product.
+  const acceptance = await deps.store.tosAcceptance(interaction.user.id, account.id).catch(() => undefined);
   if (acceptance === undefined) {
     return interaction.reply({ content: "Couldn't check your acceptance status — try again in a moment.", ephemeral: true });
   }
@@ -406,7 +410,7 @@ export async function runMemberLinkSweep(deps: OpsDeps): Promise<number> {
       // out of policy (e.g. verified before the gate existed, or the docs
       // bumped). Same fail-safe as the link check: a lookup error keeps the
       // role — only a definitive missing/stale acceptance revokes.
-      const acceptance = await deps.store.tosAcceptance(m.user.id).catch(e => {
+      const acceptance = await deps.store.tosAcceptance(m.user.id, account.id).catch(e => {
         inc("ops.sweep_error");
         logError("member consent check failed", e);
         return undefined;
@@ -821,11 +825,11 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
   },
   {
     channel: "privacy-policy",
-    version: 1,
+    version: 2,
     embeds: () => [new EmbedBuilder()
       .setTitle("Privacy — the short version")
       .setDescription(
-        "The full policy is at [github.com/Alby2007/characterly/PRIVACY.md](https://github.com/Alby2007/characterly/blob/main/PRIVACY.md). The day-to-day version:\n\n" +
+        `The full policy is at [${config.siteUrl.replace(/\/+$/, "").replace(/^https?:\/\//, "")}/privacy](${PRIVACY_URL}). The day-to-day version:\n\n` +
         "• **Servers see nothing until enabled** — no messages are archived until a server admin runs `/memory-resume`\n" +
         "• **Personal memory is opt-in** — derived facts, profile attributes, and relationship notes only exist for members who run `/profile-build` or `/opt-in`\n" +
         "• **Retention is bounded** — raw messages are held 30 days, then permanently deleted\n" +

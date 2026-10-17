@@ -103,6 +103,26 @@ test("tosAcceptance/recordTosAcceptance round-trip; highest version wins", async
   await sql.end();
 });
 
+test("tosAcceptance matches web-signup rows via account_id", async () => {
+  const sql = makeTestSql();
+  const { store } = await makeStore(sql);
+  // A web signup predates Discord linking — NULL discord_user_id, account only.
+  await sql`
+    INSERT INTO consent_events (discord_user_id, account_id, document, version, source)
+    VALUES (NULL, 'acc-web', 'terms', 1, 'web_signup')
+  `;
+  // The same person, now linked on Discord — the account row counts.
+  assert.equal((await store.tosAcceptance("u-bob", "acc-web"))?.version, 1);
+  // Without the account hint the web row doesn't match his Discord id…
+  assert.equal(await store.tosAcceptance("u-bob"), null);
+  // …and it never leaks to a different account.
+  assert.equal(await store.tosAcceptance("u-eve", "acc-other"), null);
+  // A stale web acceptance (v1) plus a current Discord one (v2) — highest wins.
+  await store.recordTosAcceptance("u-bob", "acc-web", 2, "discord_verify");
+  assert.equal((await store.tosAcceptance("u-bob", "acc-web"))?.version, 2);
+  await sql.end();
+});
+
 test("first spend applies the daily grant lazily, then debits", async () => {
   const sql = makeTestSql();
   const store = await fixture(sql);

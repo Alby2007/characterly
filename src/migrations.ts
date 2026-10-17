@@ -2328,6 +2328,89 @@ const migrations: Migration[] = [
       // The vector extension stays — shared infra other features may rely on.
     },
   },
+
+  // ── v41: web-side consent capture ─────────────────────────────────────────
+  // discord_user_id goes nullable so rows can key on account_id alone (a web
+  // signup predates Discord linking). RLS locks the table off PostgREST — it
+  // was world-readable/writable to the publishable key — while the RPCs give
+  // the site a security-definer path keyed on auth.uid(). Bot access via the
+  // postgres role is unaffected.
+  {
+    version: 41,
+    name: "v41_web_consent",
+    up: async (sql) => {
+      await sql`ALTER TABLE consent_events ALTER COLUMN discord_user_id DROP NOT NULL`;
+      await sql`CREATE INDEX IF NOT EXISTS consent_events_account_doc ON consent_events (account_id, document, version DESC)`;
+      await sql`ALTER TABLE consent_events ENABLE ROW LEVEL SECURITY`;
+      // Auth-dependent: Supabase-hosted only — wrapped so self-host Postgres
+      // (no auth schema) still migrates cleanly.
+      await sql`
+        DO $web$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+            EXECUTE $dfn$
+              CREATE OR REPLACE FUNCTION public.my_consent(p_document text)
+              RETURNS integer
+              LANGUAGE sql
+              STABLE
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+                SELECT COALESCE(MAX(version), 0)
+                FROM public.consent_events
+                WHERE account_id = auth.uid()::text AND document = p_document
+              $body$
+            $dfn$;
+            EXECUTE $dfn$
+              CREATE OR REPLACE FUNCTION public.record_consent(p_document text, p_version integer)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE uid uuid := auth.uid();
+              BEGIN
+                IF uid IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                IF p_document <> 'terms' THEN
+                  RAISE EXCEPTION 'unsupported consent document';
+                END IF;
+                -- Version is what the client *says* it showed — bound it so a
+                -- forged high version can't evade future re-prompts. Raise the
+                -- ceiling in the same migration that bumps TERMS_VERSION.
+                IF p_version IS NULL OR p_version < 1 OR p_version > 10 THEN
+                  RAISE EXCEPTION 'unsupported consent version';
+                END IF;
+                INSERT INTO public.consent_events (discord_user_id, account_id, document, version, source)
+                VALUES (NULL, uid::text, p_document, p_version, 'web_signup');
+              END
+              $body$
+            $dfn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.my_consent(text) FROM PUBLIC';
+            EXECUTE 'REVOKE ALL ON FUNCTION public.record_consent(text, integer) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.my_consent(text) FROM anon';
+              EXECUTE 'REVOKE ALL ON FUNCTION public.record_consent(text, integer) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.my_consent(text) TO authenticated';
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.record_consent(text, integer) TO authenticated';
+            END IF;
+          END IF;
+        END $web$
+      `;
+    },
+    down: async (sql) => {
+      await sql`DROP FUNCTION IF EXISTS public.my_consent(text)`;
+      await sql`DROP FUNCTION IF EXISTS public.record_consent(text, integer)`;
+      await sql`ALTER TABLE consent_events DISABLE ROW LEVEL SECURITY`;
+      await sql`DROP INDEX IF EXISTS consent_events_account_doc`;
+      // NOT NULL restore would fail if web rows (NULL uid) exist — that's the
+      // intended guard: rolling back past web signups is a data decision.
+      await sql`ALTER TABLE consent_events ALTER COLUMN discord_user_id SET NOT NULL`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

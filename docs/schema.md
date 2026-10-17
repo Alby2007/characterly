@@ -559,19 +559,21 @@ One-time Discord → web linking codes (v27). `/link` in Discord mints a code (`
 
 ### `consent_events`
 
-Append-only clickwrap audit trail (v39) — every Terms/Privacy acceptance is a row; the max `version` per `(discord_user_id, document)` is the current state and older rows stay as evidence. Written by the house verify gate (`source='discord_verify'`); the schema is surface-agnostic so a later website signup checkbox writes `source='web_signup'` rows to the same table.
+Append-only clickwrap audit trail (v39, extended v41) — every Terms/Privacy acceptance is a row; the max `version` matching `discord_user_id` **or** `account_id` is the current state and older rows stay as evidence. Two writers: the house verify gate (`source='discord_verify'`, `discord_user_id` set) and the website (`source='web_signup'`, `account_id` only — a web signup predates Discord linking, so `discord_user_id` went nullable in v41).
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | BIGSERIAL PK | |
-| `discord_user_id` | TEXT | The Discord user who clicked accept |
+| `discord_user_id` | TEXT NULL | The Discord user who clicked accept — NULL on web-signup rows |
 | `account_id` | TEXT NULL | `web_profiles.id` (or `'selfhosted'`) — loose TEXT, no FK: `web_profiles` only exists under Supabase auth while this table is plain-Postgres |
 | `document` | TEXT | Which document set — `'terms'` covers the ToS+Privacy pair today |
-| `version` | INT | The version stamped on the button they clicked (`house:consent:<v>`) — what they actually saw, not "current at click time" |
-| `source` | TEXT | Where the acceptance happened — `discord_verify`, later `web_signup` |
+| `version` | INT | The version stamped on the control they clicked — what they actually saw, not "current at click time" |
+| `source` | TEXT | Where the acceptance happened — `discord_verify`, `web_signup` |
 | `accepted_at` | TIMESTAMPTZ | Defaults `now()` |
 
-**Index:** `consent_events_user_doc (discord_user_id, document, version DESC)`. No RLS/grants — bot-only writes via the postgres role; a web-side writer needs an explicit policy when it's built.
+**Indexes:** `consent_events_user_doc (discord_user_id, document, version DESC)` + v41's `consent_events_account_doc (account_id, document, version DESC)`.
+
+**RLS/web surface (v41):** RLS is enabled with no policies — fail-closed to PostgREST. The site's publishable key reaches the table only through two `SECURITY DEFINER` functions, both inside the `auth`-schema gate so plain Postgres skips them: `my_consent(p_document) → int` returns the caller's (`auth.uid()`) max accepted version, and `record_consent(p_document, p_version)` inserts a `web_signup` row for the caller (`document='terms'` and `1 ≤ version ≤ 10` enforced — raise the ceiling alongside a `TERMS_VERSION` bump). `EXECUTE` is granted to `authenticated` only — anonymous visitors can't read or write consent state. Bot access via the postgres role bypasses RLS as usual.
 
 ---
 
@@ -806,3 +808,5 @@ Version tracking for the migration system.
 | 37 | `v37_ratings_and_comment_reports` | `listing_ratings` (upsert-per-rater, `stars` 1–5 CHECK) + `comment_reports` (dedupe per `(message_id, reporter_user_id)`, shared daily report budget) — listing threads become the comment + rating surface |
 | 38 | `v38_discord_profile_snapshot` | `link_codes` + `web_profiles` gain `discord_username`/`discord_avatar_url`; `claim_link_code` copies the mint-time snapshot, the identity trigger stamps it from `identity_data`, `unlink_discord` clears it; OAuth rows backfilled — code-linked accounts render name/avatar like OAuth ones |
 | 39 | `v39_consent_events` | `consent_events` — append-only Terms/Privacy clickwrap log (`discord_user_id`, `account_id`, `document`, `version`, `source`, `accepted_at`) backing the verify-gate acceptance step and the sweep's unconsented-member revocation |
+| 40 | `v40_semantic_recall` | `vector` extension + un-dimensioned `embedding` columns on `memories` and `companion_journal` — hybrid semantic recall, dims enforced in code (`EMBED_DIMS`), no ANN index (guild-scope scans are tiny) |
+| 41 | `v41_web_consent` | `consent_events.discord_user_id` → nullable (web signups have no Discord id yet), `consent_events_account_doc` index, RLS enabled (fail-closed to PostgREST) + auth-gated `my_consent`/`record_consent` security-definer RPCs — the site's `web_signup` write path |

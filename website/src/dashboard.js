@@ -1,11 +1,11 @@
 import "./base.js";
 import { supabase } from "./supabase.js";
-import { DISCORD_OAUTH_ENABLED } from "./config.js";
+import { DISCORD_OAUTH_ENABLED, TERMS_VERSION } from "./config.js";
 import {
   requireAuth, getProfile, updateDisplayName,
   updatePassword, deleteAccount, signOut,
   linkDiscord, getIdentities, unlinkDiscord, unlinkDiscordLink, claimLinkCode, withTimeout,
-  getBotSettings, saveBotSettings, getByokStatus, getCreditLedger,
+  getBotSettings, saveBotSettings, getByokStatus, getCreditLedger, ensureConsent,
 } from "./auth.js";
 
 const $ = sel => document.querySelector(sel);
@@ -13,6 +13,14 @@ const guard = (p, ms = 8000) => withTimeout(p, ms).catch(e => console.warn("dash
 
 const user = await requireAuth();
 if (!user) throw new Error("redirecting");
+
+// Clickwrap gate — OAuth + magic-link signups never see the email form's
+// checkbox, so acceptance is captured here on the first authed visit. Holds
+// rendering until consent is recorded (sign-out is the escape hatch).
+$("#consent-signout").addEventListener("click", async () => {
+  try { await signOut(); } finally { window.location.href = "/"; }
+});
+await ensureConsent(TERMS_VERSION);
 
 // Wired FIRST: nothing below (network-bound renders) may be able to leave
 // sign-out / delete inert by hanging or throwing.

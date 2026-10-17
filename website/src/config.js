@@ -7,10 +7,16 @@ export const LINKS = {
   addToDiscord: "https://discord.com/oauth2/authorize?client_id=1549171765056639048",
   discord: "https://discord.gg/vCjQ9v3md",
   github: "https://github.com/Alby2007/characterly",
-  privacy: "https://github.com/Alby2007/characterly/blob/main/PRIVACY.md",
-  terms: "https://github.com/Alby2007/characterly/blob/main/TERMS.md",
-  security: "https://github.com/Alby2007/characterly/blob/main/SECURITY.md",
+  // First-party charter pages — they render the repo's .md files at build.
+  privacy: "/privacy",
+  terms: "/terms",
+  security: "/security",
 };
+
+// Current Terms/Privacy version for clickwrap consent — keep in sync with
+// TERMS_VERSION in src/ops.ts. Bumping re-prompts website users at the
+// dashboard gate AND Discord members at verify.
+export const TERMS_VERSION = 1;
 
 // Supabase client config. The publishable key is public by design — access is
 // enforced by row-level security on the database, not by secrecy of the key.

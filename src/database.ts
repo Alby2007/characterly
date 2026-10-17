@@ -3604,12 +3604,16 @@ export class MemoryStore {
   }
 
   /** Latest recorded Terms/Privacy acceptance for a Discord user — null when
-   *  they've never accepted. Append-only rows; the highest version wins.
+   *  they've never accepted. Matches on discord_user_id OR the linked
+   *  account_id when supplied, so a web-signup acceptance counts at the
+   *  Discord gate. Append-only rows; the highest version wins.
    *  Uncached: a stale cache would let a just-bumped policy slip through. */
-  async tosAcceptance(discordUserId: string): Promise<{ version: number; acceptedAt: string } | null> {
+  async tosAcceptance(discordUserId: string, accountId?: string | null): Promise<{ version: number; acceptedAt: string } | null> {
     const rows = await this.sql<Array<{ version: number; accepted_at: string }>>`
       SELECT version, accepted_at FROM consent_events
-      WHERE discord_user_id = ${discordUserId} AND document = 'terms'
+      WHERE document = 'terms'
+        AND (discord_user_id = ${discordUserId}
+          OR (${accountId ?? null}::text IS NOT NULL AND account_id = ${accountId ?? null}))
       ORDER BY version DESC, accepted_at DESC LIMIT 1
     `;
     return rows[0] ? { version: Number(rows[0].version), acceptedAt: rows[0].accepted_at } : null;

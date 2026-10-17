@@ -673,3 +673,39 @@ test("migration v38 adds the Discord profile snapshot columns to link_codes", as
     assert.equal(row.length, 1, "the code row itself survives the column drop");
   } finally { await sql.end(); }
 });
+
+test("migration v41 makes consent_events discord_user_id nullable + locks RLS, guarded rollback", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any);
+
+    const [col] = await sql<Array<{ is_nullable: string }>>`
+      SELECT is_nullable FROM information_schema.columns
+      WHERE table_name = 'consent_events' AND column_name = 'discord_user_id'`;
+    assert.equal(col.is_nullable, "YES", "web-signup rows have no Discord id yet");
+
+    const [rls] = await sql<Array<{ relrowsecurity: boolean }>>`
+      SELECT relrowsecurity FROM pg_class WHERE relname = 'consent_events'`;
+    assert.equal(rls.relrowsecurity, true, "table must be RLS-locked off PostgREST");
+
+    const idx = await sql`SELECT indexname FROM pg_indexes WHERE indexname = 'consent_events_account_doc'`;
+    assert.equal(idx.length, 1, "account/doc/version index exists");
+
+    // The web RPCs are auth-schema-gated — plain Postgres gets none of them.
+    const fns = await sql`SELECT proname FROM pg_proc WHERE proname IN ('my_consent', 'record_consent')`;
+    assert.equal(fns.length, 0, "RPCs shouldn't exist outside Supabase auth");
+
+    // A web-signup row (NULL uid) must block the rollback — data decision, not
+    // silent loss. Removing it lets v40 restore NOT NULL.
+    await sql`INSERT INTO consent_events (discord_user_id, account_id, document, version, source)
+              VALUES (NULL, 'acc-web', 'terms', 1, 'web_signup')`;
+    await assert.rejects(runMigrations(sql as any, 40), "rollback must refuse while web rows exist");
+    await sql`DELETE FROM consent_events WHERE account_id = 'acc-web'`;
+    await runMigrations(sql as any, 40);
+    const [col2] = await sql<Array<{ is_nullable: string }>>`
+      SELECT is_nullable FROM information_schema.columns
+      WHERE table_name = 'consent_events' AND column_name = 'discord_user_id'`;
+    assert.equal(col2.is_nullable, "NO", "rollback restores NOT NULL once clean");
+  } finally { await sql.end(); }
+});

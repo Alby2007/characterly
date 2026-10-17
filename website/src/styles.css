@@ -951,3 +951,122 @@ input.toggle:focus-visible { outline: 2px solid var(--gold-hi); outline-offset: 
   *, *::before, *::after { animation: none !important; transition-duration: 0.01ms !important; }
   .js .rv { opacity: 1; transform: none; filter: none; }
 }
+
+/* ── The Charter — legal documents set as house papers ─────────────────── */
+.charter {
+  width: min(860px, 92vw);
+  margin: 0 auto;
+  padding: calc(var(--nav-h) + 56px) 0 110px;
+}
+.charter-head { text-align: center; margin-bottom: 34px; }
+.charter-head .label { display: block; }
+.doc-tabs {
+  display: inline-flex; gap: 28px; margin-top: 18px;
+  border-bottom: 1px solid var(--rule);
+}
+.doc-tabs a {
+  position: relative; padding: 0 0 12px;
+  font-family: var(--sans); font-size: 14.5px; font-weight: 500;
+  color: var(--paper-3); text-decoration: none; transition: color 0.2s;
+}
+.doc-tabs a::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1.5px;
+  background: var(--gold); transform: scaleX(0); transform-origin: left; transition: transform 0.35s var(--ease);
+}
+.doc-tabs a:hover { color: var(--paper); }
+.doc-tabs a.active { color: var(--paper); }
+.doc-tabs a.active::after { transform: scaleX(1); }
+
+.sheet-doc {
+  padding: clamp(30px, 5vw, 58px) clamp(24px, 5.4vw, 64px) 26px;
+}
+.sheet-doc-head {
+  display: flex; align-items: center; gap: 18px;
+  padding-bottom: 22px; margin-bottom: 26px;
+  border-bottom: 1px solid rgba(43, 32, 24, 0.22);
+}
+.sheet-doc-head .seal { width: 52px; height: 52px; flex: none; }
+.modal > .seal { display: block; margin: 0 auto 14px; }
+.sheet-doc-head h1 {
+  margin: 0; font-family: var(--serif); font-weight: 560;
+  font-size: clamp(28px, 4.4vw, 40px); line-height: 1.08; letter-spacing: 0.005em;
+  color: var(--sheet-ink);
+}
+.doc-meta {
+  margin-top: 8px; font-family: var(--mono); font-size: 11px;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--sheet-dim);
+}
+
+.doc-toc {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 6px 26px; margin-bottom: 34px;
+  padding-bottom: 24px; border-bottom: 1px solid rgba(43, 32, 24, 0.14);
+}
+.doc-toc a {
+  display: flex; align-items: baseline; gap: 10px; padding: 3px 0;
+  font-size: 13.5px; color: var(--sheet-dim); text-decoration: none; transition: color 0.15s;
+}
+.doc-toc a:hover { color: var(--sheet-ink); }
+.doc-toc .toc-n { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; opacity: 0.75; }
+
+.doc-body h2 {
+  display: flex; align-items: baseline; gap: 14px;
+  margin: 34px 0 12px; font-family: var(--serif); font-weight: 560;
+  font-size: 22px; line-height: 1.2; color: var(--sheet-ink);
+  scroll-margin-top: calc(var(--nav-h) + 20px);
+}
+.doc-body h2 .sec-n {
+  font-family: var(--mono); font-weight: 500; font-size: 11px;
+  letter-spacing: 0.1em; color: var(--sheet-dim); flex: none;
+}
+.doc-body p {
+  margin: 0 0 14px; font-size: 15.5px; line-height: 1.72; color: var(--sheet-ink);
+}
+.doc-body strong { font-weight: 650; }
+.doc-body ul { margin: 0 0 16px; padding-left: 2px; list-style: none; }
+.doc-body li {
+  position: relative; margin: 0 0 9px; padding-left: 22px;
+  font-size: 15.5px; line-height: 1.65; color: var(--sheet-ink);
+}
+.doc-body li::before {
+  content: "—"; position: absolute; left: 0; top: 0;
+  font-family: var(--serif); color: var(--sheet-dim);
+}
+.doc-body a { color: #6d4a1f; text-underline-offset: 3px; }
+.doc-body a:hover { color: #4a2f10; }
+.doc-body code {
+  font-family: var(--mono); font-size: 0.86em;
+  padding: 1px 5px; border-radius: 3px;
+  background: rgba(43, 32, 24, 0.1); color: var(--sheet-ink);
+}
+.sheet-doc-foot {
+  display: flex; justify-content: space-between; align-items: center; gap: 16px;
+  margin-top: 40px; padding-top: 20px;
+  border-top: 1px solid rgba(43, 32, 24, 0.22);
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--sheet-dim);
+}
+.sheet-doc-foot a { color: inherit; text-decoration: none; }
+.sheet-doc-foot a:hover { color: var(--sheet-ink); }
+.charter-foot {
+  margin-top: 34px; text-align: center; font-size: 14px; color: var(--paper-3);
+}
+.charter-foot a { color: var(--paper-2); }
+
+/* ── Consent row (signup) ──────────────────────────────────────────────── */
+.consent-row {
+  display: flex; align-items: flex-start; gap: 12px; cursor: pointer;
+  font-size: 14px; line-height: 1.5; color: var(--paper-2);
+}
+.consent-row input {
+  appearance: none; flex: none; width: 18px; height: 18px; margin-top: 2px;
+  border: 1px solid var(--rule-2); border-radius: 3px; background: transparent;
+  cursor: pointer; position: relative; transition: border-color 0.2s, background 0.2s;
+}
+.consent-row input:hover { border-color: var(--gold); }
+.consent-row input:checked { background: var(--gold); border-color: var(--gold); }
+.consent-row input:checked::after {
+  content: ""; position: absolute; left: 5px; top: 1.5px; width: 5px; height: 10px;
+  border: solid #1b161c; border-width: 0 2px 2px 0; transform: rotate(42deg);
+}
+.consent-row a { color: var(--gold-hi); text-underline-offset: 3px; }

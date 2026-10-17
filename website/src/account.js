@@ -1,8 +1,8 @@
 import "./base.js";
-import { DISCORD_OAUTH_ENABLED } from "./config.js";
+import { DISCORD_OAUTH_ENABLED, TERMS_VERSION } from "./config.js";
 import {
   getSession, onAuthChange, authRedirectTarget, signIn, signUp, magicLink,
-  resendVerification, signInWithDiscord, resetPassword, updatePassword,
+  resendVerification, signInWithDiscord, resetPassword, updatePassword, recordConsent,
 } from "./auth.js";
 
 const $ = sel => document.querySelector(sel);
@@ -158,11 +158,17 @@ forms.signup.addEventListener("submit", async e => {
   const email = fd.get("email").trim();
   const password = fd.get("password");
   if (password.length < 8) { showError("Password must be at least 8 characters."); return; }
+  if (!fd.get("tos")) { showError("Please agree to the Terms of Service and Privacy Policy first."); return; }
   busy(btn, true); showError("");
   const { data, error } = await signUp(email, password, fd.get("display_name").trim());
   busy(btn, false);
   if (error) return showError(error.message);
-  if (data.session) { window.location.href = authRedirectTarget(); return; }
+  if (data.session) {
+    // Immediate-session setups (email confirm off) can record here; confirm-
+    // required flows record at the dashboard consent gate on first sign-in.
+    recordConsent(TERMS_VERSION).catch(() => {});
+    window.location.href = authRedirectTarget(); return;
+  }
   showNotice("We sent a verification link to your email. Click it to finish creating your account.",
     { type: "signup", email });
 });

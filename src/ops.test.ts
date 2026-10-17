@@ -5,7 +5,7 @@ import {
   handleHouseMemberRemove, ensureHouseLayout, collectHostHealth,
   runWatchdogTick, handleOpsCommand, initOps, resetOpsState, WANTED_LAYOUT,
   ensureVerifyGate, handleHouseButton, runMemberLinkSweep, runTagSweep, ensureResourcePosts,
-  TERMS_VERSION,
+  TERMS_VERSION, RESOURCE_POSTS,
   type OpsDeps, type AutomodMessage, type MemberLike,
 } from "./ops.js";
 import { PermissionFlagsBits } from "discord.js";
@@ -307,6 +307,23 @@ test("house:verify — linked account grants Member; unlinked gets the signup po
   assert.equal(unlinked.added.length, 0, "no linked account ⇒ no role");
   assert.match(ix2.replies[0].content, /No linked Characterly account/);
   assert.match(ix2.replies[0].content, /\/link/);
+});
+
+test("house:verify — passes the linked account id to the consent lookup", async () => {
+  // A web_signup acceptance lives on account_id only (no discord_user_id) —
+  // the gate must hand the account over or those rows never count.
+  let seen: Array<[string, unknown]> = [];
+  initOps(makeDeps({
+    fetchMember: async () => makeMember(),
+    store: {
+      creditsSupported: true,
+      accountForDiscordUser: async () => ({ id: "acc-web", plan: "free", creditBalance: 0 }),
+      tosAcceptance: async (uid: string, accountId?: unknown) => { seen.push([uid, accountId]); return { version: TERMS_VERSION, acceptedAt: "2026-01-01T00:00:00Z" }; },
+      recordTosAcceptance: async () => {},
+    } as unknown as MemoryStore,
+  }));
+  await handleHouseButton(makeButtonIx() as any);
+  assert.deepEqual(seen, [["u1", "acc-web"]], "consent lookup should key on user + linked account");
 });
 
 test("house:verify — pending members are told to accept rules; non-house + already-verified refused", async () => {
@@ -819,8 +836,10 @@ test("ensureResourcePosts posts marked embeds once; dedupes extras; edits stale 
   });
   const msgsById = new Map<string, ReturnType<typeof mkMsg>>();
   const marked = (key: string, v: number) => [{ footer: { text: `Char.ly resources · ${key} · v${v}` } }];
-  msgsById.set("m-new", mkMsg("m-new", marked("privacy-policy", 1)));   // current — kept
-  msgsById.set("m-dup", mkMsg("m-dup", marked("privacy-policy", 1)));   // duplicate — deleted
+  // Current marker derived from RESOURCE_POSTS so a version bump doesn't stale the fixture.
+  const privacyV = RESOURCE_POSTS.find(p => p.channel === "privacy-policy")!.version;
+  msgsById.set("m-new", mkMsg("m-new", marked("privacy-policy", privacyV)));   // current — kept
+  msgsById.set("m-dup", mkMsg("m-dup", marked("privacy-policy", privacyV)));   // duplicate — deleted
   msgsById.set("m-stale", mkMsg("m-stale", marked("how-to-publish-bots", 0))); // stale — edited
   msgsById.set("m-user", mkMsg("m-user", [], false));                  // human post — ignored
 
