@@ -61,8 +61,9 @@ filename, `sha256` of the source bytes) on both rows.
 
 **Private by default.** An import creates a `status='unlisted'` listing plus an
 adopted clone owned by the importer — invisible to marketplace queries and live
-listing caps, adoptable only by its creator. First import claims the DM pick;
-the awakened companion is never touched. Discord: preview → confirm. Website:
+listing caps, adoptable only by its creator. First import claims the DM pick
+(it answers once the awakened companion is active — onboarding owns DMs until
+then); the awakened companion is never touched. Discord: preview → confirm. Website:
 the dashboard's "Import a character" plate parses the file client-side, shows a
 preview, uploads an extracted PNG avatar to the `card-avatars` bucket, and
 creates the pair via the `import_companion_card` RPC (idempotent on `sha256` —
@@ -273,15 +274,19 @@ Forum card → **Add** → `store.adoptListing` in one transaction:
 - **Clone** — a `kind='adopted'` companions row is inserted owned by the
   adopter, plus the `companion_adoptions` row. Re-adopting the same listing
   reuses the same clone, so the relationship and memories continue.
-- **DM activation** — the clone becomes `active_dm_companion_id` (answers DMs),
-  and the greeting is sent as the character. `dm_introduced_at` stamps **only
+- **DM activation** — the clone becomes `active_dm_companion_id` and the
+  greeting is sent as the character. `dm_introduced_at` stamps **only
   on a successful send**; if DMs are closed, the greeting replays on the user's
-  next DM contact.
+  next DM contact. The pick *answers* DMs once the awakened companion is
+  active — until then DMs run the awakening flow (summons to servers work
+  regardless).
 - **Introduction gate** — adopted companions can't be server-summoned until
   `dm_introduced_at` is set; an early summon attempt gets an ephemeral warning.
 - `getCompanionByOwner` stays awakened-only, so onboarding, avatar edits, and
   the permanent-lock semantics are untouched. `resolveDmCompanion` picks the
   active DM companion; `listCompanionsForUser` is the roster (awakened first).
+  The DM routing gate uses `isAwakenedCompanionActive(existing)` — an adopted
+  pick never suppresses the awakening flow.
 
 Roster commands: `switch` (pick who answers DMs), `drop` (picker →
 `market:drop`), `summon`/`dismiss` (pickers when >1), `card`, `status`.

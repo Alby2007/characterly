@@ -12,6 +12,7 @@ import {
   buildOnboardingDraftEmbed,
   buildOnboardingWelcomePayload,
   commandDefinitions,
+  isAwakenedCompanionActive,
   findMutualGuilds,
   handleCompanionModal,
   handleMemoryButton, handleMarketplaceContext, handleMarketSelect,
@@ -961,16 +962,18 @@ async function handleDmMessage(
     return;
   }
 
-  // Resolve who answers: the user's active DM pick (adopted or awakened),
-  // falling back to the awakened companion/onboarding draft. `existing` stays
-  // the awakened row so onboarding behaves exactly as before.
+  // Resolve who answers once awake: the user's active DM pick (adopted or
+  // awakened), falling back to the awakened companion/onboarding draft.
+  // `existing` is the awakened row — the DM lane belongs to onboarding until
+  // it turns active, so an adopted pick must not suppress the awakening
+  // flow (adoption + the pick live on the Discord snowflake, not the web
+  // account — they survive relinking to a fresh account).
   const existing = await store.getCompanionByOwner(userId);
   const dmCompanion = await store.resolveDmCompanion(userId).catch(() => null);
-  const activeCompanion = dmCompanion ?? existing;
   const replyToId = message.reference?.messageId ?? undefined;
 
   // ── 1:1 DM Conversational Onboarding ───────────────────────────────────────
-  if (!activeCompanion || activeCompanion.onboardingState !== "active") {
+  if (!isAwakenedCompanionActive(existing)) {
     if (!replyThrottle.consume(dmScope, userId)) { inc("reply.cooldown"); return; }
     try {
       await message.channel.sendTyping();
@@ -1083,7 +1086,10 @@ async function handleDmMessage(
   }
 
   // ── Active 1:1 DM Companion Chat ───────────────────────────────────────────
-  const companion = activeCompanion;
+  // The gate guarantees `existing` is awakened + active, so the DM pick
+  // (adopted or awakened) answers — resolveDmCompanion already falls back
+  // to the awakened row when no pick is set.
+  const companion = (dmCompanion ?? existing)!;
   // An adopted companion selected in the marketplace without reachable DMs
   // introduces itself on first contact here — only a successful send counts.
   if (companion.kind === "adopted") {

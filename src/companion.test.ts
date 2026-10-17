@@ -20,6 +20,7 @@ import {
   handleMemoryButton,
   handleMemoryCommand,
   handleSetupModal,
+  isAwakenedCompanionActive,
 } from "./commands.js";
 import { MemoryStore } from "./database.js";
 import { makeStore, makeTestSql } from "./test-helpers.js";
@@ -898,6 +899,91 @@ test("onboarding UX: bare greeting guard, welcome/draft/awakened cards, proactiv
   assert.equal(deniedReplies.length, 2);
   assert.match(deniedReplies[0]?.content ?? "", /administrators/i);
   assert.equal(purgedGuilds.length, 2, "refused paths never purge");
+});
+
+test("DM lane: awakening owns DMs until the permanent companion is active — adopted picks defer, never suppress", async () => {
+  const awakenedDraft: GuildCompanion = { ...makeCompanion(3, "u-pat", "Sketch"), onboardingState: "onboarding" };
+  const awakenedActive = makeCompanion(1, "u-pat", "Nyx");
+  const adopted = {
+    ...makeCompanion(2, "u-pat", "Wren"),
+    kind: "adopted",
+    adoptedFromListingId: 11,
+  } as GuildCompanion;
+
+  // The DM gate predicate — fresh linked account, in-progress draft, and
+  // awakened-active. The awakening flow owns DMs in the first two states;
+  // an adopted pick's existence must not change any of these answers.
+  assert.equal(isAwakenedCompanionActive(null), false, "fresh linked user → onboarding owns the DM");
+  assert.equal(isAwakenedCompanionActive(awakenedDraft), false, "draft resumes onboarding");
+  assert.equal(isAwakenedCompanionActive(awakenedActive), true, "awakened companion → normal chat");
+
+  // market:talk — the pick is stored immediately either way (it takes effect
+  // on awakening), but the copy must not claim the adoptee answers now.
+  const talkCases: Array<{ awakened: GuildCompanion | null; expect: RegExp }> = [
+    { awakened: null, expect: /once you've awakened your own companion/i },
+    { awakened: awakenedActive, expect: /is answering your DMs now/i },
+  ];
+  for (const { awakened, expect } of talkCases) {
+    let pick: number | null = null;
+    let replied: any = null;
+    const store = {
+      listCompanionsForUser: async () => [adopted],
+      setActiveDmCompanion: async (_uid: string, id: number) => { pick = id; },
+      getCompanionByOwner: async () => awakened,
+      adoptionForCompanion: async () => ({ id: 5, dmIntroducedAt: new Date() }),
+      listingById: async () => null,
+    } as unknown as MemoryStore;
+    await handleMemoryButton(
+      {
+        customId: `market:talk:${adopted.id}`,
+        user: { id: "u-pat" },
+        reply: async (r: any) => { replied = r; },
+        update: async (r: any) => { replied = r; },
+      } as any,
+      store,
+    );
+    assert.equal(pick, adopted.id, "the pick is stored either way");
+    assert.match(replied?.content ?? "", expect);
+  }
+
+  // market:add — fresh adopt while unawakened must not promise DM answers and
+  // must surface the awaken affordance; awakened gets the normal copy.
+  const addCases: Array<{ awakened: GuildCompanion | null; expect: RegExp; nudge: boolean }> = [
+    { awakened: null, expect: /your DMs belong to your own companion/i, nudge: true },
+    { awakened: awakenedActive, expect: /they'll answer your DMs now/i, nudge: false },
+  ];
+  for (const { awakened, expect, nudge } of addCases) {
+    let pick: number | null = null;
+    let replied: any = null;
+    const listing = {
+      id: 11, name: "Wren", status: "active", greeting: "*waves*",
+      creatorUserId: "u-creator",
+    };
+    const store = {
+      listingById: async () => listing,
+      creditsSupported: false,
+      adoptListing: async () => ({
+        ok: true, companion: adopted,
+        adoption: { id: 9, dmIntroducedAt: null }, reused: false, revived: false,
+      }),
+      setActiveDmCompanion: async (_uid: string, id: number) => { pick = id; },
+      getCompanionByOwner: async () => awakened,
+      markDmIntroduced: async () => {},
+    } as unknown as MemoryStore;
+    await handleMemoryButton(
+      {
+        customId: `market:add:${listing.id}`,
+        user: { id: "u-pat", username: "Pat", createDM: async () => ({ send: async () => ({}) }) },
+        reply: async (r: any) => { replied = r; },
+        update: async (r: any) => { replied = r; },
+      } as any,
+      store,
+    );
+    assert.equal(pick, adopted.id);
+    assert.match(replied?.content ?? "", expect);
+    const hasNudge = Boolean(replied?.components?.length);
+    assert.equal(hasNudge, nudge, `awaken nudge button should ${nudge ? "" : "not "}be offered`);
+  }
 });
 
 // ── DB-backed integration tests ───────────────────────────────────────────────

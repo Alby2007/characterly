@@ -668,7 +668,7 @@ Per-Discord-user bot toggles (v29), keyed by `discord_user_id` **outside** the a
 | `discord_user_id` | TEXT PK | |
 | `c2c_enabled` | BOOLEAN | Default true — companion replies to other companions (those turns spend the owner's tokens) |
 | `low_credit_alerts` | BOOLEAN | Default true — once-per-UTC-day DM when the balance runs low |
-| `active_dm_companion_id` | BIGINT NULL | Which roster companion answers the user's DMs (v34); null = the awakened companion. Cleared automatically when the picked adoption is dropped |
+| `active_dm_companion_id` | BIGINT NULL | Which roster companion answers the user's DMs (v34); null = the awakened companion. Takes effect only once the awakened companion is active — onboarding owns the DM until then. Cleared automatically when the picked adoption is dropped |
 | `updated_at` | TIMESTAMPTZ | |
 
 **RLS:** enabled, zero policies — the bot reads/writes via the postgres role; the site uses `my_bot_settings()` / `upsert_my_settings(patch)` / `my_byok_status()` security-definer rpcs (authenticated role only).

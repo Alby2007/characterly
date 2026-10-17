@@ -97,6 +97,14 @@ export function buildOnboardingWelcomePayload(userId: string) {
   return { embeds: [embed], components: [row] };
 }
 
+/** DM routing rule: the awakening flow owns the DM lane until the permanent
+ *  companion is awake — an adopted DM pick (an 'active' companion of kind
+ *  'adopted') must not suppress it. The pick takes effect once this returns
+ *  true; `resolveDmCompanion` still decides who *answers* after that. */
+export function isAwakenedCompanionActive(awakened: Companion | null): boolean {
+  return awakened?.onboardingState === "active";
+}
+
 export function buildOnboardingDraftEmbed(spec: Partial<CompanionSpec>, turnCount: number): EmbedBuilder {
   const isReady = Boolean(spec.name?.trim() && spec.voicePersona?.trim() && spec.ownerDynamic?.trim());
   const embed = new EmbedBuilder()
@@ -1378,7 +1386,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
           {
             name: "Adopted Companions",
             value: adoptedRoster.length
-              ? adoptedRoster.map(c => `• **${c.name}**${c.id === dmPointer?.id ? " *(answering DMs)*" : ""}`).join("\n")
+              ? adoptedRoster.map(c => `• **${c.name}**${c.id === dmPointer?.id ? (isAwakenedCompanionActive(companion) ? " *(answering DMs)*" : " *(DM pick — answers once awakened)*") : ""}`).join("\n")
               : `None — browse the marketplace${account?.plan === "premium" ? " (unlimited slots)" : ` (${config.freeAdoptionSlots} slot)`}`,
             inline: false,
           },
@@ -1760,7 +1768,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       // surface the affordance here so the permanent bond stays discoverable.
       const hint = hasAwakened
         ? ""
-        : "\n\nYou haven't awakened a permanent companion yet — that's the one bond that's yours forever.";
+        : "\n\nYou haven't awakened a permanent companion yet — that's the one bond that's yours forever. Whoever you pick answers your DMs once they're awake.";
       if (!hasAwakened) {
         rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
           new ButtonBuilder().setCustomId("onboard:start").setLabel("Awaken your own companion").setStyle(ButtonStyle.Primary),
@@ -3146,7 +3154,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       // A user who only ever adopts never sees the DM onboarding path — keep
       // the permanent awakened bond discoverable.
       const awakened = await store.getCompanionByOwner(userId);
-      const hasAwakened = awakened?.onboardingState === "active";
+      const hasAwakened = isAwakenedCompanionActive(awakened);
       const rows = hasAwakened
         ? []
         : [new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -3155,12 +3163,15 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       return interaction.reply({
         ephemeral: true,
         content:
-          `**${res.companion.name}** has joined your companions${res.reused ? " (re-adopted — your history with them continues)" : ""} — they'll answer your DMs now.` +
+          `**${res.companion.name}** has joined your companions${res.reused ? " (re-adopted — your history with them continues)" : ""}` +
+          (hasAwakened
+            ? " — they'll answer your DMs now."
+            : " — your DMs belong to your own companion while you awaken them; once they're awake, `/companion action:switch` puts " + res.companion.name + " there.") +
           (greeted
             ? " They've introduced themselves — check your DMs! Once introduced, `/companion action:summon` works in servers too."
             : " I couldn't reach your DMs — open them once so they can introduce themselves (required before server summoning).") +
-          " `/companion action:switch` changes who's answering." +
-          (hasAwakened ? "" : " You can also awaken a permanent companion of your own — that's the bond that stays yours forever."),
+          (hasAwakened ? " `/companion action:switch` changes who's answering." : "") +
+          (hasAwakened ? "" : " Awaken a permanent companion of your own — that's the bond that stays yours forever."),
         components: rows,
       });
     }
@@ -3253,6 +3264,8 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         return interaction.update({ content: "That companion isn't on your roster.", components: [] });
       }
       await store.setActiveDmCompanion(userId, companion.id);
+      const awakenedRow = await store.getCompanionByOwner(userId);
+      const awakenedActive = isAwakenedCompanionActive(awakenedRow);
       let extra = "";
       if (companion.kind === "adopted") {
         const adoption = await store.adoptionForCompanion(companion.id);
@@ -3267,7 +3280,12 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
           }
         }
       }
-      return interaction.update({ content: `**${companion.name}** is answering your DMs now.${extra}`, components: [] });
+      return interaction.update({
+        content: awakenedActive
+          ? `**${companion.name}** is answering your DMs now.${extra}`
+          : `**${companion.name}** is your DM pick — they'll answer once you've awakened your own companion.${extra}`,
+        components: [],
+      });
     }
 
     if (sub === "summon" || sub === "dismiss") {
