@@ -14,7 +14,7 @@ The marketplace is a Character.AI-style storefront living in a forum channel on 
 
 - **Bot-minted listings.** The bot itself creates the forum thread and posts the card — name, cover art, tagline, vibe, traits, star rating, add-count — with **Add** / **Rate** / **Report** buttons, so listings can't be faked by users posting links. Republish posts a fresh thread rather than editing in place.
 - **Three ways to publish:** `/companion action:publish` lists your awakened companion (persona cloned, edits propagate to adopters as versions); `/companion action:create` authors freehand characters that don't consume your awakened slot; `/companion action:import` (or the dashboard) brings in standard character-card `.json`/`.png` files — imports stay private-unlisted until published.
-- **Adopt, don't awaken.** Clicking **Add** clones the listing into a `kind='adopted'` companion owned by the adopter — their own memories, journal, relationships, and billing. The character opens DMs with the creator-written greeting, then can be summoned into servers. Re-adopting after a drop resumes the *same* clone, so the relationship continues.
+- **Adopt, don't awaken.** Clicking **Add** clones the listing into a `kind='adopted'` companion owned by the adopter — their own memories, journal, relationships, and billing. The character opens a private `#adoptees` thread in the hub server with the creator-written greeting, then can be summoned into other servers. Re-adopting after a drop resumes the *same* clone *and thread*, so the relationship and chat history continue.
 - **Gates & slots.** Free accounts hold 1 active adoption and 2 live listings; Premium is uncapped on both. A dropped companion locks re-adoption for 12 hours. Hosted-lane adopters need a linked Characterly account (or a BYOK key) — **Add** fails early for unlinked users with an ephemeral pointer at the verify channel, instead of handing them a companion they can't talk to.
 - **Discovery surface.** Listing threads double as comment sections — readable by everyone, writable by verified Members. An ephemeral ★1–5 picker (one vote per user, re-rating upserts) refreshes the card's average live. Creators tag listings (≤3 from the forum taxonomy: Romance, Anime, Games, Fandom, Fantasy, …); the bot manages curated badges — `New`, `Top Rated`, `Trending`, `Staff Pick` — recomputed by a sweep against live stats. Gallery View covers come from the card's image or attached art.
 - **Moderation is a feature, not a checkbox** ([docs/moderation.md](docs/moderation.md)): publish/edit screening is fail-closed (blocklist + model verdict), adopted-companion replies are screened on both lanes (fail-open → neutral refusal + refund), categorized reports auto-flag at threshold and ping mods with Keep/Delist/Ban/Ban-creator buttons, message-level comment reports carry their own action row, house automod covers the threads, and `banned` listings freeze every clone.
@@ -86,6 +86,7 @@ The Characterly community server is where the marketplace lives (`src/ops.ts`, g
 - **Link sweep** — unlinking on the website auto-revokes Member within minutes (a lookup *error* keeps the role — an outage can't mass-revoke).
 - **Automod** — deterministic invite-link, scam, mass-mention, burst-spam, and new-account rules run before any memory pipeline; marketplace comments inherit them.
 - **Support tickets** — `#support-ticket` is visible pre-verify (so "can't log in" cases still reach staff) but read-only; its persistent **Open a ticket** card opens a modal that files a private thread between the user and staff (one open ticket per account, enforced by a partial unique index). Ticket threads are excluded from automod and the memory pipeline — support conversations never become companion memory.
+- **Adoptee threads** — `#adoptees` holds one named private thread per adoption: the adopter's chat surface with their companion. Turns there run the same pipeline as DMs under the adopter's personal scope (their credits/BYOK, memory, journals); thread history stays per-companion automatically. Private threads are moderator-visible for safety; automod stays out of them.
 
 ---
 
@@ -127,7 +128,7 @@ All command replies are ephemeral (private to the invoker) unless noted; compani
 | `/companion action:import` | Bring in a character card (`.png`/`.json`) from another platform — private until published |
 | `/companion action:unpublish` | Remove your companion's marketplace listing |
 | `/companion action:relist` | Bring back an unpublished marketplace listing |
-| `/companion action:switch` | Choose which of your companions answers your DMs |
+| `/companion action:switch` | Where each of your companions lives — awakened in DMs, adoptees in their `#adoptees` threads |
 | `/companion action:drop` | Drop an adopted companion (12h re-adopt cooldown) |
 
 On the forum card itself: **Add** adopts, **Rate** opens the star picker, **Tags** / **Cover image** / **Edit persona** are creator tools, **Report** files a categorized report; right-click → **Apps → Report message** flags a comment; **Staff pick** toggles the editorial badge (mods).

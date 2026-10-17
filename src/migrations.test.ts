@@ -914,3 +914,33 @@ test("migration v48 adds support_tickets + one-open-per-user index, guarded roll
     assert.equal(gone.length, 0, "rollback should drop support_tickets");
   } finally { await sql.end(); }
 });
+
+test("migration v54 adds companion_adoptions.chat_thread_id + partial index, rolls back", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any);
+
+    const col = await sql<Array<{ column_name: string }>>`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'companion_adoptions' AND column_name = 'chat_thread_id'`;
+    assert.equal(col.length, 1, "chat_thread_id should exist on companion_adoptions");
+
+    // The partial index only covers stamped threads — NULL rows never index.
+    const idx = await sql<Array<{ indexname: string }>>`
+      SELECT indexname FROM pg_indexes
+      WHERE tablename = 'companion_adoptions' AND indexname = 'adoptions_thread'`;
+    assert.equal(idx.length, 1, "adoptions_thread partial index should exist");
+
+    await sql`INSERT INTO companion_adoptions (user_id, listing_id, companion_id, chat_thread_id)
+              VALUES ('u1', 1, 1, 't-thread-1')`;
+    await sql`INSERT INTO companion_adoptions (user_id, listing_id, companion_id)
+              VALUES ('u2', 1, 2)`;
+
+    await runMigrations(sql as any, 53);
+    const gone = await sql<Array<{ column_name: string }>>`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'companion_adoptions' AND column_name = 'chat_thread_id'`;
+    assert.equal(gone.length, 0, "rollback should drop chat_thread_id");
+  } finally { await sql.end(); }
+});

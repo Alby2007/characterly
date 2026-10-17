@@ -1,6 +1,6 @@
 # Characterly Privacy Policy
 
-_Last updated: 2026-10-14_
+_Last updated: 2026-10-18_
 
 Characterly ("the bot") is a Discord bot that hosts personal AI companions. This policy describes what it stores, why, and how to remove it. Plain English, no legalese.
 
@@ -17,6 +17,8 @@ Characterly ("the bot") is a Discord bot that hosts personal AI companions. This
 **Derived personal data — opt-in only.** Memories about a person, structured profile attributes (pronouns, interests, timezone, etc.), generated profile cards and dossiers, and relationship observations/edges are created **only for members who explicitly opt in** via `/profile-build` or `/opt-in`. Members who never opt in get no derived data.
 
 **Companion journal.** When a companion speaks it may privately journal — short first-person notes about what it experienced (a shared moment, a joke, a promise). Entries are paraphrased, never verbatim quotes; an entry that involves you is only written if you are opted in, and it stays scoped to where it formed. Entries about you are deleted on `/opt-out`, shown in `/memory-export`, and a server's entries are wiped if the bot is removed.
+
+**Adopted-companion threads.** Chats with companions you adopt from the marketplace live in private threads under `#adoptees` in the Characterly community server. Messages there are archived and processed exactly like DM conversations (same retention, extraction, and deletion controls) — but unlike DMs, Discord private threads are also visible to members with thread-moderation permissions, i.e. our house moderation staff. Moderators only open these threads for safety and support purposes; automated community moderation never runs inside them.
 
 **Third-party processing.** Message content is sent to a large-language-model API (currently Groq; configurable to any OpenAI-compatible provider) for memory extraction, verification, and reply generation. Servers may supply their own provider key via `/setup` — stored encrypted, never shown after entry.
 

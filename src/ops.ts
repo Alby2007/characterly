@@ -6,7 +6,9 @@ import { logError, redactSecrets } from "./secrets.js";
 import { checkListingFields, checkMessageContent } from "./safety.js";
 import { CURATED_TAGS, marketplaceAssetPath, postListingThread } from "./marketplace.js";
 import { SEED_LISTINGS } from "./seed-personas.js";
+import { sendAsCompanionInChannel } from "./webhooks.js";
 import type { MemoryStore } from "./database.js";
+import type { Companion, CompanionAdoption } from "./types.js";
 
 // ── House ops ────────────────────────────────────────────────────────────────
 // The bot is also the private operator of OUR community server and its own
@@ -24,6 +26,16 @@ export const isHouse = (guildId: string | null | undefined): boolean =>
  *  pipeline (index.ts) and to scope the "Report message" context command. */
 export const isMarketplaceThread = (channel: { isThread?(): boolean; parentId?: string | null } | null | undefined): boolean =>
   !!channel?.isThread?.() && channel.parentId === config.marketplaceChannelId;
+
+/** True when the channel is a thread under the house's #adoptees channel —
+ *  an adopted companion's private chat surface (v54). Env id wins; the name
+ *  match covers deployments that created the channel before the env existed
+ *  (the layout reconciles it under the marketplace category either way). */
+export const isAdopteeThread = (channel: { isThread?(): boolean; parentId?: string | null; parent?: { name?: string | null } | null } | null | undefined): boolean => {
+  if (!channel?.isThread?.()) return false;
+  if (config.houseAdopteesChannelId) return channel.parentId === config.houseAdopteesChannelId;
+  return normName(channel.parent?.name ?? "") === "adoptees";
+};
 
 // Narrow structural shapes — tests hand fakes, index.ts casts the real objects.
 interface ForumTagLike {
@@ -149,6 +161,9 @@ export interface OpsDeps {
 // calls initOps once at ClientReady. Direct functions always take deps.
 let opsDeps: OpsDeps | null = null;
 export function initOps(d: OpsDeps): void { opsDeps = d; }
+/** Module-level access for interaction handlers in commands.ts — ops deps
+ *  are wired at ClientReady, long before any interaction can arrive. */
+export function getOpsDeps(): OpsDeps | null { return opsDeps; }
 
 // Test-only: raid/burst windows and breach latches are module state.
 export function resetOpsState(): void {
@@ -223,6 +238,11 @@ export async function handleHouseMemberAdd(member: MemberLike, deps: OpsDeps): P
   // Welcome at join, screening or not — pending members can read channels even
   // though they can't interact, so "read rules → verify" lands when it matters.
   if (await onboardMember(member, deps, { welcome: !raidHot })) welcomed.add(member.user.id);
+  // Deferred adoptee threads — adopters who joined the house AFTER adopting
+  // elsewhere (import paths) get their private threads opened on arrival.
+  await ensureAdopteeThreadsForUser(member.user.id, deps).catch(e => {
+    inc("ops.adoptee_thread_error"); logError("member-add adoptee ensure failed", e);
+  });
 }
 
 export async function handleHouseMemberUpdate(
@@ -235,8 +255,13 @@ export async function handleHouseMemberUpdate(
   // this only fires for members the raid window suppressed (or a send that
   // failed). `welcomed` dedupes; strict === true on the old side so an
   // uncached partial can't greet an existing member.
-  if (oldMember.pending === true && newMember.pending === false && !welcomed.has(newMember.user.id)) {
-    if (await onboardMember(newMember, deps)) welcomed.add(newMember.user.id);
+  if (oldMember.pending === true && newMember.pending === false) {
+    if (!welcomed.has(newMember.user.id) && await onboardMember(newMember, deps)) welcomed.add(newMember.user.id);
+    // Screening just cleared — retry deferred adoptee threads in case the
+    // pending member couldn't be added to a private thread at join.
+    await ensureAdopteeThreadsForUser(newMember.user.id, deps).catch(e => {
+      inc("ops.adoptee_thread_error"); logError("member-update adoptee ensure failed", e);
+    });
   }
 }
 
@@ -833,6 +858,165 @@ export async function handleTicketModal(interaction: ModalSubmitInteraction): Pr
   });
 }
 
+// ── Adoptee threads (v54) ──────────────────────────────────────────────────
+// Each active adoption owns one named private thread under #adoptees — the
+// companion's chat surface. Messages there route to the dm:<adopter> pipeline
+// (index.ts); this file owns the thread lifecycle: create, greet, reuse,
+// lock/unlock, backfill.
+
+/** Resolve the #adoptees text channel — env id first, then a name match in
+ *  the house guild so a channel created before the env existed still binds. */
+async function adopteesChannel(deps: OpsDeps): Promise<SendableChannel | null> {
+  if (config.houseAdopteesChannelId) {
+    return deps.fetchChannel(config.houseAdopteesChannelId).catch(() => null);
+  }
+  const guild = await deps.fetchGuild(config.houseGuildId!).catch(() => null);
+  const ch = guild?.channels.cache.find(
+    c => c.type === ChannelType.GuildText && normName(c.name) === "adoptees",
+  );
+  return ch ? deps.fetchChannel(ch.id).catch(() => null) : null;
+}
+
+/** The adoption greeting as the companion's first message — webhook persona
+ *  when the lane is up, a bold-name bot post as fallback. True = it landed. */
+async function greetAdopteeInThread(
+  deps: OpsDeps,
+  thread: TicketThreadLike,
+  parent: SendableChannel,
+  companion: Companion,
+  greeting: string,
+): Promise<boolean> {
+  const text = greeting || `*${companion.name} joins you.*`;
+  // The webhook host is the real parent channel — a fabricated {type}-only
+  // parent would resolve the host but die inside fetchWebhooks.
+  const sent = deps.botId
+    ? await sendAsCompanionInChannel(
+        { id: thread.id, type: ChannelType.PrivateThread, parent: parent as unknown as { type: ChannelType } },
+        companion, text, deps.botId,
+      ).catch(() => null)
+    : null;
+  if (sent) return true;
+  return thread.send({ content: `**${companion.name}**\n${text}`, allowedMentions: { parse: [] } })
+    .then(() => true)
+    .catch(e => { inc("ops.adoptee_greet_error"); logError("adoptee greeting failed", e); return false; });
+}
+
+export type EnsureAdopteeThreadResult =
+  | { thread: TicketThreadLike; greeted: boolean; created: boolean }
+  | { needsInvite: true }
+  | { failed: true };
+
+/** Create (or reuse) the private adoptee thread for an adoption. Idempotent —
+ *  a live `chat_thread_id` short-circuits unless `reopen` is asked (re-adopt
+ *  unarchives the locked thread so the history continues). The companion
+ *  introduces themselves on creation — that's what unlocks server summoning. */
+export async function ensureAdopteeThread(
+  deps: OpsDeps,
+  ctx: {
+    adoption: CompanionAdoption;
+    companion: Companion;
+    listing?: { id: number; greeting: string } | null;
+    username?: string;
+    reopen?: boolean;
+  },
+): Promise<EnsureAdopteeThreadResult> {
+  const { adoption, companion } = ctx;
+  if (!isHouse(config.houseGuildId)) return { failed: true };
+  if (adoption.chatThreadId) {
+    const existing = await deps.fetchChannel(adoption.chatThreadId).catch(() => null);
+    if (existing) {
+      if (ctx.reopen) {
+        await (existing as TicketThreadLike).setLocked?.(false).catch(() => {});
+        await (existing as TicketThreadLike).setArchived?.(false).catch(() => {});
+      }
+      return { thread: existing as TicketThreadLike, greeted: false, created: false };
+    }
+    // Deleted thread (mod cleanup) — fall through and rebuild.
+  }
+  // The adopter must be a house member to see their private thread — everyone
+  // else gets pointed at the invite (backfill picks them up on join).
+  const member = await deps.fetchMember(config.houseGuildId!, adoption.userId).catch(() => null);
+  if (!member) return { needsInvite: true };
+  const parent = await adopteesChannel(deps);
+  if (!parent || typeof parent.threads?.create !== "function") {
+    inc("ops.adoptee_thread_missing_channel");
+    return { failed: true };
+  }
+  const name = `${companion.name || "Companion"} — ${ctx.username || member.user.username || adoption.userId}`.slice(0, 95);
+  const thread = await parent.threads.create({
+    name,
+    type: ChannelType.PrivateThread,
+    invitable: false,
+    autoArchiveDuration: 10080,
+  }).catch(e => { inc("ops.adoptee_thread_error"); logError("adoptee thread create failed", e); return null; });
+  if (!thread) return { failed: true };
+  const added = await thread.members?.add(adoption.userId).then(() => true).catch(() => false) ?? false;
+  if (!added) {
+    // An invisible thread is worse than none — drop it and fail loudly.
+    await thread.setLocked?.(true).catch(() => {});
+    await thread.setArchived?.(true).catch(() => {});
+    return { failed: true };
+  }
+  await deps.store.setAdoptionThread(adoption.id, thread.id).catch(e => {
+    inc("ops.adoptee_thread_error"); logError("adoption thread stamp failed", e);
+  });
+  const greeted = await greetAdopteeInThread(
+    deps, thread, parent, companion, ctx.listing?.greeting ?? "",
+  );
+  if (greeted) await deps.store.markDmIntroduced(adoption.id).catch(() => {});
+  inc("ops.adoptee_thread_created");
+  return { thread, greeted, created: true };
+}
+
+/** Archive+lock (or reopen) an adoptee thread — drop/ban and unflag/re-adopt
+ *  hooks. `note` posts before archiving: sends fail on archived threads. */
+export async function setAdopteeThreadLocked(
+  deps: OpsDeps,
+  threadId: string | null,
+  locked: boolean,
+  note?: string,
+): Promise<void> {
+  if (!threadId) return;
+  const thread = await deps.fetchChannel(threadId).catch(() => null) as TicketThreadLike | null;
+  if (!thread) return;
+  if (locked) {
+    if (note) await thread.send({ content: note, allowedMentions: { parse: [] } }).catch(() => {});
+    await thread.setLocked?.(true).catch(() => {});
+    await thread.setArchived?.(true).catch(() => {});
+  } else {
+    await thread.setLocked?.(false).catch(() => {});
+    await thread.setArchived?.(false).catch(() => {});
+  }
+}
+
+/** Ensure every active adoption of a user has its thread — the member-join
+ *  hook and the interactive paths both drain through here. */
+export async function ensureAdopteeThreadsForUser(userId: string, deps: OpsDeps): Promise<void> {
+  const missing = await deps.store.adoptionsMissingThreadsForUser(userId).catch(() => []);
+  for (const row of missing) {
+    await ensureAdopteeThread(deps, row).catch(e => {
+      inc("ops.adoptee_thread_error"); logError("ensure adoptee thread failed", e);
+    });
+  }
+}
+
+/** Boot/interval sweep — same shape as greetPendingInstalls: bounded batch,
+ *  per-row fault tolerance, permanent dedupe via chat_thread_id. Non-members
+ *  are skipped silently; the member-add hook catches them when they join. */
+export async function backfillAdopteeThreads(deps: OpsDeps): Promise<void> {
+  if (!deps || !config.houseGuildId) return;
+  const missing = await deps.store.activeAdoptionsMissingThreads(10).catch(e => {
+    inc("ops.adoptee_backfill_error"); logError("adoptee backfill query failed", e); return [];
+  });
+  for (const row of missing) {
+    const member = await deps.fetchMember(config.houseGuildId!, row.adoption.userId).catch(() => null);
+    if (!member) continue;
+    await ensureAdopteeThread(deps, { ...row, username: member.user.username }).catch(e => {
+      inc("ops.adoptee_thread_error"); logError("adoptee backfill create failed", e);
+    });
+  }
+}
+
 // ── Channel ops ──────────────────────────────────────────────────────────────
 // The wanted layout mirrors the live hub server. Matching is name-only after
 // NFKC+lowercase normalization (channel names may carry emoji, categories may
@@ -853,8 +1037,10 @@ export const WANTED_LAYOUT: Array<{
    *  channel — used to keep select channels gated inside a visible category.
    *  `staffModerate` layers Mod/Admin ManageThreads onto a channel — for
    *  private-thread surfaces (#support-ticket) where staff must see + join
-   *  threads they aren't members of. */
-  channels: Array<{ name: string; type: ChannelType; readOnly?: true | "member" | "everyone" | "staff"; hidden?: true; staffModerate?: true }>;
+   *  threads they aren't members of. `memberThreads` lets the Member role
+   *  SEND inside threads while every create stays denied — #adoptees, where
+   *  adopters chat in private threads only the bot opens. */
+  channels: Array<{ name: string; type: ChannelType; readOnly?: true | "member" | "everyone" | "staff"; hidden?: true; staffModerate?: true; memberThreads?: true }>;
 }> = [
   {
     category: "SYSTEM",
@@ -871,7 +1057,12 @@ export const WANTED_LAYOUT: Array<{
   },
   {
     category: "CHARACTER MARKETPLACE",
-    channels: [{ name: "characters", type: ChannelType.GuildForum }],
+    channels: [
+      { name: "characters", type: ChannelType.GuildForum },
+      // Adopted companions' private chat threads — members talk inside
+      // threads the bot opens for them; the channel itself is silent.
+      { name: "adoptees", type: ChannelType.GuildText, readOnly: "everyone", staffModerate: true, memberThreads: true },
+    ],
   },
   {
     // Visible pre-verify — the shelf tour prospective members read before
@@ -981,6 +1172,26 @@ async function ensureStaffOnly(ch: GuildChannelLike, created: string[], label: s
   }
 }
 
+/** Member gets SendMessagesInThreads on a thread-surface — adopters chat
+ *  inside their own private threads. CreatePrivateThreads stays denied
+ *  everywhere, so the bot is the only thread opener and every thread maps
+ *  back to a registered adoption. */
+async function ensureMemberThreadChat(ch: GuildChannelLike, created: string[], label: string, roleId: string | undefined): Promise<void> {
+  const overwrites = ch.permissionOverwrites;
+  if (!roleId || typeof overwrites?.edit !== "function") return;
+  const cur = [...(overwrites.cache ?? [])].find(o => o.id === roleId);
+  if (cur && permHas(cur.allow, PermissionFlagsBits.SendMessagesInThreads)
+    && permHas(cur.deny, PermissionFlagsBits.CreatePrivateThreads)) return;
+  await overwrites.edit(roleId, {
+    ViewChannel: true,
+    SendMessagesInThreads: true,
+    SendMessages: false,
+    CreatePublicThreads: false,
+    CreatePrivateThreads: false,
+  }).then(() => { created.push(`🗨 ${label} → Member threads`); })
+    .catch(() => {});
+}
+
 /** Mod/Admin get ManageThreads on a surface — private ticket threads are
  *  only visible to members + ManageThreads holders, and the house roles may
  *  not carry the perm guild-wide. SendMessagesInThreads lets staff reply
@@ -1066,6 +1277,7 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
       // the Member role lands while its siblings stay readable.
       if (target && wanted.hidden) await ensureHiddenFromEveryone(target, created, `#${wanted.name}`, guild.id);
       if (target && wanted.staffModerate) await ensureStaffModerate(target, created, `#${wanted.name}`, guild);
+      if (target && wanted.memberThreads) await ensureMemberThreadChat(target, created, `#${wanted.name}`, config.houseMemberRoleId);
     }
   }
   return created;
@@ -1134,7 +1346,7 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
   },
   {
     channel: "privacy-policy",
-    version: 2,
+    version: 3,
     embeds: () => [new EmbedBuilder()
       .setTitle("Privacy — the short version")
       .setDescription(
@@ -1143,6 +1355,7 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
         "• **Personal memory is opt-in** — derived facts, profile attributes, and relationship notes only exist for members who run `/profile-build` or `/opt-in`\n" +
         "• **Retention is bounded** — raw messages are held 30 days, then permanently deleted\n" +
         "• **Companion memory is yours** — your bond memories stay private to you and never leak into servers or other users' companions\n" +
+        "• **Adoptee chats are private, not staff-blind** — companions you adopt chat in private `#adoptees` threads; unlike DMs, Discord private threads are also visible to house moderators (safety + support only, no automod inside)\n" +
         "• **You hold the delete key** — `/opt-out` wipes derived data, `/forget` removes one memory, `/memory-export` shows everything held\n" +
         "• **Removing the bot wipes the server** — every row it stored there goes with it",
       )],

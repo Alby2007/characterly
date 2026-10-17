@@ -166,14 +166,14 @@ test("drop frees the slot, starts a 12h cooldown, re-adopt reuses the clone", as
   if (!first.ok) return;
 
   await store.summonCompanion("g1", first.companion.id, "u-dropper", "dropper");
-  await store.setActiveDmCompanion("u-dropper", first.companion.id);
 
   const dropped = await store.dropAdoption("u-dropper", first.companion.id, COOLDOWN);
   assert.ok(dropped);
   assert.ok(dropped!.droppedAt);
   assert.ok(dropped!.cooldownUntil);
 
-  // Clone is gone from the roster, out of all guilds, pointer cleared.
+  // Clone is gone from the roster, out of all guilds. DM resolution stays
+  // null — this user has no awakened companion and adopted picks are gone.
   const roster = await store.listCompanionsForUser("u-dropper");
   assert.equal(roster.some(c => c.id === first.companion.id), false);
   const guilds = await store.listCompanionGuilds(first.companion.id);
@@ -197,7 +197,7 @@ test("drop frees the slot, starts a 12h cooldown, re-adopt reuses the clone", as
   }
 });
 
-test("resolveDmCompanion honors the pick and falls back to awakened", async () => {
+test("resolveDmCompanion is awakened-only — adopted companions never answer DMs", async () => {
   const { store } = await freshStore();
   const awakened = await awakenedCompanion(store, "u-picker", "Home");
   const creator = await awakenedCompanion(store, "u-c6", "Guest");
@@ -206,18 +206,22 @@ test("resolveDmCompanion honors the pick and falls back to awakened", async () =
   assert.equal(adopted.ok, true);
   if (!adopted.ok) return;
 
-  // Default: awakened wins while no pick exists.
-  assert.equal((await store.resolveDmCompanion("u-picker"))!.id, awakened.id);
-
-  await store.setActiveDmCompanion("u-picker", adopted.companion.id);
+  // Adopted companions live in #adoptees threads — the DM lane resolves to
+  // the awakened companion regardless of what's on the roster.
   const resolved = await store.resolveDmCompanion("u-picker");
-  assert.equal(resolved!.id, adopted.companion.id);
-  assert.equal(resolved!.kind, "adopted");
+  assert.equal(resolved!.id, awakened.id);
+  assert.equal(resolved!.kind, "awakened");
 
   // getCompanionByOwner never returns the clone.
   assert.equal((await store.getCompanionByOwner("u-picker"))!.id, awakened.id);
 
-  // Dropping clears the pick → back to awakened.
+  // A user with only an adoption resolves to nothing — DMs belong to the
+  // awakening flow until a permanent companion exists.
+  const loner = await store.adoptListing("u-loner", listing.id, { maxSlots: 1 });
+  assert.equal(loner.ok, true);
+  assert.equal(await store.resolveDmCompanion("u-loner"), null);
+
+  // Dropping the adoption changes nothing about DM resolution.
   await store.dropAdoption("u-picker", adopted.companion.id, COOLDOWN);
   assert.equal((await store.resolveDmCompanion("u-picker"))!.id, awakened.id);
 });
@@ -591,18 +595,18 @@ test("banned listings freeze clones everywhere — roster, DM resolution, guilds
   assert.equal(adopt.ok, true);
   if (!adopt.ok) return;
   await store.summonCompanion("g-ban", adopt.companion.id, "u-ad-ban", "ad");
-  await store.setActiveDmCompanion("u-ad-ban", adopt.companion.id);
 
-  // Baseline: clone is live everywhere.
-  assert.equal((await store.resolveDmCompanion("u-ad-ban"))?.id, adopt.companion.id);
+  // Baseline: clone is live in roster + guilds. DM resolution is null —
+  // adopted companions never answer DMs (they live in #adoptees threads)
+  // and this adopter has no awakened companion.
   assert.equal((await store.listCompanionsForUser("u-ad-ban")).length, 1);
   assert.equal((await store.listGuildCompanions("g-ban")).length, 1);
+  assert.equal(await store.resolveDmCompanion("u-ad-ban"), null);
 
   const banned = await store.modAction(listing.id, "mod-1", "ban");
   assert.equal(banned?.status, "banned");
 
-  // Clone is frozen: invisible in roster, DM resolution skips it (falls to
-  // awakened → null here), and guild presence stops.
+  // Clone is frozen: invisible in roster and guild presence stops.
   assert.equal((await store.listCompanionsForUser("u-ad-ban")).length, 0);
   assert.equal(await store.resolveDmCompanion("u-ad-ban"), null);
   assert.equal((await store.listGuildCompanions("g-ban")).length, 0);
@@ -969,14 +973,12 @@ test("unlisted import: creator self-adopts, strangers refused, provenance stampe
   assert.equal((res.companion.importMeta as any).creator, "some-author");
   assert.equal(res.companion.adoptedFromListingId, listing.id);
 
-  // Roster + DM resolve include the import.
+  // Roster includes the import; DM resolution stays null — the import is an
+  // adopted companion (it lives in its #adoptees thread, never the DM lane).
   const roster = await store.listCompanionsForUser("u-importer");
   assert.equal(roster.length, 1);
   assert.equal(roster[0].id, res.companion.id);
-  const picked = await store.resolveDmCompanion("u-importer");
-  assert.equal(picked, null); // no pick yet + no awakened → nothing resolves
-  await store.claimDmCompanionIfUnset("u-importer", res.companion.id);
-  assert.equal((await store.resolveDmCompanion("u-importer"))?.id, res.companion.id);
+  assert.equal(await store.resolveDmCompanion("u-importer"), null);
 
   // Self-adopt doesn't move the public counter.
   const after = await store.listingById(listing.id);

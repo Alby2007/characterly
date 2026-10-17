@@ -119,6 +119,12 @@ const env = z.object({
   // The lobby gate channel: a persistent verify card lives here — clicking it
   // checks for a linked Characterly account and grants HOUSE_MEMBER_ROLE_ID.
   HOUSE_VERIFY_CHANNEL_ID: z.string().optional(),
+  // The adoptee-chat surface: adopted companions get named private threads
+  // under this channel (v54). Falls back to a name lookup when unset.
+  HOUSE_ADOPTEES_CHANNEL_ID: z.string().optional(),
+  // Public invite for non-member adopters who need to join the house to meet
+  // their companions (falls back to SITE_URL in copy when unset).
+  HOUSE_INVITE_URL: z.string().optional(),
   // Where ops alerts/host breaches go — defaults to the marketplace mod channel.
   OPS_CHANNEL_ID: z.string().optional(),
   // Discord user ids allowed to run /ops (controls the host — person-level,
@@ -240,6 +246,8 @@ export const config = {
   houseRulesChannelId: env.HOUSE_RULES_CHANNEL_ID,
   houseAnnounceChannelId: env.HOUSE_ANNOUNCE_CHANNEL_ID,
   houseVerifyChannelId: env.HOUSE_VERIFY_CHANNEL_ID,
+  houseAdopteesChannelId: env.HOUSE_ADOPTEES_CHANNEL_ID,
+  houseInviteUrl: env.HOUSE_INVITE_URL,
   opsChannelId: env.OPS_CHANNEL_ID ?? env.MARKETPLACE_MOD_CHANNEL_ID,
   opsUserIds: (env.OPS_USER_IDS ?? "").split(",").map(s => s.trim()).filter(Boolean),
   opsRepoDir: env.OPS_REPO_DIR,

@@ -1,11 +1,12 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert";
 import {
-  isHouse, isMarketplaceThread, automodMessage, handleHouseMemberAdd, handleHouseMemberUpdate,
+  isHouse, isMarketplaceThread, isAdopteeThread, automodMessage, handleHouseMemberAdd, handleHouseMemberUpdate,
   handleHouseMemberRemove, ensureHouseLayout, collectHostHealth,
   runWatchdogTick, handleOpsCommand, initOps, resetOpsState, WANTED_LAYOUT,
   ensureVerifyGate, handleHouseButton, runMemberLinkSweep, runTagSweep, ensureResourcePosts,
   ensureTicketPanel, handleTicketButton, handleTicketModal,
+  ensureAdopteeThread, setAdopteeThreadLocked, backfillAdopteeThreads,
   TERMS_VERSION, RESOURCE_POSTS,
   type OpsDeps, type AutomodMessage, type MemberLike,
 } from "./ops.js";
@@ -25,6 +26,7 @@ const prev = {
   automodMentionMax: config.automodMentionMax, automodNewAccountDays: config.automodNewAccountDays,
   hostHeapPct: config.hostHeapPct, hostDiskPct: config.hostDiskPct, hostLagMs: config.hostLagMs,
   opsRepoDir: config.opsRepoDir, marketplaceChannelId: config.marketplaceChannelId,
+  houseAdopteesChannelId: config.houseAdopteesChannelId,
 };
 
 const HOUSE = "g-house";
@@ -50,6 +52,7 @@ beforeEach(() => {
   config.hostLagMs = 1000;
   config.opsRepoDir = "~/characterly";
   config.marketplaceChannelId = "c-forum";
+  config.houseAdopteesChannelId = "c-adoptees";
 });
 
 process.on("exit", () => Object.assign(config, prev));
@@ -768,6 +771,7 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
     mkCh("announcements", "cat-system", false), mkCh("events", "cat-system", false), mkCh("updates", "cat-system", false),
     mkCh("rules", "cat-system", true), mkCh("log-in", "cat-system", true), mkCh("characterly-web", "cat-system", true),
     mkCh("characters", "cat-character marketplace", true, 15),
+    mkCh("adoptees", "cat-character marketplace", true),
     ...["what-is-characterly", "what-is-companionly", "get-companionly", "privacy-policy", "how-to-publish-bots"]
       .map(n => mkCh(n, "cat-resources", true)),
     mkCh("faqs", "cat-help", true), mkCh("support-ticket", "cat-help", true), mkCh("suggest-a-feature", "cat-help", true),
@@ -1505,4 +1509,186 @@ test("/ops seedmarket: refuses when the marketplace channel isn't configured", a
     await handleOpsCommand(ix.interaction as never);
     assert.match(ix.replies[0]?.content ?? "", /MARKETPLACE_CHANNEL_ID/i);
   } finally { config.marketplaceChannelId = saved; }
+});
+
+// ── Adoptee threads (v54) ────────────────────────────────────────────────────
+
+type FakeAdopteeThread = {
+  id: string;
+  sentPayloads: unknown[];
+  addedMembers: string[];
+  locked: boolean;
+  archived: boolean;
+  members: { add(id: string): Promise<void> };
+  send(p: unknown): Promise<void>;
+  setLocked(b: boolean): Promise<void>;
+  setArchived(b: boolean): Promise<void>;
+};
+
+function makeAdopteeThread(id: string, opts: { addFails?: boolean } = {}): FakeAdopteeThread {
+  const t: FakeAdopteeThread = {
+    id, sentPayloads: [], addedMembers: [], locked: false, archived: false,
+    members: { add: async uid => { if (opts.addFails) throw new Error("no access"); t.addedMembers.push(uid); } },
+    send: async p => { t.sentPayloads.push(p); },
+    setLocked: async b => { t.locked = b; },
+    setArchived: async b => { t.archived = b; },
+  };
+  return t;
+}
+
+function makeAdopteesParent(thread: FakeAdopteeThread, created: Array<Record<string, unknown>>) {
+  return {
+    send: async () => {},
+    threads: {
+      fetchActive: async () => ({ threads: new Map() }),
+      create: async (opts: Record<string, unknown>) => { created.push(opts); return thread; },
+    },
+  };
+}
+
+const adopteeFixture = (over: Record<string, unknown> = {}) => ({
+  adoption: {
+    id: 7, userId: "u-adopter", listingId: 3, companionId: 11,
+    adoptedAt: new Date().toISOString(), droppedAt: null, cooldownUntil: null,
+    dmIntroducedAt: null, chatThreadId: null,
+  },
+  companion: { id: 11, name: "Wren", avatarUrl: null },
+  listing: { id: 3, greeting: "*Wren waves hello.*" },
+  username: "Joiner",
+  ...over,
+});
+
+function adopteeDeps(opts: {
+  thread?: FakeAdopteeThread;
+  created?: Array<Record<string, unknown>>;
+  member?: MemberLike | null;
+  stamped?: Array<[number, string]>;
+  introduced?: number[];
+  channels?: Record<string, unknown>;
+  missingRows?: Array<Record<string, unknown>>;
+} = {}) {
+  const created = opts.created ?? [];
+  const stamped = opts.stamped ?? [];
+  const introduced = opts.introduced ?? [];
+  const thread = opts.thread ?? makeAdopteeThread("t-new");
+  const parent = makeAdopteesParent(thread, created);
+  const deps = makeDeps({
+    store: {
+      setAdoptionThread: async (a: number, t: string) => { stamped.push([a, t]); },
+      markDmIntroduced: async (a: number) => { introduced.push(a); },
+      adoptionsMissingThreadsForUser: async () => [],
+      activeAdoptionsMissingThreads: async () => opts.missingRows ?? [],
+    } as unknown as MemoryStore,
+    fetchMember: async () => opts.member === undefined ? makeMember({ id: "u-adopter" }) : opts.member,
+    fetchChannel: async id => (opts.channels?.[id] as never) ?? (id === "c-adoptees" ? parent : { send: async () => {} }),
+  });
+  return { deps, thread, created, stamped, introduced };
+}
+
+test("isAdopteeThread: env-id parent matches; name fallback catches pre-env channels", () => {
+  assert.equal(isAdopteeThread({ isThread: () => true, parentId: "c-adoptees" }), true);
+  assert.equal(isAdopteeThread({ isThread: () => true, parentId: "c-elsewhere" }), false);
+  assert.equal(isAdopteeThread(null), false);
+  assert.equal(isAdopteeThread({ isThread: () => true }), false);
+  const saved = config.houseAdopteesChannelId;
+  config.houseAdopteesChannelId = undefined;
+  try {
+    assert.equal(isAdopteeThread({ isThread: () => true, parent: { name: "#Adoptees" } }), true);
+    assert.equal(isAdopteeThread({ isThread: () => true, parent: { name: "support-ticket" } }), false);
+  } finally { config.houseAdopteesChannelId = saved; }
+});
+
+test("ensureAdopteeThread: creates a named private thread, adds the adopter, greets, stamps", async () => {
+  const { deps, thread, created, stamped, introduced } = adopteeDeps();
+  const res = await ensureAdopteeThread(deps, adopteeFixture() as never);
+  assert.ok("thread" in res && res.created);
+  assert.equal(created.length, 1);
+  assert.equal(created[0].type, 12); // ChannelType.PrivateThread
+  assert.equal(created[0].invitable, false);
+  assert.match(created[0].name as string, /Wren.*Joiner/);
+  assert.deepEqual(thread.addedMembers, ["u-adopter"]);
+  assert.deepEqual(stamped, [[7, "t-new"]]);
+  assert.deepEqual(introduced, [7]);
+  // The greeting landed — webhook lane is dead on the fake parent, so the
+  // bold-name fallback posted into the thread.
+  assert.equal(thread.sentPayloads.length, 1);
+});
+
+test("ensureAdopteeThread: non-members get needsInvite — no thread created", async () => {
+  const { deps, created, stamped } = adopteeDeps({ member: null });
+  const res = await ensureAdopteeThread(deps, adopteeFixture() as never);
+  assert.deepEqual(res, { needsInvite: true });
+  assert.equal(created.length, 0);
+  assert.equal(stamped.length, 0);
+});
+
+test("ensureAdopteeThread: existing chat_thread_id short-circuits; reopen unlocks+unarchives", async () => {
+  const existing = makeAdopteeThread("t-old");
+  existing.locked = true; existing.archived = true;
+  const { deps, created } = adopteeDeps({ channels: { "t-old": existing } });
+  const fixture = adopteeFixture();
+  (fixture.adoption as { chatThreadId: string | null }).chatThreadId = "t-old";
+  const res = await ensureAdopteeThread(deps, { ...fixture, reopen: true } as never);
+  assert.ok("thread" in res && !res.created && res.thread.id === "t-old");
+  assert.equal(created.length, 0);
+  assert.equal(existing.locked, false);
+  assert.equal(existing.archived, false);
+  // Same thread, no greeting — greeting only happens on creation.
+  assert.equal(existing.sentPayloads.length, 0);
+});
+
+test("ensureAdopteeThread: member-add failure tears the thread down and fails", async () => {
+  const thread = makeAdopteeThread("t-bad", { addFails: true });
+  const { deps, stamped } = adopteeDeps({ thread });
+  const res = await ensureAdopteeThread(deps, adopteeFixture() as never);
+  assert.deepEqual(res, { failed: true });
+  assert.equal(thread.locked, true);
+  assert.equal(thread.archived, true);
+  assert.equal(stamped.length, 0);
+});
+
+test("setAdopteeThreadLocked: lock posts the note then locks+archives; unlock reopens", async () => {
+  const thread = makeAdopteeThread("t-life");
+  const { deps } = adopteeDeps({ channels: { "t-life": thread } });
+  await setAdopteeThreadLocked(deps, "t-life", true, "frozen by moderation");
+  assert.equal(thread.sentPayloads.length, 1);
+  assert.equal((thread.sentPayloads[0] as { content: string }).content, "frozen by moderation");
+  assert.equal(thread.locked, true);
+  assert.equal(thread.archived, true);
+  await setAdopteeThreadLocked(deps, "t-life", false);
+  assert.equal(thread.locked, false);
+  assert.equal(thread.archived, false);
+  // No thread id / unknown thread are quiet no-ops.
+  await setAdopteeThreadLocked(deps, null, true);
+  await setAdopteeThreadLocked(deps, "t-gone", true);
+});
+
+test("backfillAdopteeThreads: creates threads for members, skips non-members", async () => {
+  const created: Array<Record<string, unknown>> = [];
+  const stamped: Array<[number, string]> = [];
+  const missing = [
+    { ...adopteeFixture(), adoption: { ...adopteeFixture().adoption, id: 7 } },
+    { ...adopteeFixture(), adoption: { ...adopteeFixture().adoption, id: 8, userId: "u-gone" } },
+  ];
+  const thread = makeAdopteeThread("t-bf");
+  const { deps } = adopteeDeps({ thread, created, stamped, missingRows: missing });
+  // u-adopter is a member; u-gone isn't.
+  deps.fetchMember = async (_g: string, uid: string) => uid === "u-adopter" ? makeMember({ id: uid }) : null;
+  await backfillAdopteeThreads(deps);
+  assert.equal(created.length, 1);
+  assert.deepEqual(stamped, [[7, "t-bf"]]);
+});
+
+test("house member add: deferred adoptees get their threads on join", async () => {
+  const created: Array<Record<string, unknown>> = [];
+  const stamped: Array<[number, string]> = [];
+  const thread = makeAdopteeThread("t-join");
+  const missing = [{ ...adopteeFixture(), username: "Joiner" }];
+  const { deps } = adopteeDeps({ thread, created, stamped });
+  (deps.store as { adoptionsMissingThreadsForUser(uid: string): Promise<unknown[]> })
+    .adoptionsMissingThreadsForUser = async uid => uid === "u-adopter" ? missing : [];
+  const m = makeMember({ id: "u-adopter" });
+  await handleHouseMemberAdd(m, deps);
+  assert.equal(created.length, 1);
+  assert.deepEqual(stamped, [[7, "t-join"]]);
 });

@@ -4811,6 +4811,23 @@ const migrations: Migration[] = [
       `;
     },
   },
+
+  // ── v54: adoptee chat threads ─────────────────────────────────────────────
+  // Adopted companions live in named private threads under the house's
+  // #adoptees channel — one thread per adoption, mapped back through
+  // companion_adoptions.chat_thread_id. DMs belong to the awakened bond only.
+  {
+    version: 54,
+    name: "v54_adoptee_threads",
+    up: async (sql) => {
+      await addColumn(sql, "companion_adoptions", "chat_thread_id TEXT");
+      await sql`CREATE INDEX IF NOT EXISTS adoptions_thread ON companion_adoptions(chat_thread_id) WHERE chat_thread_id IS NOT NULL`;
+    },
+    down: async (sql) => {
+      await sql`DROP INDEX IF EXISTS adoptions_thread`;
+      await sql`ALTER TABLE companion_adoptions DROP COLUMN IF EXISTS chat_thread_id`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

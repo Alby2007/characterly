@@ -19,7 +19,7 @@ function webhookNoticeOnce(channelId: string): boolean {
   return true;
 }
 
-function resolveWebhookHostChannel(channel: Message["channel"]): { host: TextChannel | null; threadId?: string } {
+function resolveWebhookHostChannel(channel: { type: ChannelType; parent?: { type: ChannelType } | null; id: string }): { host: TextChannel | null; threadId?: string } {
   if (channel.type === ChannelType.GuildText) {
     return { host: channel as TextChannel };
   }
@@ -63,13 +63,16 @@ async function getOrCreateChannelWebhook(host: TextChannel, botUserId: string): 
  * or speaks a companion's dialogue — if ManageWebhooks permission is missing,
  * it posts a one-time system notice and returns null.
  */
-export async function sendAsCompanion(
-  triggerMessage: Message,
+/** Persona send into any guild channel/thread — the shared core behind
+ *  sendAsCompanion. Returns null when the webhook lane is unavailable;
+ *  callers decide what the failure means (a notice, a plain fallback, …). */
+export async function sendAsCompanionInChannel(
+  channel: { type: ChannelType; parent?: { type: ChannelType } | null; id: string },
   companion: Pick<Companion, "id" | "name" | "avatarUrl">,
   content: string,
   botUserId: string,
 ): Promise<{ id: string; createdAt: Date; viaWebhook: boolean } | null> {
-  const { host, threadId } = resolveWebhookHostChannel(triggerMessage.channel);
+  const { host, threadId } = resolveWebhookHostChannel(channel);
   if (host) {
     for (let attempt = 0; attempt < 2; attempt++) {
       const hook = await getOrCreateChannelWebhook(host, botUserId);
@@ -95,8 +98,18 @@ export async function sendAsCompanion(
       }
     }
   }
-
   inc("webhook.unavailable_blocked");
+  return null;
+}
+
+export async function sendAsCompanion(
+  triggerMessage: Message,
+  companion: Pick<Companion, "id" | "name" | "avatarUrl">,
+  content: string,
+  botUserId: string,
+): Promise<{ id: string; createdAt: Date; viaWebhook: boolean } | null> {
+  const sent = await sendAsCompanionInChannel(triggerMessage.channel, companion, content, botUserId);
+  if (sent) return sent;
   if (webhookNoticeOnce(triggerMessage.channelId)) {
     await triggerMessage
       .reply({

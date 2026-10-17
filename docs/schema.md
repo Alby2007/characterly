@@ -719,7 +719,7 @@ Append-only audit trail for listing personas (v34): one row per `(listing_id, ve
 
 ### `companion_adoptions`
 
-One row per (user, listing) adoption relationship (v34). `companion_id` points at the adopter-owned clone; `dropped_at`/`cooldown_until` drive the 12-hour re-adopt cooldown; `dm_introduced_at` is stamped only when the greeting DM actually lands and gates server summoning.
+One row per (user, listing) adoption relationship (v34). `companion_id` points at the adopter-owned clone; `dropped_at`/`cooldown_until` drive the 12-hour re-adopt cooldown; `dm_introduced_at` is stamped only when the greeting actually lands in the adoptee thread and gates server summoning; `chat_thread_id` (v54) is the registry mapping the adoption to its private `#adoptees` thread.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -730,6 +730,7 @@ One row per (user, listing) adoption relationship (v34). `companion_id` points a
 | `adopted_at` | TIMESTAMPTZ | Resets on re-adoption |
 | `dropped_at` / `cooldown_until` | TIMESTAMPTZ NULL | Set together by `dropAdoption`; re-adoption clears both and reuses the same clone |
 | `dm_introduced_at` | TIMESTAMPTZ NULL | Stamped by `markDmIntroduced` after the greeting send succeeds |
+| `chat_thread_id` | TEXT NULL | The adoption's private thread under `#adoptees` (v54, partial index `adoptions_thread`). Persists across drop→re-adopt so history continues |
 
 **RLS:** enabled, zero policies.
 
@@ -881,3 +882,4 @@ Version tracking for the migration system.
 | 46 | `v46_quiet_channels` | `server_settings.quiet_channels TEXT[]` — companion silence without blindness: replies and system cards suppressed while archiving/extraction continue; threads inherit via `parentId` |
 | 47 | `v47_app_installs` | `app_installs` (install ledger for the welcome-DM sweep) + `record_app_install` security-definer RPC (service-role only — the website worker's webhook sink); rollback refuses while installs exist |
 | 48 | `v48_support_tickets` | `support_tickets` + partial unique index `one_open_per_user` — the house ticket system's ledger; rollback refuses while tickets exist |
+| 54 | `v54_adoptee_threads` | `companion_adoptions.chat_thread_id` + partial index `adoptions_thread` — adoptee private-thread registry; drop→re-adopt reuses the same thread so history continues |

@@ -8,10 +8,10 @@ import { isSafeUrl, resolvesToPrivateAddress } from "./tools.js";
 import { detectProviderFromKey, guardedLlmFetch } from "./brains.js";
 import { runProfileBuild, PROFILE_BUILD_COOLDOWN_MS } from "./profile-build.js";
 import { inc, metricsSnapshot } from "./metrics.js";
-import type { ChatImport, Companion, CompanionListing, CompanionSpec, MessageEvent } from "./types.js";
+import type { ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, MessageEvent } from "./types.js";
 import { config } from "./config.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
-import { handleOpsCommand, handleHouseButton, handleTicketButton, isHouse, isMarketplaceThread } from "./ops.js";
+import { handleOpsCommand, handleHouseButton, handleTicketButton, isHouse, isMarketplaceThread, getOpsDeps, ensureAdopteeThread, ensureAdopteeThreadsForUser, setAdopteeThreadLocked } from "./ops.js";
 import { CURATED_TAGS, postListingThread, buildListingCard, buildListingComponents } from "./marketplace.js";
 import { parseCardFile, cardToPersona, cardImportMeta, cardFileHash, CARD_MAX_BYTES, type ImportPersona, type CardImportMeta, type ParsedCard } from "./charcard.js";
 import { parseChatFile, chatImportMeta, chatFileHash, type ParsedChat, type ChatImportMeta } from "./chathist.js";
@@ -818,20 +818,30 @@ async function doRelist(
   );
 }
 
-/** DM the adopted companion's greeting; returns whether it actually landed —
- *  server summoning unlocks only on a successful send. */
-export async function sendAdoptionGreeting(user: { createDM(): Promise<{ send(o: object): Promise<unknown> }> }, companion: Companion, greeting: string): Promise<boolean> {
-  try {
-    const dm = await user.createDM();
-    const embed = new EmbedBuilder()
-      .setTitle(companion.name)
-      .setDescription(greeting || `*${companion.name} joins you.*`);
-    if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
-    await dm.send({ embeds: [embed] });
-    return true;
-  } catch {
-    return false;
-  }
+/** Where non-members are pointed to meet their adopted companions. */
+function houseInviteRef(): string {
+  return config.houseInviteUrl ?? config.siteUrl;
+}
+
+/** Adopt-time thread setup shared by every adoption path — creates/reopens the
+ *  private #adoptees thread and lands the greeting. Returns a UI-ready mention
+ *  or the fallback the caller should show. */
+async function adopteeThreadResult(
+  args: { adoption: CompanionAdoption; companion: Companion; listing: { id: number; greeting: string } | null; username: string; reopen?: boolean },
+): Promise<{ thread?: string; needsInvite?: true; failed?: true }> {
+  const deps = getOpsDeps();
+  if (!deps) return { failed: true };
+  const hit = await ensureAdopteeThread(deps, args).catch(() => ({ failed: true as const }));
+  if ("thread" in hit) return { thread: `<#${hit.thread.id}>` };
+  return "needsInvite" in hit ? { needsInvite: true } : { failed: true };
+}
+
+/** Where this adoption's thread lives, for copy — known thread mention, or a
+ *  generic pointer when creation failed or the user hasn't joined yet. */
+function adoptPointerCopy(t: { thread?: string; needsInvite?: true }): string {
+  return t.thread ? ` they're waiting for you in ${t.thread}.`
+    : t.needsInvite ? ` join the Characterly server to meet them — ${houseInviteRef()}`
+    : ` I'll open your private thread under #adoptees shortly.`;
 }
 
 export async function summonPickedCompanion(interaction: ChatInputCommandInteraction | ButtonInteraction, companion: Companion, store: MemoryStore) {
@@ -854,7 +864,7 @@ export async function summonPickedCompanion(interaction: ChatInputCommandInterac
     const adoption = await store.adoptionForCompanion(companion.id);
     if (adoption && !adoption.dmIntroducedAt) {
       const msg =
-        `**${companion.name}** hasn't introduced themselves yet — open your DMs with me and they'll say hello. ` +
+        `**${companion.name}** hasn't met you yet — find your private thread under #adoptees in the Characterly server (join it first if you haven't) and say hello. ` +
         `After that first introduction you can summon them into servers.`;
       if (isButton) return (interaction as ButtonInteraction).update({ content: msg, components: [] });
       return interaction.reply({ content: msg, ephemeral: true });
@@ -1016,7 +1026,7 @@ export const commandDefinitions = [
       { name: "create — Author an extra marketplace character (counts toward listing slots)", value: "create" },
       { name: "unpublish — Remove your companion from the marketplace", value: "unpublish" },
       { name: "relist — Bring back an unpublished listing", value: "relist" },
-      { name: "switch — Choose which companion answers in your DMs", value: "switch" },
+      { name: "switch — Where each of your companions lives (DM or thread)", value: "switch" },
       { name: "drop — Give up an adopted companion (12h re-adopt cooldown)", value: "drop" },
       { name: "import — Bring in a character card (.png/.json) from another platform", value: "import" },
       { name: "imports — View or undo your chat-history imports", value: "imports" },
@@ -1388,15 +1398,13 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     }
     if (action === "status") {
       const dmScope = `dm:${interaction.user.id}`;
-      const [companion, keyRow, dmUsage, account, dmResolved] = await Promise.all([
+      const [companion, keyRow, dmUsage, account] = await Promise.all([
         store.getCompanionByOwner(interaction.user.id),
         typeof store.getGuildKey === "function" ? store.getGuildKey(dmScope) : Promise.resolve(null),
         typeof store.usageToday === "function" ? store.usageToday(dmScope) : Promise.resolve(0),
         store.creditsSupported ? store.accountForDiscordUser(interaction.user.id).catch(() => null) : Promise.resolve(null),
-        store.resolveDmCompanion(interaction.user.id).catch(() => null),
       ]);
       const adoptedRoster = (await store.listCompanionsForUser(interaction.user.id)).filter(c => c.kind === "adopted");
-      const dmPointer = dmResolved;
       const guildIds =
         companion && typeof store.listCompanionGuilds === "function"
           ? await store.listCompanionGuilds(companion.id)
@@ -1422,7 +1430,10 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
           {
             name: "Adopted Companions",
             value: adoptedRoster.length
-              ? adoptedRoster.map(c => `• **${c.name}**${c.id === dmPointer?.id ? (isAwakenedCompanionActive(companion) ? " *(answering DMs)*" : " *(DM pick — answers once awakened)*") : ""}`).join("\n")
+              ? (await Promise.all(adoptedRoster.slice(0, 10).map(async c => {
+                  const ad = await store.adoptionForCompanion(c.id).catch(() => null);
+                  return `• **${c.name}**${ad?.chatThreadId ? ` — <#${ad.chatThreadId}>` : ""}`;
+                }))).join("\n") + (adoptedRoster.length > 10 ? `\n… and ${adoptedRoster.length - 10} more` : "")
               : `None — browse the marketplace${account?.plan === "premium" ? " (unlimited slots)" : ` (${config.freeAdoptionSlots} slot)`}`,
             inline: false,
           },
@@ -1614,13 +1625,12 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
             : "You've already imported this card, and it can't rejoin your roster right now — try again later.";
           return interaction.reply({ content: msg, ephemeral: true });
         }
-        const greeted = res.adoption && !res.adoption.dmIntroducedAt
-          ? await sendAdoptionGreeting(interaction.user, res.companion, dupe.greeting)
-          : false;
-        if (greeted && res.adoption) await store.markDmIntroduced(res.adoption.id);
+        const t = res.adoption
+          ? await adopteeThreadResult({ adoption: res.adoption, companion: res.companion, listing: dupe, username: interaction.user.username, reopen: true })
+          : {};
         return interaction.reply({
           ephemeral: true,
-          content: `You've already imported this card — **${escapeMarkdown(res.companion.name)}** is ${res.revived ? "back on your roster" : "already with you"}.${greeted ? " They said hello in your DMs." : ""}`,
+          content: `You've already imported this card — **${escapeMarkdown(res.companion.name)}** is ${res.revived ? "back on your roster" : "already with you"}.${adoptPointerCopy(t)}`,
         });
       }
       const meta = cardImportMeta(parsed.card, { filename: file.name ?? "card", sha256, importedVia: "discord" });
@@ -1791,28 +1801,33 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       if (!active.length) {
         return promptUnawakenedCompanion(interaction, "You haven't awakened your companion yet!", brainFor);
       }
-      const current = await store.resolveDmCompanion(interaction.user.id);
-      const buttons = active.slice(0, 5).map((c, i) =>
-        new ButtonBuilder()
-          .setCustomId(`market:talk:${c.id}`)
-          .setLabel(c.name || `Companion ${i + 1}`)
-          .setStyle(c.id === current?.id ? ButtonStyle.Success : ButtonStyle.Primary),
-      );
-      const rows = [new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons)];
-      const hasAwakened = active.some(c => c.kind === "awakened");
+      // Companions live in fixed places now: the awakened bond owns the DM,
+      // adoptees own their private #adoptees threads. Opportunistically
+      // create missing threads for house members before listing links.
+      const deps = getOpsDeps();
+      if (deps) await ensureAdopteeThreadsForUser(interaction.user.id, deps).catch(() => {});
+      const awakened = active.find(c => c.kind === "awakened");
+      const adopted = active.filter(c => c.kind === "adopted");
+      const lines: string[] = [];
+      if (awakened) lines.push(`• **${awakened.name}** — your permanent companion, in my DMs.`);
+      for (const c of adopted.slice(0, 10)) {
+        const ad = await store.adoptionForCompanion(c.id).catch(() => null);
+        lines.push(ad?.chatThreadId
+          ? `• **${c.name}** — <#${ad.chatThreadId}>`
+          : `• **${c.name}** — join the Characterly server to open your thread: ${houseInviteRef()}`);
+      }
       // Adopted-only users can't reach awakening through the DM chat path —
       // surface the affordance here so the permanent bond stays discoverable.
-      const hint = hasAwakened
-        ? ""
-        : "\n\nYou haven't awakened a permanent companion yet — that's the one bond that's yours forever. Whoever you pick answers your DMs once they're awake.";
-      if (!hasAwakened) {
+      const rows: ActionRowBuilder<ButtonBuilder>[] = [];
+      if (!awakened) {
         rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
           new ButtonBuilder().setCustomId("onboard:start").setLabel("Awaken your own companion").setStyle(ButtonStyle.Primary),
         ));
       }
+      const hint = awakened ? "" : "\n\nYou haven't awakened a permanent companion yet — that's the one bond that's yours forever, in my DMs.";
       return interaction.reply({
         ephemeral: true,
-        content: `Who do you want answering your DMs? (green = current)${hint}`,
+        content: `**Where your companions live:**\n${lines.join("\n")}${hint}`,
         components: rows,
       });
     }
@@ -2784,15 +2799,13 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
             : "Couldn't bring that character in — try again in a moment.";
         return interaction.update({ content: msg, components: [] });
       }
-      if (!res.reused) await store.claimDmCompanionIfUnset(userId, res.companion.id);
-      const greeted = res.adoption && !res.adoption.dmIntroducedAt
-        ? await sendAdoptionGreeting(interaction.user, res.companion, created.listing.greeting)
-        : false;
-      if (greeted && res.adoption) await store.markDmIntroduced(res.adoption.id);
+      const t = res.adoption
+        ? await adopteeThreadResult({ adoption: res.adoption, companion: res.companion, listing: created.listing, username: interaction.user.username, reopen: true })
+        : {};
       inc("market.imported");
       return interaction.update({
         content:
-          `**${res.companion.name}** is here! ${greeted ? "They've just introduced themselves in your DMs." : "Say hi in your DMs — or pick them up anytime with `/companion action:switch`."}` +
+          `**${res.companion.name}** is here —${adoptPointerCopy(t)}` +
           `\n\n*Imported personas stay private — publishing to the marketplace is a separate choice (\`/companion action:publish\`).*`,
         components: [],
       });
@@ -2934,6 +2947,19 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
           return interaction.update({ content: `**${listing.name}** is already ${listing.status} — nothing to do.`, components: [] });
         }
         if (action !== "unflag") await archiveThread(listing.forumThreadId);
+        // Adoptee threads: a banned listing freezes its clones' chats; an
+        // unflag that restores to live unlocks them again. Delist keeps
+        // clones (and their threads) alive.
+        const depsM = getOpsDeps();
+        if (depsM && (action === "ban" || action === "unflag" && updated.status === "active")) {
+          const lock = action === "ban";
+          for (const a of await store.adoptionsForListing(listingId).catch(() => [])) {
+            if (a.chatThreadId) {
+              void setAdopteeThreadLocked(depsM, a.chatThreadId, lock,
+                lock ? `**${listing.name}** was removed by moderation — this chat is frozen.` : undefined).catch(() => {});
+            }
+          }
+        }
         inc(`market.mod_${action}`);
         const verb =
           action === "unflag"
@@ -2951,6 +2977,17 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       if (action === "bancreator") {
         const banned = await store.banCreator(listing.creatorUserId, userId);
         for (const l of banned) await archiveThread(l.forumThreadId);
+        const depsB = getOpsDeps();
+        if (depsB) {
+          for (const l of banned) {
+            for (const a of await store.adoptionsForListing(l.id).catch(() => [])) {
+              if (a.chatThreadId) {
+                void setAdopteeThreadLocked(depsB, a.chatThreadId, true,
+                  `**${l.name}** was removed by moderation — this chat is frozen.`).catch(() => {});
+              }
+            }
+          }
+        }
         inc("market.mod_bancreator");
         return interaction.update({
           content:
@@ -3183,9 +3220,10 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
           : "That listing is no longer available.";
         return interaction.reply({ content: msg, ephemeral: true });
       }
-      await store.setActiveDmCompanion(userId, res.companion.id);
-      const greeted = await sendAdoptionGreeting(interaction.user, res.companion, listing.greeting);
-      if (greeted) await store.markDmIntroduced(res.adoption.id);
+      const t = await adopteeThreadResult({
+        adoption: res.adoption, companion: res.companion, listing,
+        username: interaction.user.username, reopen: true,
+      });
       inc("market.adopted");
       // A user who only ever adopts never sees the DM onboarding path — keep
       // the permanent awakened bond discoverable.
@@ -3199,15 +3237,9 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       return interaction.reply({
         ephemeral: true,
         content:
-          `**${res.companion.name}** has joined your companions${res.reused ? " (re-adopted — your history with them continues)" : ""}` +
-          (hasAwakened
-            ? " — they'll answer your DMs now."
-            : " — your DMs belong to your own companion while you awaken them; once they're awake, `/companion action:switch` puts " + res.companion.name + " there.") +
-          (greeted
-            ? " They've introduced themselves — check your DMs! Once introduced, `/companion action:summon` works in servers too."
-            : " I couldn't reach your DMs — open them once so they can introduce themselves (required before server summoning).") +
-          (hasAwakened ? " `/companion action:switch` changes who's answering." : "") +
-          (hasAwakened ? "" : " Awaken a permanent companion of your own — that's the bond that stays yours forever."),
+          `**${res.companion.name}** has joined your companions${res.reused ? " (re-adopted — your history with them continues)" : ""} —${adoptPointerCopy(t)}` +
+          " Once they've said hello there, `/companion action:summon` works in other servers too." +
+          (hasAwakened ? "" : " Awaken a permanent companion of your own — that's the bond that stays yours forever, in my DMs."),
         components: rows,
       });
     }
@@ -3299,27 +3331,19 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       if (!companion) {
         return interaction.update({ content: "That companion isn't on your roster.", components: [] });
       }
-      await store.setActiveDmCompanion(userId, companion.id);
-      const awakenedRow = await store.getCompanionByOwner(userId);
-      const awakenedActive = isAwakenedCompanionActive(awakenedRow);
-      let extra = "";
-      if (companion.kind === "adopted") {
-        const adoption = await store.adoptionForCompanion(companion.id);
-        if (adoption && !adoption.dmIntroducedAt) {
-          const listing = companion.adoptedFromListingId ? await store.listingById(companion.adoptedFromListingId) : null;
-          const greeted = await sendAdoptionGreeting(interaction.user, companion, listing?.greeting ?? "");
-          if (greeted) {
-            await store.markDmIntroduced(adoption.id);
-            extra = " They've just introduced themselves — check your DMs.";
-          } else {
-            extra = " Open your DMs once so they can introduce themselves (required before server summoning).";
-          }
-        }
+      if (companion.kind === "awakened") {
+        return interaction.update({ content: `**${companion.name}** lives in my DMs — that's your permanent bond.`, components: [] });
       }
+      const adoption = await store.adoptionForCompanion(companion.id);
+      if (!adoption) {
+        return interaction.update({ content: "That adoption isn't active anymore.", components: [] });
+      }
+      const listing = companion.adoptedFromListingId
+        ? await store.listingById(companion.adoptedFromListingId).catch(() => null)
+        : null;
+      const t = await adopteeThreadResult({ adoption, companion, listing, username: interaction.user.username });
       return interaction.update({
-        content: awakenedActive
-          ? `**${companion.name}** is answering your DMs now.${extra}`
-          : `**${companion.name}** is your DM pick — they'll answer once you've awakened your own companion.${extra}`,
+        content: `**${companion.name}** —${adoptPointerCopy(t)}`,
         components: [],
       });
     }
@@ -3341,6 +3365,13 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         return interaction.update({ content: "That adoption is no longer active.", components: [] });
       }
       inc("market.dropped");
+      // Archive + lock the adoptee thread — the row keeps chat_thread_id so
+      // a re-adopt after cooldown unarchives the same thread with its history.
+      const deps = getOpsDeps();
+      if (deps && dropped.chatThreadId) {
+        void setAdopteeThreadLocked(deps, dropped.chatThreadId, true,
+          "This companion was dropped — the chat is archived. Re-adopt them and it picks up where you left off.").catch(() => {});
+      }
       return interaction.update({
         content: `Dropped — you can't re-adopt this companion until <t:${Math.floor(new Date(dropped.cooldownUntil!).getTime() / 1000)}:R>. Your history with them is kept if you come back.`,
         components: [],

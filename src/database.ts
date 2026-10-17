@@ -2596,6 +2596,7 @@ export class MemoryStore {
       droppedAt: r.dropped_at ? ts(r.dropped_at) : null,
       cooldownUntil: r.cooldown_until ? ts(r.cooldown_until) : null,
       dmIntroducedAt: r.dm_introduced_at ? ts(r.dm_introduced_at) : null,
+      chatThreadId: r.chat_thread_id ?? null,
     };
   }
 
@@ -3292,46 +3293,10 @@ export class MemoryStore {
     return rows.map(r => this.rowToCompanion(r));
   }
 
-  /** Which companion answers in this user's DM: their explicit pick while it
-   *  stays usable, otherwise the awakened companion. */
+  /** The DM lane belongs to the awakened companion — adopted companions chat
+   *  in their own private #adoptees threads (v54), never in DMs. */
   async resolveDmCompanion(userId: string): Promise<Companion | null> {
-    const picked = await this.sql<Array<any>>`
-      SELECT c.* FROM user_bot_settings s
-      JOIN companions c ON c.id = s.active_dm_companion_id
-      WHERE s.discord_user_id = ${userId} AND c.owner_user_id = ${userId}
-        AND c.onboarding_state = 'active'
-        AND (c.kind = 'awakened' OR EXISTS (
-          SELECT 1 FROM companion_adoptions a
-          WHERE a.companion_id = c.id AND a.dropped_at IS NULL
-        ))
-        -- Clones of banned listings freeze everywhere — DM answers included.
-        AND (c.adopted_from_listing_id IS NULL OR EXISTS (
-          SELECT 1 FROM companion_listings l
-          WHERE l.id = c.adopted_from_listing_id AND l.status <> 'banned'
-        ))
-    `;
-    if (picked[0]) return this.rowToCompanion(picked[0]);
     return this.getCompanionByOwner(userId);
-  }
-
-  async setActiveDmCompanion(userId: string, companionId: number): Promise<void> {
-    await this.sql`
-      INSERT INTO user_bot_settings (discord_user_id, active_dm_companion_id, updated_at)
-      VALUES (${userId}, ${companionId}, NOW())
-      ON CONFLICT (discord_user_id) DO UPDATE SET active_dm_companion_id = ${companionId}, updated_at = NOW()
-    `;
-  }
-
-  /** First import claims the DM slot; later imports leave the user's pick
-   *  alone. Mirrors the WHERE clause in import_companion_card (v42). */
-  async claimDmCompanionIfUnset(userId: string, companionId: number): Promise<void> {
-    await this.sql`
-      INSERT INTO user_bot_settings (discord_user_id, active_dm_companion_id, updated_at)
-      VALUES (${userId}, ${companionId}, NOW())
-      ON CONFLICT (discord_user_id) DO UPDATE
-        SET active_dm_companion_id = EXCLUDED.active_dm_companion_id, updated_at = NOW()
-        WHERE user_bot_settings.active_dm_companion_id IS NULL
-    `;
   }
 
   /** Active adoptions that actually occupy a slot — clones of banned
@@ -3359,6 +3324,125 @@ export class MemoryStore {
       SELECT * FROM companion_adoptions WHERE companion_id = ${companionId}
     `;
     return rows[0] ? this.rowToAdoption(rows[0]) : null;
+  }
+
+  // ── Adoptee chat threads (v54) ───────────────────────────────────────────
+  // Each active adoption owns one private thread under the house's #adoptees
+  // channel. Messages there run the dm:<adopterId> pipeline — the thread is a
+  // DM rendered in a guild channel.
+
+  /** Resolve a Discord thread/channel id to its adoption + companion. Only
+   *  active adoptions count — a dropped clone's thread is locked history. */
+  async companionThreadForChannel(threadId: string): Promise<{ adoption: CompanionAdoption; companion: Companion } | null> {
+    const rows = await this.sql<Array<any>>`
+      SELECT a.*, c.id AS c_id, c.owner_user_id AS c_owner_user_id, c.name AS c_name,
+             c.avatar_url AS c_avatar_url, c.voice_persona AS c_voice_persona,
+             c.core_traits AS c_core_traits, c.owner_dynamic AS c_owner_dynamic,
+             c.backstory AS c_backstory, c.onboarding_state AS c_onboarding_state,
+             c.onboarding_turns AS c_onboarding_turns, c.kind AS c_kind,
+             c.adopted_from_listing_id AS c_adopted_from_listing_id,
+             c.listing_version AS c_listing_version, c.persona_source AS c_persona_source,
+             c.import_meta AS c_import_meta, c.created_at AS c_created_at, c.updated_at AS c_updated_at
+      FROM companion_adoptions a
+      JOIN companions c ON c.id = a.companion_id
+      WHERE a.chat_thread_id = ${threadId} AND a.dropped_at IS NULL
+    `;
+    const r = rows[0];
+    if (!r) return null;
+    const companion = this.rowToCompanion({
+      id: r.c_id, owner_user_id: r.c_owner_user_id, name: r.c_name,
+      avatar_url: r.c_avatar_url, voice_persona: r.c_voice_persona,
+      core_traits: r.c_core_traits, owner_dynamic: r.c_owner_dynamic,
+      backstory: r.c_backstory, onboarding_state: r.c_onboarding_state,
+      onboarding_turns: r.c_onboarding_turns, kind: r.c_kind,
+      adopted_from_listing_id: r.c_adopted_from_listing_id,
+      listing_version: r.c_listing_version, persona_source: r.c_persona_source,
+      import_meta: r.c_import_meta, created_at: r.c_created_at, updated_at: r.c_updated_at,
+    });
+    return { adoption: this.rowToAdoption(r), companion };
+  }
+
+  async setAdoptionThread(adoptionId: number, threadId: string): Promise<void> {
+    await this.sql`UPDATE companion_adoptions SET chat_thread_id = ${threadId} WHERE id = ${adoptionId}`;
+  }
+
+  /** Active adoptions whose private thread hasn't been created yet — the
+   *  sweep and the member-join hook both drain this set. */
+  async activeAdoptionsMissingThreads(limit = 10): Promise<Array<{ adoption: CompanionAdoption; companion: Companion; listing: { id: number; greeting: string } | null }>> {
+    const rows = await this.sql<Array<any>>`
+      SELECT a.*, c.id AS c_id, c.owner_user_id AS c_owner_user_id, c.name AS c_name,
+             c.avatar_url AS c_avatar_url, c.voice_persona AS c_voice_persona,
+             c.core_traits AS c_core_traits, c.owner_dynamic AS c_owner_dynamic,
+             c.backstory AS c_backstory, c.onboarding_state AS c_onboarding_state,
+             c.onboarding_turns AS c_onboarding_turns, c.kind AS c_kind,
+             c.adopted_from_listing_id AS c_adopted_from_listing_id,
+             c.listing_version AS c_listing_version, c.persona_source AS c_persona_source,
+             c.import_meta AS c_import_meta, c.created_at AS c_created_at, c.updated_at AS c_updated_at,
+             l.id AS l_id, l.greeting AS l_greeting
+      FROM companion_adoptions a
+      JOIN companions c ON c.id = a.companion_id
+      LEFT JOIN companion_listings l ON l.id = a.listing_id
+      WHERE a.dropped_at IS NULL AND a.chat_thread_id IS NULL
+        -- Clones of banned listings are frozen — no thread to greet into.
+        AND (l.id IS NULL OR l.status <> 'banned')
+      ORDER BY a.adopted_at ASC LIMIT ${limit}
+    `;
+    return rows.map(r => ({
+      adoption: this.rowToAdoption(r),
+      companion: this.rowToCompanion({
+        id: r.c_id, owner_user_id: r.c_owner_user_id, name: r.c_name,
+        avatar_url: r.c_avatar_url, voice_persona: r.c_voice_persona,
+        core_traits: r.c_core_traits, owner_dynamic: r.c_owner_dynamic,
+        backstory: r.c_backstory, onboarding_state: r.c_onboarding_state,
+        onboarding_turns: r.c_onboarding_turns, kind: r.c_kind,
+        adopted_from_listing_id: r.c_adopted_from_listing_id,
+        listing_version: r.c_listing_version, persona_source: r.c_persona_source,
+        import_meta: r.c_import_meta, created_at: r.c_created_at, updated_at: r.c_updated_at,
+      }),
+      listing: r.l_id ? { id: Number(r.l_id), greeting: r.l_greeting ?? "" } : null,
+    }));
+  }
+
+  async adoptionsMissingThreadsForUser(userId: string): Promise<Array<{ adoption: CompanionAdoption; companion: Companion; listing: { id: number; greeting: string } | null }>> {
+    const rows = await this.sql<Array<any>>`
+      SELECT a.*, c.id AS c_id, c.owner_user_id AS c_owner_user_id, c.name AS c_name,
+             c.avatar_url AS c_avatar_url, c.voice_persona AS c_voice_persona,
+             c.core_traits AS c_core_traits, c.owner_dynamic AS c_owner_dynamic,
+             c.backstory AS c_backstory, c.onboarding_state AS c_onboarding_state,
+             c.onboarding_turns AS c_onboarding_turns, c.kind AS c_kind,
+             c.adopted_from_listing_id AS c_adopted_from_listing_id,
+             c.listing_version AS c_listing_version, c.persona_source AS c_persona_source,
+             c.import_meta AS c_import_meta, c.created_at AS c_created_at, c.updated_at AS c_updated_at,
+             l.id AS l_id, l.greeting AS l_greeting
+      FROM companion_adoptions a
+      JOIN companions c ON c.id = a.companion_id
+      LEFT JOIN companion_listings l ON l.id = a.listing_id
+      WHERE a.dropped_at IS NULL AND a.chat_thread_id IS NULL AND a.user_id = ${userId}
+        AND (l.id IS NULL OR l.status <> 'banned')
+      ORDER BY a.adopted_at ASC
+    `;
+    return rows.map(r => ({
+      adoption: this.rowToAdoption(r),
+      companion: this.rowToCompanion({
+        id: r.c_id, owner_user_id: r.c_owner_user_id, name: r.c_name,
+        avatar_url: r.c_avatar_url, voice_persona: r.c_voice_persona,
+        core_traits: r.c_core_traits, owner_dynamic: r.c_owner_dynamic,
+        backstory: r.c_backstory, onboarding_state: r.c_onboarding_state,
+        onboarding_turns: r.c_onboarding_turns, kind: r.c_kind,
+        adopted_from_listing_id: r.c_adopted_from_listing_id,
+        listing_version: r.c_listing_version, persona_source: r.c_persona_source,
+        import_meta: r.c_import_meta, created_at: r.c_created_at, updated_at: r.c_updated_at,
+      }),
+      listing: r.l_id ? { id: Number(r.l_id), greeting: r.l_greeting ?? "" } : null,
+    }));
+  }
+
+  /** Active adoptions under a listing — the ban path locks their threads. */
+  async adoptionsForListing(listingId: number): Promise<CompanionAdoption[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM companion_adoptions WHERE listing_id = ${listingId} AND dropped_at IS NULL
+    `;
+    return rows.map(r => this.rowToAdoption(r));
   }
 
   /** Adopt a listing for a user inside one transaction. maxSlots applies to

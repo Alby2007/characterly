@@ -51,9 +51,10 @@ untouched and their private memories are never scanned.
 first-party, consented, private content — the same privacy posture as their
 memories.
 
-### Self-harm triage (all DMs)
+### Self-harm triage (all DMs + adoptee threads)
 
-Deterministic phrase triage on every DM (awakened and adopted). On a hit the
+Deterministic phrase triage on every DM turn and every adoptee-thread turn.
+On a hit the
 companion breaks character briefly to deliver a scripted crisis-resource
 response (988 US/CA, Samaritans 116 123 UK/IE, findahelpline.com
 international) and offers to stay. No LLM call, no charge, no throttle.
@@ -77,8 +78,9 @@ Statuses: `active` → `flagged` (report threshold hold) → `delisted` /
     saves edits but keeps it down, and it stays out of the relist picker.
     Only a mod **Keep up** restores it.
 - **`banned`** — kill switch. No Adds, no relist, and **all clones freeze**:
-  they vanish from adopter rosters, stop answering DMs, and stop speaking in
-  guilds. A frozen adoption also stops consuming the adopter's slot — the
+  they vanish from adopter rosters, their adoptee threads lock (a moderation
+  notice posts first), and they stop speaking in guilds. A frozen adoption
+  also stops consuming the adopter's slot — the
   user can't drop what they can't see, so the slot releases until the ban
   lifts. Query-level (`companions` rows are never deleted), so a bad ban is
   fully reversible: **Keep up** ladders `banned → flagged → active`.
@@ -197,7 +199,9 @@ because the interim is where the liability lives.
 
 - **Emergency freeze (SQL):**
   `UPDATE companion_listings SET status='banned' WHERE id=<n>;` — clones
-  freeze on the next roster/DM/guild read.
+  freeze on the next roster/thread/guild read (thread locks themselves are
+  button-driven, so an SQL ban leaves the thread unlocked but inert — the
+  turn pipeline refuses banned clones before any send).
 - **Clear a flag:** `status='active'` (or `'delisted'` to keep it down).
 - **Ban a creator:**
   `INSERT INTO marketplace_bans (discord_user_id, reason, banned_by) VALUES ('<id>','<why>','<mod>');`

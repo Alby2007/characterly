@@ -3,7 +3,8 @@
 The marketplace is a Character.AI-style discovery layer built on top of (never
 replacing) the permanent awakened-companion bond. Creators publish characters
 into a forum channel in the hub Discord server; adopters add them and chat in
-DMs, then can summon them into servers. This doc is the end-to-end reference.
+a private `#adoptees` thread in the hub server — then can summon them into
+other servers. This doc is the end-to-end reference.
 
 ## The mental model — three different things
 
@@ -61,9 +62,10 @@ filename, `sha256` of the source bytes) on both rows.
 
 **Private by default.** An import creates a `status='unlisted'` listing plus an
 adopted clone owned by the importer — invisible to marketplace queries and live
-listing caps, adoptable only by its creator. First import claims the DM pick
-(it answers once the awakened companion is active — onboarding owns DMs until
-then); the awakened companion is never touched. Discord: preview → confirm. Website:
+listing caps, adoptable only by its creator. Like every adoption it gets its
+own private `#adoptees` thread (created at confirm for house members —
+non-members get the server invite and the thread materializes on join); the
+awakened companion is never touched. Discord: preview → confirm. Website:
 the dashboard's "Import a character" plate parses the file client-side, shows a
 preview, uploads an extracted PNG avatar to the `card-avatars` bucket, and
 creates the pair via the `import_companion_card` RPC (idempotent on `sha256` —
@@ -274,40 +276,52 @@ Forum card → **Add** → `store.adoptListing` in one transaction:
 - **Clone** — a `kind='adopted'` companions row is inserted owned by the
   adopter, plus the `companion_adoptions` row. Re-adopting the same listing
   reuses the same clone, so the relationship and memories continue.
-- **DM activation** — the clone becomes `active_dm_companion_id` and the
-  greeting is sent as the character. `dm_introduced_at` stamps **only
-  on a successful send**; if DMs are closed, the greeting replays on the user's
-  next DM contact. The pick *answers* DMs once the awakened companion is
-  active — until then DMs run the awakening flow (summons to servers work
-  regardless).
+- **Thread creation** — the adoption opens (or, on re-adopt, reopens) a
+  named private thread under `#adoptees` in the hub server and the companion
+  posts the listing `greeting` there as their first message. `chat_thread_id`
+  on `companion_adoptions` is the registry; `dm_introduced_at` stamps **only
+  on a successful greeting send** — it's what unlocks server summoning.
+  Adopters who aren't house members get the server invite instead of a
+  silent deferral; `handleHouseMemberAdd` and the periodic
+  `backfillAdopteeThreads` sweep materialize the thread on join.
 - **Introduction gate** — adopted companions can't be server-summoned until
-  `dm_introduced_at` is set; an early summon attempt gets an ephemeral warning.
+  `dm_introduced_at` is set; an early summon attempt gets an ephemeral warning
+  pointing at the thread.
 - `getCompanionByOwner` stays awakened-only, so onboarding, avatar edits, and
-  the permanent-lock semantics are untouched. `resolveDmCompanion` picks the
-  active DM companion; `listCompanionsForUser` is the roster (awakened first).
-  The DM routing gate uses `isAwakenedCompanionActive(existing)` — an adopted
-  pick never suppresses the awakening flow.
+  the permanent-lock semantics are untouched. `resolveDmCompanion` is
+  awakened-only too — the DM lane belongs to the permanent bond, full stop
+  (onboarding owns it until the awakened companion is active). Adopted
+  companions never answer DMs. `listCompanionsForUser` is the roster.
 
-DM replies carry a per-message identity — `buildCompanionDmPayload` sends every
-companion reply as a Components V2 message: a bold name header + reply text in
-a Section with the companion's avatar as a Thumbnail accessory (avatarless
-companions get bare text displays — sections require an accessory; send
-failures fall back to plain `**name**\ntext`). Bots can't impersonate
-per-message in DMs (webhooks are guild-only), so this is how the answering
-companion is visible. System/onboarding replies stay classic text+embeds —
-the visual split between persona bubbles and bot chrome is intentional.
+Inside their threads adopted companions speak with full webhook identity
+(real name + avatar per message via `sendAsCompanion`) — each thread is its
+own channel, so transcript and LLM context are isolated per companion for
+free (`recentContext` keys on channel id). The awakened companion's DM
+replies carry the same identity via `buildCompanionDmPayload` — a Components
+V2 Section (bold name header + avatar thumbnail; bare text displays when
+avatarless, plain-text fallback on send failure) since bots can't impersonate
+per-message in DMs.
 
-Roster commands: `switch` (pick who answers DMs), `drop` (picker →
-`market:drop`), `summon`/`dismiss` (pickers when >1), `card`, `status`.
+**Thread-scoped DM lane.** Thread turns run the identical pipeline as DMs
+(`runCompanionTurn`) under `dm:<adopterId>` scope — the adopter's credits or
+BYOK key, their memories/journals, self-harm triage, adopted-reply safety
+screen, and refund semantics all carry over. Registered adoptee threads are
+the one exception to the house's private-thread bypass (`isAdopteeThread` +
+`companionThreadForChannel`); support-ticket threads still bypass entirely.
+
+Roster commands: `switch` (where each companion lives — DM link vs thread
+links), `drop` (picker → `market:drop`), `summon`/`dismiss` (pickers when
+>1), `card`, `status`. `market:talk` buttons open/create the thread.
 
 ## Dropping & cooldown
 
 `/companion action:drop` → picker → `dropAdoption` transactionally: sets
 `dropped_at` + `cooldown_until` (12h), deactivates the clone's
-`guild_companions` rows everywhere, and clears the DM pick (falls back to
-awakened). The clone's `companions` row and its memories are **kept** —
-re-adoption after cooldown resumes the same relationship. The freed slot is
-usable immediately for *other* listings.
+`guild_companions` rows everywhere, and archives+locks its adoptee thread
+(`setAdopteeThreadLocked`). The clone's `companions` row, its memories, and
+the thread's history are **kept** — re-adoption after cooldown reopens the
+same thread and resumes the same relationship. The freed slot is usable
+immediately for *other* listings.
 
 ## Money
 
@@ -335,16 +349,17 @@ The mechanics in one paragraph:
   (`checkListingFields`) then `Brain.safetyVerdict` on the operator model
   (`safetyBrain()`); all three write paths (publish/create/edit) screen the
   assembled persona.
-- **Reply screening (fail-open)** — adopted companions' replies (DM + guild,
+- **Reply screening (fail-open)** — adopted companions' replies (thread + guild,
   BYOK + hosted) pass `safetyVerdict` before send; a flag swaps in
   `SAFE_REFUSAL` and refunds the reply leg.
-- **Self-harm triage** — `isSelfHarmSignal` on every DM; hit → scripted
+- **Self-harm triage** — `isSelfHarmSignal` on every DM and every adoptee
+  thread turn; hit → scripted
   `CRISIS_RESPONSE`, no charge, no throttle.
 - **Statuses** — `active` → `flagged` → `delisted` / `banned`. `delisted`
   has two flavors told apart by `moderation_events`: a *creator unpublish*
   relists freely; a *mod takedown* refuses creator relist/republish and
   hides from the relist picker — only **Keep up** restores it. `banned` is
-  the kill switch: clones freeze everywhere (roster, DM, guilds) via the
+  the kill switch: clones freeze everywhere (roster, thread, guilds) via the
   `adopted_from_listing_id → status` join, and a frozen adoption releases
   the adopter's slot until the ban lifts. **Keep up** ladders
   `banned→flagged→active`. **Creator bans** (`marketplace_bans`) ban all

@@ -345,6 +345,8 @@ export type CompanionAdoption = {
   droppedAt: string | null;
   cooldownUntil: string | null;
   dmIntroducedAt: string | null;
+  /** Private house thread under #adoptees where this companion chats (v54). */
+  chatThreadId: string | null;
 };
 
 export type CompanionSpec = {

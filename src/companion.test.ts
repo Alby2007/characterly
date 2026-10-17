@@ -26,6 +26,7 @@ import {
 import { MemoryStore } from "./database.js";
 import { makeStore, makeTestSql } from "./test-helpers.js";
 import { config } from "./config.js";
+import { initOps, resetOpsState, type OpsDeps } from "./ops.js";
 import type { GuildCompanion, MessageEvent } from "./types.js";
 
 function msg(content: string, overrides: Partial<MessageEvent> = {}): MessageEvent {
@@ -902,8 +903,7 @@ test("onboarding UX: bare greeting guard, welcome/draft/awakened cards, proactiv
   assert.equal(purgedGuilds.length, 2, "refused paths never purge");
 });
 
-test("DM lane: awakening owns DMs until the permanent companion is active — adopted picks defer, never suppress", async () => {
-  const awakenedDraft: GuildCompanion = { ...makeCompanion(3, "u-pat", "Sketch"), onboardingState: "onboarding" };
+test("DM lane: awakening owns DMs; adopted companions get private #adoptees threads", async () => {
   const awakenedActive = makeCompanion(1, "u-pat", "Nyx");
   const adopted = {
     ...makeCompanion(2, "u-pat", "Wren"),
@@ -913,77 +913,99 @@ test("DM lane: awakening owns DMs until the permanent companion is active — ad
 
   // The DM gate predicate — fresh linked account, in-progress draft, and
   // awakened-active. The awakening flow owns DMs in the first two states;
-  // an adopted pick's existence must not change any of these answers.
+  // adopted companions never enter this lane at all.
   assert.equal(isAwakenedCompanionActive(null), false, "fresh linked user → onboarding owns the DM");
-  assert.equal(isAwakenedCompanionActive(awakenedDraft), false, "draft resumes onboarding");
+  assert.equal(isAwakenedCompanionActive({ ...awakenedActive, onboardingState: "onboarding" }), false, "draft resumes onboarding");
   assert.equal(isAwakenedCompanionActive(awakenedActive), true, "awakened companion → normal chat");
 
-  // market:talk — the pick is stored immediately either way (it takes effect
-  // on awakening), but the copy must not claim the adoptee answers now.
-  const talkCases: Array<{ awakened: GuildCompanion | null; expect: RegExp }> = [
-    { awakened: null, expect: /once you've awakened your own companion/i },
-    { awakened: awakenedActive, expect: /is answering your DMs now/i },
-  ];
-  for (const { awakened, expect } of talkCases) {
-    let pick: number | null = null;
-    let replied: any = null;
-    const store = {
-      listCompanionsForUser: async () => [adopted],
-      setActiveDmCompanion: async (_uid: string, id: number) => { pick = id; },
-      getCompanionByOwner: async () => awakened,
-      adoptionForCompanion: async () => ({ id: 5, dmIntroducedAt: new Date() }),
-      listingById: async () => null,
-    } as unknown as MemoryStore;
-    await handleMemoryButton(
-      {
-        customId: `market:talk:${adopted.id}`,
-        user: { id: "u-pat" },
-        reply: async (r: any) => { replied = r; },
-        update: async (r: any) => { replied = r; },
+  // Fake ops so adopteeThreadResult creates the private thread for real —
+  // this is the adoption path's thread wiring end to end.
+  const sentPayloads: unknown[] = [];
+  const addedMembers: string[] = [];
+  const thread = {
+    id: "t-wren",
+    members: { add: async (uid: string) => { addedMembers.push(uid); } },
+    send: async (p: unknown) => { sentPayloads.push(p); },
+    setLocked: async () => {}, setArchived: async () => {},
+  };
+  const createdThreads: Array<Record<string, unknown>> = [];
+  const stampedThreads: string[] = [];
+  const introduced: number[] = [];
+  const adoption = { id: 9, userId: "u-pat", chatThreadId: null as string | null, dmIntroducedAt: null };
+  const listing = { id: 11, name: "Wren", status: "active", greeting: "*waves*", creatorUserId: "u-creator" };
+  const store = {
+    listCompanionsForUser: async () => [adopted],
+    getCompanionByOwner: async () => null,
+    adoptionForCompanion: async () => adoption,
+    listingById: async () => listing,
+    listingForCompanion: async () => null,
+    setAdoptionThread: async (_a: number, t: string) => { stampedThreads.push(t); adoption.chatThreadId = t; },
+    markDmIntroduced: async (a: number) => { introduced.push(a); },
+    creatorBan: async () => null,
+    accountForDiscordUser: async () => null,
+    creditsSupported: false,
+    adoptListing: async () => ({ ok: true, companion: adopted, adoption, reused: false, revived: false }),
+  } as unknown as MemoryStore;
+  const savedAdoptees = config.houseAdopteesChannelId;
+  const savedHouse = config.houseGuildId;
+  config.houseAdopteesChannelId = "c-adoptees";
+  config.houseGuildId = "g-house";
+  initOps({
+    store,
+    fetchMember: async () => ({ user: { id: "u-pat", username: "Pat" } }),
+    fetchChannel: async (id: string) => id === "c-adoptees"
+      ? { send: async () => {}, threads: { create: async (o: Record<string, unknown>) => { createdThreads.push(o); return thread; } } }
+      : id === thread.id ? thread : { send: async () => {} },
+    fetchGuild: async () => null,
+    botId: "bot-1",
+  } as unknown as OpsDeps);
+  const ix = (customId: string) => {
+    const box: { replied: any } = { replied: null };
+    return {
+      box,
+      interaction: {
+        customId,
+        user: { id: "u-pat", username: "Pat" },
+        reply: async (r: any) => { box.replied = r; },
+        update: async (r: any) => { box.replied = r; },
       } as any,
-      store,
-    );
-    assert.equal(pick, adopted.id, "the pick is stored either way");
-    assert.match(replied?.content ?? "", expect);
-  }
-
-  // market:add — fresh adopt while unawakened must not promise DM answers and
-  // must surface the awaken affordance; awakened gets the normal copy.
-  const addCases: Array<{ awakened: GuildCompanion | null; expect: RegExp; nudge: boolean }> = [
-    { awakened: null, expect: /your DMs belong to your own companion/i, nudge: true },
-    { awakened: awakenedActive, expect: /they'll answer your DMs now/i, nudge: false },
-  ];
-  for (const { awakened, expect, nudge } of addCases) {
-    let pick: number | null = null;
-    let replied: any = null;
-    const listing = {
-      id: 11, name: "Wren", status: "active", greeting: "*waves*",
-      creatorUserId: "u-creator",
     };
-    const store = {
-      listingById: async () => listing,
-      creditsSupported: false,
-      adoptListing: async () => ({
-        ok: true, companion: adopted,
-        adoption: { id: 9, dmIntroducedAt: null }, reused: false, revived: false,
-      }),
-      setActiveDmCompanion: async (_uid: string, id: number) => { pick = id; },
-      getCompanionByOwner: async () => awakened,
-      markDmIntroduced: async () => {},
-    } as unknown as MemoryStore;
-    await handleMemoryButton(
-      {
-        customId: `market:add:${listing.id}`,
-        user: { id: "u-pat", username: "Pat", createDM: async () => ({ send: async () => ({}) }) },
-        reply: async (r: any) => { replied = r; },
-        update: async (r: any) => { replied = r; },
-      } as any,
-      store,
-    );
-    assert.equal(pick, adopted.id);
-    assert.match(replied?.content ?? "", expect);
-    const hasNudge = Boolean(replied?.components?.length);
-    assert.equal(hasNudge, nudge, `awaken nudge button should ${nudge ? "" : "not "}be offered`);
+  };
+  try {
+    // market:talk on the adoptee — opens the private thread, greets as the
+    // companion, and points the clicker at it. No DM pick is involved.
+    const talk = ix(`market:talk:${adopted.id}`);
+    await handleMemoryButton(talk.interaction, store);
+    assert.match(talk.box.replied?.content ?? "", /<#t-wren>/);
+    assert.equal(createdThreads.length, 1);
+    assert.match(createdThreads[0].name as string, /Wren.*Pat/);
+    assert.deepEqual(addedMembers, ["u-pat"]);
+    assert.deepEqual(stampedThreads, ["t-wren"]);
+    assert.deepEqual(introduced, [9]);
+    assert.equal(sentPayloads.length, 1, "the greeting posted as the companion's first message");
+
+    // market:talk on the awakened companion → permanent-bond copy, no threads.
+    const storeWoke = { ...store, listCompanionsForUser: async () => [awakenedActive] } as unknown as MemoryStore;
+    const woke = ix(`market:talk:${awakenedActive.id}`);
+    await handleMemoryButton(woke.interaction, storeWoke);
+    assert.match(woke.box.replied?.content ?? "", /lives in my DMs/i);
+    assert.equal(createdThreads.length, 1, "the awakened bond has no adoptee thread");
+
+    // market:add — adopt lands the thread pointer + the summon hint; an
+    // unawakened adopter still gets the awaken affordance, and copy never
+    // claims the adoptee answers DMs.
+    const add = ix(`market:add:${listing.id}`);
+    await handleMemoryButton(add.interaction, store);
+    assert.match(add.box.replied?.content ?? "", /<#t-wren>/);
+    assert.match(add.box.replied?.content ?? "", /action:summon/);
+    assert.doesNotMatch(add.box.replied?.content ?? "", /answer your DMs|in your DMs/i);
+    assert.ok(add.box.replied?.components?.length, "awaken nudge offered while unawakened");
+    assert.equal(createdThreads.length, 1, "existing chat_thread_id short-circuits");
+  } finally {
+    config.houseAdopteesChannelId = savedAdoptees;
+    config.houseGuildId = savedHouse;
+    initOps(null as unknown as OpsDeps);
+    resetOpsState();
   }
 });
 

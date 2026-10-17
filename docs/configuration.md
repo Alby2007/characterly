@@ -101,6 +101,8 @@ Entirely opt-in: **`HOUSE_GUILD_ID` unset disables everything** below — no ext
 | `HOUSE_RULES_CHANNEL_ID` | — | Pointed at from welcome messages |
 | `HOUSE_VERIFY_CHANNEL_ID` | — | Lobby gate channel — a persistent verify card is posted here on boot if missing |
 | `HOUSE_ANNOUNCE_CHANNEL_ID` | — | `/ops announce` target |
+| `HOUSE_ADOPTEES_CHANNEL_ID` | name-match `adoptees` | Parent channel for adopted-companion private threads (v54). Name fallback binds a channel created before the env existed |
+| `HOUSE_INVITE_URL` | `SITE_URL` | Public server invite shown to non-member adopters who need to join before their adoptee thread can open |
 | `OPS_CHANNEL_ID` | `MARKETPLACE_MOD_CHANNEL_ID` | Ops alerts + host breach/recovery notices |
 | `OPS_USER_IDS` | — | Comma-separated user ids allowed to run `/ops` (controls the host — person-level, tighter than ManageGuild) |
 | `OPS_REPO_DIR` | `~/characterly` | Repo checkout on the host for `/ops deploy` |

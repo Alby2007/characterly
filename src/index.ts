@@ -1,4 +1,4 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client, Events, GatewayIntentBits, Partials, type Guild, type Message, type OmitPartialGroupDMChannel } from "discord.js";
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client, Events, GatewayIntentBits, Partials, type Guild, type Message, type MessageReplyOptions, type OmitPartialGroupDMChannel } from "discord.js";
 import OpenAI from "openai";
 import { config } from "./config.js";
 import { sql } from "./db.js";
@@ -19,7 +19,6 @@ import {
   handleMemoryButton, handleMarketplaceContext, handleMarketSelect,
   handleMemoryCommand,
   handleSetupModal,
-  sendAdoptionGreeting,
   scopedCommandDefinitions,
 } from "./commands.js";
 import { containsPrivateSubtext, looksLikeSchemaLeak, recallTerms, shouldInspectForMemory, toolCues } from "./perception.js";
@@ -47,10 +46,10 @@ import { selectCompanionForTurn } from "./scene-router.js";
 import { sendAsCompanion } from "./webhooks.js";
 import { isSelfHarmSignal, CRISIS_RESPONSE, SAFE_REFUSAL } from "./safety.js";
 import {
-  initOps, automodMessage, isHouse, isMarketplaceThread, opsAlert,
+  initOps, automodMessage, isHouse, isMarketplaceThread, isAdopteeThread, opsAlert,
   handleHouseMemberAdd, handleHouseMemberUpdate, handleHouseMemberRemove,
   ensureHouseLayout, ensureResourcePosts, ensureTicketPanel, handleTicketModal, startHostWatchdog, ensureVerifyGate, startLinkSweep,
-  startTagSweep,
+  startTagSweep, backfillAdopteeThreads,
   type OpsDeps, type GuildLike,
 } from "./ops.js";
 import { exec as cpExec } from "node:child_process";
@@ -58,7 +57,7 @@ import { promisify } from "node:util";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { gatherOwnerSubtextForServer, gatherServerDigestForDm } from "./cross-context.js";
 import { defaultEmbedder, vectorLiteral } from "./embeddings.js";
-import type { CompanionPersona, JournalEntry, MessageEvent, PairContext } from "./types.js";
+import type { Companion, CompanionAdoption, CompanionPersona, JournalEntry, MessageEvent, PairContext } from "./types.js";
 
 // Register every credential before any code path can log it — redactSecrets
 // scrubs all registered values plus auth-header-shaped tokens out of logs.
@@ -569,6 +568,14 @@ setInterval(() => {
   greetPendingInstalls(store, installGreetDeps).catch(e => { inc("install.greet_error"); logError("install greet sweep failed", e); });
 }, INSTALL_GREET_INTERVAL_MS).unref();
 
+// Adoptee thread backfill — active adoptions missing their private #adoptees
+// thread get one created + greeted (non-members deferred to the member-add
+// hook). House-gated inside the sweep.
+setInterval(() => {
+  if (!client.isReady() || !config.houseGuildId) return;
+  backfillAdopteeThreads(opsDeps).catch(e => { inc("ops.adoptee_backfill_error"); logError("adoptee backfill failed", e); });
+}, SWEEP_INTERVAL_MS).unref();
+
 /** Backfill embeddings for rows saved before v40 or during embed outages.
  * Bounded batch per sweep tick — large corpora converge over several ticks.
  * No-op when the embedder is disabled. */
@@ -969,14 +976,10 @@ async function handleDmMessage(
     return;
   }
 
-  // Resolve who answers once awake: the user's active DM pick (adopted or
-  // awakened), falling back to the awakened companion/onboarding draft.
   // `existing` is the awakened row — the DM lane belongs to onboarding until
-  // it turns active, so an adopted pick must not suppress the awakening
-  // flow (adoption + the pick live on the Discord snowflake, not the web
-  // account — they survive relinking to a fresh account).
+  // it turns active, then to the awakened companion forever. Adopted
+  // companions never answer DMs; they live in #adoptees threads (v54).
   const existing = await store.getCompanionByOwner(userId);
-  const dmCompanion = await store.resolveDmCompanion(userId).catch(() => null);
   const replyToId = message.reference?.messageId ?? undefined;
 
   // ── 1:1 DM Conversational Onboarding ───────────────────────────────────────
@@ -1093,23 +1096,10 @@ async function handleDmMessage(
   }
 
   // ── Active 1:1 DM Companion Chat ───────────────────────────────────────────
-  // The gate guarantees `existing` is awakened + active, so the DM pick
-  // (adopted or awakened) answers — resolveDmCompanion already falls back
-  // to the awakened row when no pick is set.
-  const companion = (dmCompanion ?? existing)!;
-  // An adopted companion selected in the marketplace without reachable DMs
-  // introduces itself on first contact here — only a successful send counts.
-  if (companion.kind === "adopted") {
-    const adoption = await store.adoptionForCompanion(companion.id).catch(() => null);
-    if (adoption && !adoption.dmIntroducedAt) {
-      const listing = companion.adoptedFromListingId
-        ? await store.listingById(companion.adoptedFromListingId).catch(() => null)
-        : null;
-      const greeted = await sendAdoptionGreeting(message.author, companion, listing?.greeting ?? "");
-      if (greeted) await store.markDmIntroduced(adoption.id).catch(() => {});
-    }
-  }
-  const compSubj = MemoryStore.companionSubjectId(companion.id);
+  // The gate guarantees `existing` is awakened + active — and resolveDmCompanion
+  // only ever returns the awakened row. Adopted companions never answer DMs;
+  // they live in private #adoptees threads (v54).
+  const companion = existing!;
   const event: MessageEvent = {
     guildId: dmScope,
     channelId: message.channel.id,
@@ -1122,7 +1112,121 @@ async function handleDmMessage(
     imageAttachments: images.length ? images : undefined,
   };
 
-  const settings = await store.settings(dmScope, config.rawMessageRetentionDays);
+  await runCompanionTurn({
+    scope: dmScope,
+    userId,
+    channel: message.channel,
+    companion,
+    event,
+    replyToId,
+    images,
+    account,
+    sendPersona: async t => {
+      // The companion's reply renders as a CV2 persona block (name + avatar)
+      // — bots can't impersonate per-message in DMs, so identity rides in the
+      // body. Plain-text fallback if the CV2 send rejects.
+      const sent = await message.reply({
+        ...buildCompanionDmPayload(companion, t),
+        allowedMentions: { parse: [], repliedUser: false },
+      }).catch(() => message.reply({
+        content: `**${companion.name}**\n${t}`,
+        allowedMentions: { parse: [], repliedUser: false },
+      }));
+      return { id: sent.id, createdAt: sent.createdAt ?? new Date() };
+    },
+    sendSystem: o => message.reply({ ...o, allowedMentions: { parse: [], repliedUser: false } }).then(() => undefined).catch(() => {}),
+  });
+}
+
+/** An adoptee thread is a DM rendered in a guild channel — same scope
+ *  (dm:<adopter>), same billing, same memory; only the send differs (webhook
+ *  persona instead of a CV2 reply). Registered via companion_adoptions.
+ *  chat_thread_id; everything about the turn is shared in runCompanionTurn. */
+async function handleAdopteeThreadMessage(
+  message: OmitPartialGroupDMChannel<Message>,
+  images: Array<AttachmentMeta & { contentType: string }>,
+  hit: { adoption: CompanionAdoption; companion: Companion },
+) {
+  // Companion webhook echoes are archived at send time; other members of the
+  // thread (staff peeking in) aren't part of the bond — only the adopter's
+  // turns count.
+  if (message.author.bot || message.author.id !== hit.adoption.userId) return;
+  const { adoption, companion } = hit;
+  const userId = adoption.userId;
+  const dmScope = `dm:${userId}`;
+  // A banned listing freezes its clones — the lock notice lives on the thread.
+  if (companion.adoptedFromListingId) {
+    const listing = await store.listingById(companion.adoptedFromListingId).catch(() => null);
+    if (listing?.status === "banned") return;
+  }
+  // Same lane as DMs: hosted chat needs a linked account, a personal key is
+  // its own lane — the prompt lands once per cooldown, in the thread.
+  const account = store.creditsSupported ? await store.accountForDiscordUser(userId) : null;
+  if (!account && store.creditsSupported) {
+    const ownKey = await store.getGuildKey(dmScope).catch(() => null);
+    if (!ownKey) {
+      if (linkPromptDue(dmScope)) {
+        await message.reply({ content: LINK_PROMPT, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+        inc("gate.unlinked_adoptee");
+      }
+      return;
+    }
+  }
+  const event: MessageEvent = {
+    guildId: dmScope,
+    channelId: message.channel.id,
+    messageId: message.id,
+    authorId: userId,
+    authorName: message.member?.displayName ?? message.author.username,
+    content: message.content,
+    createdAt: message.createdAt,
+    mentionsBot: false,
+    imageAttachments: images.length ? images : undefined,
+  };
+  await runCompanionTurn({
+    scope: dmScope,
+    userId,
+    channel: message.channel,
+    companion,
+    event,
+    replyToId: message.reference?.messageId ?? undefined,
+    images,
+    account,
+    sendPersona: async t => {
+      // Webhook persona — real name + avatar in the thread. A dead webhook
+      // lane falls back to a bold-name post from the bot account.
+      const sent = await sendAsCompanion(message, companion, t, client.user!.id);
+      if (sent) return { id: sent.id, createdAt: sent.createdAt };
+      const fb = await message.reply({
+        content: `**${companion.name}**\n${t}`,
+        allowedMentions: { parse: [], repliedUser: false },
+      }).catch(() => null);
+      return fb ? { id: fb.id, createdAt: fb.createdAt ?? new Date() } : null;
+    },
+    sendSystem: o => message.reply({ ...o, allowedMentions: { parse: [], repliedUser: false } }).then(() => undefined).catch(() => {}),
+  });
+}
+
+/** One companion turn — archive, extraction, crisis, billing, generation,
+ *  persona send, journal. Shared by the DM lane and #adoptees threads; the
+ *  only thing that differs is HOW the reply is posted (sendPersona) and where
+ *  system chrome lands (sendSystem). Returns nothing — notices ride the
+ *  channel, failures ride metrics. */
+async function runCompanionTurn(opts: {
+  scope: string;
+  userId: string;
+  channel: { id: string; sendTyping?(): Promise<unknown>; send?(o: unknown): Promise<unknown> };
+  companion: Companion;
+  event: MessageEvent;
+  replyToId?: string;
+  images: Array<AttachmentMeta & { contentType: string }>;
+  account: { plan?: string | null } | null;
+  sendPersona: (text: string) => Promise<{ id: string; createdAt: Date } | null>;
+  sendSystem: (payload: MessageReplyOptions) => Promise<unknown>;
+}): Promise<void> {
+  const { scope, userId, channel, companion, event, replyToId, images, account, sendPersona, sendSystem } = opts;
+  const compSubj = MemoryStore.companionSubjectId(companion.id);
+  const settings = await store.settings(scope, config.rawMessageRetentionDays);
   if (!settings.memoryEnabled && !settings.replyEnabled) return;
   if (settings.memoryEnabled) {
     await store.recordMessage(event, replyToId, true, false);
@@ -1130,15 +1234,15 @@ async function handleDmMessage(
 
   let replyToContent: string | undefined;
   if (replyToId) {
-    const ref = await store.getMessage(dmScope, replyToId);
+    const ref = await store.getMessage(scope, replyToId);
     if (ref) replyToContent = `${ref.authorName}: ${ref.content}`;
   }
 
   if (settings.memoryEnabled && (shouldInspectForMemory(event) || images.length)) {
     try {
       // Free+hosted memory settles in hourly batches; premium/BYOK is live.
-      const throttleMemory = account?.plan === "free" && isHostedScope(dmScope);
-      await enqueue(sql, dmScope, "extract", { event, replyToId, replyToContent }, throttleMemory ? nextHourBoundary() : undefined);
+      const throttleMemory = account?.plan === "free" && isHostedScope(scope);
+      await enqueue(sql, scope, "extract", { event, replyToId, replyToContent }, throttleMemory ? nextHourBoundary() : undefined);
       await store.setTriageResults([{ id: event.messageId, result: "queued" }]);
       inc("jobs.enqueued");
     } catch (error) { inc("jobs.enqueue_error"); logError("DM extraction enqueue failed", error); }
@@ -1149,17 +1253,26 @@ async function handleDmMessage(
   // Self-harm triage fires before any spend or throttle — the message is
   // already recorded (extraction can still remember the disclosure), but the
   // reply is a scripted crisis response, not a generation. No judgment call.
-  if (isSelfHarmSignal(message.content)) {
+  if (isSelfHarmSignal(event.content)) {
     inc("safety.crisis");
-    await message.reply({ content: CRISIS_RESPONSE, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+    await sendSystem({ content: CRISIS_RESPONSE });
     return;
   }
 
-  if (!replyThrottle.consume(dmScope, userId)) { inc("reply.cooldown"); return; }
+  if (!replyThrottle.consume(scope, userId)) { inc("reply.cooldown"); return; }
+
+  const brain = await brainFor(scope);
+  if (!brain) {
+    replyThrottle.refund(scope, userId);
+    if (config.keyEncryptionSecret) {
+      await sendSystem(buildApiKeyOnboardingPayload(userId));
+    }
+    return;
+  }
 
   // Hosted lane bills the turn upfront: the human pays for their message +
   // the companion's reply (2 credits); a reply that never sends refunds 1.
-  const hostedDm = isHostedScope(dmScope);
+  const hostedDm = isHostedScope(scope);
   let chargedDm = 0;
   let dmBalance = 0;
   let dmReplied = false;
@@ -1169,21 +1282,21 @@ async function handleDmMessage(
     // cap trips inside the metered wrap.
     if (account?.plan !== "premium" && (await store.hostedUsageToday()) >= config.hostedDailyLlmCap * 0.9) {
       inc("gate.hosted_pressure");
-      replyThrottle.refund(dmScope, userId);
-      if (budgetNoticeOnce(message.channel.id)) {
-        await message.reply({ content: HOSTED_CAPACITY, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+      replyThrottle.refund(scope, userId);
+      if (budgetNoticeOnce(channel.id)) {
+        await sendSystem({ content: HOSTED_CAPACITY });
       }
       return;
     }
     const spend = await store.spendCredits(userId, 2, "dm_turn");
     if (!spend.ok) {
       inc("credits.insufficient");
-      replyThrottle.refund(dmScope, userId);
-      if (budgetNoticeOnce(message.channel.id)) {
+      replyThrottle.refund(scope, userId);
+      if (budgetNoticeOnce(channel.id)) {
         // A cached account can outlive a dashboard unlink by a minute — the
         // live miss above evicted it, so a re-check says which notice fits.
         const stillLinked = await store.accountForDiscordUser(userId).catch(() => null);
-        await message.reply({ content: stillLinked ? TOKEN_EMPTY : LINK_PROMPT, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+        await sendSystem({ content: stillLinked ? TOKEN_EMPTY : LINK_PROMPT });
       }
       return;
     }
@@ -1192,26 +1305,26 @@ async function handleDmMessage(
   }
 
   try {
-    await message.channel.sendTyping();
-    const lookups = await guildLookups(dmScope);
+    await channel.sendTyping?.();
+    const lookups = await guildLookups(scope);
     const peopleIds = [userId, compSubj];
-    const profileRows = await profileStore.getProfiles(dmScope, peopleIds);
-    const attrMap = await store.attributesForSubjects(dmScope, profileRows.map(p => p.subjectId), { status: "active" });
+    const profileRows = await profileStore.getProfiles(scope, peopleIds);
+    const attrMap = await store.attributesForSubjects(scope, profileRows.map(p => p.subjectId), { status: "active" });
     const profiles = profileRows.map(p => ({
       name: p.displayName,
       summary: p.summary,
       traits: p.facets.traits,
       attributes: (attrMap.get(p.subjectId) ?? []).map(a => ({ field: a.field, value: a.value, confidence: a.confidence })),
     }));
-    const pair = await buildPairContext(store, eventStore, dmScope, userId, compSubj);
+    const pair = await buildPairContext(store, eventStore, scope, userId, compSubj);
     const relationships = pair ? [pair] : [];
-    const context = (await store.recentContext(dmScope, message.channel.id))
+    const context = (await store.recentContext(scope, channel.id))
       .map(x => ({
         ...x,
         content: demangleMentions(x.content, lookups.names),
         replyToSnippet: x.replyToSnippet ? demangleMentions(x.replyToSnippet, lookups.names) : undefined,
       }));
-    const freshOwnerName = await store.displayNameFor(dmScope, userId);
+    const freshOwnerName = await store.displayNameFor(scope, userId);
     const serverDigest = await gatherServerDigestForDm(
       store,
       eventStore,
@@ -1221,7 +1334,7 @@ async function handleDmMessage(
     );
     // One embed call feeds both semantic legs — the query text is the same.
     const queryVec = await defaultEmbedder().embed(`${event.content} ${replyToContent ?? ""}`).catch(() => null);
-    const journal = await promptJournal(companion.id, dmScope, [userId], queryVec);
+    const journal = await promptJournal(companion.id, scope, [userId], queryVec);
     const persona: CompanionPersona = {
       companionId: companion.id,
       name: companion.name,
@@ -1239,12 +1352,12 @@ async function handleDmMessage(
     // too) — so it counts against the hosted:global breaker, not just the
     // scope cap.
     const meteredVision = visionClient
-      ? meteredClient(meteredClient(visionClient, { guildId: dmScope, store, getCap: async () => config.dmLlmDailyCap }), { guildId: "hosted:global", store, getCap: async () => config.hostedDailyLlmCap })
+      ? meteredClient(meteredClient(visionClient, { guildId: scope, store, getCap: async () => config.dmLlmDailyCap }), { guildId: "hosted:global", store, getCap: async () => config.hostedDailyLlmCap })
       : undefined;
     // Vision descriptions cache on the archive row — whichever pass (extract
     // job or reply) describes the attachments first is reused by every other.
     let imageContext = images.length && config.visionModel
-      ? (await store.getMessage(dmScope, event.messageId))?.imageContext ?? undefined
+      ? (await store.getMessage(scope, event.messageId))?.imageContext ?? undefined
       : undefined;
     if (!imageContext && images.length && config.visionModel) {
       const imgDescs = (await Promise.all(images.map(async a => {
@@ -1258,11 +1371,11 @@ async function handleDmMessage(
         }
       }))).filter((d): d is string => !!d);
       imageContext = imgDescs.length ? formatImageContext(imgDescs, freshOwnerName) : undefined;
-      if (imageContext) await store.setImageContext(dmScope, event.messageId, imageContext).catch(() => {});
+      if (imageContext) await store.setImageContext(scope, event.messageId, imageContext).catch(() => {});
     }
 
     const toolCtx: ToolCtx = {
-      guildId: dmScope, store, eventStore, profileStore,
+      guildId: scope, store, eventStore, profileStore,
       resolveName: n => lookups.map.get(n.trim().toLowerCase()),
     };
     // Tools (compound web_search etc.) are premium-only on the hosted lane —
@@ -1272,7 +1385,7 @@ async function handleDmMessage(
     const { text } = await brain.reply(
       { ...event, authorName: freshOwnerName },
       context,
-      await promptMemories(dmScope, userId, `${event.content} ${replyToContent ?? ""}`, queryVec),
+      await promptMemories(scope, userId, `${event.content} ${replyToContent ?? ""}`, queryVec),
       profiles,
       relationships,
       config.replyModel,
@@ -1284,7 +1397,7 @@ async function handleDmMessage(
     );
     const clean = text ? scrubMentions(text, lookups.names) : "";
     if (clean && looksLikeSchemaLeak(clean)) {
-      inc("reply.schema_leak"); replyThrottle.refund(dmScope, userId);
+      inc("reply.schema_leak"); replyThrottle.refund(scope, userId);
       if (chargedDm) refundTurn(userId, 1, "dm_turn_refund");
       return;
     }
@@ -1313,21 +1426,18 @@ async function handleDmMessage(
       }
     }
     if (dmReplyText) {
-      // The companion's reply renders as a CV2 persona block (name + avatar)
-      // — bots can't impersonate per-message in DMs, so identity rides in the
-      // body. Plain-text fallback if the CV2 send rejects.
-      const sent = await message.reply({
-        ...buildCompanionDmPayload(companion, dmReplyText),
-        allowedMentions: { parse: [], repliedUser: false },
-      }).catch(() => message.reply({
-        content: `**${companion.name}**\n${dmReplyText}`,
-        allowedMentions: { parse: [], repliedUser: false },
-      }));
+      const sent = await sendPersona(dmReplyText);
+      if (!sent) {
+        inc("reply.send_failed");
+        replyThrottle.refund(scope, userId);
+        if (chargedDm) refundTurn(userId, 1, "dm_turn_refund");
+        return;
+      }
       dmReplied = true;
       inc("reply.sent");
       await store.recordMessage({
-        guildId: dmScope,
-        channelId: message.channel.id,
+        guildId: scope,
+        channelId: channel.id,
         messageId: sent.id,
         authorId: compSubj,
         authorName: companion.name,
@@ -1340,38 +1450,38 @@ async function handleDmMessage(
       // the reply that already landed; the job no-ops on empty exchanges.
       // Free+hosted owners journal on the same hourly cadence as extraction.
       const journalDelay = account?.plan === "free" && hostedDm ? nextHourBoundary() : undefined;
-      enqueue(sql, dmScope, "journal-write", {
+      enqueue(sql, scope, "journal-write", {
         companionId: companion.id, triggerMessageId: event.messageId,
-        replyMessageId: sent.id, channelId: message.channel.id,
+        replyMessageId: sent.id, channelId: channel.id,
       }, journalDelay).catch(() => inc("jobs.enqueue_error"));
       if (chargedDm) void maybeAlertLowCredit(userId, dmBalance);
       // Free+hosted users never see tools — a once-a-day hint that Premium
       // unlocks them is the only way they'd learn the feature exists.
       if (toolsWanted && !toolsOn && account && account.plan !== "premium" && toolsNudgeDue(userId)) {
         inc("premium.tools_nudge");
-        message.channel.send(`${companion.name} almost went looking that up — Premium unlocks web search and link-reading: ${config.siteUrl}/dashboard#billing`).catch(() => {});
+        channel.send?.(`${companion.name} almost went looking that up — Premium unlocks web search and link-reading: ${config.siteUrl}/dashboard#billing`).catch(() => {});
       }
     } else {
       inc("reply.empty");
-      replyThrottle.refund(dmScope, userId);
+      replyThrottle.refund(scope, userId);
       if (chargedDm) refundTurn(userId, 1, "dm_turn_refund");
     }
   } catch (error) {
     if (error instanceof BudgetExceeded) {
       inc("budget.reply_blocked");
-      replyThrottle.refund(dmScope, userId);
+      replyThrottle.refund(scope, userId);
       // Only refund the reply-leg if no reply actually landed — a bookkeeping
       // throw after send shouldn't claw back a delivered turn.
       if (chargedDm && !dmReplied) refundTurn(userId, 1, "dm_turn_refund");
-      if (budgetNoticeOnce(message.channel.id)) {
+      if (budgetNoticeOnce(channel.id)) {
         const hostedOut = error.guildId === "hosted:global";
-        await message.reply({ content: hostedOut ? HOSTED_CAPACITY : "We've hit today's DM message limit — it resets at midnight UTC.", allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+        await sendSystem({ content: hostedOut ? HOSTED_CAPACITY : "We've hit today's DM message limit — it resets at midnight UTC." });
       }
       return;
     }
     inc("llm.reply_error");
     logError("DM reply generation failed", error);
-    replyThrottle.refund(dmScope, userId);
+    replyThrottle.refund(scope, userId);
     if (chargedDm && !dmReplied) refundTurn(userId, 1, "dm_turn_refund");
   }
 }
@@ -1388,12 +1498,23 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   }
   if (!message.content.trim() && !images.length) return;
   if (config.guildId && message.guild.id !== config.guildId) return;
-  // Support tickets are private threads in the house — staff-supervised
-  // conversations that must never hit automod (a user pasting a phishing
-  // link shouldn't watch their own ticket get deleted) or the memory
-  // pipeline (privacy). Scoped to the house: private threads elsewhere can
+  // House private threads must never hit automod (a user pasting a phishing
+  // link shouldn't watch their own ticket get deleted) — privacy surfaces.
+  // Registered #adoptees threads are the exception inside the same gate:
+  // they run the adopter's dm:<user> pipeline — a DM rendered in a guild
+  // channel — while support tickets and other private threads bypass the
+  // whole pipeline. Scoped to the house: private threads elsewhere can
   // still host summoned companions.
-  if (isHouse(message.guild.id) && message.channel.type === ChannelType.PrivateThread) return;
+  if (isHouse(message.guild.id) && message.channel.type === ChannelType.PrivateThread) {
+    if (isAdopteeThread(message.channel)) {
+      const adoptee = await store.companionThreadForChannel(message.channel.id).catch(() => null);
+      if (adoptee) {
+        await handleAdopteeThreadMessage(message, images, adoptee)
+          .catch(e => { inc("dm.adoptee_error"); logError("adoptee thread turn failed", e); });
+      }
+    }
+    return;
+  }
   // House automod runs before archive/LLM work — a deleted scam never enters
   // the memory pipeline or spends a credit. Bots/webhook-echoes are skipped
   // inside (companion sends arrive as webhook-authored messages).
