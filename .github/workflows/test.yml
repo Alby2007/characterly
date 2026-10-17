@@ -14,7 +14,9 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        # pgvector image — plain postgres:16 lacks the vector extension and
+        # migrations fail (CREATE EXTENSION vector) before the suite starts.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
