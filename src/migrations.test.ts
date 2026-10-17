@@ -932,10 +932,17 @@ test("migration v54 adds companion_adoptions.chat_thread_id + partial index, rol
       WHERE tablename = 'companion_adoptions' AND indexname = 'adoptions_thread'`;
     assert.equal(idx.length, 1, "adoptions_thread partial index should exist");
 
+    const [src] = await sql<Array<{ id: number }>>`
+      INSERT INTO companions (owner_user_id) VALUES ('u-src') RETURNING id`;
+    const [listing] = await sql<Array<{ id: number }>>`
+      INSERT INTO companion_listings (creator_user_id, source_companion_id, name)
+      VALUES ('u-creator', ${src.id}, 'Threaded') RETURNING id`;
+    const [c1] = await sql<Array<{ id: number }>>`INSERT INTO companions (owner_user_id) VALUES ('u-c1') RETURNING id`;
+    const [c2] = await sql<Array<{ id: number }>>`INSERT INTO companions (owner_user_id) VALUES ('u-c2') RETURNING id`;
     await sql`INSERT INTO companion_adoptions (user_id, listing_id, companion_id, chat_thread_id)
-              VALUES ('u1', 1, 1, 't-thread-1')`;
+              VALUES ('u1', ${listing.id}, ${c1.id}, 't-thread-1')`;
     await sql`INSERT INTO companion_adoptions (user_id, listing_id, companion_id)
-              VALUES ('u2', 1, 2)`;
+              VALUES ('u2', ${listing.id}, ${c2.id})`;
 
     await runMigrations(sql as any, 53);
     const gone = await sql<Array<{ column_name: string }>>`
