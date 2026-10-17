@@ -858,12 +858,12 @@ test("ensureResourcePosts posts marked embeds once; dedupes extras; edits stale 
       messages: { fetch: async () => (chanMsgs[id] ?? []).map(m => msgsById.get(m)!).filter(Boolean) },
     }),
   });
-  const names = ["what-is-characterly", "what-is-companionly", "get-characterly", "privacy-policy", "how-to-publish-bots"];
+  const names = ["what-is-characterly", "what-is-companionly", "get-characterly", "privacy-policy", "how-to-publish-bots", "faqs"];
   const chans = names.map(n => ({ id: `c-${n}`, name: n, type: 0 }));
   const guild = { id: HOUSE, channels: { cache: { find: (fn: (c: any) => boolean) => chans.find(fn) } } };
 
   const out = await ensureResourcePosts(deps, guild as any);
-  assert.equal(out.filter(s => s.startsWith("📝")).length, 3, "posts the 3 channels lacking a marked post");
+  assert.equal(out.filter(s => s.startsWith("📝")).length, 4, "posts the 4 channels lacking a marked post");
   assert.deepEqual(deleted, ["m-dup"], "older duplicate deleted, newest kept");
   assert.deepEqual(edited, ["m-stale"], "stale post edited in place, not reposted");
   const staleAfter = msgsById.get("m-stale")!.embeds;

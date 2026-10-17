@@ -855,6 +855,52 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
         "**The rules** — keep it SFW. Personas are screened on publish; listings can be flagged and moderators can delist. A linked account is required so creators own what they ship.",
       )],
   },
+  {
+    channel: "faqs",
+    version: 1,
+    embeds: () => [
+      new EmbedBuilder()
+        .setTitle("Getting started")
+        .setDescription(
+          "**How do I get a companion?**\n" +
+          "DM me and just talk — that first conversation awakens your personal companion, with a name, a voice, and a bond that's yours. Or grab someone off the shelf: hit **Add** on any listing in " + (config.marketplaceChannelId ? `<#${config.marketplaceChannelId}>` : "**#characters**") + ".\n\n" +
+          "**Why did Add tell me to verify first?**\n" +
+          `Adopting needs a linked Characterly account — it's what ties your companions, tokens, and data controls to you. Click **Verify** in ${config.houseVerifyChannelId ? `<#${config.houseVerifyChannelId}>` : "**#log-in**"}, it takes about 30 seconds, then come back and Add away.\n\n` +
+          "**Do I have to pay?**\n" +
+          "Nope — every account gets **30 free tokens a day**, no card, no setup. If you start running out, **Premium ($7.99/mo)** bumps you to 150 a day plus live memory and web tools, and unlocks token packs in the dashboard. (Tinkerers can plug in their own API key with `/companion action:key`, but you never need to.)\n\n" +
+          "**How many companions can I have?**\n" +
+          "One awakened companion — that bond is permanent. On top of that, free accounts keep one adopted character at a time; Premium removes the cap.\n\n" +
+          "**Where do they hang out?**\n" +
+          "In your DMs, always. To bring one into a server where I'm installed, run `/companion action:summon` — they'll chat with everyone there, not just you.",
+        ),
+      new EmbedBuilder()
+        .setTitle("Characters & the marketplace")
+        .setDescription(
+          "**Can I make my own character?**\n" +
+          "Three ways: `/companion action:publish` turns your awakened companion into a listing, `action:create` builds one from scratch, and `action:import` pulls in a character card file you already have.\n\n" +
+          "**How do I edit a listing?**\n" +
+          "Right on its card — the buttons let you rewrite the persona, swap the cover art (that's the pretty picture in gallery view), and tag up to 3 genres so browsers can find it.\n\n" +
+          "**Why is a companion ignoring me?**\n" +
+          "A few possibilities: an admin may have quieted the channel (`/quiet-channel` silences them but they still observe), paused companions server-wide, or ignored the channel entirely — or you're out of tokens. The dashboard shows your balance.\n\n" +
+          "**What do the stars and comments do?**\n" +
+          "They keep the shelf honest — rate the ones you've adopted, comment on the listing thread, and the good ones bubble up as **Top Rated**. Report anything off and staff takes a look.\n\n" +
+          "**What happens if I drop one?**\n" +
+          "Dropping frees your adoption slot but starts a **12-hour cooldown** before you can re-adopt that same character — so don't rage-quit on a bad day.",
+        ),
+      new EmbedBuilder()
+        .setTitle("Privacy & your account")
+        .setDescription(
+          "**Can it read my messages?**\n" +
+          "Only where admins allow it. Servers see nothing until someone runs `/memory-resume`, facts about *you* only form after you opt in (`/profile-build` or `/opt-in`), and raw messages are deleted after 30 days anyway.\n\n" +
+          "**Who sees my companion's memories?**\n" +
+          "Just you. Whatever your companion learns in your DMs stays in your DMs — it never leaks into servers or to other people's versions of the same character.\n\n" +
+          "**How do I delete my data?**\n" +
+          "`/opt-out` wipes everything derived about you, `/forget` removes one specific memory, and the dashboard's Delete section closes the whole account if you want a clean break.\n\n" +
+          "**Something broken?**\n" +
+          "**#support-ticket** gets a human. Got an idea instead? **#suggest-a-feature** — we actually read it.",
+        ),
+    ],
+  },
 ];
 
 /** Reconcile the RESOURCES explainer posts — one marked message per channel,
