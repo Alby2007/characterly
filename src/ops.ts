@@ -1,5 +1,5 @@
 import os from "node:os";
-import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, ForumLayoutType, PermissionFlagsBits, type ButtonInteraction, type ChatInputCommandInteraction } from "discord.js";
+import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, ForumLayoutType, ModalBuilder, PermissionFlagsBits, TextInputBuilder, TextInputStyle, type ButtonInteraction, type ChatInputCommandInteraction, type ModalSubmitInteraction } from "discord.js";
 import { config } from "./config.js";
 import { inc } from "./metrics.js";
 import { logError, redactSecrets } from "./secrets.js";
@@ -39,6 +39,15 @@ interface ThreadLike {
   setAppliedTags?(tags: string[]): Promise<unknown>;
 }
 
+/** The ticket thread surface — created private, joined by the opener. */
+interface TicketThreadLike {
+  id: string;
+  members?: { add(userId: string): Promise<unknown> };
+  send(payload: unknown): Promise<unknown>;
+  setLocked?(locked: boolean): Promise<unknown>;
+  setArchived?(archived: boolean): Promise<unknown>;
+}
+
 interface SendableChannel {
   send(payload: unknown): Promise<unknown>;
   /** Present on real text channels — the verify-gate idempotency probe.
@@ -54,6 +63,8 @@ interface SendableChannel {
   availableTags?: ForumTagLike[];
   threads?: {
     fetchActive(): Promise<{ threads: Map<string, ThreadLike> | Iterable<[string, ThreadLike]> | Iterable<ThreadLike> }>;
+    /** Text channels only — the ticket system creates private threads. */
+    create?(opts: { name: string; type?: number; invitable?: boolean; autoArchiveDuration?: number }): Promise<TicketThreadLike>;
   };
 }
 
@@ -238,8 +249,8 @@ export async function handleHouseMemberRemove(member: MemberLike, deps: OpsDeps)
 // ── Verify gate ──────────────────────────────────────────────────────────────
 // Member = verified: a persistent card in HOUSE_VERIFY_CHANNEL_ID carries the
 // house:verify button; clicking it checks for a linked Characterly account and
-// grants the role. The lobby + #faqs is all @everyone sees, so
-// the card must read sensibly to members still pending rules screening.
+// grants the role. The lobby + #faqs + #support-ticket is all @everyone sees,
+// so the card must read sensibly to members still pending rules screening.
 
 const VERIFY_CUSTOM_ID = "house:verify";
 
@@ -609,6 +620,219 @@ export async function automodMessage(message: AutomodMessage, deps: OpsDeps): Pr
   return false;
 }
 
+// ── Support tickets ──────────────────────────────────────────────────────────
+// A persistent card in #support-ticket carries the Open button; the modal
+// intake creates one private thread per ticket. The opener sees it via thread
+// membership, staff via ManageThreads (granted channel-locally by
+// staffModerate in WANTED_LAYOUT). support_tickets rows dedupe one-open-per-
+// user — the partial unique index is the arbiter, so a double-submit or a
+// button-click race can't open two threads. Ticket threads are excluded from
+// automod + memory in index.ts's handleMessage.
+
+const TICKET_OPEN_ID = "ticket:open";
+const TICKET_MODAL_ID = "ticket:new";
+const TICKET_CLOSE_ID = "ticket:close";
+const TICKET_CHANNEL = "support-ticket";
+
+function ticketChannel(guild: GuildLike): GuildChannelLike | undefined {
+  return guild.channels.cache.find(
+    c => c.type === ChannelType.GuildText && normName(c.name) === normName(TICKET_CHANNEL));
+}
+
+/** Post the ticket panel once — same keep-first/delete-rest self-heal as the
+ *  verify gate: the button's customId is the marker inside components JSON. */
+export async function ensureTicketPanel(deps: OpsDeps, guild: GuildLike): Promise<boolean> {
+  if (!isHouse(guild.id)) return false;
+  const ch = ticketChannel(guild);
+  if (!ch?.id) return false;
+  const sendable = await deps.fetchChannel(ch.id).catch(() => null);
+  if (!sendable?.send) return false;
+  const recent = await sendable.messages?.fetch({ limit: 20 }).catch(() => null);
+  if (recent) {
+    let kept = false;
+    for (const entry of recent) {
+      const m = (Array.isArray(entry) ? entry[1] : entry) as { author?: { id?: string }; components?: unknown[]; delete?(): Promise<unknown> };
+      if (m.author?.id !== deps.botId || !JSON.stringify(m.components ?? []).includes(TICKET_OPEN_ID)) continue;
+      if (kept) await m.delete?.().catch(() => {}); // stale duplicate card — self-heal
+      else kept = true;
+    }
+    if (kept) return false;
+  }
+  await sendable.send({
+    embeds: [new EmbedBuilder()
+      .setTitle("Open a support ticket")
+      .setDescription(
+        "Need a human? Open a ticket — billing, account trouble, bugs, or anything the FAQs didn't cover.\n\n" +
+        "A private thread opens between you and the staff team — nobody else can see it, and nothing in it feeds companion memory. One open ticket at a time.\n\n" +
+        "_Just joined? Accept the server rules first — the button works once you have._",
+      )],
+    components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(TICKET_OPEN_ID).setLabel("Open a ticket").setStyle(ButtonStyle.Primary),
+    )],
+    allowedMentions: { parse: [] },
+  });
+  return true;
+}
+
+export function buildTicketModal(): ModalBuilder {
+  return new ModalBuilder()
+    .setCustomId(TICKET_MODAL_ID)
+    .setTitle("Open a support ticket")
+    .addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("subject").setLabel("Subject")
+          .setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(100)
+          .setPlaceholder("Billing, account, bug, something else…")),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("details").setLabel("What do you need?")
+          .setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1000)
+          .setPlaceholder("The more detail the better — links, error text, what you tried.")),
+    );
+}
+
+/** ticket:* buttons — routed from handleMemoryButton; deps are module-init'd.
+ *  ticket:open dedupe-checks then shows the intake modal; ticket:close lives
+ *  inside the ticket thread and needs the opener or staff perms. */
+export async function handleTicketButton(interaction: ButtonInteraction): Promise<unknown> {
+  const deps = opsDeps;
+  if (!deps) return interaction.reply({ content: "Ops isn't initialized yet — the bot is still starting.", ephemeral: true });
+  if (!isHouse(interaction.guildId)) {
+    return interaction.reply({ content: "That button only works in our community server.", ephemeral: true });
+  }
+  if (interaction.customId === TICKET_OPEN_ID) {
+    // Dedupe before the modal — re-checked on submit too (the unique index
+    // is the real arbiter; this just saves the user the typing).
+    const existing = await deps.store.openSupportTicketFor(interaction.user.id).catch(() => undefined);
+    if (existing === undefined) {
+      return interaction.reply({ content: "Couldn't check your tickets right now — try again in a moment.", ephemeral: true });
+    }
+    if (existing) {
+      return interaction.reply({ content: `You already have an open ticket — <#${existing.threadId}>.`, ephemeral: true });
+    }
+    if (typeof interaction.showModal !== "function") {
+      return interaction.reply({ content: "Ticket intake needs a newer Discord client — describe your issue to a Mod directly.", ephemeral: true });
+    }
+    return interaction.showModal(buildTicketModal());
+  }
+  if (interaction.customId === TICKET_CLOSE_ID) {
+    const channel = interaction.channel as unknown as {
+      id: string; isThread?(): boolean; send?(payload: unknown): Promise<unknown>;
+      setLocked?(locked: boolean): Promise<unknown>; setArchived?(archived: boolean): Promise<unknown>;
+    } | null;
+    if (!channel?.isThread?.()) {
+      return interaction.reply({ content: "That button only works inside a ticket thread.", ephemeral: true });
+    }
+    const ticket = await deps.store.supportTicketByThread(channel.id).catch(() => undefined);
+    if (ticket === undefined) {
+      return interaction.reply({ content: "Couldn't look up this ticket — try again in a moment.", ephemeral: true });
+    }
+    if (!ticket || ticket.status !== "open") {
+      return interaction.reply({ content: "That ticket's already closed.", ephemeral: true });
+    }
+    // Opener or staff — ManageThreads/ManageGuild/Administrator all count.
+    const perms = (interaction as { memberPermissions?: { has?(b: bigint): boolean } }).memberPermissions;
+    const staff = !!(perms?.has?.(PermissionFlagsBits.ManageThreads)
+      || perms?.has?.(PermissionFlagsBits.ManageGuild)
+      || perms?.has?.(PermissionFlagsBits.Administrator));
+    if (interaction.user.id !== ticket.openerId && !staff) {
+      return interaction.reply({ content: "Only the ticket opener or staff can close it.", ephemeral: true });
+    }
+    await deps.store.closeSupportTicket(ticket.threadId, interaction.user.id)
+      .catch(e => { inc("ops.ticket_error"); logError("ticket close failed", e); });
+    await interaction.update({ components: [] }).catch(() => {}); // strip the button
+    // Close note first — a locked+archived thread refuses further messages.
+    await channel.send?.({
+      content: `🔒 Ticket closed by <@${interaction.user.id}>. This thread is archived — open a new ticket if anything else comes up.`,
+      allowedMentions: { users: [interaction.user.id] },
+    }).catch(() => {});
+    await channel.setLocked?.(true).catch(() => {});
+    await channel.setArchived?.(true).catch(() => {});
+    await opsAlert(deps, `🔒 **Ticket closed** — <#${ticket.threadId}> (${ticket.subject.slice(0, 140)}) by <@${interaction.user.id}>`);
+    inc("ops.ticket_closed");
+    return undefined;
+  }
+  return undefined;
+}
+
+/** ticket:new modal submit — creates the private thread, adds the opener,
+ *  files the row, alerts staff. Ordered so a DB failure never leaves an
+ *  untracked open thread. */
+export async function handleTicketModal(interaction: ModalSubmitInteraction): Promise<unknown> {
+  if (interaction.customId !== TICKET_MODAL_ID) return undefined;
+  const deps = opsDeps;
+  if (!deps || !isHouse(interaction.guildId)) {
+    return interaction.reply({ content: "Tickets only open from our community server.", ephemeral: true });
+  }
+  await interaction.deferReply({ ephemeral: true }).catch(() => {});
+  const subject = interaction.fields.getTextInputValue("subject").slice(0, 100).trim();
+  const details = interaction.fields.getTextInputValue("details").slice(0, 1000).trim();
+  if (!subject || !details) {
+    return interaction.editReply({ content: "Both fields are required — click Open a ticket to try again." });
+  }
+  const existing = await deps.store.openSupportTicketFor(interaction.user.id).catch(() => undefined);
+  if (existing === undefined) {
+    return interaction.editReply({ content: "Couldn't check your tickets right now — try again in a moment." });
+  }
+  if (existing) {
+    return interaction.editReply({ content: `You already have an open ticket — <#${existing.threadId}>.` });
+  }
+  const guild = await deps.fetchGuild(interaction.guildId!).catch(() => null);
+  const ch = guild ? ticketChannel(guild) : undefined;
+  const sendable = ch ? await deps.fetchChannel(ch.id).catch(() => null) : null;
+  if (!ch || typeof sendable?.threads?.create !== "function") {
+    return interaction.editReply({ content: "The ticket desk isn't set up yet — tell an admin #support-ticket is missing." });
+  }
+  const slug = interaction.user.username.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 20) || "member";
+  const thread = await sendable.threads.create({
+    name: `ticket-${slug}`.slice(0, 90),
+    type: ChannelType.PrivateThread,
+    invitable: false,
+    autoArchiveDuration: 10080, // a week — active threads never auto-lock mid-ticket
+  }).catch(e => { inc("ops.ticket_error"); logError("ticket thread create failed", e); return null; });
+  if (!thread) {
+    return interaction.editReply({ content: "Couldn't open the ticket thread — try again in a moment." });
+  }
+  const row = await deps.store.createSupportTicket(interaction.guildId!, interaction.user.id, thread.id, subject, details)
+    .catch(e => { inc("ops.ticket_error"); logError("ticket insert failed", e); return null; });
+  if (!row) {
+    // Dedupe race lost or DB failure — archive the orphan thread either way.
+    await thread.setLocked?.(true).catch(() => {});
+    await thread.setArchived?.(true).catch(() => {});
+    const again = await deps.store.openSupportTicketFor(interaction.user.id).catch(() => null);
+    return interaction.editReply({
+      content: again
+        ? `You already have an open ticket — <#${again.threadId}>.`
+        : "Couldn't file the ticket — try again in a moment.",
+    });
+  }
+  const added = await thread.members?.add(interaction.user.id).then(() => true).catch(() => false) ?? false;
+  await thread.send({
+    content: `<@${interaction.user.id}>`,
+    embeds: [new EmbedBuilder()
+      .setTitle(`🎫 ${subject.slice(0, 200)}`)
+      .setDescription(details)
+      .setFooter({ text: `Ticket opened by ${interaction.user.username} — only you and staff can see this thread.` })],
+    components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(TICKET_CLOSE_ID).setLabel("Close ticket").setStyle(ButtonStyle.Danger),
+    )],
+    allowedMentions: { users: [interaction.user.id] },
+  }).catch(e => { inc("ops.ticket_error"); logError("ticket opener send failed", e); });
+  // Staff ping rides the ops channel — the Mod role mention notifies while
+  // the thread link lets them jump straight in.
+  const modRole = guild!.roles?.cache?.find(r => normName(r.name) === normName("Mod"));
+  const chOps = await opsChannel(deps);
+  await chOps?.send({
+    content: `🎫 **Ticket opened** — <@${interaction.user.id}>: ${subject.slice(0, 140)} → <#${thread.id}>${added ? "" : " ⚠️ member-add failed, invite them manually"}`,
+    allowedMentions: modRole ? { roles: [modRole.id], users: [interaction.user.id] } : { users: [interaction.user.id] },
+  }).catch(e => { inc("ops.ticket_error"); logError("ticket alert failed", e); });
+  inc("ops.ticket_opened");
+  return interaction.editReply({
+    content: `Ticket opened — <#${thread.id}>. Only you and staff can see it; we'll reply there.`,
+  });
+}
+
 // ── Channel ops ──────────────────────────────────────────────────────────────
 // The wanted layout mirrors the live hub server. Matching is name-only after
 // NFKC+lowercase normalization (channel names may carry emoji, categories may
@@ -626,8 +850,11 @@ export const WANTED_LAYOUT: Array<{
    *  and #faqs: the channel overwrite allows ViewChannel where the category
    *  denies it); "staff" is "everyone" plus send-access for the Mod/Admin
    *  roles. `hidden` is the inverse: @everyone loses ViewChannel on that
-   *  channel — used to keep select channels gated inside a visible category. */
-  channels: Array<{ name: string; type: ChannelType; readOnly?: true | "member" | "everyone" | "staff"; hidden?: true }>;
+   *  channel — used to keep select channels gated inside a visible category.
+   *  `staffModerate` layers Mod/Admin ManageThreads onto a channel — for
+   *  private-thread surfaces (#support-ticket) where staff must see + join
+   *  threads they aren't members of. */
+  channels: Array<{ name: string; type: ChannelType; readOnly?: true | "member" | "everyone" | "staff"; hidden?: true; staffModerate?: true }>;
 }> = [
   {
     category: "SYSTEM",
@@ -664,7 +891,11 @@ export const WANTED_LAYOUT: Array<{
     readOnly: true,
     channels: [
       { name: "faqs", type: ChannelType.GuildText, readOnly: "everyone" },
-      { name: "support-ticket", type: ChannelType.GuildText },
+      // The ticket desk — visible pre-verify so "can't log in" cases can
+      // still reach staff; the panel card is the only thing in it since the
+      // @everyone deny keeps the channel itself silent. Conversation lives in
+      // private threads only ticket members + ManageThreads staff can see.
+      { name: "support-ticket", type: ChannelType.GuildText, readOnly: "everyone", staffModerate: true },
       { name: "suggest-a-feature", type: ChannelType.GuildText },
     ],
   },
@@ -750,6 +981,24 @@ async function ensureStaffOnly(ch: GuildChannelLike, created: string[], label: s
   }
 }
 
+/** Mod/Admin get ManageThreads on a surface — private ticket threads are
+ *  only visible to members + ManageThreads holders, and the house roles may
+ *  not carry the perm guild-wide. SendMessagesInThreads lets staff reply
+ *  once joined; ViewChannel is already covered but cheap to restate. */
+async function ensureStaffModerate(ch: GuildChannelLike, created: string[], label: string, guild: GuildLike): Promise<void> {
+  const overwrites = ch.permissionOverwrites;
+  if (typeof overwrites?.edit !== "function") return;
+  for (const name of ["Mod", "Admin"]) {
+    const role = guild.roles?.cache?.find(r => normName(r.name) === normName(name));
+    if (!role) continue;
+    const cur = [...(overwrites.cache ?? [])].find(o => o.id === role.id);
+    if (cur && permHas(cur.allow, PermissionFlagsBits.ManageThreads)) continue;
+    await overwrites.edit(role.id, { ViewChannel: true, SendMessagesInThreads: true, ManageThreads: true })
+      .then(() => { created.push(`🧵 ${label} → ${name} manages threads`); })
+      .catch(() => {});
+  }
+}
+
 /** Create missing categories + channels by name. Idempotent — returns the
  * names of what it created ([] when the layout is already complete). */
 export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
@@ -816,6 +1065,7 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
       // @everyone ViewChannel deny (desyncing it), so it stays gated until
       // the Member role lands while its siblings stay readable.
       if (target && wanted.hidden) await ensureHiddenFromEveryone(target, created, `#${wanted.name}`, guild.id);
+      if (target && wanted.staffModerate) await ensureStaffModerate(target, created, `#${wanted.name}`, guild);
     }
   }
   return created;
@@ -1218,7 +1468,11 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
       logError("resource posts failed", e);
       return null;
     });
-    const did = [...created, ...(posted ?? [])];
+    const panel = await ensureTicketPanel(deps, guild).catch(e => {
+      logError("ticket panel failed", e);
+      return null;
+    });
+    const did = [...created, ...(posted ?? []), ...(panel ? ["🎫 ticket panel"] : [])];
     return interaction.reply({
       content: did.length ? `Did: ${did.join(", ")}` : "Layout + resource posts already current — nothing to do.",
       ephemeral: true,

@@ -884,3 +884,33 @@ test("migration v47 adds app_installs + record_app_install, guarded rollback", a
     assert.equal(gone.length, 0, "rollback should drop app_installs");
   } finally { await sql.end(); }
 });
+
+test("migration v48 adds support_tickets + one-open-per-user index, guarded rollback", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any);
+
+    await sql`INSERT INTO support_tickets (thread_id, guild_id, opener_id, subject, details)
+              VALUES ('t1', 'g1', 'u1', 'billing', 'charged twice')`;
+    // Second open ticket for the same opener hits the partial unique index.
+    await assert.rejects(
+      () => sql`INSERT INTO support_tickets (thread_id, guild_id, opener_id, subject, details)
+                VALUES ('t2', 'g1', 'u1', 'again', 'double')`,
+      /duplicate key|support_tickets_one_open_per_user/,
+    );
+    // Closing frees the slot.
+    await sql`UPDATE support_tickets SET status = 'closed', closed_at = NOW() WHERE thread_id = 't1'`;
+    await sql`INSERT INTO support_tickets (thread_id, guild_id, opener_id, subject, details)
+              VALUES ('t3', 'g1', 'u1', 'new', 'follow-up')`;
+
+    // Guarded rollback: data present → refuse; empty → drop.
+    await assert.rejects(() => runMigrations(sql as any, 47), /v48 rollback refused/);
+    await sql`DELETE FROM support_tickets`;
+    await runMigrations(sql as any, 47);
+    const gone = await sql<Array<{ table_name: string }>>`
+      SELECT table_name FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = 'support_tickets'`;
+    assert.equal(gone.length, 0, "rollback should drop support_tickets");
+  } finally { await sql.end(); }
+});

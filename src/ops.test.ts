@@ -5,6 +5,7 @@ import {
   handleHouseMemberRemove, ensureHouseLayout, collectHostHealth,
   runWatchdogTick, handleOpsCommand, initOps, resetOpsState, WANTED_LAYOUT,
   ensureVerifyGate, handleHouseButton, runMemberLinkSweep, runTagSweep, ensureResourcePosts,
+  ensureTicketPanel, handleTicketButton, handleTicketModal,
   TERMS_VERSION, RESOURCE_POSTS,
   type OpsDeps, type AutomodMessage, type MemberLike,
 } from "./ops.js";
@@ -796,7 +797,7 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
   assert.ok(!edits.some(x => x.target === "cat:RESOURCES" && x.id === "r-member"),
     "RESOURCES doesn't need a separate Member deny — @everyone's covers it");
   // Synced children are left alone — they inherit the parent deny.
-  for (const n of ["support-ticket", "suggest-a-feature", "privacy-policy", "what-is-characterly", "what-is-companionly"]) {
+  for (const n of ["suggest-a-feature", "privacy-policy", "what-is-characterly", "what-is-companionly"]) {
     assert.ok(!edits.some(e => e.target === n), `synced #${n} inherits the category deny — no per-channel write`);
   }
   // The two gated RESOURCES channels get their own @everyone hide overwrite —
@@ -815,6 +816,18 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
   assert.equal(faqsEdit!.id, "g-house", "faqs overwrite targets @everyone (guild id)");
   assert.equal(faqsEdit!.perms.ViewChannel, true, "unverified can read it");
   assert.equal(faqsEdit!.perms.SendMessages, false, "…but can't post in it");
+  // #support-ticket is the pre-verify ticket desk: same visible-silent
+  // @everyone overwrite, plus ManageThreads allows for Mod/Admin so staff can
+  // see + join the private ticket threads.
+  const ticketEdit = edits.find(e => e.target === "support-ticket" && e.id === "g-house");
+  assert.ok(ticketEdit, "#support-ticket needs its own @everyone overwrite");
+  assert.equal(ticketEdit!.perms.ViewChannel, true, "unverified can read the ticket desk");
+  assert.equal(ticketEdit!.perms.SendMessages, false, "…but can't post in it");
+  for (const rid of ["r-mod", "r-admin"]) {
+    const e = edits.find(x => x.target === "support-ticket" && x.id === rid);
+    assert.ok(e, `#support-ticket needs a ManageThreads allow for ${rid}`);
+    assert.equal(e!.perms.ManageThreads, true, "staff see + join ticket threads");
+  }
   // #characterly-web is staff-posted: @everyone visible-silent, Mod+Admin write.
   const webLock = edits.find(e => e.target === "characterly-web" && e.id === "g-house");
   assert.ok(webLock, "#characterly-web needs the @everyone visible-silent overwrite");
@@ -911,7 +924,248 @@ test("ensureResourcePosts posts marked embeds once; dedupes extras; edits stale 
   assert.equal(deleted.length + edited.length, 0);
 });
 
-// ── Host health + watchdog ───────────────────────────────────────────────────
+// ── Support tickets ──────────────────────────────────────────────────────────
+
+// In-memory ticket store mirroring the real one's semantics — one open ticket
+// per opener, keyed by thread.
+const ticketStore = () => {
+  const byThread = new Map<string, any>();
+  const openByUser = new Map<string, string>();
+  return {
+    byThread, openByUser,
+    openSupportTicketFor: async (uid: string) => {
+      const tid = openByUser.get(uid);
+      return tid ? byThread.get(tid) : null;
+    },
+    supportTicketByThread: async (tid: string) => byThread.get(tid) ?? null,
+    createSupportTicket: async (g: string, uid: string, tid: string, subject: string, details: string) => {
+      if (openByUser.has(uid)) return null; // partial-unique-index semantics
+      const t = { threadId: tid, guildId: g, openerId: uid, subject, details, status: "open", openedAt: "", closedAt: null, closerId: null };
+      byThread.set(tid, t); openByUser.set(uid, tid);
+      return t;
+    },
+    closeSupportTicket: async (tid: string, uid: string) => {
+      const t = byThread.get(tid);
+      if (t?.status === "open") { t.status = "closed"; t.closerId = uid; openByUser.delete(t.openerId); }
+    },
+  } as unknown as MemoryStore;
+};
+
+const mkTicketThread = (id = "t-1") => {
+  const state = { membersAdded: [] as string[], sent: [] as any[], locked: false, archived: false };
+  return {
+    ...state, state, id,
+    members: { add: async (u: string) => { state.membersAdded.push(u); } },
+    send: async (p: any) => { state.sent.push(p); },
+    setLocked: async (v: boolean) => { state.locked = v; },
+    setArchived: async (v: boolean) => { state.archived = v; },
+  };
+};
+
+// A guild exposing #support-ticket + the Mod role, and a deps bundle whose
+// fetchChannel serves a sendable channel with threads.create for it.
+const ticketWorld = (opts: { thread?: ReturnType<typeof mkTicketThread>; sent?: Array<{ id: string; payload: any }> } = {}) => {
+  const thread = opts.thread ?? mkTicketThread();
+  const sent = opts.sent ?? [];
+  const supportCh = { id: "c-support-ticket", name: "support-ticket", type: 0 };
+  const guild = {
+    id: HOUSE,
+    channels: {
+      cache: { find: (fn: (c: any) => boolean) => [supportCh].find(fn) },
+      create: async (o: any) => ({ id: `n-${o.name}`, ...o }),
+    },
+    roles: { cache: { find: (fn: (r: any) => boolean) => [{ id: "r-mod", name: "Mod" }, { id: "r-admin", name: "Admin" }].find(fn) } },
+  };
+  const deps = makeDeps({
+    store: ticketStore(),
+    fetchGuild: async () => guild,
+    fetchChannel: async (id: string) => id === supportCh.id
+      ? {
+          id, send: async (p: any) => { sent.push({ id, payload: p }); },
+          messages: { fetch: async () => [] },
+          threads: { create: async () => thread, fetchActive: async () => ({ threads: [] }) },
+        }
+      : { id, send: async (p: any) => { sent.push({ id, payload: p }); } },
+  });
+  (deps as any).guild = guild;
+  return { deps, thread, sent, supportCh, guild };
+};
+
+const mkModalIx = (fields: Record<string, string>, over: any = {}) => {
+  const replies: any[] = [];
+  const edits: any[] = [];
+  return {
+    replies, edits,
+    customId: "ticket:new", guildId: HOUSE, user: { id: "u1", username: "Alice" },
+    fields: { getTextInputValue: (k: string) => fields[k] ?? "" },
+    deferReply: async () => {},
+    reply: async (r: any) => { replies.push(r); return r; },
+    editReply: async (r: any) => { edits.push(r); return r; },
+    ...over,
+  };
+};
+
+test("ensureTicketPanel posts the card once; dedupes duplicates", async () => {
+  const sent: Array<{ id: string; payload: any }> = [];
+  const deleted: string[] = [];
+  const cards = [
+    { author: { id: "bot-1" }, components: [{ components: [{ custom_id: "ticket:open" }] }], delete: async () => {} }, // kept
+    { author: { id: "u-x" }, components: [], delete: async () => { deleted.push("m-user"); } },
+    { author: { id: "bot-1" }, components: [{ components: [{ custom_id: "ticket:open" }] }], delete: async () => { deleted.push("m-dup"); } }, // dup → deleted
+  ];
+  const { deps, guild } = ticketWorld({ sent });
+  // First run — no panel → post.
+  assert.equal(await ensureTicketPanel(deps, guild as any), true);
+  const card = sent.find(s => s.id === "c-support-ticket");
+  assert.ok(card, "panel posted to #support-ticket");
+  assert.ok(JSON.stringify(card!.payload.components).includes("ticket:open"));
+
+  // Panel already there → no-op (first bot card kept, the dup is deleted).
+  const withPanel = makeDeps({
+    fetchChannel: async (id: string) => ({
+      id, send: async (p: any) => { sent.push({ id, payload: p }); },
+      messages: { fetch: async () => cards },
+    }),
+  });
+  const sentBefore = sent.length;
+  assert.equal(await ensureTicketPanel(withPanel, guild as any), false);
+  assert.equal(sent.length, sentBefore, "no repost when a panel exists");
+  assert.deepEqual(deleted, ["m-dup"], "only the duplicate bot card deleted — user posts untouched");
+
+  // Non-house guild → no panel posted.
+  const foreign = { ...guild, id: "g-other" };
+  const sentBefore2 = sent.length;
+  assert.equal(await ensureTicketPanel(deps, foreign as any), false, "house-gated like the rest of ops");
+  assert.equal(sent.length, sentBefore2);
+});
+
+test("ticket:open — shows the modal; existing ticket + lookup error refused", async () => {
+  const { deps } = ticketWorld();
+  initOps(deps);
+  const modals: string[] = [];
+  const replies: any[] = [];
+  const ix = {
+    customId: "ticket:open", guildId: HOUSE, user: { id: "u1" },
+    reply: async (r: any) => { replies.push(r); return r; },
+    showModal: async (m: any) => { modals.push(m.data?.custom_id ?? "?"); },
+  };
+  await handleTicketButton(ix as any);
+  assert.deepEqual(modals, ["ticket:new"], "open click shows the intake modal");
+
+  // Already-open ticket → pointer, no modal.
+  await deps.store.createSupportTicket(HOUSE, "u1", "t-existing", "x", "y");
+  const ix2 = { ...ix, replies: [] as any[], reply: async (r: any) => { replies.push(r); return r; } };
+  await handleTicketButton(ix2 as any);
+  assert.match(replies.at(-1).content, /already have an open ticket.*t-existing/);
+
+  // Store outage → retry message, fail-closed.
+  initOps(makeDeps({ store: { openSupportTicketFor: async () => { throw new Error("db down"); } } as unknown as MemoryStore }));
+  await handleTicketButton(ix2 as any);
+  assert.match(replies.at(-1).content, /try again in a moment/);
+
+  // Foreign guild → refused.
+  initOps(deps);
+  const foreign = { ...ix, guildId: "g-other", reply: async (r: any) => { replies.push(r); return r; } };
+  await handleTicketButton(foreign as any);
+  assert.match(replies.at(-1).content, /community server/);
+});
+
+test("ticket modal — creates the private thread, adds member, files row, pings ops", async () => {
+  const thread = mkTicketThread();
+  const sent: Array<{ id: string; payload: any }> = [];
+  const { deps } = ticketWorld({ thread, sent });
+  initOps(deps);
+  const ix = mkModalIx({ subject: "Billing question", details: "Charged twice" });
+  await handleTicketModal(ix as any);
+
+  assert.equal(thread.state.membersAdded[0], "u1", "opener added to the private thread");
+  const opener = thread.state.sent[0];
+  assert.ok(opener, "ticket card posted in-thread");
+  assert.ok(JSON.stringify(opener.components).includes("ticket:close"), "card carries the close button");
+  assert.match(JSON.stringify(opener.embeds), /Billing question/);
+  const ticket = await deps.store.openSupportTicketFor("u1");
+  assert.equal(ticket?.threadId, "t-1", "row filed with the thread id");
+  const alert = sent.find(s => s.id === OPS);
+  assert.ok(alert, "ops channel got the staff ping");
+  assert.match(alert!.payload.content, /Ticket opened/);
+  assert.deepEqual(alert!.payload.allowedMentions.roles, ["r-mod"], "Mod role pinged");
+  assert.match(ix.edits[0].content, /t-1/, "user gets the thread link");
+});
+
+test("ticket modal — dedupe conflict archives the orphan thread", async () => {
+  const thread = mkTicketThread();
+  const { deps } = ticketWorld({ thread });
+  // A rival ticket lands between the pre-submit check and the insert —
+  // create hits the unique-index wall, the post-conflict lookup finds it.
+  let lookCalls = 0;
+  deps.store = {
+    ...deps.store as object,
+    openSupportTicketFor: async () => (lookCalls++ === 0 ? null : { threadId: "t-first", status: "open" }),
+    createSupportTicket: async () => null,
+  } as unknown as MemoryStore;
+  initOps(deps);
+  const ix = mkModalIx({ subject: "dup", details: "second submit" });
+  await handleTicketModal(ix as any);
+  assert.equal(thread.state.locked, true, "orphan thread locked");
+  assert.equal(thread.state.archived, true, "orphan thread archived, never left live");
+  assert.match(ix.edits[0].content, /already have an open ticket/);
+});
+
+test("ticket:close — opener + staff close; strangers refused; locks + archives", async () => {
+  const { deps } = ticketWorld();
+  await deps.store.createSupportTicket(HOUSE, "u1", "t-1", "help", "pls");
+  initOps(deps);
+
+  const mkClose = (userId: string, perms: bigint[] = []) => {
+    const state = { locked: false, archived: false, sent: [] as any[], updates: [] as any[], replies: [] as any[] };
+    const ix = {
+      customId: "ticket:close", guildId: HOUSE, user: { id: userId },
+      channel: {
+        id: "t-1", isThread: () => true,
+        send: async (p: any) => { state.sent.push(p); },
+        setLocked: async (v: boolean) => { state.locked = v; },
+        setArchived: async (v: boolean) => { state.archived = v; },
+      },
+      memberPermissions: { has: (b: bigint) => perms.includes(b) },
+      update: async (p: any) => { state.updates.push(p); return p; },
+      reply: async (r: any) => { state.replies.push(r); return r; },
+    };
+    return { ix, state };
+  };
+
+  // A stranger can't close it.
+  const stranger = mkClose("u-rando");
+  await handleTicketButton(stranger.ix as any);
+  assert.match(stranger.state.replies[0].content, /opener or staff/);
+  assert.equal(stranger.state.archived, false);
+  assert.equal((await deps.store.supportTicketByThread("t-1"))?.status, "open");
+
+  // The opener can.
+  const opener = mkClose("u1");
+  await handleTicketButton(opener.ix as any);
+  assert.equal(opener.state.locked, true, "thread locked");
+  assert.equal(opener.state.archived, true, "thread archived");
+  assert.equal(opener.state.updates.length, 1, "button stripped from the card");
+  assert.match(opener.state.sent[0].content, /Ticket closed/);
+  assert.equal((await deps.store.supportTicketByThread("t-1"))?.status, "closed");
+
+  // Reopen + staff close — ManageThreads holder who isn't the opener.
+  await deps.store.createSupportTicket(HOUSE, "u2", "t-2", "x", "y");
+  const staffClose = mkClose("u-mod", [PermissionFlagsBits.ManageThreads]);
+  staffClose.ix.channel.id = "t-2";
+  await handleTicketButton(staffClose.ix as any);
+  assert.equal(staffClose.state.archived, true, "staff can close");
+  assert.equal((await deps.store.supportTicketByThread("t-2"))?.closerId, "u-mod");
+
+  // Already closed / not a thread → refused.
+  const again = mkClose("u1");
+  again.ix.channel.id = "t-2";
+  await handleTicketButton(again.ix as any);
+  assert.match(again.state.replies[0].content, /already closed/);
+  const notThread = { customId: "ticket:close", guildId: HOUSE, user: { id: "u1" }, channel: { id: "c-x", isThread: () => false }, reply: async (r: any) => r };
+  await handleTicketButton(notThread as any);
+});
+
 
 test("collectHostHealth reports proc/disk/db/queue", async () => {
   let queueArg: unknown = "unset";

@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto";
-import type { AppInstall, AttributeStatus, ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, EvidenceEffect, EvidenceType, GuildCompanion, JournalCandidate, JournalEntry, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, VerificationVerdict, WebhookMessageRecord } from "./types.js";
+import type { AppInstall, AttributeStatus, ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, EvidenceEffect, EvidenceType, GuildCompanion, JournalCandidate, JournalEntry, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, SupportTicket, VerificationVerdict, WebhookMessageRecord } from "./types.js";
 import { sql as defaultSql, type Sql } from "./db.js";
 import { runMigrations } from "./migrations.js";
 import { findMentionedUsers } from "./entity-resolution.js";
@@ -3889,6 +3889,65 @@ export class MemoryStore {
         last_error = ${error.slice(0, 400)}, updated_at = NOW()
       WHERE discord_user_id = ${discordUserId}
     `;
+  }
+
+  private rowToSupportTicket(r: any): SupportTicket {
+    return {
+      threadId: r.thread_id,
+      guildId: r.guild_id,
+      openerId: r.opener_id,
+      subject: r.subject,
+      details: r.details,
+      status: r.status,
+      openedAt: ts(r.opened_at),
+      closedAt: r.closed_at ? ts(r.closed_at) : null,
+      closerId: r.closer_id ?? null,
+    };
+  }
+
+  /** File the ticket row for a freshly-created private thread. Returns null
+   *  when the opener already holds an open ticket — the partial unique index
+   *  is the race-proof arbiter (the handler archives the orphan thread). */
+  async createSupportTicket(
+    guildId: string, openerId: string, threadId: string, subject: string, details: string,
+  ): Promise<SupportTicket | null> {
+    const rows = await this.sql<Array<any>>`
+      INSERT INTO support_tickets (thread_id, guild_id, opener_id, subject, details)
+      VALUES (${threadId}, ${guildId}, ${openerId}, ${subject.slice(0, 200)}, ${details.slice(0, 2000)})
+      ON CONFLICT (opener_id) WHERE status = 'open' DO NOTHING
+      RETURNING *
+    `;
+    return rows[0] ? this.rowToSupportTicket(rows[0]) : null;
+  }
+
+  async openSupportTicketFor(openerId: string): Promise<SupportTicket | null> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM support_tickets WHERE opener_id = ${openerId} AND status = 'open'
+    `;
+    return rows[0] ? this.rowToSupportTicket(rows[0]) : null;
+  }
+
+  async supportTicketByThread(threadId: string): Promise<SupportTicket | null> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM support_tickets WHERE thread_id = ${threadId}
+    `;
+    return rows[0] ? this.rowToSupportTicket(rows[0]) : null;
+  }
+
+  async closeSupportTicket(threadId: string, closerId: string): Promise<void> {
+    await this.sql`
+      UPDATE support_tickets
+      SET status = 'closed', closed_at = NOW(), closer_id = ${closerId}
+      WHERE thread_id = ${threadId} AND status = 'open'
+    `;
+  }
+
+  async listOpenSupportTickets(guildId: string): Promise<SupportTicket[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM support_tickets WHERE guild_id = ${guildId} AND status = 'open'
+      ORDER BY opened_at ASC
+    `;
+    return rows.map(r => this.rowToSupportTicket(r));
   }
 
   async recordWebhookMessage(

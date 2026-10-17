@@ -85,6 +85,7 @@ The Characterly community server is where the marketplace lives (`src/ops.ts`, g
 - **Verify gate** — `Member` means *verified Characterly member*. `@everyone` sees the lobby + the marketplace (browse-only); the persistent card in the gate channel's **Verify** button walks: accept rules → linked account (site + `/link` if missing) → Terms/Privacy clickwrap → Member role.
 - **Link sweep** — unlinking on the website auto-revokes Member within minutes (a lookup *error* keeps the role — an outage can't mass-revoke).
 - **Automod** — deterministic invite-link, scam, mass-mention, burst-spam, and new-account rules run before any memory pipeline; marketplace comments inherit them.
+- **Support tickets** — `#support-ticket` is visible pre-verify (so "can't log in" cases still reach staff) but read-only; its persistent **Open a ticket** card opens a modal that files a private thread between the user and staff (one open ticket per account, enforced by a partial unique index). Ticket threads are excluded from automod and the memory pipeline — support conversations never become companion memory.
 
 ---
 

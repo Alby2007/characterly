@@ -558,6 +558,23 @@ Discord app-install ledger (v47) — one row per Discord user who authorized the
 
 ---
 
+### `support_tickets`
+
+House support-ticket ledger (v48) — one row per private thread under `#support-ticket`. Written by the ticket modal handler (`createSupportTicket`), read by the open/close buttons.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `thread_id` | TEXT PK | The private thread IS the ticket |
+| `guild_id` | TEXT | Always the house guild |
+| `opener_id` | TEXT | Discord user who filed |
+| `subject` / `details` | TEXT | Modal intake fields |
+| `status` | TEXT | `open` · `closed` |
+| `opened_at` / `closed_at` / `closer_id` | TIMESTAMPTZ / TIMESTAMPTZ / TEXT | Lifecycle |
+
+**Indexes:** partial unique `support_tickets_one_open_per_user (opener_id) WHERE status='open'` — the one-open-ticket-per-user rule as a database guarantee (double-submits hit it as a no-op via `ON CONFLICT (opener_id) WHERE status='open'`); partial `support_tickets_open (guild_id, opened_at) WHERE status='open'`. RLS deny-all. Rollback refuses while rows exist.
+
+---
+
 ### `web_profiles`
 
 Web account profiles for Supabase Auth users (v26) — the "real life user" half, named `web_profiles` because `profiles` is already the subject-profile table. Only created when the `auth` schema exists (Supabase); plain Postgres skips it.
@@ -863,3 +880,4 @@ Version tracking for the migration system.
 | 45 | `v45_chat_import_undo` | auth-gated `delete_chat_import(p_id)` security-definer RPC — owner-scoped row delete; the `import_id` cascade retracts the distilled journal (the website's Undo button + `/companion action:imports`) |
 | 46 | `v46_quiet_channels` | `server_settings.quiet_channels TEXT[]` — companion silence without blindness: replies and system cards suppressed while archiving/extraction continue; threads inherit via `parentId` |
 | 47 | `v47_app_installs` | `app_installs` (install ledger for the welcome-DM sweep) + `record_app_install` security-definer RPC (service-role only — the website worker's webhook sink); rollback refuses while installs exist |
+| 48 | `v48_support_tickets` | `support_tickets` + partial unique index `one_open_per_user` — the house ticket system's ledger; rollback refuses while tickets exist |

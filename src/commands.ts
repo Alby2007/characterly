@@ -11,7 +11,7 @@ import { inc, metricsSnapshot } from "./metrics.js";
 import type { ChatImport, Companion, CompanionListing, CompanionSpec, MessageEvent } from "./types.js";
 import { config } from "./config.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
-import { handleOpsCommand, handleHouseButton, isHouse, isMarketplaceThread } from "./ops.js";
+import { handleOpsCommand, handleHouseButton, handleTicketButton, isHouse, isMarketplaceThread } from "./ops.js";
 import { CURATED_TAGS, postListingThread, buildListingCard, buildListingComponents } from "./marketplace.js";
 import { parseCardFile, cardToPersona, cardImportMeta, cardFileHash, CARD_MAX_BYTES, type ImportPersona, type CardImportMeta, type ParsedCard } from "./charcard.js";
 import { parseChatFile, chatImportMeta, chatFileHash, type ParsedChat, type ChatImportMeta } from "./chathist.js";
@@ -2678,6 +2678,9 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
 
   // house:* — the verify-gate button on our own community server.
   if (parts[0] === "house") return handleHouseButton(interaction);
+
+  // ticket:* — the support-ticket panel's open/close buttons.
+  if (parts[0] === "ticket") return handleTicketButton(interaction);
 
   // market:{add|report|reportcat|talk|summon|dismiss|drop|unlist|relist|editmodal}:{id}
   // market:mod:{unflag|delist|ban|bancreator}:{listingId} — the companion

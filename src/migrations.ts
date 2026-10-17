@@ -3557,6 +3557,50 @@ const migrations: Migration[] = [
       await sql`DROP TABLE IF EXISTS app_installs`;
     },
   },
+  {
+    version: 48,
+    name: "v48_support_tickets",
+    up: async (sql) => {
+      // support_tickets — the house ticket system's ledger. One row per
+      // private thread under #support-ticket; the partial unique index makes
+      // "one open ticket per user" a database guarantee, not just a handler
+      // check — two concurrent modal submits can't double-open.
+      await sql`
+        CREATE TABLE IF NOT EXISTS support_tickets (
+          thread_id   TEXT PRIMARY KEY,
+          guild_id    TEXT NOT NULL,
+          opener_id   TEXT NOT NULL,
+          subject     TEXT NOT NULL,
+          details     TEXT NOT NULL,
+          status      TEXT NOT NULL DEFAULT 'open',
+          opened_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          closed_at   TIMESTAMPTZ,
+          closer_id   TEXT
+        )
+      `;
+      await sql`
+        CREATE UNIQUE INDEX IF NOT EXISTS support_tickets_one_open_per_user
+          ON support_tickets (opener_id) WHERE status = 'open'
+      `;
+      await sql`
+        CREATE INDEX IF NOT EXISTS support_tickets_open
+          ON support_tickets (guild_id, opened_at) WHERE status = 'open'
+      `;
+      await sql`ALTER TABLE support_tickets ENABLE ROW LEVEL SECURITY`;
+    },
+    down: async (sql) => {
+      // Same data-decision guard as v47 — don't silently drop ticket history.
+      await sql`
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM support_tickets) THEN
+            RAISE EXCEPTION 'v48 rollback refused: support tickets exist';
+          END IF;
+        END $$
+      `;
+      await sql`DROP TABLE IF EXISTS support_tickets`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

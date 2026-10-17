@@ -1,4 +1,4 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events, GatewayIntentBits, Partials, type Guild, type Message, type OmitPartialGroupDMChannel } from "discord.js";
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client, Events, GatewayIntentBits, Partials, type Guild, type Message, type OmitPartialGroupDMChannel } from "discord.js";
 import OpenAI from "openai";
 import { config } from "./config.js";
 import { sql } from "./db.js";
@@ -47,7 +47,7 @@ import { isSelfHarmSignal, CRISIS_RESPONSE, SAFE_REFUSAL } from "./safety.js";
 import {
   initOps, automodMessage, isHouse, isMarketplaceThread, opsAlert,
   handleHouseMemberAdd, handleHouseMemberUpdate, handleHouseMemberRemove,
-  ensureHouseLayout, ensureResourcePosts, startHostWatchdog, ensureVerifyGate, startLinkSweep,
+  ensureHouseLayout, ensureResourcePosts, ensureTicketPanel, handleTicketModal, startHostWatchdog, ensureVerifyGate, startLinkSweep,
   startTagSweep,
   type OpsDeps, type GuildLike,
 } from "./ops.js";
@@ -292,6 +292,8 @@ client.once(Events.ClientReady, async ready => {
         const made = await ensureHouseLayout(house).catch(e => { logError("house layout failed", e); return [] as string[]; });
         const posted = await ensureResourcePosts(opsDeps, house).catch(e => { logError("resource posts failed", e); return [] as string[]; });
         const changed = [...made, ...posted];
+        // Ticket panel — the persistent Open-a-ticket card in #support-ticket.
+        await ensureTicketPanel(opsDeps, house).catch(e => { inc("ops.init_error"); logError("ticket panel failed", e); return false; });
         if (changed.length) await opsAlert(opsDeps, `🧱 House layout — ${changed.join(", ")}`);
         // Verify gate card — posted once if missing; pending members see it
         // but the button refuses until screening passes.
@@ -688,6 +690,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isModalSubmit()) {
       await handleSetupModal(interaction, store, invalidateBrain);
       await handleCompanionModal(interaction, store, scopeId => lookupCache.delete(scopeId));
+      await handleTicketModal(interaction);
     }
     if (interaction.isButton()) await handleMemoryButton(interaction, store, brainFor, eventStore);
   } catch (error) {
@@ -1363,6 +1366,12 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   }
   if (!message.content.trim() && !images.length) return;
   if (config.guildId && message.guild.id !== config.guildId) return;
+  // Support tickets are private threads in the house — staff-supervised
+  // conversations that must never hit automod (a user pasting a phishing
+  // link shouldn't watch their own ticket get deleted) or the memory
+  // pipeline (privacy). Scoped to the house: private threads elsewhere can
+  // still host summoned companions.
+  if (isHouse(message.guild.id) && message.channel.type === ChannelType.PrivateThread) return;
   // House automod runs before archive/LLM work — a deleted scam never enters
   // the memory pipeline or spends a credit. Bots/webhook-echoes are skipped
   // inside (companion sends arrive as webhook-authored messages).

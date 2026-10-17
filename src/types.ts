@@ -425,6 +425,21 @@ export type AppInstall = {
   updatedAt: string;
 };
 
+/** A house support ticket (v48) — one private thread per ticket under
+ *  #support-ticket. `status` is 'open' | 'closed'; the partial unique index
+ *  enforces one open ticket per opener. */
+export type SupportTicket = {
+  threadId: string;
+  guildId: string;
+  openerId: string;
+  subject: string;
+  details: string;
+  status: "open" | "closed" | string;
+  openedAt: string;
+  closedAt: string | null;
+  closerId: string | null;
+};
+
 export type CompanionPersona = {
   companionId: number;
   name: string;
