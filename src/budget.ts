@@ -19,6 +19,17 @@ export class BudgetExceeded extends Error {
   }
 }
 
+/** A job paused because the payer's token balance ran dry — same
+ * park-until-UTC-midnight semantics as BudgetExceeded (the daily grant lands
+ * then), but a distinct name so logs read "wallet empty", not "LLM cap". */
+export class CreditsExhausted extends BudgetExceeded {
+  constructor(guildId: string, public readonly balance: number) {
+    super(guildId, 0);
+    this.name = "CreditsExhausted";
+    this.message = `${guildId} paused — token balance is empty (${balance})`;
+  }
+}
+
 export function isBudgetExceeded(error: unknown): error is BudgetExceeded {
   return error instanceof BudgetExceeded;
 }

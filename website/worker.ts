@@ -18,6 +18,33 @@ interface Env {
 
 const EVENTS_PATH = "/discord/events";
 
+// Baseline hardening for every asset response. CSP notes:
+//  - script-src allows 'self' + the sha256 of the one inline script every page
+//    shares (documentElement .js toggle — verbatim between the tags). Change
+//    that script and this hash must be recomputed or the pages break.
+//  - style-src keeps 'unsafe-inline' — the reveal system uses inline style=""
+//    attributes everywhere; attribute-level CSS injection is low risk here.
+//  - connect-src covers Supabase (auth/rest/rpc/storage) only; Stripe is a
+//    top-level navigation, never an XHR.
+//  - frame-ancestors 'none' = clickjacking protection on the dashboard.
+const SECURITY_HEADERS: Record<string, string> = {
+  "content-security-policy": [
+    "default-src 'self'",
+    "script-src 'self' 'sha256-qOhFsq0QMV2REqNwk5hGH5bZE9SkX6gt6yeyKdYPv+U='",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob: https:",
+    "connect-src 'self' https://*.supabase.co wss://*.supabase.co",
+    "font-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+  ].join("; "),
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "permissions-policy": "camera=(), microphone=(), geolocation=()",
+};
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -25,7 +52,10 @@ export default {
       if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
       return handleDiscordEvent(request, env);
     }
-    return env.ASSETS.fetch(request);
+    const res = await env.ASSETS.fetch(request);
+    const out = new Response(res.body, res);
+    for (const [k, v] of Object.entries(SECURITY_HEADERS)) out.headers.set(k, v);
+    return out;
   },
 };
 
@@ -38,6 +68,13 @@ async function handleDiscordEvent(request: Request, env: Env): Promise<Response>
   }
   const ok = await verifyDiscordSignature(env.DISCORD_APP_PUBLIC_KEY, signature, timestamp, body);
   if (!ok) return new Response("invalid signature", { status: 401 });
+  // A valid signature is replayable forever without a freshness window —
+  // redeliveries Discord sends itself arrive within seconds, so five minutes
+  // is generous. Stale-signed bodies are rejected, not just deduplicated.
+  const eventTs = Number(timestamp);
+  if (!Number.isFinite(eventTs) || Math.abs(Date.now() / 1000 - eventTs) > 300) {
+    return new Response("stale timestamp", { status: 401 });
+  }
 
   const action = parseDiscordEvent(body);
   if (action.kind === "install") {

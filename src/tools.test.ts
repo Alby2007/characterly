@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { executeTool, isSafeUrl, parseDdgLite, stripHtml } from "./tools.js";
-import { guardedLlmFetch } from "./brains.js";
+import { guardedLlmFetch, makeGuardedLlmFetch } from "./brains.js";
 import { toolCues } from "./perception.js";
 
 // Pure tests — no network. webSearch/visitUrl correctness against live
@@ -81,6 +81,60 @@ test("guardedLlmFetch blocks private targets at connect time", async () => {
     assert.ok(err, `${url} should reject`);
     assert.match(String((err as { cause?: unknown }).cause ?? err), /private|blocked/i);
   }
+});
+
+test("guardedLlmFetch follows redirects but re-validates every hop", async () => {
+  const seen: string[] = [];
+  const mk = (responder: (url: string) => Response) =>
+    makeGuardedLlmFetch(async url => {
+      seen.push(url);
+      return responder(url) as never;
+    });
+
+  // A safe hop → the next URL is fetched; relative redirects resolve against
+  // the previous hop and stay on the same host.
+  const f1 = mk(url => url.endsWith("/v1/models")
+    ? new Response("ok", { status: 200 })
+    : new Response(null, { status: 302, headers: { location: "/v1/models" } }));
+  const calls: string[] = [];
+  const f2 = makeGuardedLlmFetch(async url => {
+    calls.push(url);
+    return (url.endsWith("/landing")
+      ? new Response(null, { status: 302, headers: { location: "https://api.example.org/real" } })
+      : new Response("ok", { status: 200 })) as never;
+  });
+  const r1 = await f1("https://api.example.org/v1/chat/completions", { method: "POST", body: "{}" });
+  assert.equal(r1.status, 200);
+  assert.deepEqual(seen, ["https://api.example.org/v1/chat/completions", "https://api.example.org/v1/models"]);
+  const r2 = await f2("https://api.example.org/landing");
+  assert.equal(r2.status, 200);
+  assert.deepEqual(calls, ["https://api.example.org/landing", "https://api.example.org/real"]);
+
+  // A redirect to a private IP literal must never be fetched — undici skips
+  // DNS lookup for literals, so only the per-hop isSafeUrl check blocks it.
+  const seenBad: string[] = [];
+  const f3 = makeGuardedLlmFetch(async url => {
+    seenBad.push(url);
+    return new Response(null, { status: 302, headers: { location: "http://169.254.169.254/latest/meta-data" } }) as never;
+  });
+  const err = await f3("https://api.example.org/x").then(() => null, (e: unknown) => e);
+  assert.ok(err);
+  assert.match(String(err), /blocked/);
+  assert.equal(seenBad.length, 1, "the unsafe hop must never be fetched");
+
+  // Redirect loops terminate instead of spinning forever.
+  const f4 = makeGuardedLlmFetch(async () =>
+    new Response(null, { status: 302, headers: { location: "https://api.example.org/loop" } }) as never);
+  await assert.rejects(f4("https://api.example.org/loop"), /redirect limit/);
+});
+
+test("guardedLlmFetch refuses to replay a redirect with a non-repeatable body", async () => {
+  const f = makeGuardedLlmFetch(async () =>
+    new Response(null, { status: 302, headers: { location: "https://api.example.org/elsewhere" } }) as never);
+  await assert.rejects(
+    f("https://api.example.org/x", { method: "POST", body: new ReadableStream() as never }),
+    /non-replayable/,
+  );
 });
 
 test("executeTool returns error strings for bad input, never throws", async () => {

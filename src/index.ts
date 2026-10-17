@@ -380,7 +380,7 @@ async function applyRetention() {
     const pruned = await store.pruneJournal();
     if (pruned) console.log(`Pruned ${pruned} stale companion journal entries`);
   } catch (error) { inc("maintenance.journal_error"); logError("Journal prune failed", error); }
-  const dmScopes = await store.listActiveDmScopes().catch(() => [] as string[]);
+  const dmScopes = await store.listDmScopes().catch(() => [] as string[]);
   const scopes: Array<{ id: string; name: string }> = [
     ...[...client.guilds.cache.values()].map(g => ({ id: g.id, name: g.name })),
     ...dmScopes.map(id => ({ id, name: id })),
@@ -595,7 +595,7 @@ async function embedBackfill(batchSize = 150): Promise<void> {
 // the mark so the next pass retries — crash-safe), and 'extracted' marks the
 // terminal state so empty results don't re-extract forever.
 async function sweepMissedSignals(windowMs: number) {
-  const dmScopes = await store.listActiveDmScopes().catch(() => [] as string[]);
+  const dmScopes = await store.listDmScopes().catch(() => [] as string[]);
   const scopes: Array<{ id: string; name: string }> = [
     ...[...client.guilds.cache.values()].map(g => ({ id: g.id, name: g.name })),
     ...dmScopes.map(id => ({ id, name: id })),
@@ -714,23 +714,28 @@ client.on(Events.MessageCreate, message => {
 
 // Edits update the archive row; the extraction-time snapshot in memory_evidence
 // is deliberately left alone — it's the record of what was observed, not a
-// mirror of current content.
+// mirror of current content. DMs are archived under dm:<uid> scope too, so
+// their edits must propagate the same way — message ids are globally unique.
 client.on(Events.MessageUpdate, (_old, message) => {
   if (!store) return; // before init() completes — a sync TypeError would escape .catch
-  if (!message.guild || !message.content?.trim()) return;
-  if (config.guildId && message.guild.id !== config.guildId) return;
-  store.updateMessageContent(message.guild.id, message.id, message.content)
-    .catch(error => { inc("handler.message_error"); logError("Message update handling failed", error); });
+  if (message.content == null) return; // partial event with no content field
+  if (message.guild && config.guildId && message.guild.id !== config.guildId) return;
+  const promise = message.guild
+    ? store.updateMessageContent(message.guild.id, message.id, message.content)
+    : store.updateMessageContentById(message.id, message.content);
+  promise.catch(error => { inc("handler.message_error"); logError("Message update handling failed", error); });
 });
 
 // Deletes remove the raw row (so the sweep never extracts deleted content)
-// and scrub the verbatim text on any evidence it already produced.
+// and scrub the verbatim text on any evidence it already produced. DMs get
+// the same treatment — a deleted DM must leave the archive too.
 client.on(Events.MessageDelete, message => {
   if (!store) return;
-  if (!message.guild) return;
-  if (config.guildId && message.guild.id !== config.guildId) return;
-  store.deleteMessage(message.guild.id, message.id)
-    .catch(error => { inc("handler.message_error"); logError("Message delete handling failed", error); });
+  if (message.guild && config.guildId && message.guild.id !== config.guildId) return;
+  const promise = message.guild
+    ? store.deleteMessage(message.guild.id, message.id)
+    : store.deleteMessageById(message.id);
+  promise.catch(error => { inc("handler.message_error"); logError("Message delete handling failed", error); });
 });
 
 // Alias maps are shared per guild rather than built per message — the same map
@@ -821,6 +826,7 @@ const journalDeps = {
 const chatImportDeps = {
   get store() { return store; },
   brainFor,
+  isHostedScope,
   maxWindows: config.chatImportMaxWindows,
   windowSize: 30,
   sendDm: async (userId: string, content: string) => {

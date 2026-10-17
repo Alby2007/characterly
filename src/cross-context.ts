@@ -71,7 +71,7 @@ export async function gatherServerDigestForDm(
       eventStore.listEvents(guildId, { limit: 3 }),
       store.relationshipsFor(guildId, compSubj),
       store.relationshipsFor(guildId, ownerUserId),
-      store.recentMemories(guildId, 5),
+      store.recentMemories(guildId, 5, { consentedOnly: true }),
     ]);
 
     const items: string[] = [];

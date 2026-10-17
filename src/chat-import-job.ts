@@ -1,6 +1,7 @@
 import type { Brain } from "./brain.js";
 import type { MemoryStore } from "./database.js";
 import type { ChatTurn } from "./chathist.js";
+import { BudgetExceeded, CreditsExhausted } from "./budget.js";
 import { FatalJobError, MAX_JOB_ATTEMPTS } from "./jobs.js";
 import { inc } from "./metrics.js";
 import { logError } from "./secrets.js";
@@ -11,12 +12,19 @@ import { logError } from "./secrets.js";
 // lands as the pinned 'bond' entry. Turns delete at done — distill-and-
 // discard, we keep the memory not the corpus. Resumes from processed_turns
 // on retry; BudgetExceeded parks the job at the UTC boundary like extract.
+// Hosted-lane imports bill per window — same ledger as turns, so the hosted
+// fleet cap can't be drained through the import path at zero token cost.
 
 export type ChatImportJobPayload = { importId: number };
+
+/** One credit per distilled window — the metered cost of the LLM call it buys. */
+export const CHAT_IMPORT_CREDITS_PER_WINDOW = 1;
 
 export interface ChatImportJobDeps {
   store: MemoryStore;
   brainFor: (scope: string) => Promise<Brain | null>;
+  /** Hosted-vs-BYOK lane check — only hosted work spends tokens. */
+  isHostedScope?: (scope: string) => boolean;
   /** Max ~30-turn windows per import — bounds hosted spend per transcript. */
   maxWindows: number;
   windowSize: number;
@@ -75,31 +83,59 @@ export async function runChatImportJob(
   // consent gate passes trivially; the importer consented by uploading.
   const alwaysConsent = async () => true;
 
+  const hosted = deps.isHostedScope?.(dmScope) ?? false;
   try {
     for (let i = startTurn; i < turns.length; i += windowSize) {
-      const window = turns.slice(i, i + windowSize);
-      const windowText = window
-        .map((t: ChatTurn) => `${t.speaker === "user" ? userName : charName}: ${t.text}`)
-        .join("\n");
-      const out = await brain.distillHistoryWindow({
-        name: companion.name,
-        voicePersona: companion.voicePersona,
-        coreTraits: companion.coreTraits,
-        charName, userName, windowText, summary,
-      });
-      summary = out.summary;
-      const windowEnd = window[window.length - 1]?.ts ?? lastTs;
-      // The importer is always a subject of their own history — stamping
-      // them makes opt-out deletion (forgetJournalAbout on the dm scope) and
-      // the about-first recall sort treat imported entries like live ones.
-      const owned = out.entries.map(e => ({
-        ...e,
-        aboutSubjects: [...new Set([imp.ownerUserId, ...(e.aboutSubjects ?? [])])],
-      }));
-      const saved = await store.saveImportedJournalEntries(
-        companion.id, dmScope, owned, imp.id, windowEnd, alwaysConsent,
-      );
-      await store.updateChatImportProgress(imp.id, i + window.length, saved.length, summary);
+      // Per-window billing on the hosted lane — charging inside the loop (not
+      // per import) keeps resume honest: processed windows were paid for,
+      // unprocessed ones weren't. A failed window refunds like an unsent turn.
+      let chargedWindow = false;
+      if (hosted) {
+        // Unlinked mid-import can't park-and-resume forever — that's a
+        // permanent state, not an empty balance. Fail the row outright.
+        if (!await store.accountForDiscordUser(imp.ownerUserId)) {
+          await store.failChatImport(imp.id, "account unlinked mid-import");
+          return;
+        }
+        const spent = await store.spendCredits(imp.ownerUserId, CHAT_IMPORT_CREDITS_PER_WINDOW, "chat_import");
+        if (!spent.ok) {
+          // Out of tokens — not a fault. Park until the UTC grant like any
+          // capped job; the import stays 'distilling' and resumes tomorrow.
+          throw new CreditsExhausted(dmScope, spent.balance);
+        }
+        chargedWindow = true;
+      }
+      try {
+        const window = turns.slice(i, i + windowSize);
+        const windowText = window
+          .map((t: ChatTurn) => `${t.speaker === "user" ? userName : charName}: ${t.text}`)
+          .join("\n");
+        const out = await brain.distillHistoryWindow({
+          name: companion.name,
+          voicePersona: companion.voicePersona,
+          coreTraits: companion.coreTraits,
+          charName, userName, windowText, summary,
+        });
+        summary = out.summary;
+        const windowEnd = window[window.length - 1]?.ts ?? lastTs;
+        // The importer is always a subject of their own history — stamping
+        // them makes opt-out deletion (forgetJournalAbout on the dm scope) and
+        // the about-first recall sort treat imported entries like live ones.
+        const owned = out.entries.map(e => ({
+          ...e,
+          aboutSubjects: [...new Set([imp.ownerUserId, ...(e.aboutSubjects ?? [])])],
+        }));
+        const saved = await store.saveImportedJournalEntries(
+          companion.id, dmScope, owned, imp.id, windowEnd, alwaysConsent,
+        );
+        await store.updateChatImportProgress(imp.id, i + window.length, saved.length, summary);
+      } catch (error) {
+        if (chargedWindow) {
+          await store.refundCredits(imp.ownerUserId, CHAT_IMPORT_CREDITS_PER_WINDOW, "chat_import_refund")
+            .catch(e => logError("chat-import credit refund failed", e));
+        }
+        throw error;
+      }
     }
 
     // The last rolling summary is the relationship's shape — pin it as the
@@ -121,8 +157,9 @@ export async function runChatImportJob(
       `I finished reading our old chats — **${kept} moment${kept === 1 ? "" : "s"}** from **${imp.filename}** are part of me now${summary ? ", plus what we were to each other" : ""}. The file itself is gone — I keep the memories, not the transcript.`,
     ).catch(e => logError("chat-import completion DM failed", e));
   } catch (error) {
-    // Last attempt spent — the row can't keep pretending it runs.
-    if (!(error instanceof FatalJobError) && attempts >= MAX_JOB_ATTEMPTS) {
+    // Last attempt spent — the row can't keep pretending it runs. A parked
+    // BudgetExceeded is the exception: it's rescheduled, not dying.
+    if (!(error instanceof FatalJobError) && !(error instanceof BudgetExceeded) && attempts >= MAX_JOB_ATTEMPTS) {
       await store.failChatImport(imp.id, "distill failed after retries").catch(() => {});
     }
     throw error; // BudgetExceeded + transient faults rethrow for the worker's own retry/backoff.

@@ -8,6 +8,7 @@
 // Keyed guild:user (not per-channel) so channel-hopping can't dodge it.
 
 export class ReplyThrottle {
+  private static readonly MAX_BUCKETS = 4096;
   private buckets = new Map<string, { tokens: number; refilledAt: number }>();
   private now: () => number;
 
@@ -22,6 +23,20 @@ export class ReplyThrottle {
     const key = `${guildId}:${userId}`;
     let b = this.buckets.get(key);
     if (!b) {
+      if (this.buckets.size >= ReplyThrottle.MAX_BUCKETS) {
+        // Buckets never expire on their own — evict first so a long-lived
+        // process can't grow the map without bound. A bucket that refilled
+        // to full (or hasn't been touched in a while) is safe to drop: a
+        // recreated bucket starts full anyway, so idle members lose nothing.
+        const staleBefore = now - this.opts.refillMs * 4;
+        for (const [k, v] of this.buckets) {
+          if (v.tokens >= this.opts.capacity || v.refilledAt < staleBefore) this.buckets.delete(k);
+        }
+        if (this.buckets.size >= ReplyThrottle.MAX_BUCKETS) {
+          const oldest = this.buckets.keys().next(); // Maps iterate insertion-first
+          if (!oldest.done) this.buckets.delete(oldest.value);
+        }
+      }
       b = { tokens: this.opts.capacity, refilledAt: now };
       this.buckets.set(key, b);
     } else {

@@ -200,6 +200,80 @@ test("job — windows distill to journal, bond pinned, transcript discarded, DM 
   assert.match(rows[3].created_at.toISOString(), /^2024-05-01/);
 });
 
+test("job — hosted lane bills per window; BYOK lane never touches the ledger", async () => {
+  const { store } = await freshStore();
+  const comp = await awakenedCompanion(store, "u-bill");
+  const imp = await store.createChatImport("u-bill", comp.id, importOpts()); // 65 turns → 3 windows
+
+  let spends = 0;
+  (store as any).accountForDiscordUser = async () => ({ id: "acct", plan: "free", creditBalance: 99 });
+  (store as any).spendCredits = async () => { spends++; return { ok: true, balance: 0 }; };
+
+  // BYOK lane: isHostedScope false → no ledger interaction at all.
+  await runChatImportJob("dm:u-bill", { importId: imp.id },
+    { ...jobDeps(store, fakeBrain()), isHostedScope: () => false });
+  assert.equal(spends, 0, "BYOK imports burn the user's own provider, not tokens");
+  assert.equal((await store.chatImportById(imp.id))?.status, "done");
+
+  // Hosted lane: one spend per window — a 65-turn import pays 3.
+  const imp2 = await store.createChatImport("u-bill", comp.id, importOpts("b.jsonl"));
+  await runChatImportJob("dm:u-bill", { importId: imp2.id },
+    { ...jobDeps(store, fakeBrain()), isHostedScope: () => true });
+  assert.equal(spends, 3);
+});
+
+test("job — empty wallet parks the import (CreditsExhausted), unlink fails it", async () => {
+  const { store } = await freshStore();
+  const comp = await awakenedCompanion(store, "u-capped");
+  const imp = await store.createChatImport("u-capped", comp.id, importOpts());
+
+  // Hosted lane with a linked account whose wallet covers exactly one window.
+  (store as any).accountForDiscordUser = async () => ({ id: "acct", plan: "free", creditBalance: 0 });
+  let spends = 0;
+  (store as any).spendCredits = async () => { spends++; return { ok: spends <= 1, balance: 0 }; };
+  const err = await runChatImportJob("dm:u-capped", { importId: imp.id },
+    { ...jobDeps(store, fakeBrain()), isHostedScope: () => true }).then(() => null, e => e);
+  assert.equal((err as Error).name, "CreditsExhausted");
+  const cur = await store.chatImportById(imp.id);
+  assert.equal(cur?.status, "distilling", "a parked import stays resumable, not failed");
+  assert.equal(cur?.processedTurns, 30, "the paid window still committed");
+
+  // Mid-import unlink is permanent — fail the row, don't park it forever.
+  const imp2 = await store.createChatImport("u-capped", comp.id, importOpts("c.jsonl"));
+  (store as any).accountForDiscordUser = async () => null;
+  await runChatImportJob("dm:u-capped", { importId: imp2.id },
+    { ...jobDeps(store, fakeBrain()), isHostedScope: () => true });
+  assert.equal((await store.chatImportById(imp2.id))?.status, "failed");
+});
+
+test("job — a window that throws refunds its charge", async () => {
+  const { store } = await freshStore();
+  const comp = await awakenedCompanion(store, "u-refund");
+  const imp = await store.createChatImport("u-refund", comp.id, importOpts());
+  (store as any).accountForDiscordUser = async () => ({ id: "a", plan: "free", creditBalance: 99 });
+  const calls: string[] = [];
+  const flakyBrain = {
+    async distillHistoryWindow() {
+      calls.push("x");
+      if (calls.length === 2) throw new Error("provider hiccup");
+      return {
+        entries: [{ kind: "moment" as const, content: `unique window ${calls.length} content`, importance: 0.5 }],
+        summary: `sum ${calls.length}`,
+      };
+    },
+  };
+  let spends = 0, refunds = 0;
+  (store as any).spendCredits = async () => { spends++; return { ok: true, balance: 99 }; };
+  (store as any).refundCredits = async () => { refunds++; return { ok: true, balance: 99 }; };
+  await assert.rejects(
+    runChatImportJob("dm:u-refund", { importId: imp.id },
+      { ...jobDeps(store, flakyBrain), isHostedScope: () => true }),
+    /hiccup/,
+  );
+  assert.equal(spends, 2);
+  assert.equal(refunds, 1, "the failed window's credit is refunded like an unsent turn");
+});
+
 test("job — resumes mid-import from processed_turns + rolling summary", async () => {
   const { store } = await freshStore();
   const comp = await awakenedCompanion(store, "u-resume");

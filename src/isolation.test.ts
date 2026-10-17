@@ -161,3 +161,88 @@ test("command surfaces refuse or filter B's data when invoked from A", async () 
     assert.ok(a.memoryId > 0 && b.memoryId > a.memoryId); // seeded — ids are a global sequence
   } finally { await sql.end(); }
 });
+
+// recentMemories has two consumers: admin triage (must see everything) and
+// the server→DM digest (must respect consent). The gated variant applies the
+// same subject predicate the recall paths use — server facts + opted-in,
+// non-opted-out members — so opted-out or stray non-member rows can't gossip
+// into a private DM.
+test("recentMemories consentedOnly gates the DM digest to consented subjects", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const g = "g-consent";
+    await sql`INSERT INTO members (guild_id, user_id, known_names, first_seen_at, last_seen_at, opted_in, message_count) VALUES (${g}, 'u-yes', '{Yes}', now(), now(), 1, 1)`;
+    await sql`INSERT INTO members (guild_id, user_id, known_names, first_seen_at, last_seen_at, opted_in, message_count) VALUES (${g}, 'u-never', '{Never}', now(), now(), 0, 1)`;
+    await sql`INSERT INTO members (guild_id, user_id, known_names, first_seen_at, last_seen_at, opted_in, opted_out, message_count) VALUES (${g}, 'u-left', '{Left}', now(), now(), 1, 1, 1)`;
+    for (const [subj, content] of [
+      ["u-yes", "consented fact"],
+      ["u-left", "opted-out fact"],
+      ["u-never", "never-consented fact"],
+      ["server", "server lore bit"],
+      ["u-gone", "stale row — member gone"],
+    ] as const) {
+      await sql`INSERT INTO memories (guild_id, subject_id, kind, content, confidence, importance, status)
+        VALUES (${g}, ${subj}, 'person_fact', ${content}, 0.9, 0.5, 'active')`;
+    }
+
+    const all = await store.recentMemories(g, 15);
+    assert.equal(all.length, 5, "admin triage still sees every row");
+    const gated = await store.recentMemories(g, 15, { consentedOnly: true });
+    const contents = gated.map(m => m.content);
+    assert.ok(contents.includes("consented fact"));
+    assert.ok(contents.includes("server lore bit"));
+    assert.ok(!contents.includes("opted-out fact"), "opted-out member leaked into the digest");
+    assert.ok(!contents.includes("never-consented fact"), "never-consented member leaked into the digest");
+    assert.ok(!contents.includes("stale row — member gone"), "a departed/non-member subject leaked into the digest");
+  } finally { await sql.end(); }
+});
+
+// Abandoned-onboarding retention regression: recordMessage archives DMs under
+// dm:<uid> from the FIRST onboarding turn — before the companion activates —
+// but the old listActiveDmScopes only swept 'active' companions, retaining
+// those rows (and any evidence verbatim) forever. listDmScopes must cover
+// every dm: scope that holds data.
+test("listDmScopes covers dm: scopes with data — not just awakened companions", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    // Companion stuck mid-awakening — onboarding_state != 'active'.
+    await sql`INSERT INTO companions (owner_user_id, name, voice_persona, core_traits, owner_dynamic, backstory, onboarding_state, onboarding_turns, kind, created_at, updated_at)
+      VALUES ('u-abandon', 'Ghost', 'p', '{}', 'd', 'b', 'onboarding', 3, 'awakened', now(), now())`;
+    // Orphaned DM archive — messages exist but no companion row at all.
+    await sql`INSERT INTO messages (id, guild_id, channel_id, author_id, author_name, content, created_at)
+      VALUES ('dm-m1', 'dm:u-orphan', 'dm-c1', 'u-orphan', 'O', 'hi', now())`;
+    const scopes = await store.listDmScopes();
+    assert.ok(scopes.includes("dm:u-abandon"), "mid-onboarding scope missing — its DMs would never be pruned");
+    assert.ok(scopes.includes("dm:u-orphan"), "message-only orphan scope missing");
+  } finally { await sql.end(); }
+});
+
+// DM edit/delete events carry no guild — the *ById variants key on the
+// globally-unique message snowflake instead. Same contract as the
+// guild-scoped calls: update rewrites content; delete drops the row and
+// scrubs the verbatim columns on any evidence it produced.
+test("updateMessageContentById + deleteMessageById act on dm: rows by snowflake", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    await sql`INSERT INTO messages (id, guild_id, channel_id, author_id, author_name, content, created_at)
+      VALUES ('dm-del', 'dm:u-x', 'c', 'u-x', 'X', 'secret text', now())`;
+    const [mem] = await sql`INSERT INTO memories (guild_id, subject_id, kind, content, confidence, importance, status)
+      VALUES ('dm:u-x', 'u-x', 'person_fact', 'derived', 0.9, 0.5, 'active') RETURNING id`;
+    await sql`INSERT INTO memory_evidence (memory_id, message_id, author_id, quote, message_content_snapshot, reason, explicitness, observed_at)
+      VALUES (${mem.id}, 'dm-del', 'u-x', 'secret text', 'secret text', 'r', 0.9, now())`;
+
+    await store.updateMessageContentById("dm-del", "edited");
+    const [row] = await sql`SELECT content FROM messages WHERE id = 'dm-del'`;
+    assert.equal(row.content, "edited");
+
+    await store.deleteMessageById("dm-del");
+    const [gone] = await sql`SELECT count(*)::int AS n FROM messages WHERE id = 'dm-del'`;
+    assert.equal(gone.n, 0);
+    const [ev] = await sql`SELECT quote, message_content_snapshot AS snap FROM memory_evidence WHERE message_id = 'dm-del'`;
+    assert.equal(ev.quote, "", "verbatim quote scrubbed on delete");
+    assert.equal(ev.snap, "", "content snapshot scrubbed on delete");
+  } finally { await sql.end(); }
+});

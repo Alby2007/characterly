@@ -3,7 +3,7 @@ import { Agent, fetch as undiciFetch } from "undici";
 import { Brain, type LlmClient } from "./brain.js";
 import { decryptSecret, errorText } from "./secrets.js";
 import { inc } from "./metrics.js";
-import { isPrivateAddress, safeLookup } from "./tools.js";
+import { isSafeUrl, safeLookup } from "./tools.js";
 
 // Per-guild base URLs are untrusted input — a guild admin can point them
 // anywhere, and every call carries that guild's API key. isSafeUrl +
@@ -15,15 +15,54 @@ import { isPrivateAddress, safeLookup } from "./tools.js";
 // legitimately point at LAN/local model servers).
 const guildDispatcher = new Agent({ connect: { lookup: safeLookup } });
 
-/** fetch that re-validates DNS at connect time — for calls carrying a
- * guild's own key to a guild-chosen base URL. IP literals are checked here
- * because undici skips lookup() for them and would otherwise connect raw. */
-export const guardedLlmFetch: typeof fetch = (input, init) => {
-  const raw = typeof input === "string" || input instanceof URL ? String(input) : (input as Request).url;
-  const host = new URL(raw).hostname;
-  if (isPrivateAddress(host)) return Promise.reject(new Error(`blocked: ${host} is a private address`));
-  return undiciFetch(input as any, { ...(init as any), dispatcher: guildDispatcher }) as unknown as Promise<Response>;
-};
+/** fetch that re-validates URL safety + DNS at connect time — for calls
+ * carrying a guild's own key to a guild-chosen base URL. isSafeUrl runs per
+ * hop (IP literals included — undici skips lookup() for them and would
+ * otherwise connect raw), and redirects are followed MANUALLY: undici's
+ * internal follower never consults the guard, so a BYOK endpoint answering
+ * 302 → http://169.254.169.254/… would turn the bot into an internal-network
+ * request primitive. */
+const MAX_LLM_REDIRECTS = 3;
+
+// A body that can be re-sent on the next hop. JSON bodies from the OpenAI SDK
+// are strings; streams can't be replayed, so a redirect carrying one is
+// refused rather than silently sending an empty payload.
+function replayableBody(body: unknown): boolean {
+  return body == null
+    || typeof body === "string"
+    || body instanceof URLSearchParams
+    || body instanceof ArrayBuffer
+    || ArrayBuffer.isView(body)
+    || body instanceof Blob;
+}
+
+/** doFetch is injectable so the redirect policy is testable without network. */
+export function makeGuardedLlmFetch(
+  doFetch: (input: string, init?: Record<string, unknown>) => Promise<{ status: number; headers: { get(name: string): string | null }; arrayBuffer(): Promise<ArrayBuffer> }>,
+): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    let url = input instanceof Request ? input.url : String(input);
+    const reqInit: Record<string, unknown> = input instanceof Request
+      ? { method: input.method, headers: input.headers, body: input.body, signal: input.signal, ...(init ?? {}) }
+      : { ...(init ?? {}) };
+    for (let hop = 0; hop <= MAX_LLM_REDIRECTS; hop++) {
+      if (!isSafeUrl(url)) throw new Error(`blocked: ${url} fails URL safety`);
+      const res = await doFetch(url, { ...reqInit, redirect: "manual", dispatcher: guildDispatcher });
+      const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+      if (!location) return res as unknown as Response;
+      await res.arrayBuffer().catch(() => undefined); // drain — frees the connection for reuse
+      if (!replayableBody(reqInit.body)) {
+        throw new Error(`blocked: ${url} redirected with a non-replayable body`);
+      }
+      url = new URL(location, url).toString();
+    }
+    throw new Error("blocked: llm endpoint exceeded redirect limit");
+  }) as typeof fetch;
+}
+
+export const guardedLlmFetch: typeof fetch = makeGuardedLlmFetch(
+  (input, init) => undiciFetch(input, init as never),
+);
 
 /**
  * Auto-detect provider, base URL, and default model from an API key prefix

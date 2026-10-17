@@ -102,3 +102,28 @@ test("pendingInstallGreets filters to authorized, ungreeted, under-attempts rows
     assert.match(after[0].lastError ?? "", /Cannot send/);
   } finally { await sql.end(); }
 });
+
+// v49 ordering: Discord retries webhook deliveries — a redelivered AUTHORIZED
+// landing after a real DEAUTHORIZED used to resurrect the row, and the greet
+// sweep would then DM a revoked install. The event timestamp rides meta; only
+// an event that isn't older than the recorded one may overwrite.
+test("record_app_install ignores events older than the recorded one", async () => {
+  const sql = makeTestSql();
+  try {
+    await makeStore(sql);
+    const raw = sql as any;
+    await raw`SELECT public.record_app_install('u1', 'authorized', '{"timestamp":"2024-01-01T00:00:00Z"}'::jsonb)`;
+    await raw`SELECT public.record_app_install('u1', 'deauthorized', '{"timestamp":"2024-01-02T00:00:00Z"}'::jsonb)`;
+    // Stale redelivery of the original authorized — must be ignored.
+    await raw`SELECT public.record_app_install('u1', 'authorized', '{"timestamp":"2024-01-01T00:00:00Z"}'::jsonb)`;
+    let [row] = await raw`SELECT event, deauthorized_at FROM app_installs WHERE discord_user_id = 'u1'`;
+    assert.equal(row.event, "deauthorized", "stale replay must not clear the revocation");
+    assert.ok(row.deauthorized_at, "deauthorized_at survives the stale replay");
+
+    // A genuinely newer authorized event still applies.
+    await raw`SELECT public.record_app_install('u1', 'authorized', '{"timestamp":"2024-01-03T00:00:00Z"}'::jsonb)`;
+    [row] = await raw`SELECT event, deauthorized_at FROM app_installs WHERE discord_user_id = 'u1'`;
+    assert.equal(row.event, "authorized");
+    assert.equal(row.deauthorized_at, null);
+  } finally { await sql.end(); }
+});

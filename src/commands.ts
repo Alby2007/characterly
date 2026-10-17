@@ -1236,6 +1236,21 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
           ephemeral: true,
         });
       }
+      const ownCard = targetUser.id === interaction.user.id;
+      if (!ownCard) {
+        // Another member's companion card is only visible where the companion
+        // is actually present — persona internals (and the owner bond below)
+        // stay private until the owner summons them into the shared space.
+        const summonedHere = interaction.guildId
+          ? (await store.listGuildCompanions(interaction.guildId)).some(c => c.id === companion.id)
+          : false;
+        if (!summonedHere) {
+          return interaction.reply({
+            content: `${targetUser.username}'s companion isn't in this server — their card only shows where they've been summoned.`,
+            ephemeral: true,
+          });
+        }
+      }
       const compSubj = MemoryStore.companionSubjectId(companion.id);
       const edges = (await store.relationshipsFor(guildId, compSubj)).slice(0, 5);
       const relLines: string[] = [];
@@ -1252,7 +1267,9 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         .addFields(
           { name: "Voice & Vibe", value: companion.voicePersona || "—", inline: false },
           { name: "Core Traits", value: companion.coreTraits.length ? companion.coreTraits.join(", ") : "—", inline: true },
-          { name: `Bond with ${targetUser.username}`, value: companion.ownerDynamic || "—", inline: true },
+          // The owner-bond field is the most private persona datum — only the
+          // owner sees it, even on a summoned companion's card.
+          ...(ownCard ? [{ name: `Bond with ${targetUser.username}`, value: companion.ownerDynamic || "—", inline: true }] : []),
           { name: "Relationships here", value: relLines.length ? relLines.join("\n") : "No established relationships in this scope yet.", inline: false },
         )
         .setFooter({ text: "Permanently bound companion (1 per account)" });

@@ -195,6 +195,25 @@ test("containsPrivateSubtext catches a verbatim echo of private DM subtext", asy
   assert.equal(containsPrivateSubtext("anything", ""), false);
 });
 
+test("containsPrivateSubtext catches close paraphrases, not only verbatim echoes", async () => {
+  const { containsPrivateSubtext } = await import("./perception.js");
+  const subtext = [
+    "- [Private DM memory] Alice is planning a surprise trip to Lisbon next month",
+    "- [Private DM memory] her grandmother's recipe box is the one thing she kept after the move",
+    "- [Private DM memory] alby's mother went into the hospital on tuesday",
+  ].join("\n");
+
+  // Same fact restated — most of the line's content words survive the reword.
+  assert.equal(containsPrivateSubtext("she kept her grandmother's recipe box after the move", subtext), true);
+  assert.equal(containsPrivateSubtext("didn't alice plan a surprise trip to lisbon this month", subtext), true);
+  assert.equal(containsPrivateSubtext("alby's mother is in the hospital since tuesday", subtext), true);
+  // Topical overlap below the threshold is not a leak — the same nouns can
+  // legitimately appear in server talk.
+  assert.equal(containsPrivateSubtext("how's alby — is the hospital thing on tuesday?", subtext), false);
+  assert.equal(containsPrivateSubtext("does she still cook from that recipe box", subtext), false);
+  assert.equal(containsPrivateSubtext("alice mentioned lisbon once", subtext), false);
+});
+
 // ── recallTerms / formatAge ───────────────────────────────────────────────────
 
 test("recallTerms surfaces proper nouns first and strips chat stopwords", () => {

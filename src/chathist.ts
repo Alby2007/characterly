@@ -266,7 +266,9 @@ export function parseChatFile(bytes: Uint8Array, filename = "", opts: HintOpts =
   if (isJsonlName || !text.startsWith("{")) {
     const r = parseJsonl(text, opts);
     if (r) return r;
-    if (isJsonlName) return { ok: false, error: "bad_json" };
+    // A .txt/.jsonl that fails line-parsing can still be pretty-printed or
+    // array-shaped JSON — fall through to the generic parsers before giving
+    // up instead of rejecting a transcript over its filename alone.
   }
 
   if (!text.startsWith("{") && !text.startsWith("[")) return { ok: false, error: "not_a_chat" };

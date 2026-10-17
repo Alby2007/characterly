@@ -318,8 +318,9 @@ export class EventPipeline {
           await eventStore.updateSignificance(guildId, ev.id, score, "event", classification.title, classification.summary);
           promoted++;
         } else if (tier === "discard") {
-          // Discard: close the record with significance 0 and leave tier as candidate
-          // (we never hard-delete — "discard" just means we don't surface it)
+          // Discard: stamp the computed score (writing it is what takes the
+          // row out of the unscored rescan set) and leave tier as 'candidate'
+          // — we never hard-delete; "discard" just means we don't surface it.
           await eventStore.updateSignificance(guildId, ev.id, score, "candidate", ev.title, ev.summary);
           discarded++;
         }

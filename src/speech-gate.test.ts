@@ -193,3 +193,23 @@ test("TTL expiry returns an engaged user to stranger tier", () => {
   assert.equal(late.verdict!.engaged, false, "120s TTL elapsed — no longer a participant");
   assert.equal(late.spoke, false);
 });
+
+// The bucket map previously grew one entry per guild:user forever — an
+// unbounded leak on a long-lived process. The cap evicts stale windows first
+// (a recreated bucket starts full, so idle members lose nothing), then the
+// insertion-oldest key.
+test("throttle buckets stay bounded — cap evicts instead of growing forever", () => {
+  let now = 1_000_000;
+  const throttle = new ReplyThrottle({ capacity: 1, refillMs: 60_000, now: () => now });
+  const inner = (throttle as unknown as { buckets: Map<string, unknown> }).buckets;
+  for (let i = 0; i < 5000; i++) {
+    assert.equal(throttle.consume("g1", `u${i}`), true);
+    throttle.consume("g1", `u${i}`); // spend the single token → empty fresh bucket
+  }
+  assert.ok(inner.size <= 4096, `buckets grew to ${inner.size}`);
+  // Stale sweep: after the windows age out, a new sender evicts the dead
+  // weight rather than dropping the oldest live bucket.
+  now += 5 * 60_000;
+  assert.equal(throttle.consume("g1", "u-fresh"), true);
+  assert.ok(inner.size <= 4096);
+});

@@ -231,16 +231,26 @@ export function looksLikeSchemaLeak(text: string): boolean {
 // Vault leak guard: the DM→guild bridge injects the owner's private subtext
 // into a server reply prompt. The persona is instructed never to disclose it,
 // but a prompt rule is not a boundary — if the model echoes a subtext line
-// verbatim, the reply must not send. Compares normalised text; only spans
-// ≥24 chars are evidence — short generic phrases can legitimately recur in
-// server talk.
+// verbatim, the reply must not send. Two passes: a verbatim substring match,
+// then a token-overlap pass that catches close paraphrases (same fact
+// reworded keeps the same content words). Only lines ≥24 normalised chars
+// with ≥4 signal tokens are evidence — short generic phrases can
+// legitimately recur in server talk.
 export function containsPrivateSubtext(reply: string, subtext?: string): boolean {
   if (!subtext) return false;
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const contentTokens = (s: string) => s.split(" ").filter(t => t.length >= 3 && !QUESTION_STOPWORDS.has(t));
   const replyNorm = norm(reply);
+  const replyTokens = new Set(contentTokens(replyNorm));
   for (const line of subtext.split("\n")) {
     const content = norm(line.replace(/^-\s*\[[^\]]*\]\s*/, ""));
-    if (content.length >= 24 && replyNorm.includes(content)) return true;
+    if (content.length < 24) continue;
+    if (replyNorm.includes(content)) return true;
+    const lineTokens = new Set(contentTokens(content));
+    if (lineTokens.size < 4) continue;
+    let hits = 0;
+    for (const t of lineTokens) if (replyTokens.has(t)) hits++;
+    if (hits / lineTokens.size >= 0.7) return true;
   }
   return false;
 }

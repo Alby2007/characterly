@@ -125,3 +125,38 @@ test("reply appends imageContext to the situation", async () => {
     'Alice attached image — content observed by the bot: "a dog on a beach"');
   assert.match(capture.chat.messages[0].content, /content observed by the bot: "a dog on a beach"/);
 });
+
+// BYOK providers without structured output (Ollama, llama.cpp, many proxies)
+// reject response_format outright — the chatCreate seam must strip it and
+// retry bare, the same contract chatContent has always had. describeImage
+// stands in for every batch method routed through the seam.
+test("describeImage retries without response_format when the provider rejects it", async () => {
+  const sent: any[] = [];
+  const flaky = {
+    responses: { create: async () => ({ output_text: "{}" }) },
+    chat: { completions: { create: async (p: any) => {
+      sent.push(p);
+      if (p.response_format) throw new Error("400 Bad Request: response_format not supported");
+      return { choices: [{ message: { content: '{"description":"a dog","category":"photo"}' } }] };
+    } } },
+  } as LlmClient;
+  const brain = new Brain("k", "m", undefined, flaky);
+  const out = await brain.describeImage({ url: "https://cdn.example/x.png" }, "m", undefined, okFetch);
+  assert.equal(out.description, "a dog");
+  assert.equal(sent.length, 2, "strict attempt then one bare retry");
+  assert.equal(sent[1].response_format, undefined, "retry drops response_format");
+});
+
+// A non-format rejection must NOT fall back — retrying a 401/quota error
+// without response_format just doubles the failure and hides the real cause.
+test("describeImage does not retry on non-format errors", async () => {
+  const flaky = {
+    responses: { create: async () => ({ output_text: "{}" }) },
+    chat: { completions: { create: async () => { throw new Error("401 unauthorized"); } } },
+  } as LlmClient;
+  const brain = new Brain("k", "m", undefined, flaky);
+  await assert.rejects(
+    brain.describeImage({ url: "https://cdn.example/x.png" }, "m", undefined, okFetch),
+    /401/,
+  );
+});

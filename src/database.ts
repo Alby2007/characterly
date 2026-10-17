@@ -470,6 +470,20 @@ export class MemoryStore {
     });
   }
 
+  /** Id-only variants for DM deletes/updates — Discord gives us no guild for
+   *  those events (and may not even give the author on a partial), but message
+   *  ids are globally unique snowflakes, so scoping by id alone is exact. */
+  async updateMessageContentById(messageId: string, content: string): Promise<void> {
+    await this.sql`UPDATE messages SET content = ${content} WHERE id = ${messageId}`;
+  }
+
+  async deleteMessageById(messageId: string): Promise<void> {
+    await this.sql.begin(async sql => {
+      await sql`DELETE FROM messages WHERE id = ${messageId}`;
+      await sql`UPDATE memory_evidence SET quote = '', message_content_snapshot = '' WHERE message_id = ${messageId}`;
+    });
+  }
+
   // ── Members ────────────────────────────────────────────────────────────────
   // The members table is the member registry: one row per (guild, user) tracking every
   // display name observed, message counts, and first/last activity. It backs the
@@ -2098,13 +2112,20 @@ export class MemoryStore {
 
   // Admin triage view: the last N memories written for the guild across all
   // subjects, with the best display label we have (member name > extracted
-  // subject name > raw id).
-  async recentMemories(guildId: string, limit = 15): Promise<Array<Memory & { subjectLabel: string }>> {
+  // subject name > raw id). opts.consentedOnly applies the same subject gate
+  // the recall paths use (server facts or opted-in members only) — required
+  // for anything that leaves the guild, like the private-DM digest.
+  async recentMemories(guildId: string, limit = 15, opts?: { consentedOnly?: boolean }): Promise<Array<Memory & { subjectLabel: string }>> {
     const rows = await this.sql<Array<MemoryRow & { subject_label: string }>>`
       SELECT m.*, COALESCE(NULLIF(mb.known_names[1], ''), NULLIF(m.subject_name, ''), m.subject_id) AS subject_label
       FROM memories m
       LEFT JOIN members mb ON mb.guild_id = m.guild_id AND mb.user_id = m.subject_id
       WHERE m.guild_id = ${guildId}
+        ${opts?.consentedOnly
+          ? this.sql`AND (m.subject_id = 'server' OR m.subject_id IN
+              (SELECT user_id FROM members
+               WHERE guild_id = ${guildId} AND opted_in = 1 AND opted_out = 0))`
+          : this.sql``}
       ORDER BY m.created_at DESC, m.id DESC
       LIMIT ${limit}
     `;
@@ -2515,11 +2536,23 @@ export class MemoryStore {
     return rows.map(r => r.guild_id);
   }
 
-  async listActiveDmScopes(): Promise<string[]> {
-    const rows = await this.sql<Array<{ owner_user_id: string }>>`
-      SELECT DISTINCT owner_user_id FROM companions WHERE onboarding_state = 'active'
+  /** Every dm: scope that holds data — NOT just fully-awakened companions.
+   *  A user who starts awakening and abandons it still has archived messages
+   *  (and possibly evidence verbatim) under dm:<uid>; scoping the sweep to
+   *  'active' companions retained those rows forever. */
+  async listDmScopes(): Promise<string[]> {
+    const rows = await this.sql<Array<{ guild_id: string }>>`
+      SELECT guild_id FROM (
+        SELECT DISTINCT guild_id FROM messages WHERE guild_id LIKE 'dm:%'
+        UNION
+        SELECT DISTINCT guild_id FROM members WHERE guild_id LIKE 'dm:%'
+        UNION
+        SELECT DISTINCT guild_id FROM server_settings WHERE guild_id LIKE 'dm:%'
+        UNION
+        SELECT DISTINCT ('dm:' || owner_user_id) AS guild_id FROM companions
+      ) scopes
     `;
-    return rows.map(r => `dm:${r.owner_user_id}`);
+    return rows.map(r => r.guild_id);
   }
 
   // ── Companion marketplace (v34) ────────────────────────────────────────────

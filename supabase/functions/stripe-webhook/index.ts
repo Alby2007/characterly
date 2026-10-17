@@ -70,10 +70,13 @@ Deno.serve(async (request) => {
 
   // Payment links are public — a forwarded or bare link loses the
   // client_reference_id. Fall back to the email typed at checkout so the
-  // purchase still lands instead of vanishing into a silent no-op.
-  const accountForSession = async (s: Record<string, any>): Promise<string | null> => {
+  // purchase still lands instead of vanishing into a silent no-op — but only
+  // for token packs: a mistyped/forged email on a premium checkout would
+  // otherwise flip a stranger's plan, and every legit premium session minted
+  // by create-checkout always carries client_reference_id anyway.
+  const accountForSession = async (s: Record<string, any>, allowEmailFallback: boolean): Promise<string | null> => {
     if (isUuid(s.client_reference_id)) return s.client_reference_id;
-    const email = s.customer_details?.email;
+    const email = allowEmailFallback ? s.customer_details?.email : null;
     if (!email) return null;
     return await must(
       sb.rpc("account_id_for_email", { p_email: email }),
@@ -88,12 +91,15 @@ Deno.serve(async (request) => {
         const s = event.data.object;
         const action = classifyCheckout(s as never, { packLinks: PACK_LINKS, premiumLink: PREMIUM_LINK, packMeta: PACK_META });
         if (action.kind === "ignore") break;
-        const accountId = await accountForSession(s);
+        const accountId = await accountForSession(s, action.kind === "pack");
         if (!accountId) {
           // Permanent — nothing to credit. Log so the paid-but-unattributed
           // session is visible in function logs instead of silently acked.
+          // The email is masked: function logs are operator-visible but the
+          // address isn't needed to investigate — the session id is.
+          const maskedEmail = String(s.customer_details?.email ?? "none").replace(/(.).*(@.*)/, "$1***$2");
           console.error(
-            `checkout ${s.id}: no account (client_reference_id=${s.client_reference_id}, email=${s.customer_details?.email ?? "none"})`,
+            `checkout ${s.id}: no account (client_reference_id=${s.client_reference_id}, email=${maskedEmail})`,
           );
           break;
         }
@@ -161,13 +167,15 @@ Deno.serve(async (request) => {
       }
 
       case "charge.refunded": {
-        // Audit-only: a zero-delta adjust row makes the refund visible in the
-        // ledger and ops queries. Tokens aren't clawed back automatically —
-        // charge events don't carry the session→pack mapping.
+        // clawback_pack debits the account's newest unrefunded pack and writes
+        // the refund ledger row under the account lock — tokens a buyer
+        // already spent drive the balance negative so the next grants repay
+        // the debt. With no purchase left to claw it still writes the
+        // zero-delta audit row (e.g. subscription charge refunds).
         const ch = event.data.object;
         const acct = ch.customer
           ? await must(
-            sb.from("web_profiles").select("id, credit_balance").eq("stripe_customer_id", ch.customer).maybeSingle(),
+            sb.from("web_profiles").select("id").eq("stripe_customer_id", ch.customer).maybeSingle(),
             "refund lookup",
           )
           : null;
@@ -175,15 +183,11 @@ Deno.serve(async (request) => {
           console.error(`charge.refunded ${ch.id}: unmapped customer ${ch.customer}`);
           break;
         }
-        const { error } = await sb.from("credit_ledger").insert({
-          account_id: acct.id,
-          delta: 0,
-          kind: "adjust",
-          reason: `stripe_refund:${ch.id}`,
-          stripe_ref: `refund:${ch.id}`, // dedupes redelivered refund events
-          balance_after: acct.credit_balance,
-        });
-        if (error && error.code !== "23505") throw new Error(`refund audit: ${error.message}`);
+        const res = await must(
+          sb.rpc("clawback_pack", { p_account: acct.id, p_charge: ch.id }),
+          "clawback_pack",
+        );
+        if (!res?.ok) console.error(`clawback_pack rejected ${ch.id}: ${JSON.stringify(res)}`);
         break;
       }
 

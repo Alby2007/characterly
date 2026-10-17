@@ -85,6 +85,24 @@ export class Brain {
     return /response_format|json_schema|structured output|not supported/i.test((err as Error)?.message ?? "");
   }
 
+  /** Direct create() for callers that build their own request (batch shapes,
+   *  images, multi-message prompts) — same contract as chatContent: strict
+   *  params first, then a bare retry without response_format when the provider
+   *  rejects it. Every direct structured call must go through this seam —
+   *  routing around it strands BYOK providers that can't do json_schema. */
+  private async chatCreate(params: Record<string, unknown>, client: LlmClient = this.client) {
+    const { response_format, ...rest } = params;
+    if (response_format) {
+      try {
+        return await client.chat.completions.create(params as never);
+      } catch (err) {
+        if (!this.looksLikeFormatRejection(err)) throw err;
+        // Fall through to the bare call — the prompt carries the schema.
+      }
+    }
+    return client.chat.completions.create(rest as never);
+  }
+
   private async chatContent(opts: {
     model?: string; prompt: string; maxTokens?: number; schemaName?: string; schema?: object;
     temperature?: number; reasoningEffort?: "low";
@@ -333,7 +351,7 @@ Two jobs:
     const contextLine = input.contextText?.trim()
       ? ` The sender's own caption was: "${input.contextText.trim()}" — use it only to disambiguate, not as part of the description.`
       : "";
-    const response = await (client ?? this.client).chat.completions.create({
+    const response = await this.chatCreate({
       model,
       messages: [{ role: "user", content: [
         { type: "text", text: `Describe this image factually in one or two sentences: what it depicts, any clearly legible text in it, and its apparent purpose in a Discord conversation. Do not guess at the identity of any person shown.${contextLine}` },
@@ -349,7 +367,7 @@ Two jobs:
           required: ["description", "category"], additionalProperties: false,
         },
       } },
-    });
+    }, client ?? undefined);
     return JSON.parse(response.choices[0].message.content);
   }
 
@@ -558,7 +576,7 @@ Two jobs:
       additionalProperties: false,
     };
 
-    const response = await this.client.chat.completions.create({
+    const response = await this.chatCreate({
       model,
       messages: [{
         role: "user",
@@ -628,7 +646,7 @@ Two jobs:
       ? input.currentAttributes.map(a => `- ${a.field}: ${a.value}`).join("\n")
       : "None";
 
-    const response = await this.client.chat.completions.create({
+    const response = await this.chatCreate({
       model: model ?? this.model,
       messages: [{
         role: "user",
@@ -672,7 +690,7 @@ Two jobs:
       ? input.events.map(e => `- ${e.title} (role: ${e.role})`).join("\n")
       : "None";
 
-    const response = await this.client.chat.completions.create({
+    const response = await this.chatCreate({
       model: model ?? this.model,
       messages: [{
         role: "user",
@@ -723,7 +741,7 @@ Two jobs:
       additionalProperties: false,
     };
 
-    const response = await this.client.chat.completions.create({
+    const response = await this.chatCreate({
       model,
       messages: [{
         role: "user",
@@ -791,7 +809,7 @@ Two jobs:
       additionalProperties: false,
     };
 
-    const response = await this.client.chat.completions.create({
+    const response = await this.chatCreate({
       model,
       messages: [{
         role: "user",
@@ -839,7 +857,7 @@ Two jobs:
       return `[${i}] assertion: "${m.nature}" involving ${m.otherName}\n    source (${m.authorName}${aka}): "${m.sourceMessage.slice(0, 500)}"${ctx}`;
     }).join("\n");
 
-    const response = await this.client.chat.completions.create({
+    const response = await this.chatCreate({
       model,
       messages: [{
         role: "user",
@@ -885,7 +903,7 @@ Two jobs:
   ): Promise<{ confident: boolean; aToBNature: string; bToANature: string; valence: number; reason: string }> {
     model ??= this.model;
     const lines = exchanges.map(e => `${e.authorName}: ${e.content.slice(0, 300)}`).join("\n");
-    const response = await this.client.chat.completions.create({
+    const response = await this.chatCreate({
       model,
       messages: [{
         role: "user",
@@ -933,7 +951,7 @@ Two jobs:
       `${m.label}:\n${m.memories.map(mm => `  [${mm.index}] (${mm.kind}, ${mm.status}) ${mm.content}`).join("\n")}`
     ).join("\n");
 
-    const response = await this.client.chat.completions.create({
+    const response = await this.chatCreate({
       model,
       messages: [{
         role: "user",
@@ -969,7 +987,7 @@ Two jobs:
     model?: string
   ): Promise<Array<{ memoryId: number; relation: "contests" | "confirms"; reason: string }>> {
     const list = memories.map(m => `#${m.id} [${m.status}]: ${m.content}`).join("\n");
-    const response = await this.client.chat.completions.create({
+    const response = await this.chatCreate({
       model: model ?? this.model,
       messages: [{
         role: "user",
@@ -1046,7 +1064,7 @@ Two jobs:
     };
 
     const spec = specs[section];
-    const response = await this.client.chat.completions.create({
+    const response = await this.chatCreate({
       model: model ?? this.model,
       messages: [{
         role: "user",
@@ -1126,7 +1144,7 @@ ${historyLines || "(first message)"}
 Latest message from ${input.ownerName}:
 ${input.userMessage}`;
 
-    const response = await this.client.chat.completions.create({
+    const response = await this.chatCreate({
       model: input.model ?? this.model,
       temperature: 0.85,
       messages: [{ role: "user", content: prompt }],
