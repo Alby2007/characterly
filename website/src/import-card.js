@@ -30,8 +30,8 @@ export function initImportCard({ linked, uid }) {
     drop.hidden = false;
   };
   const reset = () => {
-    pending = null;
     if (pending?.thumbUrl) URL.revokeObjectURL(pending.thumbUrl);
+    pending = null;
     preview.hidden = true;
     drop.hidden = false;
     input.value = "";
@@ -138,6 +138,8 @@ export function initImportCard({ linked, uid }) {
         : /not authenticated/i.test(m) ? "Your session lapsed — refresh and sign in again."
         : /discord not linked/i.test(m) ? "Link Discord above first — companions live in your DMs."
         : /adoption slot full/i.test(m) ? "Your companion roster is full — drop one in Discord (/companion → drop) or go Premium, then try again."
+        : /cooldown/i.test(m) ? "That companion is on a short re-adopt cooldown — they'll be back soon."
+        : /daily adoption/i.test(m) ? "That's a lot of new companions today — try again tomorrow."
         : /import cap/i.test(m) ? "You've reached the import limit — publish or remove some imports first."
         : /name required/i.test(m) ? "That card has no usable name — check the file and try again."
         : "Couldn't finish the import — try again in a moment.";

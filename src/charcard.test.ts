@@ -4,11 +4,9 @@ import { parseCardFile, cardToPersona, cardFileHash, cardImportMeta } from "./ch
 
 const enc = new TextEncoder();
 
-/** Minimal PNG writer for tests: signature + IHDR + tEXt(chara) + IEND. The
- *  parser doesn't validate CRCs, so zero-fill is fine. */
-function cardPng(payloadB64: string, keyword = "chara"): Uint8Array {
-  const kw = enc.encode(keyword);
-  const data = enc.encode(payloadB64);
+/** Minimal PNG writer for tests: signature + IHDR + tEXt(keyword) chunks +
+ *  IEND. The parser doesn't validate CRCs, so zero-fill is fine. */
+function cardPngChunks(texts: [string, string][]): Uint8Array {
   const chunk = (type: string, body: Uint8Array) => {
     const out = new Uint8Array(8 + body.length + 4);
     new DataView(out.buffer).setUint32(0, body.length);
@@ -16,14 +14,18 @@ function cardPng(payloadB64: string, keyword = "chara"): Uint8Array {
     out.set(body, 8);
     return out;
   };
-  const textChunk = chunk("tEXt", new Uint8Array([...kw, 0, ...data]));
+  const textChunks = texts.map(([kw, data]) =>
+    chunk("tEXt", new Uint8Array([...enc.encode(kw), 0, ...enc.encode(data)])));
   const sig = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   const ihdr = chunk("IHDR", new Uint8Array(13));
   const iend = chunk("IEND", new Uint8Array(0));
-  const out = new Uint8Array(sig.length + ihdr.length + textChunk.length + iend.length);
-  out.set(sig); out.set(ihdr, sig.length); out.set(textChunk, sig.length + ihdr.length); out.set(iend, sig.length + ihdr.length + textChunk.length);
+  const parts = [sig, ihdr, ...textChunks, iend];
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let off = 0;
+  for (const p of parts) { out.set(p, off); off += p.length; }
   return out;
 }
+const cardPng = (payloadB64: string, keyword = "chara") => cardPngChunks([[keyword, payloadB64]]);
 
 const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
 
@@ -61,6 +63,15 @@ test("PNG card: tEXt chunk payload round-trips", () => {
   assert.ok(res.ok);
   assert.equal(res.card.name, "Lirael");
   assert.equal(res.card.firstMes, V2.data.first_mes);
+});
+
+test("a corrupt chara chunk doesn't hide a valid ccv3 chunk", () => {
+  // First keyword hits a garbage payload — the parser must keep scanning
+  // instead of returning the first matching keyword.
+  const png = cardPngChunks([["chara", "!!!not-base64-or-json!!!"], ["ccv3", b64(JSON.stringify(V2))]]);
+  const res = parseCardFile(png, "dual.png");
+  assert.ok(res.ok);
+  assert.equal(res.card.name, "Lirael");
 });
 
 test("flat v1 card + CAI Tools aliases", () => {
@@ -112,6 +123,27 @@ test("cardToPersona truncates oversized card fields", () => {
   const p = cardToPersona(res.card);
   assert.ok(p.backstory.length <= 4000);
   assert.ok(p.voicePersona.length <= 2000);
+});
+
+test("{{user}} reads as 'you' in the greeting, 'the user' in persona prose", () => {
+  const card = { name: "N", description: "d", personality: "protects {{user}}", first_mes: "Hi {{user}}!" };
+  const res = parseCardFile(enc.encode(JSON.stringify(card)), "n.json");
+  assert.ok(res.ok);
+  const p = cardToPersona(res.card);
+  assert.equal(p.greeting, "Hi you!");
+  assert.ok(p.voicePersona.includes("the user"));
+});
+
+test("cardImportMeta bounds card-controlled strings", async () => {
+  const card = { name: "N", description: "d", creator: "x".repeat(500), tags: Array(30).fill("t".repeat(60)) };
+  const res = parseCardFile(enc.encode(JSON.stringify(card)), "n.json");
+  assert.ok(res.ok);
+  const meta = cardImportMeta(res.card, { filename: "f".repeat(300), sha256: "s".repeat(200), importedVia: "discord" });
+  assert.ok(meta.creator.length <= 120);
+  assert.ok(meta.filename.length <= 200);
+  assert.ok(meta.sha256.length <= 80);
+  assert.equal(meta.tags.length, 20);
+  assert.ok(meta.tags[0].length <= 40);
 });
 
 test("sha256 hash is deterministic and meta stamps provenance", async () => {

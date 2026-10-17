@@ -459,8 +459,8 @@ export function buildImportPublishModal(listing: CompanionListing): ModalBuilder
     .setLabel("Greeting — first DM the character sends")
     .setStyle(TextInputStyle.Paragraph)
     .setRequired(true)
-    .setMaxLength(1000)
-    .setValue(listing.greeting.slice(0, 1000));
+    .setMaxLength(2000) // imports allow 2000 — don't silently halve long cards
+    .setValue(listing.greeting.slice(0, 2000));
   const coverInput = new TextInputBuilder()
     .setCustomId("listing-cover")
     .setLabel("Cover image URL (optional)")
@@ -1386,6 +1386,12 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       if (!file.url || !isSafeUrl(file.url)) {
         return interaction.reply({ content: "That upload didn't give me a usable file URL — try exporting the card again.", ephemeral: true });
       }
+      // Attachment URLs are Discord-issued, but the fetch still follows
+      // redirects — refuse anything that would resolve inside the network,
+      // same bar as the user-typed cover-image URL.
+      if (await resolvesToPrivateAddress(new URL(file.url).hostname).catch(() => true)) {
+        return interaction.reply({ content: "That upload didn't give me a usable file URL — try exporting the card again.", ephemeral: true });
+      }
       const bytes = await fetch(file.url)
         .then(r => (r.ok ? r.arrayBuffer() : null))
         .then(b => (b ? new Uint8Array(b) : null))
@@ -1410,8 +1416,12 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       }
       const sha256 = await cardFileHash(bytes);
       // The same file re-imported is a no-op — revive/reuse the private row
-      // instead of stacking duplicate companions.
-      const dupe = await store.findUnlistedByHash(interaction.user.id, sha256).catch(() => null);
+      // instead of stacking duplicate companions. Fail-closed: a lookup error
+      // means "unknown", not "no dupe" — proceeding would stack a duplicate.
+      const dupe = await store.findUnlistedByHash(interaction.user.id, sha256).catch(() => undefined);
+      if (dupe === undefined) {
+        return interaction.reply({ content: "Couldn't check your previous imports right now — try again in a moment.", ephemeral: true });
+      }
       if (dupe) {
         const account = await store.accountForDiscordUser(interaction.user.id).catch(() => null);
         const maxSlots = !store.creditsSupported || account?.plan === "premium" ? 1_000_000 : config.freeAdoptionSlots;
@@ -1428,7 +1438,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         if (greeted && res.adoption) await store.markDmIntroduced(res.adoption.id);
         return interaction.reply({
           ephemeral: true,
-          content: `You've already imported this card — **${res.companion.name}** is ${res.reused ? "still on your roster" : "back on your roster"}.${greeted ? " They said hello in your DMs." : ""}`,
+          content: `You've already imported this card — **${escapeMarkdown(res.companion.name)}** is ${res.revived ? "back on your roster" : "already with you"}.${greeted ? " They said hello in your DMs." : ""}`,
         });
       }
       const meta = cardImportMeta(parsed.card, { filename: file.name ?? "card", sha256, importedVia: "discord" });
@@ -1437,6 +1447,9 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         avatarUrl: isPng ? file.url : null,
         expires: Date.now() + PENDING_IMPORT_TTL_MS,
       });
+      // Abandoned previews are only touched again if that user clicks — sweep
+      // expired entries on write so the map can't grow stale entries forever.
+      for (const [k, v] of pendingImports) if (v.expires < Date.now()) pendingImports.delete(k);
       const card = parsed.card;
       const embed = new EmbedBuilder()
         .setTitle(`Import ${persona.name}?`)
@@ -2205,13 +2218,17 @@ export async function handleCompanionModal(
     if (!account) {
       return interaction.reply({ content: `Publishing requires a linked account — create one at ${config.siteUrl} and run \`/link\`.`, ephemeral: true });
     }
+    // An unlisted→active flip is a new public listing — same daily gate as
+    // the awakened publish path (also covers the creator ban).
+    const gateError = await publishGateError(store, userId, true);
+    if (gateError) return interaction.reply({ content: gateError, ephemeral: true });
     const channel = await interaction.client.channels.fetch(config.marketplaceChannelId!).catch(() => null);
     if (!channel || channel.type !== ChannelType.GuildForum) {
       return interaction.reply({ content: "The marketplace channel isn't reachable — tell a moderator to check MARKETPLACE_CHANNEL_ID.", ephemeral: true });
     }
     const name = interaction.fields.getTextInputValue("listing-name").trim().slice(0, 64) || prior.name;
     const tagline = interaction.fields.getTextInputValue("listing-tagline").trim().slice(0, 120);
-    const greeting = interaction.fields.getTextInputValue("listing-greeting").trim().slice(0, 1000);
+    const greeting = interaction.fields.getTextInputValue("listing-greeting").trim().slice(0, 2000);
     const coverField = interaction.fields.getTextInputValue("listing-cover").trim().slice(0, 400);
     let avatarUrl: string | null = null;
     if (coverField) {
@@ -2239,11 +2256,12 @@ export async function handleCompanionModal(
       coreTraits: prior.coreTraits,
       ownerDynamic: prior.ownerDynamic,
       backstory: prior.backstory,
-    }, listingCapFor(store, account));
+    }, listingCapFor(store, account), config.marketPublishDailyCap);
     if (!res.ok) {
       return interaction.reply({
         ephemeral: true,
         content: res.reason === "cap" ? LISTING_CAP_MSG
+          : res.reason === "daily_cap" ? DAILY_PUBLISH_MSG
           : res.reason === "moderated" ? `**${prior.name}** was taken down by a moderator — only they can bring it back.`
           : "That import isn't available to publish anymore.",
       });
@@ -2549,7 +2567,12 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       pendingImports.delete(userId);
       const account = await store.accountForDiscordUser(userId).catch(() => null);
       const maxSlots = !store.creditsSupported || account?.plan === "premium" ? 1_000_000 : config.freeAdoptionSlots;
-      const held = await store.listUnlistedListings(userId).catch(() => []);
+      // Fail-closed: this count IS the import cap on the Discord lane — a
+      // lookup error must not read as "zero imports held".
+      const held = await store.listUnlistedListings(userId).catch(() => null);
+      if (!held) {
+        return interaction.update({ content: "Couldn't check your imports right now — try again in a moment.", components: [] });
+      }
       if (held.length >= config.characterImportCap) {
         return interaction.update({
           content: `You're holding ${config.characterImportCap} imported characters already — publish one to the marketplace or delete one before importing more.`,
@@ -2623,9 +2646,11 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       if (!account) {
         return interaction.reply({ content: `Publishing requires a linked Characterly account — create one at ${config.siteUrl} and run \`/link\` first.`, ephemeral: true });
       }
-      if (await store.creatorBan(userId).catch(() => null)) {
-        return interaction.reply({ content: BANNED_CREATOR_MSG, ephemeral: true });
-      }
+      // Publishing an import produces a NEW public listing — the daily cap
+      // applies just like a fresh awakened publish (publishGateError also
+      // covers the creator ban).
+      const gateError = await publishGateError(store, userId, true);
+      if (gateError) return interaction.reply({ content: gateError, ephemeral: true });
       return interaction.showModal(buildImportPublishModal(listing));
     }
 
@@ -2987,13 +3012,16 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         const modChannel = await interaction.client.channels.fetch(config.marketplaceModChannelId).catch(() => null);
         if (modChannel?.isTextBased() && "send" in modChannel) {
           // Imported personas carry their claimed creator + file hash — a
-          // theft report can be judged against the card's own stamp.
+          // theft report can be judged against the card's own stamp. These
+          // strings are card-author-controlled: escape + cap them, and never
+          // let the content parse mentions (the creator ping is allow-listed).
           const provenance = listing.personaSource === "card_import" && listing.importMeta
-            ? `\nImported card · claimed creator: **${String(listing.importMeta.creator || "unknown")}** · spec: ${String(listing.importMeta.spec || "?")} · sha256: \`${String(listing.importMeta.sha256 || "?").slice(0, 12)}…\``
+            ? `\nImported card · claimed creator: **${escapeMarkdown(String(listing.importMeta.creator || "unknown").slice(0, 120))}** · spec: ${escapeMarkdown(String(listing.importMeta.spec || "?").slice(0, 40))} · sha256: \`${String(listing.importMeta.sha256 || "?").slice(0, 12)}…\``
             : "";
           await (modChannel as TextChannel).send({
+            allowedMentions: { parse: [], users: [listing.creatorUserId] },
             content:
-              `🚩 **${catLabel}** report on **${listing.name}** (id ${listing.id}, creator <@${listing.creatorUserId}>) — ` +
+              `🚩 **${catLabel}** report on **${escapeMarkdown(listing.name)}** (id ${listing.id}, creator <@${listing.creatorUserId}>) — ` +
               `${count} report${count === 1 ? "" : "s"} total${flagged ? " — **auto-flagged, new Adds blocked**" : ""}.${provenance}`,
             components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
               new ButtonBuilder().setCustomId(`market:mod:unflag:${id}`).setLabel("Keep up").setStyle(ButtonStyle.Success),

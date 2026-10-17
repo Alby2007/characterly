@@ -744,3 +744,34 @@ test("migration v42 adds provenance columns; RPC/storage skipped outside Supabas
     assert.equal(gone.length, 0, "clean rollback drops both columns");
   } finally { await sql.end(); }
 });
+
+test("migration v43 adds published_at and backfills live listings only", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any, 42);
+
+    // One already-live listing + one private import, both predating v43.
+    await sql`INSERT INTO companion_listings
+      (creator_user_id, name, tagline, voice_persona, core_traits, owner_dynamic,
+       backstory, greeting, version, status, persona_source, import_meta, created_at, updated_at)
+      VALUES
+      ('u-live', 'Live', 't', 'p', '{}', 'd', 'b', 'hi', 1, 'active', 'authored', NULL, NOW(), NOW()),
+      ('u-priv', 'Priv', 't', 'p', '{}', 'd', 'b', 'hi', 1, 'unlisted', 'card_import',
+       '{"sha256":"y"}'::jsonb, NOW(), NOW())`;
+
+    await runMigrations(sql as any, 43);
+    const rows = await sql<Array<{ name: string; published_at: Date | null }>>`
+      SELECT name, published_at FROM companion_listings ORDER BY name`;
+    const priv = rows.find(r => r.name === "Priv")!;
+    const live = rows.find(r => r.name === "Live")!;
+    assert.equal(priv.published_at, null, "unlisted import has never been published");
+    assert.ok(live.published_at, "live listing backfills published_at");
+
+    await runMigrations(sql as any, 42);
+    const gone = await sql<Array<{ column_name: string }>>`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'companion_listings' AND column_name = 'published_at'`;
+    assert.equal(gone.length, 0, "rollback drops published_at");
+  } finally { await sql.end(); }
+});

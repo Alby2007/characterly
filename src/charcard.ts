@@ -62,12 +62,15 @@ function ascii(b: Uint8Array, off: number, len: number): string {
   return s;
 }
 
-/** Extract the embedded character JSON from a card PNG. Card v2 stores the
- *  payload as base64 in a `tEXt` chunk under the `chara` keyword; v3 uses
+/** Extract every embedded character payload from a card PNG. Card v2 stores
+ *  the payload as base64 in a `tEXt` chunk under the `chara` keyword; v3 uses
  *  `ccv3`. Some tools write an uncompressed `iTXt` instead — supported; zTXt
- *  (compressed) is rare and intentionally skipped. */
-function cardJsonFromPng(bytes: Uint8Array): string | null {
+ *  (compressed) is rare and intentionally skipped. A PNG can carry several
+ *  candidate chunks (a corrupt `chara` next to a valid `ccv3` happens), so we
+ *  return all of them and let the caller try each until one parses. */
+function cardJsonCandidatesFromPng(bytes: Uint8Array): string[] {
   const dec = new TextDecoder();
+  const out: string[] = [];
   let off = 8;
   while (off + 12 <= bytes.length) {
     const len = readU32(bytes, off);
@@ -80,23 +83,26 @@ function cardJsonFromPng(bytes: Uint8Array): string | null {
       while (nul < dataEnd && bytes[nul] !== 0) nul++;
       const keyword = ascii(bytes, dataOff, nul - dataOff).toLowerCase();
       if (keyword === "chara" || keyword === "ccv3") {
+        let text: string | null = null;
         if (type === "tEXt") {
-          return ascii(bytes, nul + 1, dataEnd - nul - 1);
+          text = ascii(bytes, nul + 1, dataEnd - nul - 1);
+        } else {
+          // iTXt: keyword\0 compFlag compMethod lang\0 translated\0 utf8text
+          let p = nul + 1;
+          const compressed = bytes[p] === 1;
+          p += 2;
+          while (p < dataEnd && bytes[p] !== 0) p++; // language tag
+          p++;
+          while (p < dataEnd && bytes[p] !== 0) p++; // translated keyword
+          p++;
+          if (!compressed && p <= dataEnd) text = dec.decode(bytes.subarray(p, dataEnd));
         }
-        // iTXt: keyword\0 compFlag compMethod lang\0 translated\0 utf8text
-        let p = nul + 1;
-        const compressed = bytes[p] === 1;
-        p += 2;
-        while (p < dataEnd && bytes[p] !== 0) p++; // language tag
-        p++;
-        while (p < dataEnd && bytes[p] !== 0) p++; // translated keyword
-        p++;
-        if (!compressed && p <= dataEnd) return dec.decode(bytes.subarray(p, dataEnd));
+        if (text) out.push(text);
       }
     }
     off = dataOff + len + 4;
   }
-  return null;
+  return out;
 }
 
 function b64ToU8(s: string): Uint8Array | null {
@@ -156,25 +162,33 @@ function normalizeCard(raw: unknown): ParsedCard | null {
  *  as JSON (covers .json exports and pasted card text). */
 export function parseCardFile(bytes: Uint8Array, filename = ""): ParseResult {
   if (bytes.length > CARD_MAX_BYTES) return { ok: false, error: "too_large" };
-  let jsonText: string | null = null;
+  const jsonTexts: string[] = [];
   if (isPng(bytes)) {
-    const embedded = cardJsonFromPng(bytes);
-    if (!embedded) return { ok: false, error: "no_card_in_png" };
-    const payload = b64ToU8(embedded);
-    // tEXt payloads are base64; an uncompressed iTXt is already JSON.
-    jsonText = payload ? new TextDecoder().decode(payload) : embedded.trimStart().startsWith("{") ? embedded : null;
-    if (!jsonText) return { ok: false, error: "no_card_in_png" };
+    for (const embedded of cardJsonCandidatesFromPng(bytes)) {
+      const payload = b64ToU8(embedded);
+      // tEXt payloads are base64; an uncompressed iTXt is already JSON.
+      const text = payload ? new TextDecoder().decode(payload) : embedded.trimStart().startsWith("{") ? embedded : null;
+      if (text) jsonTexts.push(text);
+    }
+    if (!jsonTexts.length) return { ok: false, error: "no_card_in_png" };
   } else {
     const head = bytes.length > JSON_MAX_BYTES ? "" : new TextDecoder().decode(bytes).trimStart();
     if (!head || !head.startsWith("{")) return { ok: false, error: "not_a_card" };
-    jsonText = head;
+    jsonTexts.push(head);
   }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(jsonText);
-  } catch {
-    return { ok: false, error: "bad_json" };
+  let raw: unknown = null;
+  let parsed = false;
+  for (const text of jsonTexts) {
+    try {
+      raw = JSON.parse(text);
+      parsed = true;
+      break;
+    } catch {
+      // A corrupt `chara` chunk next to a valid `ccv3` (or vice versa) —
+      // fall through to the next candidate.
+    }
   }
+  if (!parsed) return { ok: false, error: "bad_json" };
   const card = normalizeCard(raw);
   return card ? { ok: true, card } : { ok: false, error: "not_a_card" };
 }
@@ -194,7 +208,9 @@ function firstSentence(s: string, n: number): string {
  *  placeholders are resolved to the card name / a generic "the user". */
 export function cardToPersona(card: ParsedCard): ImportPersona {
   const name = cut(card.name, 64) || "Imported Companion";
-  const fill = (s: string) => s.replace(/\{\{char\}\}/gi, name).replace(/\{\{user\}\}/gi, "the user");
+  // {{user}} reads differently by position: in persona prose it's third-person
+  // ("the user"); in the greeting the character is speaking TO them → "you".
+  const fill = (s: string, user = "the user") => s.replace(/\{\{char\}\}/gi, name).replace(/\{\{user\}\}/gi, user);
   const personality = fill(card.personality);
   const description = fill(card.description);
   const scenario = fill(card.scenario);
@@ -219,7 +235,7 @@ export function cardToPersona(card: ParsedCard): ImportPersona {
     coreTraits: traits,
     ownerDynamic: "Companion",
     backstory: cut(backstory, 4000),
-    greeting: cut(fill(card.firstMes), 2000),
+    greeting: cut(fill(card.firstMes, "you"), 2000),
   };
 }
 
@@ -234,13 +250,16 @@ export function cardImportMeta(
 ): CardImportMeta {
   return {
     source: "character_card",
-    spec: card.spec || "unknown",
-    specVersion: card.specVersion,
-    creator: card.creator,
-    characterVersion: card.characterVersion,
-    tags: card.tags,
-    filename: extra.filename,
-    sha256: extra.sha256,
+    // Card-controlled strings are bounded here — the same caps the web RPC
+    // applies — so a huge `creator` field can't bloat the row or break the
+    // 2,000-char mod-channel alert that prints it.
+    spec: cut(card.spec || "unknown", 40),
+    specVersion: cut(card.specVersion, 20),
+    creator: cut(card.creator, 120),
+    characterVersion: cut(card.characterVersion, 40),
+    tags: card.tags.slice(0, 20).map(t => cut(t, 40)),
+    filename: cut(extra.filename, 200),
+    sha256: cut(extra.sha256, 80),
     importedAt: new Date().toISOString(),
     importedVia: extra.importedVia,
   };

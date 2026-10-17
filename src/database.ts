@@ -2594,24 +2594,25 @@ export class MemoryStore {
           `;
           if (Number(countRows[0].n) >= opts.maxListings) return { ok: false as const, reason: "cap" as const };
         }
-        // The daily publish cap counts genuinely new rows — a revive or a
-        // republish isn't a new listing. Under the same lock so parallel
-        // publishes can't both slide under it.
+        // The daily publish cap counts listings that went LIVE today — a
+        // revive or a republish isn't a new listing, and private unlisted
+        // imports (published_at NULL) never count. Under the same lock so
+        // parallel publishes can't both slide under it.
         if (!existing && opts.maxDailyPublish != null) {
           const dailyRows = await sql<[{ n: number | string }]>`
             SELECT COUNT(*) AS n FROM companion_listings
-            WHERE creator_user_id = ${creatorUserId} AND created_at > NOW() - INTERVAL '1 day'
+            WHERE creator_user_id = ${creatorUserId} AND published_at > NOW() - INTERVAL '1 day'
           `;
           if (Number(dailyRows[0].n) >= opts.maxDailyPublish) return { ok: false as const, reason: "daily_cap" as const };
         }
       }
       const rows = await sql<Array<any>>`
-        INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, avatar_url, forum_thread_id, version, status, created_at, updated_at)
+        INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, avatar_url, forum_thread_id, version, status, published_at, created_at, updated_at)
         VALUES (
           ${creatorUserId}, ${sourceCompanionId},
           ${spec.name}, ${spec.tagline}, ${spec.voicePersona}, ${spec.coreTraits},
           ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${spec.avatarUrl},
-          ${opts.forumThreadId ?? null}, 1, 'active', NOW(), NOW()
+          ${opts.forumThreadId ?? null}, 1, 'active', NOW(), NOW(), NOW()
         )
         ON CONFLICT (source_companion_id) DO UPDATE SET
           name           = EXCLUDED.name,
@@ -2679,18 +2680,19 @@ export class MemoryStore {
         if (opts.maxDailyPublish != null) {
           const dailyRows = await sql<[{ n: number | string }]>`
             SELECT COUNT(*) AS n FROM companion_listings
-            WHERE creator_user_id = ${creatorUserId} AND created_at > NOW() - INTERVAL '1 day'
+            WHERE creator_user_id = ${creatorUserId} AND published_at > NOW() - INTERVAL '1 day'
           `;
           if (Number(dailyRows[0].n) >= opts.maxDailyPublish) return { ok: false as const, reason: "daily_cap" as const };
         }
       }
       const rows = await sql<Array<any>>`
-        INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, avatar_url, version, status, persona_source, import_meta, created_at, updated_at)
+        INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, avatar_url, version, status, persona_source, import_meta, published_at, created_at, updated_at)
         VALUES (
           ${creatorUserId}, NULL,
           ${spec.name}, ${spec.tagline}, ${spec.voicePersona}, ${spec.coreTraits},
           ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${spec.avatarUrl},
-          1, ${status}, ${opts.personaSource ?? "authored"}, ${opts.importMeta ? sql.json(opts.importMeta as never) : null}, NOW(), NOW()
+          1, ${status}, ${opts.personaSource ?? "authored"}, ${opts.importMeta ? sql.json(opts.importMeta as never) : null},
+          CASE WHEN ${status} = 'active' THEN NOW() ELSE NULL END, NOW(), NOW()
         )
         RETURNING *
       `;
@@ -2912,7 +2914,8 @@ export class MemoryStore {
     creatorUserId: string,
     spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
     maxListings: number,
-  ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "not_found" | "not_unlisted" | "cap" | "moderated" }> {
+    maxDailyPublish?: number,
+  ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "not_found" | "not_unlisted" | "cap" | "moderated" | "daily_cap" }> {
     const res = (await this.sql.begin(async sql => {
       await sql`SELECT pg_advisory_xact_lock(hashtext(${`listing:${creatorUserId}`}))`;
       const rows = await sql<Array<any>>`
@@ -2941,6 +2944,15 @@ export class MemoryStore {
         WHERE creator_user_id = ${creatorUserId} AND status <> 'delisted' AND status <> 'unlisted'
       `;
       if (Number(countRows[0].n) >= maxListings) return { ok: false as const, reason: "cap" as const };
+      // Going public counts against the daily publish budget — unlisted
+      // rows have published_at NULL, so this counts only today's flips.
+      if (maxDailyPublish != null) {
+        const dailyRows = await sql<[{ n: number | string }]>`
+          SELECT COUNT(*) AS n FROM companion_listings
+          WHERE creator_user_id = ${creatorUserId} AND published_at > NOW() - INTERVAL '1 day'
+        `;
+        if (Number(dailyRows[0].n) >= maxDailyPublish) return { ok: false as const, reason: "daily_cap" as const };
+      }
       const newVersion = Number(listing.version) + 1;
       const updated = await sql<Array<any>>`
         UPDATE companion_listings SET
@@ -2948,7 +2960,7 @@ export class MemoryStore {
           voice_persona = ${spec.voicePersona}, core_traits = ${spec.coreTraits},
           owner_dynamic = ${spec.ownerDynamic}, backstory = ${spec.backstory},
           greeting = ${spec.greeting}, avatar_url = ${spec.avatarUrl},
-          version = ${newVersion}, status = 'active', updated_at = NOW()
+          version = ${newVersion}, status = 'active', published_at = NOW(), updated_at = NOW()
         WHERE id = ${listingId}
         RETURNING *
       `;
@@ -2962,7 +2974,7 @@ export class MemoryStore {
         ON CONFLICT (listing_id, version) DO NOTHING
       `;
       return { ok: true as const, listing: this.rowToListing(updated[0]) };
-    })) as { ok: true; listing: CompanionListing } | { ok: false; reason: "not_found" | "not_unlisted" | "cap" | "moderated" };
+    })) as { ok: true; listing: CompanionListing } | { ok: false; reason: "not_found" | "not_unlisted" | "cap" | "moderated" | "daily_cap" };
     if (res.ok) await this.propagateListingVersion(res.listing.id);
     return res;
   }
@@ -3186,11 +3198,13 @@ export class MemoryStore {
   }
 
   // Per-UTC-day action counts — the marketplace rate limits derive from
-  // existing rows rather than a dedicated rate table.
+  // existing rows rather than a dedicated rate table. Publish counts
+  // published_at (first time live), not created_at — private unlisted
+  // imports stay out of the publish quota until they're actually published.
   async dailyPublishCount(creatorUserId: string): Promise<number> {
     const rows = await this.sql<[{ n: number | string }]>`
       SELECT COUNT(*) AS n FROM companion_listings
-      WHERE creator_user_id = ${creatorUserId} AND created_at > NOW() - INTERVAL '1 day'
+      WHERE creator_user_id = ${creatorUserId} AND published_at > NOW() - INTERVAL '1 day'
     `;
     return Number(rows[0].n);
   }
@@ -3307,7 +3321,7 @@ export class MemoryStore {
     listingId: number,
     opts: { maxSlots: number; maxDaily?: number },
   ): Promise<
-    | { ok: true; companion: Companion; adoption: CompanionAdoption; reused: boolean }
+    | { ok: true; companion: Companion; adoption: CompanionAdoption; reused: boolean; revived: boolean }
     | { ok: false; reason: "not_found" | "delisted" | "own_listing" | "cap" | "cooldown" | "daily_cap"; cooldownUntil?: string }
   > {
     return this.sql.begin(async sql => {
@@ -3332,7 +3346,7 @@ export class MemoryStore {
       const existing = existingRows[0];
       if (existing && !existing.dropped_at) {
         return {
-          ok: true as const, reused: true,
+          ok: true as const, reused: true, revived: false,
           companion: this.rowToCompanion((await sql<Array<any>>`SELECT * FROM companions WHERE id = ${existing.companion_id}`)[0]),
           adoption: this.rowToAdoption(existing),
         };
@@ -3407,7 +3421,9 @@ export class MemoryStore {
       const companion = this.rowToCompanion(
         (await sql<Array<any>>`SELECT * FROM companions WHERE id = ${companionId}`)[0],
       );
-      return { ok: true as const, companion, adoption, reused: Boolean(existing) };
+      // revived = the adoption row existed but was dropped — "back on your
+      // roster" rather than "still on your roster" (reused) or a fresh add.
+      return { ok: true as const, companion, adoption, reused: Boolean(existing), revived: Boolean(existing?.dropped_at) };
     }) as Promise<any>;
   }
 

@@ -684,7 +684,7 @@ test("daily counters: publish + adopt windows", async () => {
   assert.equal(await store.dailyAdoptCount("u-dca"), 1);
 
   await sql`UPDATE companion_adoptions SET adopted_at = NOW() - INTERVAL '2 days' WHERE user_id = 'u-dca'`;
-  await sql`UPDATE companion_listings SET created_at = NOW() - INTERVAL '2 days' WHERE id = ${listing.id}`;
+  await sql`UPDATE companion_listings SET created_at = NOW() - INTERVAL '2 days', published_at = NOW() - INTERVAL '2 days' WHERE id = ${listing.id}`;
   assert.equal(await store.dailyAdoptCount("u-dca"), 0);
   assert.equal(await store.dailyPublishCount("u-dc"), 0);
 });
@@ -1066,4 +1066,60 @@ test("findUnlistedByHash dedupes; deleteUnlistedListing only removes untouched r
   assert.equal(await store.deleteUnlistedListing(b.listing.id, "u-d"), true);
   const vers = await sql`SELECT COUNT(*) AS n FROM companion_persona_versions WHERE listing_id = ${b.listing.id}`;
   assert.equal(Number(vers[0].n), 0);
+});
+
+test("private imports don't eat the publish quota; publishListing counts the flip", async () => {
+  const { store } = await freshStore();
+  // Two unlisted imports — the daily publish budget is untouched (they
+  // haven't published anything yet; created_at no longer counts).
+  for (const h of ["q1", "q2"]) {
+    const r = await store.createListing("u-q", { ...IMPORT_SPEC, name: h }, {
+      status: "unlisted", personaSource: "card_import", importMeta: { sha256: h },
+    });
+    assert.equal(r.ok, true);
+  }
+  assert.equal(await store.dailyPublishCount("u-q"), 0);
+
+  const [l1, l2] = await store.listUnlistedListings("u-q");
+  const p1 = await store.publishListing(l1.id, "u-q", IMPORT_SPEC, 10, 1);
+  assert.equal(p1.ok, true);
+  assert.equal(await store.dailyPublishCount("u-q"), 1, "the flip stamps published_at");
+  const p2 = await store.publishListing(l2.id, "u-q", IMPORT_SPEC, 10, 1);
+  assert.equal(p2.ok, false);
+  if (!p2.ok) assert.equal(p2.reason, "daily_cap");
+
+  // An import created long ago still counts today — the flip timestamp is
+  // what matters, so staged imports can't dodge the daily cap.
+  const staged = await store.createListing("u-q2", IMPORT_SPEC, {
+    status: "unlisted", personaSource: "card_import", importMeta: { sha256: "old" },
+  });
+  assert.ok(staged.ok);
+  if (!staged.ok) return;
+  await sql`UPDATE companion_listings SET created_at = NOW() - INTERVAL '5 days' WHERE id = ${staged.listing.id}`;
+  const pub = await store.publishListing(staged.listing.id, "u-q2", IMPORT_SPEC, 10, 1);
+  assert.equal(pub.ok, true);
+  assert.equal(await store.dailyPublishCount("u-q2"), 1);
+  const second = await store.createListing("u-q2", { ...IMPORT_SPEC, name: "Second" }, {
+    status: "unlisted", personaSource: "card_import", importMeta: { sha256: "old2" },
+  });
+  assert.ok(second.ok);
+  if (!second.ok) return;
+  const capped = await store.publishListing(second.listing.id, "u-q2", IMPORT_SPEC, 10, 1);
+  assert.equal(capped.ok, false);
+  if (!capped.ok) assert.equal(capped.reason, "daily_cap");
+});
+
+test("adoptListing distinguishes fresh / still-active / revived", async () => {
+  const { store } = await freshStore();
+  const c = await awakenedCompanion(store, "u-rv-c", "RV");
+  const l = await makeListing(store, "u-rv-c", c.id, "RV");
+
+  const fresh = await store.adoptListing("u-rv", l.id, { maxSlots: 5 });
+  assert.ok(fresh.ok && !fresh.reused && !fresh.revived, "first adopt is fresh");
+  const again = await store.adoptListing("u-rv", l.id, { maxSlots: 5 });
+  assert.ok(again.ok && again.reused && !again.revived, "re-click on a live adoption is a no-op reuse");
+  const drop = await store.dropAdoption("u-rv", fresh.ok ? fresh.companion.id : -1, -1);
+  assert.ok(drop);
+  const back = await store.adoptListing("u-rv", l.id, { maxSlots: 5 });
+  assert.ok(back.ok && back.reused && back.revived, "re-adopt after a drop is a revive");
 });
