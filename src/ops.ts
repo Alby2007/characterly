@@ -1035,12 +1035,14 @@ export const WANTED_LAYOUT: Array<{
    *  denies it); "staff" is "everyone" plus send-access for the Mod/Admin
    *  roles. `hidden` is the inverse: @everyone loses ViewChannel on that
    *  channel — used to keep select channels gated inside a visible category.
-   *  `staffModerate` layers Mod/Admin ManageThreads onto a channel — for
+   *  `staffModerate` layers staff ManageThreads onto a channel — for
    *  private-thread surfaces (#support-ticket) where staff must see + join
-   *  threads they aren't members of. `memberThreads` lets the Member role
-   *  SEND inside threads while every create stays denied — #adoptees, where
-   *  adopters chat in private threads only the bot opens. */
-  channels: Array<{ name: string; type: ChannelType; readOnly?: true | "member" | "everyone" | "staff"; hidden?: true; staffModerate?: true; memberThreads?: true }>;
+   *  threads they aren't members of. `true` grants all house staff roles; a
+   *  string[] narrows the grant (unlisted staff roles get the bits revoked).
+   *  `memberThreads` lets the Member role SEND inside threads while every
+   *  create stays denied — #adoptees, where adopters chat in private
+   *  threads only the bot opens. */
+  channels: Array<{ name: string; type: ChannelType; readOnly?: true | "member" | "everyone" | "staff"; hidden?: true; staffModerate?: true | string[]; memberThreads?: true }>;
 }> = [
   {
     category: "SYSTEM",
@@ -1061,7 +1063,7 @@ export const WANTED_LAYOUT: Array<{
       { name: "characters", type: ChannelType.GuildForum },
       // Adopted companions' private chat threads — members talk inside
       // threads the bot opens for them; the channel itself is silent.
-      { name: "adoptees", type: ChannelType.GuildText, readOnly: "everyone", staffModerate: true, memberThreads: true },
+      { name: "adoptees", type: ChannelType.GuildText, readOnly: "everyone", staffModerate: ["Admin"], memberThreads: true },
     ],
   },
   {
@@ -1192,17 +1194,32 @@ async function ensureMemberThreadChat(ch: GuildChannelLike, created: string[], l
     .catch(() => {});
 }
 
-/** Mod/Admin get ManageThreads on a surface — private ticket threads are
+/** Granted staff roles get ManageThreads on a surface — private threads are
  *  only visible to members + ManageThreads holders, and the house roles may
  *  not carry the perm guild-wide. SendMessagesInThreads lets staff reply
- *  once joined; ViewChannel is already covered but cheap to restate. */
-async function ensureStaffModerate(ch: GuildChannelLike, created: string[], label: string, guild: GuildLike): Promise<void> {
+ *  once joined; ViewChannel is already covered but cheap to restate. House
+ *  staff roles NOT in grantNames get the managed bits denied — a convergent
+ *  revoke, so narrowing a surface's grant list actually narrows it on the
+ *  next reconcile (an explicit deny also wins over later stray allows). */
+const HOUSE_STAFF_ROLES = ["Mod", "Admin"] as const;
+async function ensureStaffModerate(
+  ch: GuildChannelLike, created: string[], label: string, guild: GuildLike,
+  grantNames: readonly string[] = HOUSE_STAFF_ROLES,
+): Promise<void> {
   const overwrites = ch.permissionOverwrites;
   if (typeof overwrites?.edit !== "function") return;
-  for (const name of ["Mod", "Admin"]) {
+  for (const name of HOUSE_STAFF_ROLES) {
     const role = guild.roles?.cache?.find(r => normName(r.name) === normName(name));
     if (!role) continue;
     const cur = [...(overwrites.cache ?? [])].find(o => o.id === role.id);
+    if (!grantNames.some(n => normName(n) === normName(name))) {
+      if (cur && (permHas(cur.allow, PermissionFlagsBits.ManageThreads) || permHas(cur.allow, PermissionFlagsBits.SendMessagesInThreads))) {
+        await overwrites.edit(role.id, { ManageThreads: false, SendMessagesInThreads: false })
+          .then(() => { created.push(`🔒 ${label} → ${name} thread perms revoked`); })
+          .catch(() => {});
+      }
+      continue;
+    }
     if (cur && permHas(cur.allow, PermissionFlagsBits.ManageThreads)) continue;
     await overwrites.edit(role.id, { ViewChannel: true, SendMessagesInThreads: true, ManageThreads: true })
       .then(() => { created.push(`🧵 ${label} → ${name} manages threads`); })
@@ -1276,7 +1293,7 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
       // @everyone ViewChannel deny (desyncing it), so it stays gated until
       // the Member role lands while its siblings stay readable.
       if (target && wanted.hidden) await ensureHiddenFromEveryone(target, created, `#${wanted.name}`, guild.id);
-      if (target && wanted.staffModerate) await ensureStaffModerate(target, created, `#${wanted.name}`, guild);
+      if (target && wanted.staffModerate) await ensureStaffModerate(target, created, `#${wanted.name}`, guild, wanted.staffModerate === true ? undefined : wanted.staffModerate);
       if (target && wanted.memberThreads) await ensureMemberThreadChat(target, created, `#${wanted.name}`, config.houseMemberRoleId);
     }
   }
@@ -1346,7 +1363,7 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
   },
   {
     channel: "privacy-policy",
-    version: 3,
+    version: 4,
     embeds: () => [new EmbedBuilder()
       .setTitle("Privacy — the short version")
       .setDescription(
@@ -1358,7 +1375,7 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
         "• **Personal memory is opt-in** — derived facts, profile attributes, and relationship notes only exist for members who run `/profile-build` or `/opt-in`\n" +
         "• **Retention is bounded** — raw messages are held 30 days, then permanently deleted\n" +
         "• **Companion memory is yours** — your bond memories stay private to you and never leak into servers or other users' companions\n" +
-        "• **Adoptee chats are private, not staff-blind** — companions you adopt chat in private `#adoptees` threads; unlike DMs, Discord private threads are also visible to house moderators (safety + support only, no automod inside)\n" +
+        "• **Adoptee chats are private, not staff-blind** — companions you adopt chat in private `#adoptees` threads; unlike DMs, Discord private threads are also visible to server admins (safety + support only, no automod inside — mods can't see them)\n" +
         "• **You hold the delete key** — `/opt-out` wipes derived data, `/forget` removes one memory, `/memory-export` shows everything held\n" +
         "• **Removing the bot wipes the server** — every row it stored there goes with it",
       )],

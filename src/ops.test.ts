@@ -832,6 +832,13 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
     assert.ok(e, `#support-ticket needs a ManageThreads allow for ${rid}`);
     assert.equal(e!.perms.ManageThreads, true, "staff see + join ticket threads");
   }
+  // #adoptees narrows staffModerate to Admin only — Mods must never hold
+  // ManageThreads there (private adoptee chats are admin-visible only).
+  const adopteeAdmin = edits.find(e => e.target === "adoptees" && e.id === "r-admin");
+  assert.ok(adopteeAdmin, "#adoptees needs a ManageThreads allow for Admin");
+  assert.equal(adopteeAdmin!.perms.ManageThreads, true, "admins can see + moderate adoptee threads");
+  assert.ok(!edits.some(e => e.target === "adoptees" && e.id === "r-mod" && e.perms.ManageThreads === true),
+    "Mod must not be granted ManageThreads on #adoptees");
   // #characterly-web is staff-posted: @everyone visible-silent, Mod+Admin write.
   const webLock = edits.find(e => e.target === "characterly-web" && e.id === "g-house");
   assert.ok(webLock, "#characterly-web needs the @everyone visible-silent overwrite");
@@ -866,6 +873,38 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
   const second = await ensureHouseLayout(guild as any);
   assert.equal(edits.length, 0, "second run must not re-write overwrites");
   assert.deepEqual(second, []);
+});
+
+test("staffModerate grant list: stale Mod thread perms on #adoptees get revoked", async () => {
+  // The Admin-only grant must be convergent — a pre-existing broad Mod
+  // overwrite on the channel gets its managed bits denied on reconcile.
+  const edits: Array<{ id: string; perms: Record<string, unknown> }> = [];
+  const managed = PermissionFlagsBits.ManageThreads | PermissionFlagsBits.SendMessagesInThreads;
+  const adopteesOws = [{ id: "r-mod", allow: 1024n | managed, deny: 0n }];
+  const adoptees = {
+    id: "c-adoptees", name: "adoptees", type: 0, parentId: "cat-market", permissionsLocked: false,
+    permissionOverwrites: {
+      cache: adopteesOws,
+      edit: async (id: string, perms: Record<string, unknown>) => { edits.push({ id, perms }); },
+    },
+  };
+  const guild = {
+    id: HOUSE,
+    channels: {
+      cache: { find: (fn: (c: any) => boolean) =>
+        [adoptees, { id: "cat-market", name: "CHARACTER MARKETPLACE", type: 4 }].find(fn) },
+      create: async (o: any) => ({ id: `n-${o.name}`, ...o }),
+    },
+    roles: { cache: { find: (fn: (r: any) => boolean) => [{ id: "r-mod", name: "Mod" }, { id: "r-admin", name: "Admin" }].find(fn) } },
+  };
+  await ensureHouseLayout(guild as any);
+  const revoke = edits.find(e => e.id === "r-mod");
+  assert.ok(revoke, "stale Mod thread perms should be revoked on #adoptees");
+  assert.equal(revoke!.perms.ManageThreads, false);
+  assert.equal(revoke!.perms.SendMessagesInThreads, false);
+  const grant = edits.find(e => e.id === "r-admin");
+  assert.ok(grant, "Admin keeps the manage grant");
+  assert.equal(grant!.perms.ManageThreads, true);
 });
 
 test("ensureResourcePosts posts marked embeds once; dedupes extras; edits stale in place", async () => {
