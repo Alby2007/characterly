@@ -157,7 +157,7 @@ export function initImportHistory({ linked, uid }) {
       drop.hidden = false;
       done.hidden = false;
       done.innerHTML = data?.reused
-        ? `<strong>${escapeHtml(pending.filename)}</strong> is already imported — it's ${data?.status ?? "in progress"}.`
+        ? `<strong>${escapeHtml(pending.filename)}</strong> is already imported — it's ${escapeHtml(data?.status ?? "in progress")}.`
         : `<strong>${escapeHtml(pending.filename)}</strong> is queued — the companion will read through and keep what mattered. We'll note progress below and in Discord.`;
       pending = null;
       input.value = "";

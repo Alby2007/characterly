@@ -119,8 +119,12 @@ export const unlinkDiscordLink = () => supabase.rpc("unlink_discord");
 
 // ── Profile + identities ─────────────────────────────────────────────────────
 export async function getProfile(userId) {
+  // Named columns only — RLS already scopes the row to the owner, but the
+  // client never needs stripe_customer_id or grant timestamps.
   const { data, error } = await supabase
-    .from("web_profiles").select("*").eq("id", userId).maybeSingle();
+    .from("web_profiles")
+    .select("id, display_name, discord_user_id, discord_username, discord_avatar_url, plan, credit_balance")
+    .eq("id", userId).maybeSingle();
   if (error) throw error;
   return data;
 }
@@ -177,9 +181,9 @@ export const recordConsent = version =>
  * see the email form's checkbox. Call once per authed page load. */
 export async function ensureConsent(currentVersion) {
   const { data, error } = await getConsent();
-  // PGRST202 = RPC missing — the consent infra isn't deployed yet, so there is
-  // nothing to enforce. Fail open rather than lock accounts out mid-rollout.
-  if (error?.code === "PGRST202") return true;
+  // Fail closed: an RPC error (including PGRST202 — consent infra missing)
+  // falls through to the gate, and recording failure surfaces visibly. A
+  // legal acceptance must never be silently skipped.
   if (!error && (data ?? 0) >= currentVersion) return true;
   const gate = document.getElementById("consent-gate");
   if (!gate) return true; // Page without the gate markup — nothing to block on.

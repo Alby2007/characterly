@@ -29,8 +29,12 @@ const PRODUCTS: Record<string, { mode: "payment" | "subscription"; meta: string;
   pack_5000: { mode: "payment", meta: "pack_5000", price: "price_1UQoE6GAOUmNDfnh0egnY8GD", needsPremium: true },
 };
 
-const CORS = {
-  "Access-Control-Allow-Origin": Deno.env.get("SITE_URL") ?? "*",
+// No "*" fallback: an unset SITE_URL means no origin allowance at all — the
+// POST handler 500s without it anyway, and a payment-minting endpoint should
+// never answer preflights from arbitrary origins.
+const SITE = Deno.env.get("SITE_URL")?.trim().replace(/\/+$/, "");
+const CORS: Record<string, string> = {
+  ...(SITE ? { "Access-Control-Allow-Origin": SITE } : {}),
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
@@ -44,7 +48,7 @@ Deno.serve(async (request) => {
   // Secrets paste in with stray whitespace more often than you'd think — a
   // newline in the key makes the Authorization header throw inside fetch().
   const stripeKey = Deno.env.get("STRIPE_SECRET_KEY")?.trim();
-  const site = Deno.env.get("SITE_URL")?.trim().replace(/\/+$/, "");
+  const site = SITE;
   if (!stripeKey || !site) return json({ error: "not configured" }, 500);
 
   const jwt = (request.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
