@@ -6,6 +6,7 @@
 //   DISCORD_APP_PUBLIC_KEY      — app public key (dev portal → General Info)
 //   SUPABASE_URL                — project URL
 //   SUPABASE_SERVICE_ROLE_KEY   — service role key (server-side only)
+//   AVATAR_UPLOAD_SECRET        — shared secret the bot sends on PUT /avatar
 
 import { verifyDiscordSignature, parseDiscordEvent } from "../src/discord-events.ts";
 
@@ -14,9 +15,14 @@ interface Env {
   DISCORD_APP_PUBLIC_KEY?: string;
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
+  AVATAR_UPLOAD_SECRET?: string;
 }
 
 const EVENTS_PATH = "/discord/events";
+const AVATAR_PATH = "/avatar";
+const AVATAR_BUCKET = "companion-avatars";
+const AVATAR_MAX_BYTES = 8 * 1024 * 1024;
+const AVATAR_TYPES = /^image\/(png|jpe?g|webp|gif)$/;
 
 // Baseline hardening for every asset response. CSP notes:
 //  - script-src allows 'self' + the sha256 of the one inline script every page
@@ -52,12 +58,42 @@ export default {
       if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
       return handleDiscordEvent(request, env);
     }
+    if (url.pathname === AVATAR_PATH && request.method === "PUT") {
+      return handleAvatarUpload(request, env);
+    }
     const res = await env.ASSETS.fetch(request);
     const out = new Response(res.body, res);
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) out.headers.set(k, v);
     return out;
   },
 };
+
+/** The bot re-hosts companion images so avatar_url values outlive Discord CDN
+ *  signatures + hotlink rot. Shared-secret auth → public Supabase Storage
+ *  bucket (created lazily — no manual provisioning). */
+async function handleAvatarUpload(request: Request, env: Env): Promise<Response> {
+  if (!env.AVATAR_UPLOAD_SECRET || request.headers.get("x-characterly-secret") !== env.AVATAR_UPLOAD_SECRET) {
+    return new Response("unauthorized", { status: 401 });
+  }
+  const contentType = (request.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  const m = AVATAR_TYPES.exec(contentType);
+  if (!m) return new Response("png/jpeg/webp/gif only", { status: 415 });
+  const body = await request.arrayBuffer();
+  if (!body.byteLength || body.byteLength > AVATAR_MAX_BYTES) return new Response("invalid size", { status: 413 });
+  const base = env.SUPABASE_URL?.replace(/\/+$/, "");
+  if (!base || !env.SUPABASE_SERVICE_ROLE_KEY) return new Response("storage unconfigured", { status: 500 });
+  const auth = { apikey: env.SUPABASE_SERVICE_ROLE_KEY, authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}` };
+  await fetch(`${base}/storage/v1/bucket`, {
+    method: "POST", headers: { ...auth, "content-type": "application/json" },
+    body: JSON.stringify({ id: AVATAR_BUCKET, name: AVATAR_BUCKET, public: true }),
+  }).catch(() => {}); // 409 = exists — ensure, don't error
+  const key = `${crypto.randomUUID()}.${m[1] === "jpeg" || m[1] === "jpg" ? "jpg" : m[1]}`;
+  const up = await fetch(`${base}/storage/v1/object/${AVATAR_BUCKET}/${key}`, {
+    method: "POST", headers: { ...auth, "content-type": contentType, "x-upsert": "true" }, body,
+  });
+  if (!up.ok) return new Response("upload failed", { status: 502 });
+  return Response.json({ url: `${base}/storage/v1/object/public/${AVATAR_BUCKET}/${key}` });
+}
 
 async function handleDiscordEvent(request: Request, env: Env): Promise<Response> {
   const signature = request.headers.get("x-signature-ed25519");

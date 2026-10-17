@@ -17,6 +17,7 @@ import { parseCardFile, cardToPersona, cardImportMeta, cardFileHash, CARD_MAX_BY
 import { parseChatFile, chatImportMeta, chatFileHash, type ParsedChat, type ChatImportMeta } from "./chathist.js";
 import { enqueue, pauseGuildClaims } from "./jobs.js";
 import { sql } from "./db.js";
+import { rehostAvatar } from "./avatars.js";
 
 export const ONBOARDING_ARCHETYPES: Record<
   string,
@@ -824,6 +825,31 @@ function houseInviteRef(): string | null {
   return config.houseInviteUrl ?? config.siteUrl ?? null;
 }
 
+function verifyRef(): string {
+  return config.houseVerifyChannelId ? `<#${config.houseVerifyChannelId}>` : "the gate channel";
+}
+
+/** Verified in-house: Member role or Administrator (the owner never holds
+ *  Member). memberPermissions is authoritative on real interactions — the raw
+ *  API member carries no .permissions; the m.permissions branch covers stubs. */
+function isVerifiedHouseMember(interaction: { member?: unknown; memberPermissions?: { has?(f: bigint): boolean } | null }): boolean {
+  const m = interaction.member as { roles?: { cache?: { has(id: string): boolean } } | string[]; permissions?: { has?(f: bigint): boolean } | null } | null;
+  const raw = m?.roles;
+  const hasMember = Array.isArray(raw)
+    ? raw.includes(config.houseMemberRoleId ?? "")
+    : raw?.cache?.has?.(config.houseMemberRoleId ?? "") ?? false;
+  const hasAdmin = interaction.memberPermissions?.has?.(PermissionFlagsBits.Administrator) === true
+    || m?.permissions?.has?.(PermissionFlagsBits.Administrator) === true;
+  return hasMember || hasAdmin;
+}
+
+/** In-house clicker without Member — threads open read-only until the gate
+ *  card grants the role; every pointer should say so. */
+function needsVerify(interaction: { guildId?: string | null; member?: unknown; memberPermissions?: { has?(f: bigint): boolean } | null }): boolean {
+  if (!isHouse(interaction.guildId) || !config.houseMemberRoleId) return false;
+  return !isVerifiedHouseMember(interaction);
+}
+
 /** Adopt-time thread setup shared by every adoption path — creates/reopens the
  *  private #adoptees thread and lands the greeting. Returns a UI-ready mention
  *  or the fallback the caller should show. */
@@ -839,10 +865,12 @@ async function adopteeThreadResult(
 
 /** Where this adoption's thread lives, for copy — known thread mention, or a
  *  generic pointer when creation failed or the user hasn't joined yet. */
-function adoptPointerCopy(t: { thread?: string; needsInvite?: true }): string {
-  return t.thread ? ` they're waiting for you in ${t.thread}.`
-    : t.needsInvite ? ` join the Characterly server to meet them${houseInviteRef() ? ` — ${houseInviteRef()}` : ""}`
-    : ` I'll open your private thread under #adoptees shortly.`;
+function adoptPointerCopy(t: { thread?: string; needsInvite?: true; needsVerify?: boolean }): string {
+  return t.thread
+    ? ` they're waiting for you in ${t.thread}${t.needsVerify ? ` — verify in ${verifyRef()} to chat` : ""}.`
+    : t.needsInvite
+      ? ` join the Characterly server to meet them${houseInviteRef() ? ` — ${houseInviteRef()}` : ""}${config.houseMemberRoleId ? ` — then verify in ${verifyRef()} to chat` : ""}`
+      : ` I'll open your private thread under #adoptees shortly.`;
 }
 
 export async function summonPickedCompanion(interaction: ChatInputCommandInteraction | ButtonInteraction, companion: Companion, store: MemoryStore) {
@@ -1492,6 +1520,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         }
         avatarUrl = url;
       }
+      avatarUrl = (await rehostAvatar(avatarUrl)) ?? avatarUrl;
       const updated = await store.updateCompanionAvatar(interaction.user.id, avatarUrl);
       if (!updated) {
         return interaction.reply({ content: "You haven't created a companion yet — send me a DM first!", ephemeral: true });
@@ -1631,7 +1660,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
           : {};
         return interaction.reply({
           ephemeral: true,
-          content: `You've already imported this card — **${escapeMarkdown(res.companion.name)}** is ${res.revived ? "back on your roster" : "already with you"}.${adoptPointerCopy(t)}`,
+          content: `You've already imported this card — **${escapeMarkdown(res.companion.name)}** is ${res.revived ? "back on your roster" : "already with you"}.${adoptPointerCopy({ ...t, needsVerify: needsVerify(interaction) })}`,
         });
       }
       const meta = cardImportMeta(parsed.card, { filename: file.name ?? "card", sha256, importedVia: "discord" });
@@ -1815,7 +1844,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         const ad = await store.adoptionForCompanion(c.id).catch(() => null);
         lines.push(ad?.chatThreadId
           ? `• **${c.name}** — <#${ad.chatThreadId}>`
-          : `• **${c.name}** — join the Characterly server to open your thread${houseInviteRef() ? `: ${houseInviteRef()}` : ""}`);
+          : `• **${c.name}** — join the Characterly server to open your thread${houseInviteRef() ? `: ${houseInviteRef()}` : ""}${config.houseMemberRoleId ? ` — then verify in ${verifyRef()} to chat` : ""}`);
       }
       // Adopted-only users can't reach awakening through the DM chat path —
       // surface the affordance here so the permanent bond stays discoverable.
@@ -2654,7 +2683,7 @@ export async function handleCompanionModal(
       if (!isSafeUrl(url) || await resolvesToPrivateAddress(new URL(url).hostname)) {
         return interaction.reply({ content: "That cover image URL isn't a valid public `http(s)` URL.", ephemeral: true });
       }
-      avatarUrl = url;
+      avatarUrl = (await rehostAvatar(url)) ?? url;
     }
     const updated = await store.updateListing(listing.id, userId, {
       name: listing.name, tagline: listing.tagline, voicePersona: listing.voicePersona,
@@ -2806,7 +2835,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       inc("market.imported");
       return interaction.update({
         content:
-          `**${res.companion.name}** is here —${adoptPointerCopy(t)}` +
+          `**${res.companion.name}** is here —${adoptPointerCopy({ ...t, needsVerify: needsVerify(interaction) })}` +
           `\n\n*Imported personas stay private — publishing to the marketplace is a separate choice (\`/companion action:publish\`).*`,
         components: [],
       });
@@ -3205,6 +3234,13 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
             : `You need a linked Characterly account to adopt companions — create one free at ${config.siteUrl} and run \`/link\` in my DMs, then come back.`,
         });
       }
+      // In-house adoptions require Member — adoptee threads live here where
+      // typing is verify-gated; unverified adoption lands a thread you can't
+      // talk in. Administrator bypasses (the owner never holds Member).
+      if (isHouse(interaction.guildId) && config.houseMemberRoleId && !isVerifiedHouseMember(interaction)) {
+        return interaction.reply({ ephemeral: true,
+          content: `Verify first — press **Verify** in ${config.houseVerifyChannelId ? `<#${config.houseVerifyChannelId}>` : "the gate channel"} (linked account or BYOK + Terms), then come back and hit **Add** again.` });
+      }
       // Self-host lane has no billing → no adoption cap; hosted free = FREE_ADOPTION_SLOTS, premium uncapped.
       // The daily anti-farming cap is enforced inside the transaction so
       // parallel Add clicks can't both squeeze under it.
@@ -3344,7 +3380,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         : null;
       const t = await adopteeThreadResult({ adoption, companion, listing, username: interaction.user.username });
       return interaction.update({
-        content: `**${companion.name}** —${adoptPointerCopy(t)}`,
+        content: `**${companion.name}** —${adoptPointerCopy({ ...t, needsVerify: needsVerify(interaction) })}`,
         components: [],
       });
     }

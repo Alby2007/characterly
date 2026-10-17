@@ -5,6 +5,7 @@ import { inc } from "./metrics.js";
 import { logError, redactSecrets } from "./secrets.js";
 import { checkListingFields, checkMessageContent } from "./safety.js";
 import { CURATED_TAGS, marketplaceAssetPath, postListingThread } from "./marketplace.js";
+import { uploadAvatarFile } from "./avatars.js";
 import { SEED_LISTINGS } from "./seed-personas.js";
 import { sendAsCompanionInChannel } from "./webhooks.js";
 import type { MemoryStore } from "./database.js";
@@ -356,12 +357,15 @@ export async function handleHouseButton(interaction: ButtonInteraction): Promise
   if (account === undefined) {
     return interaction.reply({ content: "Couldn't check your account right now — try again in a moment.", ephemeral: true });
   }
-  if (!account) {
+  // BYOK-only users adopt without linking — verify on the strength of a
+  // personal key; consent records against discord_user_id (account_id null).
+  if (!account && !(await deps.store.getGuildKey(`dm:${interaction.user.id}`).catch(() => null))) {
     return interaction.reply({
       content: `No linked Characterly account found — create one free at ${config.siteUrl}, run \`/link\` in the bot's DMs, then click **Verify** again.`,
       ephemeral: true,
     });
   }
+  const accountId = account?.id ?? null;
 
   if (consentClick) {
     // Record the version stamped on THIS button — it's the one the user saw.
@@ -370,7 +374,7 @@ export async function handleHouseButton(interaction: ButtonInteraction): Promise
     const consentVersion = Number(interaction.customId.slice(CONSENT_CUSTOM_ID.length + 1));
     if (Number.isInteger(consentVersion) && consentVersion >= 1) {
       const recorded = await deps.store.recordTosAcceptance(
-        interaction.user.id, account.id, consentVersion, "discord_verify",
+        interaction.user.id, accountId, consentVersion, "discord_verify",
       ).then(() => true).catch(e => {
         inc("ops.consent_error");
         logError("consent record failed", e);
@@ -384,9 +388,9 @@ export async function handleHouseButton(interaction: ButtonInteraction): Promise
   }
 
   // Consent gate — applies to verify clicks AND post-record consent clicks.
-  // account.id is passed so a web-signup acceptance on the linked account
+  // accountId is passed so a web-signup acceptance on the linked account
   // counts here — one acceptance covers the whole product.
-  const acceptance = await deps.store.tosAcceptance(interaction.user.id, account.id).catch(() => undefined);
+  const acceptance = await deps.store.tosAcceptance(interaction.user.id, accountId).catch(() => undefined);
   if (acceptance === undefined) {
     return interaction.reply({ content: "Couldn't check your acceptance status — try again in a moment.", ephemeral: true });
   }
@@ -1769,6 +1773,19 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
             continue;
           }
         }
+        // Avatar retrofit — adoptee threads read coalesce(clone, listing)
+        // avatars, so hosting the seeded cover here gives every existing +
+        // future clone a durable face without touching their rows.
+        if (!listing.avatarUrl && p.coverFile) {
+          const hosted = await uploadAvatarFile(marketplaceAssetPath(p.coverFile) ?? "");
+          const patched = hosted && await deps.store.updateListing(listing.id, deps.botId!, {
+            name: listing.name, tagline: listing.tagline, voicePersona: listing.voicePersona,
+            coreTraits: listing.coreTraits, ownerDynamic: listing.ownerDynamic,
+            backstory: listing.backstory, greeting: listing.greeting, avatarUrl: hosted,
+          }).catch(() => null);
+          results.push(patched ? `· ${p.name} — already listed (avatar hosted)` : `· ${p.name} — already listed`);
+          continue;
+        }
         results.push(`· ${p.name} — already listed`);
         continue;
       }
@@ -1776,7 +1793,10 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
       // screen a user publish would — the standard is the standard.
       const screen = checkListingFields(p);
       if (!screen.ok) { results.push(`✖ ${p.name} — blocked by the listing screen (${screen.field}: ${screen.category})`); continue; }
-      const res = await deps.store.createListing(deps.botId, p).catch(() => null);
+      // Upload the cover art first so the listing carries a durable avatar_url
+      // from birth — Discord CDN URLs expire, the Supabase object doesn't.
+      const hosted = p.coverFile ? await uploadAvatarFile(marketplaceAssetPath(p.coverFile) ?? "") : null;
+      const res = await deps.store.createListing(deps.botId, { ...p, avatarUrl: hosted ?? p.avatarUrl }).catch(() => null);
       if (!res?.ok) { results.push(`✖ ${p.name} — listing create failed`); continue; }
       const threadId = await postListingThread(cardAs, res.listing, deps.store, { tagNames: p.tags, coverFile: p.coverFile });
       if (!threadId) {

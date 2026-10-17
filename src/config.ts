@@ -63,6 +63,10 @@ const env = z.object({
   // Where the public website lives — /link replies point users here to claim
   // their code. Override for self-hosted/front-end forks.
   SITE_URL: z.string().default("https://characterly-website.albertjemmettwaite.workers.dev"),
+  // Durable avatar lane: the website worker's PUT /avatar proxies uploads into
+  // a public Supabase Storage bucket behind this shared secret. Unset = lane
+  // off — every avatar_url set-point keeps the source URL (today's behavior).
+  AVATAR_UPLOAD_SECRET: z.string().optional(),
   // ── Hosted-model credits (user-facing name: "tokens") ───────────────────────
   // Lazy refill: grants apply inside the spend tx when the marker date rolls.
   // Premium is a single 150/day floor — "practically unlimited" for humans but
@@ -211,6 +215,7 @@ export const config = {
   dmLlmDailyCap: env.DM_LLM_DAILY_CAP,
   maxCompanionChainDepth: env.MAX_COMPANION_CHAIN_DEPTH,
   siteUrl: env.SITE_URL,
+  avatarUploadSecret: env.AVATAR_UPLOAD_SECRET,
   // Hosted credits — free/premium daily refill floors, the fleet
   // circuit breaker, the low-balance DM threshold, and the unlinked-prompt
   // cooldown. spendCredits applies grants lazily under the account row lock.

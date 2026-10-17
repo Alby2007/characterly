@@ -56,6 +56,7 @@ import { exec as cpExec } from "node:child_process";
 import { promisify } from "node:util";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { gatherOwnerSubtextForServer, gatherServerDigestForDm } from "./cross-context.js";
+import { rehostAvatar } from "./avatars.js";
 import { defaultEmbedder, vectorLiteral } from "./embeddings.js";
 import type { Companion, CompanionAdoption, CompanionPersona, JournalEntry, MessageEvent, PairContext } from "./types.js";
 
@@ -1036,7 +1037,7 @@ async function handleDmMessage(
       await store.recordMessage(event, replyToId, false, false);
       await store.setTriageResults([{ id: event.messageId, result: "noise" }]);
 
-      const avatarUrl = rawAvatarAttachment?.url ?? existing?.avatarUrl ?? null;
+      const avatarUrl = rawAvatarAttachment?.url ? ((await rehostAvatar(rawAvatarAttachment.url)) ?? rawAvatarAttachment.url) : existing?.avatarUrl ?? null;
       const turn = await brain.runOnboardingTurn({
         ownerName: authorName,
         userMessage: message.content || "(sent an avatar image)",

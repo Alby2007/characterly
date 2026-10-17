@@ -722,7 +722,7 @@ test("market:rateval writes the rating; out-of-range and non-member clicks refus
       const mod = stubButton({ customId: `market:rate:${listing.id}`, userId: "u-mod", admin: true, member: { roles: { cache: { has: () => false } } } });
       await handleMemoryButton(mod.interaction, store);
       assert.match(mod.replies[0]?.content ?? "", /treating you/i);
-    } finally { Object.assign(config, saved); }
+    } finally { config.houseGuildId = saved.g; config.houseMemberRoleId = saved.r; }
   } finally { await sql.end(); }
 });
 
@@ -755,15 +755,15 @@ test("market:commentcat files the report and pings mods with quoted content + mo
       assert.match(JSON.stringify(ping.components), /market:modmsg:(keep|del|timeout)/);
       // The quoted comment must not be able to ping — parse is suppressed.
       assert.deepEqual((ping.allowedMentions as { parse: string[] }).parse, []);
-    } finally { Object.assign(config, saved); }
+
+      // Same reporter re-filing on the same comment is deduped.
+      const again = stubButton({ customId: `market:commentcat:t-1:m-1:hate`, userId: "u-reporter", channels });
+      await handleMemoryButton(again.interaction, store);
+      assert.match(updates_content(again.updates), /already reported/i);
+    } finally { config.marketplaceModChannelId = saved.m; config.marketplaceChannelId = saved.f; }
 
     const row = await store.commentReportFor("m-1");
     assert.equal(row?.authorUserId, "u-author");
-
-    // Same reporter re-filing on the same comment is deduped.
-    const again = stubButton({ customId: `market:commentcat:t-1:m-1:hate`, userId: "u-reporter", channels });
-    await handleMemoryButton(again.interaction, store);
-    assert.match(updates_content(again.updates), /already reported/i);
   } finally { await sql.end(); }
 });
 
@@ -825,7 +825,7 @@ test("market:commentcat refuses forged channel ids — non-marketplace messages 
       const wrongParent = stubButton({ customId: `market:commentcat:t-else:m-x:spam`, userId: "u-r", channels });
       await handleMemoryButton(wrongParent.interaction, store);
       assert.match(updates_content(wrongParent.updates), /only works inside marketplace/i);
-    } finally { Object.assign(config, saved); }
+    } finally { config.marketplaceModChannelId = saved.m; config.marketplaceChannelId = saved.f; }
     assert.equal(modSent.length, 0, "forged reports must never ping mods");
     const rows = await sql`SELECT COUNT(*)::int AS n FROM comment_reports`;
     assert.equal(rows[0].n, 0, "forged reports must never reach the table");
@@ -945,6 +945,47 @@ test("market:add — linked and BYOK-unlinked users adopt; a lookup error says r
   } finally { await sql.end(); }
 });
 
+test("market:add — house members need Member to adopt; Administrator bypasses", async () => {
+  const sql = makeTestSql();
+  try {
+    await webProfilesFixture(sql);
+    const { store } = await makeStore(sql);
+    assert.equal(await store.initCreditsSupport(), true);
+    const listing = await makeListingRow(store, "u-creator-gate4");
+    // Link the clicker so the account gate passes and the Member gate decides.
+    await sql`INSERT INTO web_profiles (id, discord_user_id, plan) VALUES (gen_random_uuid(), 'u-linked-2', 'free')`;
+    await sql`INSERT INTO web_profiles (id, discord_user_id, plan) VALUES (gen_random_uuid(), 'u-owner', 'premium')`;
+
+    const saved = { g: config.houseGuildId, r: config.houseMemberRoleId, v: config.houseVerifyChannelId };
+    config.houseGuildId = "g1"; // stubButton's default guild
+    config.houseMemberRoleId = "r-member";
+    config.houseVerifyChannelId = "c-verify";
+    try {
+      // Unverified member → refused before the adoption lands.
+      const outsider = stubButton({ customId: `market:add:${listing.id}`, userId: "u-linked-2",
+        member: { roles: { cache: { has: () => false } }, permissions: { has: () => false } } });
+      await handleMemoryButton(outsider.interaction, store);
+      assert.match(outsider.replies[0]?.content ?? "", /Verify first/i);
+      assert.match(outsider.replies[0]?.content ?? "", /<#c-verify>/);
+      assert.equal((await store.listCompanionsForUser("u-linked-2")).length, 0, "no adoption while unverified");
+
+      // Member → adoption lands.
+      const member = stubButton({ customId: `market:add:${listing.id}`, userId: "u-linked-2",
+        member: { roles: { cache: { has: (id: string) => id === "r-member" } }, permissions: { has: () => false } } });
+      await handleMemoryButton(member.interaction, store);
+      assert.match(member.replies[0]?.content ?? "", /has joined your companions/);
+      assert.equal((await store.listCompanionsForUser("u-linked-2")).length, 1);
+
+      // Administrator bypass — the owner never holds Member.
+      const listing2 = await makeListingRow(store, "u-creator-gate5", "Shelf3");
+      const admin = stubButton({ customId: `market:add:${listing2.id}`, userId: "u-owner", admin: true,
+        member: { roles: { cache: { has: () => false } } } });
+      await handleMemoryButton(admin.interaction, store);
+      assert.match(admin.replies[0]?.content ?? "", /has joined your companions/);
+    } finally { config.houseGuildId = saved.g; config.houseMemberRoleId = saved.r; config.houseVerifyChannelId = saved.v; }
+  } finally { await sql.end(); }
+});
+
 // ── "Report message" context command ─────────────────────────────────────────
 
 // The report path never touches the store — the dispatcher only needs it for
@@ -1005,7 +1046,7 @@ test("Report message: only marketplace-thread comments are reportable", async ()
     await handleMarketplaceContext(ok.interaction, nullCtxStore);
     assert.equal(ok.replies[0]?.ephemeral, true);
     assert.match(JSON.stringify(ok.replies[0]?.components), /market:commentcat:t-1:m-77:/);
-  } finally { Object.assign(config, saved); }
+  } finally { config.houseGuildId = saved.g; config.marketplaceChannelId = saved.f; }
 });
 
 // ── Marketplace listing tags ─────────────────────────────────────────────────
@@ -1160,7 +1201,7 @@ test("Staff pick — mod toggles the badge on/off; non-mod and non-marketplace r
       assert.deepEqual(off.calls[0], ["tag-genre"]);
       assert.match(mod2.replies[0]?.content ?? "", /Removed/i);
     } finally { await sql.end(); }
-  } finally { Object.assign(config, saved); }
+  } finally { config.houseGuildId = saved.g; config.marketplaceChannelId = saved.f; }
 });
 
 // ── Marketplace: cover image ─────────────────────────────────────────────────

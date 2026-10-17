@@ -3336,7 +3336,7 @@ export class MemoryStore {
   async companionThreadForChannel(threadId: string): Promise<{ adoption: CompanionAdoption; companion: Companion } | null> {
     const rows = await this.sql<Array<any>>`
       SELECT a.*, c.id AS c_id, c.owner_user_id AS c_owner_user_id, c.name AS c_name,
-             c.avatar_url AS c_avatar_url, c.voice_persona AS c_voice_persona,
+             coalesce(c.avatar_url, l.avatar_url) AS c_avatar_url, c.voice_persona AS c_voice_persona,
              c.core_traits AS c_core_traits, c.owner_dynamic AS c_owner_dynamic,
              c.backstory AS c_backstory, c.onboarding_state AS c_onboarding_state,
              c.onboarding_turns AS c_onboarding_turns, c.kind AS c_kind,
@@ -3345,6 +3345,7 @@ export class MemoryStore {
              c.import_meta AS c_import_meta, c.created_at AS c_created_at, c.updated_at AS c_updated_at
       FROM companion_adoptions a
       JOIN companions c ON c.id = a.companion_id
+      LEFT JOIN companion_listings l ON l.id = a.listing_id
       WHERE a.chat_thread_id = ${threadId} AND a.dropped_at IS NULL
     `;
     const r = rows[0];
@@ -3371,7 +3372,7 @@ export class MemoryStore {
   async activeAdoptionsMissingThreads(limit = 10): Promise<Array<{ adoption: CompanionAdoption; companion: Companion; listing: { id: number; greeting: string } | null }>> {
     const rows = await this.sql<Array<any>>`
       SELECT a.*, c.id AS c_id, c.owner_user_id AS c_owner_user_id, c.name AS c_name,
-             c.avatar_url AS c_avatar_url, c.voice_persona AS c_voice_persona,
+             coalesce(c.avatar_url, l.avatar_url) AS c_avatar_url, c.voice_persona AS c_voice_persona,
              c.core_traits AS c_core_traits, c.owner_dynamic AS c_owner_dynamic,
              c.backstory AS c_backstory, c.onboarding_state AS c_onboarding_state,
              c.onboarding_turns AS c_onboarding_turns, c.kind AS c_kind,
@@ -3406,7 +3407,7 @@ export class MemoryStore {
   async adoptionsMissingThreadsForUser(userId: string): Promise<Array<{ adoption: CompanionAdoption; companion: Companion; listing: { id: number; greeting: string } | null }>> {
     const rows = await this.sql<Array<any>>`
       SELECT a.*, c.id AS c_id, c.owner_user_id AS c_owner_user_id, c.name AS c_name,
-             c.avatar_url AS c_avatar_url, c.voice_persona AS c_voice_persona,
+             coalesce(c.avatar_url, l.avatar_url) AS c_avatar_url, c.voice_persona AS c_voice_persona,
              c.core_traits AS c_core_traits, c.owner_dynamic AS c_owner_dynamic,
              c.backstory AS c_backstory, c.onboarding_state AS c_onboarding_state,
              c.onboarding_turns AS c_onboarding_turns, c.kind AS c_kind,

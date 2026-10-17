@@ -67,6 +67,7 @@ function makeDeps(over: Partial<OpsDeps> = {}): OpsDeps & { sent: Array<{ id: st
       queueStats: async () => ({ pending: 2, dead: 1, oldestPendingAt: null }),
       creditsSupported: true,
       accountForDiscordUser: async () => null,
+      getGuildKey: async () => null,
       tosAcceptance: async () => null,
       recordTosAcceptance: async () => {},
     } as unknown as MemoryStore,
@@ -458,6 +459,7 @@ test("house:consent — record failure grants nothing; pending/unlinked refuse",
     store: {
       creditsSupported: true,
       accountForDiscordUser: async () => null,
+      getGuildKey: async () => null,
       recordTosAcceptance: async () => { recordCalls++; },
     } as unknown as MemoryStore,
   }));
@@ -484,6 +486,41 @@ test("house:consent — already-Member clicking accept records and confirms", as
   assert.deepEqual(recorded, [TERMS_VERSION], "re-acceptance still records (self-heal path)");
   assert.equal(member.added.length, 0, "no double role grant");
   assert.match(ix.replies[0].content, /Already verified/);
+});
+
+test("house:verify — BYOK-only users (no account, personal key) verify through consent; accountId null", async () => {
+  const member = makeMember();
+  const recorded: Array<{ user: string; account: string | null; version: number; source: string }> = [];
+  let acceptedVersion = 0;
+  const store = {
+    creditsSupported: true,
+    accountForDiscordUser: async () => null, // never linked — a personal key covers chat
+    getGuildKey: async (scope: string) =>
+      scope === "dm:u1" ? { keyEnc: Buffer.from("k"), keyHint: "h", baseUrl: null, model: null, validatedAt: null } : null,
+    tosAcceptance: async () => acceptedVersion ? { version: acceptedVersion, acceptedAt: "2026-01-01T00:00:00Z" } : null,
+    recordTosAcceptance: async (u: string, a: string | null, v: number, s: string) => {
+      recorded.push({ user: u, account: a, version: v, source: s });
+      acceptedVersion = v;
+    },
+  } as unknown as MemoryStore;
+  initOps(makeDeps({ fetchMember: async () => member, store }));
+
+  // Verify click → no account but a personal key ⇒ consent prompt, not the
+  // "no linked account" refusal.
+  const ix = makeButtonIx();
+  await handleHouseButton(ix as any);
+  assert.equal(member.added.length, 0);
+  assert.match(ix.replies[0].content, /Terms of Service/);
+  assert.doesNotMatch(ix.replies[0].content, /No linked/);
+  assert.equal(recorded.length, 0, "nothing recorded before the consent click");
+
+  // Consent click → acceptance recorded against discord_user_id (account_id
+  // null — there is no web profile to key it on), then Member granted.
+  const ix2 = makeButtonIx({ customId: `house:consent:${TERMS_VERSION}` });
+  await handleHouseButton(ix2 as any);
+  assert.deepEqual(recorded, [{ user: "u1", account: null, version: TERMS_VERSION, source: "discord_verify" }]);
+  assert.deepEqual(member.added, ["r-member"], "BYOK + consent ⇒ Member granted");
+  assert.match(ix2.replies[0].content, /Verified/);
 });
 
 test("member link sweep: unconsented holder is revoked; consent error keeps the role", async () => {

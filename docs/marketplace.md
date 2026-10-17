@@ -220,6 +220,10 @@ Seeding is operator-driven — `/ops action:seedmarket` (house guild or DM,
   what Discord uses as the thread's Gallery View cover. Re-running
   `seedmarket` patches the attachment onto pre-art threads (and swaps it
   when the file changes) — the roster never needs re-posting to refresh art.
+  The same run also pushes each cover through `uploadAvatarFile` into the
+  `companion-avatars` Supabase bucket and writes the durable URL to
+  `listing.avatar_url` (fresh creates carry it from birth; existing rows are
+  patched via `updateListing`).
 
 ## Gallery covers
 
@@ -255,6 +259,19 @@ Three doors, one field (`companion_listings.avatar_url`):
 All URL inputs run `isSafeUrl` + `resolvesToPrivateAddress` — public
 `http(s)` only, no private IPs, no localhost, no unresolvable hosts.
 
+**Durable avatars.** Every `avatar_url` set-point (DM attachment, avatar
+command, cover modal, seed covers) first pipes the source image through the
+website worker's `PUT /avatar` — shared-secret auth (`AVATAR_UPLOAD_SECRET`)
+→ a public `companion-avatars` Supabase Storage bucket — so avatars outlive
+Discord CDN signatures and hotlink rot (`src/avatars.ts`). The lane is
+best-effort: secret unset or any failure keeps the source URL.
+
+**Cover → clone propagation.** The adoptee-thread queries select
+`coalesce(c.avatar_url, l.avatar_url)`: a clone's own avatar wins when set,
+otherwise the listing's covers it — so cover changes reach every existing
+and future adoptee thread with no backfill, on top of
+`propagateListingVersion`'s normal persona sync.
+
 ## Adopting
 
 Forum card → **Add** → `store.adoptListing` in one transaction:
@@ -265,6 +282,13 @@ Forum card → **Add** → `store.adoptListing` in one transaction:
   only own a companion the DM gate refuses to serve. A lookup *error* fails
   soft with a retry prompt — it's never treated as "no account". Self-host
   has no accounts at all, so the gate no-ops there.
+- **Member gate (house only)** — in the house guild, Add also requires the
+  Member role: adoptee threads live where typing is verify-gated, so an
+  unverified adoption would land a thread the adopter can't talk in. The
+  refusal points at the verify channel; Administrator bypasses (the owner
+  never holds Member). Adoptee-thread pointers carry the same hint —
+  `— verify in #… to chat` on `adoptPointerCopy`, `market:talk`, the import
+  paths, and the `action:switch` roster's invite line.
 - **Slot check** — free: `FREE_ADOPTION_SLOTS` active adoptions; Premium:
   uncapped; self-host lane: uncapped (no billing to meter). Enforced
   atomically inside the adoption transaction under a per-user advisory lock:
