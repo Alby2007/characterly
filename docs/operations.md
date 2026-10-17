@@ -130,7 +130,8 @@ SELECT kind, sum(delta) FROM credit_ledger
 | `DATABASE_URL` | VM `.env` | Restart after change; pooler password rotation also rotates the Supabase DB password. |
 | `GROQ_API_KEY` | VM `.env` | Operator fallback key only — BYOK users unaffected. |
 | `KEY_ENCRYPTION_SECRET` | VM `.env` | **Rotating orphans every `guild_keys` row** — users must re-run `/companion action:key`. |
-| Supabase service-role key | nowhere in the repo/site | Publishable key only in `website/src/config.js` (safe by design — RLS enforces). |
+| Supabase service-role key | website worker `cf secret` (`SUPABASE_SERVICE_ROLE_KEY`) | Publishable key only in `website/src/config.js` (safe by design — RLS enforces); the service key is server-side only, used by `/discord/events` → `record_app_install`. Rotate via Supabase → API keys → `cf secret`. |
+| `DISCORD_APP_PUBLIC_KEY` | website worker `cf secret` | App's public key (dev portal → General Information) — verifies Discord's signed webhook events. Rotates with the app key; not secret-grade but required for the endpoint. |
 | `STRIPE_WEBHOOK_SECRET` | Supabase fn secrets | Missing → webhook 500s, Stripe retries; rotating = update endpoint + secret together. |
 | `STRIPE_SECRET_KEY` | Supabase fn secrets | Restricted key (`rk_live_…`, Checkout Sessions write only). Rotate in Stripe → Developers → API keys; no session flow works until re-set. |
 | `SITE_URL` | Supabase fn secrets | Checkout return URLs + CORS origin for `create-checkout`. |
@@ -155,6 +156,21 @@ Listings live in a **forum channel in the hub Discord server**. One-time setup:
 Related env (defaults are sane): `ADOPTION_COOLDOWN_MS=43200000` (12h re-adopt cooldown), `FREE_ADOPTION_SLOTS=1` (Premium is uncapped in code), `FREE_LISTING_SLOTS=2` (live listings per free account — Premium uncapped), `MARKETPLACE_REPORT_FLAG_THRESHOLD=3`, `MARKET_PUBLISH_DAILY_CAP=5` / `MARKET_REPORT_DAILY_CAP=20` / `MARKET_ADOPT_DAILY_CAP=20` (per-UTC-day rate limits), `SAFETY_MODEL` (defaults to `GROQ_MODEL` — the listing/reply classifier).
 
 Moderation policy + runbook (freeze SQL, unban, audit): `docs/moderation.md`.
+
+## Install greeting (v47) — Discord Webhook Events
+
+Users who add the app *to their account* get a welcome DM automatically (no user-first-message needed). Flow: Discord → `POST https://<site>/discord/events` (website worker, Ed25519-verified) → `record_app_install` RPC → `app_installs` → bot sweep DMs the `onboard:start` card (~20s cadence, permanent `greeted_at` dedupe).
+
+One-time setup — **deploy order matters** (Discord health-checks the URL when you save it):
+
+1. `cd website && cf secret DISCORD_APP_PUBLIC_KEY` — the app's **Public Key** from dev portal → General Information (used for Ed25519 verify).
+2. `cf secret SUPABASE_URL` and `cf secret SUPABASE_SERVICE_ROLE_KEY` — same values as the Supabase project; the service key stays server-side only.
+3. `npm run deploy` — ships `website/worker.ts` (assets still serve; only `/discord/events` hits the worker code).
+4. Dev portal → **General Information → Webhooks** → set **Webhook Events URL** to `https://<site-domain>/discord/events` and save. Discord probes it with deliberately invalid signatures — **401 is the correct answer**; a 2xx to a bad sig gets the endpoint removed.
+
+Slash-command registration now tags install contexts (`scopedCommandDefinitions`): DM-safe commands are invocable in the App DM on user installs; server-only commands stay guild-scoped. No portal action needed beyond the URL — but note user installs only grant the `applications.commands` scope, so anything needing a bot scope stays guild-side.
+
+Failure modes: send errors record `attempts`/`last_error` and retry ≤5 (~20s apart); a missing `DISCORD_APP_PUBLIC_KEY` fails the endpoint closed (401); a missing Supabase secret 500s so Discord retries delivery rather than losing the install.
 
 ## Semantic recall (v40) — embeddings via local Ollama
 

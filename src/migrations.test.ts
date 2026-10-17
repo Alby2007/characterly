@@ -855,3 +855,32 @@ test("migration v46 adds server_settings.quiet_channels, rolls back cleanly", as
     assert.equal(gone.length, 0, "rollback should drop quiet_channels");
   } finally { await sql.end(); }
 });
+
+test("migration v47 adds app_installs + record_app_install, guarded rollback", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any);
+
+    // The RPC upserts install events (service-role only in prod — callable
+    // directly here under the test's superuser).
+    await sql`SELECT public.record_app_install('u1', 'authorized', '{"s":1}'::jsonb)`;
+    const [r] = await sql`SELECT event, deauthorized_at FROM app_installs WHERE discord_user_id = 'u1'`;
+    assert.equal(r.event, "authorized");
+    assert.equal(r.deauthorized_at, null);
+
+    await sql`SELECT public.record_app_install('u1', 'deauthorized', '{}'::jsonb)`;
+    const [r2] = await sql`SELECT event, deauthorized_at FROM app_installs WHERE discord_user_id = 'u1'`;
+    assert.equal(r2.event, "deauthorized");
+    assert.ok(r2.deauthorized_at);
+
+    // Guarded rollback: data present → refuse.
+    await assert.rejects(() => runMigrations(sql as any, 46), /v47 rollback refused/);
+    await sql`DELETE FROM app_installs`;
+    await runMigrations(sql as any, 46);
+    const gone = await sql<Array<{ table_name: string }>>`
+      SELECT table_name FROM information_schema.tables
+      WHERE table_schema = 'public' AND table_name = 'app_installs'`;
+    assert.equal(gone.length, 0, "rollback should drop app_installs");
+  } finally { await sql.end(); }
+});

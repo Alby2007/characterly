@@ -3481,6 +3481,82 @@ const migrations: Migration[] = [
       await sql`ALTER TABLE server_settings DROP COLUMN IF EXISTS quiet_channels`;
     },
   },
+  {
+    version: 47,
+    name: "v47_app_installs",
+    up: async (sql) => {
+      // app_installs — the install-greeting ledger. Discord's
+      // APPLICATION_AUTHORIZED / APPLICATION_DEAUTHORIZED webhook events land
+      // here via the website worker (record_app_install RPC, service-role
+      // only); the bot's install-greet sweep DMs a welcome card to every
+      // ungreeted authorized install. greeted_at is permanent — reinstalls
+      // never re-greet.
+      await sql`
+        CREATE TABLE IF NOT EXISTS app_installs (
+          discord_user_id   TEXT PRIMARY KEY,
+          event             TEXT NOT NULL,
+          meta              JSONB,
+          greeted_at        TIMESTAMPTZ,
+          deauthorized_at   TIMESTAMPTZ,
+          attempts          INT NOT NULL DEFAULT 0,
+          last_error        TEXT,
+          created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+      await sql`
+        CREATE INDEX IF NOT EXISTS app_installs_pending
+          ON app_installs (created_at)
+          WHERE greeted_at IS NULL AND deauthorized_at IS NULL
+      `;
+      await sql`ALTER TABLE app_installs ENABLE ROW LEVEL SECURITY`;
+      await sql`
+        CREATE OR REPLACE FUNCTION public.record_app_install(p_user_id text, p_event text, p_meta jsonb)
+        RETURNS void
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = ''
+        AS $body$
+        BEGIN
+          INSERT INTO public.app_installs (discord_user_id, event, meta, deauthorized_at)
+          VALUES (p_user_id, p_event, p_meta,
+                  CASE WHEN p_event = 'deauthorized' THEN NOW() ELSE NULL END)
+          ON CONFLICT (discord_user_id) DO UPDATE SET
+            event = EXCLUDED.event,
+            meta = EXCLUDED.meta,
+            deauthorized_at = EXCLUDED.deauthorized_at,
+            updated_at = NOW();
+        END
+        $body$
+      `;
+      await sql`REVOKE ALL ON FUNCTION public.record_app_install(text, text, jsonb) FROM PUBLIC`;
+      await sql`
+        DO $role$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+            EXECUTE 'REVOKE ALL ON FUNCTION public.record_app_install(text, text, jsonb) FROM anon';
+          END IF;
+          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+            EXECUTE 'REVOKE ALL ON FUNCTION public.record_app_install(text, text, jsonb) FROM authenticated';
+          END IF;
+        END $role$
+      `;
+    },
+    down: async (sql) => {
+      await sql`DROP FUNCTION IF EXISTS public.record_app_install(text, text, jsonb)`;
+      // Same data-decision guard as v41/v42/v44 — don't silently drop the
+      // install ledger.
+      await sql`
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM app_installs) THEN
+            RAISE EXCEPTION 'v47 rollback refused: app installs exist';
+          END IF;
+        END $$
+      `;
+      await sql`DROP TABLE IF EXISTS app_installs`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

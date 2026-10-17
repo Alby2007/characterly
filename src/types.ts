@@ -410,6 +410,21 @@ export type ChatImport = {
   updatedAt: string;
 };
 
+/** A Discord app-install webhook event (v47) — the install-greeting ledger.
+ *  `greetedAt` stays NULL until the bot's install-greet sweep sends the
+ *  welcome DM; `deauthorizedAt` marks revoked installs. */
+export type AppInstall = {
+  discordUserId: string;
+  event: "authorized" | "deauthorized" | string;
+  meta: Record<string, unknown> | null;
+  greetedAt: string | null;
+  deauthorizedAt: string | null;
+  attempts: number;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type CompanionPersona = {
   companionId: number;
   name: string;

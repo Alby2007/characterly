@@ -18,6 +18,7 @@ import {
   handleMemoryCommand,
   handleSetupModal,
   sendAdoptionGreeting,
+  scopedCommandDefinitions,
 } from "./commands.js";
 import { containsPrivateSubtext, looksLikeSchemaLeak, recallTerms, shouldInspectForMemory, toolCues } from "./perception.js";
 import { ConversationTracker } from "./conversation.js";
@@ -39,6 +40,7 @@ import { BudgetExceeded, meteredClient } from "./budget.js";
 import { runExtractJob, type ExtractJobPayload } from "./extract-job.js";
 import { runJournalJob, type JournalJobPayload } from "./journal-job.js";
 import { runChatImportJob, type ChatImportJobPayload } from "./chat-import-job.js";
+import { greetPendingInstalls } from "./install-greet.js";
 import { selectCompanionForTurn } from "./scene-router.js";
 import { sendAsCompanion } from "./webhooks.js";
 import { isSelfHarmSignal, CRISIS_RESPONSE, SAFE_REFUSAL } from "./safety.js";
@@ -263,8 +265,11 @@ client.once(Events.ClientReady, async ready => {
     await init();
   } catch (error) { logError("Startup init failed", error); process.exit(1); }
   try {
-    if (config.guildId) await ready.application.commands.set(commandDefinitions, config.guildId);
-    else await ready.application.commands.set(commandDefinitions);
+    // Guild + user installs (dev portal): DM-safe commands get the App DM
+    // context, server-only ones stay guild-scoped — see scopedCommandDefinitions.
+    const scoped = scopedCommandDefinitions(commandDefinitions);
+    if (config.guildId) await ready.application.commands.set(scoped, config.guildId);
+    else await ready.application.commands.set(scoped);
   } catch (error) { inc("init.commands_error"); logError("Command registration failed", error); }
   // Fire-and-forget: both loops must never reject into the event loop — on
   // Node >=15 an unhandled rejection here is fatal to the process.
@@ -547,6 +552,18 @@ setInterval(() => sweepMissedSignals(SWEEP_WINDOW_MS), SWEEP_INTERVAL_MS).unref(
 // Embedding backfill — bounded batch of NULL-embedding rows per tick, so the
 // pre-v40 corpus and any inline-embed failures converge without a one-shot job.
 setInterval(() => embedBackfill().catch(e => { inc("embed.backfill_error"); logError("embed backfill failed", e); }), SWEEP_INTERVAL_MS).unref();
+
+// Install greeting — app_installs rows land via the Discord webhook-events
+// endpoint; this sweep sends the welcome DM to each ungreeted install.
+const INSTALL_GREET_INTERVAL_MS = 20_000;
+const installGreetDeps = {
+  fetchUser: (userId: string) => client.users.fetch(userId),
+  hasCompanion: async (userId: string) => !!(await store?.getCompanionByOwner(userId).catch(() => null)),
+};
+setInterval(() => {
+  if (!client.isReady()) return;
+  greetPendingInstalls(store, installGreetDeps).catch(e => { inc("install.greet_error"); logError("install greet sweep failed", e); });
+}, INSTALL_GREET_INTERVAL_MS).unref();
 
 /** Backfill embeddings for rows saved before v40 or during embed outages.
  * Bounded batch per sweep tick — large corpora converge over several ticks.

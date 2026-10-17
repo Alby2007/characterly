@@ -540,6 +540,24 @@ A queued/running/finished chat-history import (v44). The normalized transcript l
 
 ---
 
+### `app_installs`
+
+Discord app-install ledger (v47) — one row per Discord user who authorized the app to their account. Written **only** by the `record_app_install` RPC (security definer, revoked from PUBLIC/anon/authenticated — called by the website worker with the service key on verified Webhook Events); read by the bot's install-greet sweep.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `discord_user_id` | TEXT PK | The installer |
+| `event` | TEXT | `authorized` or `deauthorized` — last event wins (upsert) |
+| `meta` | JSONB | Event payload (scopes, timestamp, raw data) |
+| `greeted_at` | TIMESTAMPTZ NULL | Set once the welcome DM lands (or the user already has a companion) — **permanent dedupe: reinstalls never re-greet** |
+| `deauthorized_at` | TIMESTAMPTZ NULL | Set on `APPLICATION_DEAUTHORIZED` — sweep skips |
+| `attempts` / `last_error` | INT / TEXT | Send-retry bookkeeping (sweep caps at 5) |
+| `created_at` / `updated_at` | TIMESTAMPTZ | |
+
+**Index:** partial `app_installs_pending (created_at) WHERE greeted_at IS NULL AND deauthorized_at IS NULL` — the sweep's work list. RLS deny-all. Rollback refuses while rows exist (same guard as v41/v42/v44).
+
+---
+
 ### `web_profiles`
 
 Web account profiles for Supabase Auth users (v26) — the "real life user" half, named `web_profiles` because `profiles` is already the subject-profile table. Only created when the `auth` schema exists (Supabase); plain Postgres skips it.
@@ -844,3 +862,4 @@ Version tracking for the migration system.
 | 44 | `v44_chat_import` | `chat_imports` (transcript → journal distillation pipeline: `turns` cleared at done/failed — distill-and-discard), `companion_journal.source`/`import_id` (import provenance + retraction scope), `kind='bond'` for the pinned "what we were" summary, auth-gated `my_companions`/`my_chat_imports`/`import_chat_history` security-definer RPCs; rollback refuses while imports exist |
 | 45 | `v45_chat_import_undo` | auth-gated `delete_chat_import(p_id)` security-definer RPC — owner-scoped row delete; the `import_id` cascade retracts the distilled journal (the website's Undo button + `/companion action:imports`) |
 | 46 | `v46_quiet_channels` | `server_settings.quiet_channels TEXT[]` — companion silence without blindness: replies and system cards suppressed while archiving/extraction continue; threads inherit via `parentId` |
+| 47 | `v47_app_installs` | `app_installs` (install ledger for the welcome-DM sweep) + `record_app_install` security-definer RPC (service-role only — the website worker's webhook sink); rollback refuses while installs exist |

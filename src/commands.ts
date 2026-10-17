@@ -1079,12 +1079,22 @@ const display = (memory: Memory) => `**#${memory.id} · ${confidence(memory.conf
 type BrainFor = (guildId: string) => Promise<Brain | null>;
 const NO_KEY_MSG = "No AI key is configured yet — connect your personal API key with `/companion action:key` (or `/setup`).";
 
-const SERVER_ONLY_COMMANDS = new Set([
+export const SERVER_ONLY_COMMANDS = new Set([
   "memory-purge", "memory-pause", "memory-resume", "memory-settings",
   "companions-pause", "companions-resume",
   "status", "memory-triage",
   "limits", "ignore-channel", "unignore-channel", "quiet-channel", "unquiet-channel",
 ]);
+
+/** Command definitions with Discord install contexts applied — the app
+ *  supports guild + user installs (dev portal), so DM-safe commands are
+ *  invocable in the App DM (contexts: 0=guild, 1=bot DM; private channels
+ *  (2) deliberately excluded) while server-only ones stay guild-scoped. */
+export function scopedCommandDefinitions<T extends { name: string }>(defs: readonly T[]): T[] {
+  return defs.map(def => SERVER_ONLY_COMMANDS.has(def.name)
+    ? { ...def, integrationTypes: [0], contexts: [0] }
+    : { ...def, integrationTypes: [0, 1], contexts: [0, 1] });
+}
 
 export async function handleMemoryCommand(interaction: ChatInputCommandInteraction, store: MemoryStore, brainFor: BrainFor, evStore?: EventStore, profileStore: ProfileStore = new ProfileStore()) {
   // /ops self-gates on OPS_USER_IDS and house-guild context — dispatch before

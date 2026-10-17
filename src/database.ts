@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto";
-import type { AttributeStatus, ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, EvidenceEffect, EvidenceType, GuildCompanion, JournalCandidate, JournalEntry, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, VerificationVerdict, WebhookMessageRecord } from "./types.js";
+import type { AppInstall, AttributeStatus, ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, EvidenceEffect, EvidenceType, GuildCompanion, JournalCandidate, JournalEntry, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, VerificationVerdict, WebhookMessageRecord } from "./types.js";
 import { sql as defaultSql, type Sql } from "./db.js";
 import { runMigrations } from "./migrations.js";
 import { findMentionedUsers } from "./entity-resolution.js";
@@ -3847,6 +3847,48 @@ export class MemoryStore {
       RETURNING *
     `;
     return rows[0] ? this.rowToChatImport(rows[0]) : null;
+  }
+
+  private rowToAppInstall(r: any): AppInstall {
+    return {
+      discordUserId: r.discord_user_id,
+      event: r.event,
+      meta: r.meta ?? null,
+      greetedAt: r.greeted_at ? ts(r.greeted_at) : null,
+      deauthorizedAt: r.deauthorized_at ? ts(r.deauthorized_at) : null,
+      attempts: Number(r.attempts),
+      lastError: r.last_error ?? null,
+      createdAt: ts(r.created_at),
+      updatedAt: ts(r.updated_at),
+    };
+  }
+
+  /** Authorized-but-ungreeted installs, oldest first — the install-greet
+   *  sweep's work list. Deauthorized and exhausted rows are excluded. */
+  async pendingInstallGreets(limit = 10, maxAttempts = 5): Promise<AppInstall[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM app_installs
+      WHERE greeted_at IS NULL AND deauthorized_at IS NULL
+        AND event = 'authorized' AND attempts < ${maxAttempts}
+      ORDER BY created_at ASC LIMIT ${limit}
+    `;
+    return rows.map(r => this.rowToAppInstall(r));
+  }
+
+  /** Greet sent (or unnecessary — already-companioned): permanent dedupe. */
+  async markInstallGreeted(discordUserId: string): Promise<void> {
+    await this.sql`
+      UPDATE app_installs SET greeted_at = NOW(), updated_at = NOW()
+      WHERE discord_user_id = ${discordUserId}
+    `;
+  }
+
+  async markInstallGreetFailed(discordUserId: string, error: string): Promise<void> {
+    await this.sql`
+      UPDATE app_installs SET attempts = attempts + 1,
+        last_error = ${error.slice(0, 400)}, updated_at = NOW()
+      WHERE discord_user_id = ${discordUserId}
+    `;
   }
 
   async recordWebhookMessage(
