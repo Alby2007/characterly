@@ -49,7 +49,7 @@ import {
   initOps, automodMessage, isHouse, isMarketplaceThread, isAdopteeThread, opsAlert,
   handleHouseMemberAdd, handleHouseMemberUpdate, handleHouseMemberRemove,
   ensureHouseLayout, ensureResourcePosts, ensureTicketPanel, handleTicketModal, startHostWatchdog, ensureVerifyGate, startLinkSweep,
-  startTagSweep, backfillAdopteeThreads,
+  startTagSweep, backfillAdopteeThreads, ensureAdopteeThreadsForUser,
   type OpsDeps, type GuildLike,
 } from "./ops.js";
 import { exec as cpExec } from "node:child_process";
@@ -984,6 +984,36 @@ async function handleDmMessage(
 
   // ── 1:1 DM Conversational Onboarding ───────────────────────────────────────
   if (!isAwakenedCompanionActive(existing)) {
+    // Awakening is opt-in, not a funnel: an adopter who never started the
+    // interview gets pointed at their threads instead of interviewed. A
+    // draft with turns means they're mid-awakening — resume it; a 0-turn
+    // stub draft is abandoned intent and doesn't suppress the pointer.
+    const midInterview = (existing?.onboardingTurns ?? 0) > 0;
+    if (!midInterview) {
+      const adopted = (await store.listCompanionsForUser(userId).catch(() => [] as Companion[]))
+        .filter(c => c.kind === "adopted" && c.onboardingState === "active");
+      if (adopted.length) {
+        // Materialize any missing threads first so the links listed below
+        // are real — joins and screening can defer creation.
+        if (opsDeps) await ensureAdopteeThreadsForUser(userId, opsDeps).catch(() => {});
+        const lines = (await Promise.all(adopted.slice(0, 10).map(async c => {
+          const ad = await store.adoptionForCompanion(c.id).catch(() => null);
+          return ad?.chatThreadId ? `• **${c.name}** — <#${ad.chatThreadId}>` : `• **${c.name}**`;
+        }))).join("\n");
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setCustomId("onboard:start").setLabel("Awaken your own companion").setStyle(ButtonStyle.Primary),
+        );
+        await message.reply({
+          content:
+            `DMs are for the companion you awaken yourself — your adopted companions live in their own threads:\n${lines}\n\n` +
+            "Or press below to awaken a permanent companion — that's the bond that stays yours forever, right here.",
+          components: [row],
+          allowedMentions: { parse: [], repliedUser: false },
+        }).catch(() => {});
+        inc("dm.adoptee_pointer");
+        return;
+      }
+    }
     if (!replyThrottle.consume(dmScope, userId)) { inc("reply.cooldown"); return; }
     try {
       await message.channel.sendTyping();
@@ -1398,7 +1428,7 @@ async function runCompanionTurn(opts: {
     const clean = text ? scrubMentions(text, lookups.names) : "";
     if (clean && looksLikeSchemaLeak(clean)) {
       inc("reply.schema_leak"); replyThrottle.refund(scope, userId);
-      if (chargedDm) refundTurn(userId, 1, "dm_turn_refund");
+      if (chargedDm) refundTurn(userId, chargedDm, "dm_turn_refund");
       return;
     }
     // Adopted companions are third-party authored personas riding our
@@ -1418,7 +1448,7 @@ async function runCompanionTurn(opts: {
         if (verdict.verdict === "flag") {
           inc("safety.reply_flagged");
           dmReplyText = SAFE_REFUSAL;
-          if (chargedDm) { refundTurn(userId, 1, "dm_turn_refund"); chargedDm -= 1; }
+          if (chargedDm) { refundTurn(userId, chargedDm, "dm_turn_refund"); chargedDm = 0; }
         }
       } catch (error) {
         inc("safety.screen_error");
@@ -1430,7 +1460,7 @@ async function runCompanionTurn(opts: {
       if (!sent) {
         inc("reply.send_failed");
         replyThrottle.refund(scope, userId);
-        if (chargedDm) refundTurn(userId, 1, "dm_turn_refund");
+        if (chargedDm) refundTurn(userId, chargedDm, "dm_turn_refund");
         return;
       }
       dmReplied = true;
@@ -1464,7 +1494,7 @@ async function runCompanionTurn(opts: {
     } else {
       inc("reply.empty");
       replyThrottle.refund(scope, userId);
-      if (chargedDm) refundTurn(userId, 1, "dm_turn_refund");
+      if (chargedDm) refundTurn(userId, chargedDm, "dm_turn_refund");
     }
   } catch (error) {
     if (error instanceof BudgetExceeded) {
@@ -1472,7 +1502,7 @@ async function runCompanionTurn(opts: {
       replyThrottle.refund(scope, userId);
       // Only refund the reply-leg if no reply actually landed — a bookkeeping
       // throw after send shouldn't claw back a delivered turn.
-      if (chargedDm && !dmReplied) refundTurn(userId, 1, "dm_turn_refund");
+      if (chargedDm && !dmReplied) refundTurn(userId, chargedDm, "dm_turn_refund");
       if (budgetNoticeOnce(channel.id)) {
         const hostedOut = error.guildId === "hosted:global";
         await sendSystem({ content: hostedOut ? HOSTED_CAPACITY : "We've hit today's DM message limit — it resets at midnight UTC." });
@@ -1482,7 +1512,7 @@ async function runCompanionTurn(opts: {
     inc("llm.reply_error");
     logError("DM reply generation failed", error);
     replyThrottle.refund(scope, userId);
-    if (chargedDm && !dmReplied) refundTurn(userId, 1, "dm_turn_refund");
+    if (chargedDm && !dmReplied) refundTurn(userId, chargedDm, "dm_turn_refund");
   }
 }
 
@@ -1878,7 +1908,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       : clean && containsPrivateSubtext(clean, ownerSubtext) ? "reply.vault_leak" : null;
     if (leak) {
       inc(leak); replyThrottle.refund(event.guildId, throttleActor);
-      if (chargedGuild) refundTurn(payerId, 1, "guild_turn_refund");
+      if (chargedGuild) refundTurn(payerId, chargedGuild, "guild_turn_refund");
       return;
     }
     // Same adopted-companion safety screen as the DM path — flag swaps in a
@@ -1895,7 +1925,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
         if (verdict.verdict === "flag") {
           inc("safety.reply_flagged");
           guildReplyText = SAFE_REFUSAL;
-          if (chargedGuild) { refundTurn(payerId, 1, "guild_turn_refund"); chargedGuild -= 1; }
+          if (chargedGuild) { refundTurn(payerId, chargedGuild, "guild_turn_refund"); chargedGuild = 0; }
         }
       } catch (error) {
         inc("safety.screen_error");
@@ -1906,7 +1936,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       const sent = await sendAsCompanion(message, chosen, guildReplyText, client.user!.id);
       if (!sent) {
         replyThrottle.refund(event.guildId, throttleActor);
-        if (chargedGuild) refundTurn(payerId, 1, "guild_turn_refund");
+        if (chargedGuild) refundTurn(payerId, chargedGuild, "guild_turn_refund");
         return;
       }
       guildReplied = true;
@@ -1934,7 +1964,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       if (chargedGuild) void maybeAlertLowCredit(payerId, guildBalance);
     } else {
       inc("reply.empty"); replyThrottle.refund(event.guildId, throttleActor);
-      if (chargedGuild) refundTurn(payerId, 1, "guild_turn_refund");
+      if (chargedGuild) refundTurn(payerId, chargedGuild, "guild_turn_refund");
     }
     if (config.replyExit && endConversation && convo.leave(selection.convoKey, event.authorId)) {
       inc("convo.leave.model");
@@ -1945,7 +1975,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       replyThrottle.refund(event.guildId, throttleActor);
       // Only refund the reply-leg when no reply landed — a bookkeeping throw
       // after send shouldn't claw back a delivered turn.
-      if (chargedGuild && !guildReplied) refundTurn(payerId, 1, "guild_turn_refund");
+      if (chargedGuild && !guildReplied) refundTurn(payerId, chargedGuild, "guild_turn_refund");
       if (budgetNoticeOnce(event.channelId)) {
         const hostedOut = error.guildId === "hosted:global";
         await message.reply({ content: hostedOut ? HOSTED_CAPACITY : "I've hit this server's daily LLM limit, so I can't respond right now — it resets at midnight UTC. An admin can raise it with `/limits`.", allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
@@ -1954,7 +1984,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     }
     inc("llm.reply_error"); logError("Reply generation failed", error);
     replyThrottle.refund(event.guildId, throttleActor);
-    if (chargedGuild && !guildReplied) refundTurn(payerId, 1, "guild_turn_refund");
+    if (chargedGuild && !guildReplied) refundTurn(payerId, chargedGuild, "guild_turn_refund");
   }
 }
 

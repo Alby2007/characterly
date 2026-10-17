@@ -351,7 +351,7 @@ The mechanics in one paragraph:
   assembled persona.
 - **Reply screening (fail-open)** — adopted companions' replies (thread + guild,
   BYOK + hosted) pass `safetyVerdict` before send; a flag swaps in
-  `SAFE_REFUSAL` and refunds the reply leg.
+  `SAFE_REFUSAL` and refunds the full turn charge.
 - **Self-harm triage** — `isSelfHarmSignal` on every DM and every adoptee
   thread turn; hit → scripted
   `CRISIS_RESPONSE`, no charge, no throttle.
