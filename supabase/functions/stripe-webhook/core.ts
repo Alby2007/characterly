@@ -117,12 +117,14 @@ const DEAD_STATUSES = new Set(["canceled", "unpaid", "paused", "incomplete_expir
 export function classifySubscription(
   sub: SubscriptionLike,
   eventType: string,
-  premiumPriceId: string,
+  premiumPriceIds: ReadonlySet<string>,
 ): SubscriptionAction {
   if (!sub?.id) return { kind: "ignore", why: "no subscription id" };
   // undefined = the event carried no items list (some deleted payloads omit it).
   const items = sub.items?.data;
-  const ours = items ? items.some(i => i?.price?.id === premiumPriceId) : undefined;
+  // Every recurring price on the premium product counts (monthly, yearly) —
+  // a sub is ours if ANY item carries one.
+  const ours = items ? items.some(i => i?.price?.id != null && premiumPriceIds.has(i.price.id)) : undefined;
   // The event name outranks the payload's status field — a deleted event can
   // carry a stale "active" status and must never re-activate.
   if (eventType === "customer.subscription.deleted" || DEAD_STATUSES.has(sub.status ?? "")) {

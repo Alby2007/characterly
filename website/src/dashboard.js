@@ -272,7 +272,7 @@ async function openCheckout(product, btn) {
     btn.textContent = label;
   }
 }
-for (const [sel, product] of [["#btn-subscribe", "premium"], ["#btn-pack-500", "pack_500"], ["#btn-pack-1500", "pack_1500"], ["#btn-pack-5000", "pack_5000"]]) {
+for (const [sel, product] of [["#btn-subscribe", "premium"], ["#btn-subscribe-yearly", "premium_yearly"], ["#btn-pack-750", "pack_750"], ["#btn-pack-2500", "pack_2500"], ["#btn-pack-7500", "pack_7500"]]) {
   $(sel).addEventListener("click", () => { if (!$(sel).disabled) openCheckout(product, $(sel)); });
 }
 
@@ -280,15 +280,18 @@ function renderBilling() {
   const premium = profile?.plan === "premium";
   $("#billing-plan").textContent = premium ? "Premium" : "Free";
   $("#billing-plan").className = premium ? "badge badge-ok" : "badge badge-soon";
+  // A premium user must NOT get another subscription checkout — create-checkout
+  // 409s on one anyway, but both buttons stay visibly off.
   const btn = $("#btn-subscribe");
   btn.classList.toggle("btn-ghost", premium);
-  // A premium user must NOT get another subscription checkout — create-checkout
-  // 409s on one anyway, but the button stays visibly off.
   btn.disabled = premium;
   btn.textContent = premium ? "Premium — active" : "Go Premium — $7.99/mo";
+  const yearly = $("#btn-subscribe-yearly");
+  yearly.disabled = premium;
+  yearly.hidden = premium;
   // Packs are a Premium perk — free accounts get dead buttons, and the
   // function 403s them even if they call it directly.
-  for (const sel of ["#btn-pack-500", "#btn-pack-1500", "#btn-pack-5000"]) $(sel).disabled = !premium;
+  for (const sel of ["#btn-pack-750", "#btn-pack-2500", "#btn-pack-7500"]) $(sel).disabled = !premium;
   $("#pack-note").hidden = premium;
 }
 

@@ -17,6 +17,9 @@ const SECRET = "whsec_test_secret_value";
 const PACK_LINKS = { plink_pack500: 500, plink_pack1500: 1500 };
 const PREMIUM_LINK = "plink_premium";
 const PREMIUM_PRICE = "price_premium";
+// classifySubscription takes every premium price id (monthly + yearly share
+// the same plan effect); the fixture only needs two distinct ids.
+const PREMIUM_PRICES = new Set([PREMIUM_PRICE, "price_premium_yearly"]);
 
 function sign(payload: string, t: number, secret = SECRET): string {
   const v1 = createHmac("sha256", secret).update(`${t}.${payload}`).digest("hex");
@@ -160,27 +163,35 @@ const premiumSub = (status: string, over: Partial<SubscriptionLike> = {}): Subsc
 test("classifySubscription: active/trialing activate, terminal states deactivate", () => {
   for (const s of ["active", "trialing"]) {
     assert.deepEqual(
-      classifySubscription(premiumSub(s), "customer.subscription.updated", PREMIUM_PRICE),
+      classifySubscription(premiumSub(s), "customer.subscription.updated", PREMIUM_PRICES),
       { kind: "activate", subscriptionId: "sub_1", customer: "cus_1" },
       s,
     );
   }
   for (const s of ["canceled", "unpaid", "paused", "incomplete_expired"]) {
     assert.deepEqual(
-      classifySubscription(premiumSub(s), "customer.subscription.updated", PREMIUM_PRICE),
+      classifySubscription(premiumSub(s), "customer.subscription.updated", PREMIUM_PRICES),
       { kind: "deactivate", subscriptionId: "sub_1" },
       s,
     );
   }
   assert.equal(
-    classifySubscription(premiumSub("active"), "customer.subscription.deleted", PREMIUM_PRICE).kind,
+    classifySubscription(premiumSub("active"), "customer.subscription.deleted", PREMIUM_PRICES).kind,
     "deactivate",
   );
 });
 
+test("classifySubscription: the yearly price is premium too", () => {
+  const yearly = premiumSub("active");
+  yearly.items = { data: [{ price: { id: "price_premium_yearly" } }] };
+  assert.equal(classifySubscription(yearly, "customer.subscription.updated", PREMIUM_PRICES).kind, "activate");
+  yearly.status = "canceled";
+  assert.equal(classifySubscription(yearly, "customer.subscription.updated", PREMIUM_PRICES).kind, "deactivate");
+});
+
 test("classifySubscription: dunning statuses keep perks while Stripe retries", () => {
   for (const s of ["past_due", "incomplete"]) {
-    assert.equal(classifySubscription(premiumSub(s), "customer.subscription.updated", PREMIUM_PRICE).kind, "ignore", s);
+    assert.equal(classifySubscription(premiumSub(s), "customer.subscription.updated", PREMIUM_PRICES).kind, "ignore", s);
   }
 });
 
@@ -188,14 +199,14 @@ test("classifySubscription: foreign products and unverifiable items never touch 
   const foreign = premiumSub("active");
   foreign.items = { data: [{ price: { id: "price_other" } }] };
   for (const evt of ["customer.subscription.updated", "customer.subscription.deleted"]) {
-    assert.equal(classifySubscription(foreign, evt, PREMIUM_PRICE).kind, "ignore", evt);
+    assert.equal(classifySubscription(foreign, evt, PREMIUM_PRICES).kind, "ignore", evt);
   }
   // Missing items: an activate can't prove it's ours → ignore; a deactivate is
   // safe because it only matches stored subscription ids we wrote ourselves.
   const bare = { id: "sub_9", customer: "cus_9", status: "active" };
-  assert.equal(classifySubscription(bare, "customer.subscription.updated", PREMIUM_PRICE).kind, "ignore");
+  assert.equal(classifySubscription(bare, "customer.subscription.updated", PREMIUM_PRICES).kind, "ignore");
   assert.equal(
-    classifySubscription({ ...bare, status: "canceled" }, "customer.subscription.deleted", PREMIUM_PRICE).kind,
+    classifySubscription({ ...bare, status: "canceled" }, "customer.subscription.deleted", PREMIUM_PRICES).kind,
     "deactivate",
   );
 });

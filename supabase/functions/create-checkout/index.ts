@@ -18,15 +18,17 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 // Product allowlist — the request names a product, never a price or amount.
-// Catalog price ids (documented in docs/operations.md → Billing); premium
-// must use the existing price because the webhook's classifySubscription
-// verifies subscription events by price id.
+// Catalog price ids (documented in docs/operations.md → Billing); every
+// subscription price must live in the webhook's PREMIUM_PRICE_IDS set or its
+// sub events won't touch `plan`. Both intervals share checkout_kind "premium"
+// — the grant is plan-level, the price only decides what Stripe bills.
 const PREMIUM_PRICE = "price_1UQoE5GAOUmNDfnhulTyoL1o";
 const PRODUCTS: Record<string, { mode: "payment" | "subscription"; meta: string; price: string; needsPremium: boolean }> = {
   premium: { mode: "subscription", meta: "premium", price: PREMIUM_PRICE, needsPremium: false },
-  pack_500: { mode: "payment", meta: "pack_500", price: "price_1UQoE5GAOUmNDfnhwHI9mwm7", needsPremium: true },
-  pack_1500: { mode: "payment", meta: "pack_1500", price: "price_1UQoE6GAOUmNDfnh2W16RjDr", needsPremium: true },
-  pack_5000: { mode: "payment", meta: "pack_5000", price: "price_1UQoE6GAOUmNDfnh0egnY8GD", needsPremium: true },
+  premium_yearly: { mode: "subscription", meta: "premium", price: "price_1URprSGAOUmNDfnhEoiONeTP", needsPremium: false },
+  pack_750: { mode: "payment", meta: "pack_750", price: "price_1URprQGAOUmNDfnhYd3Zpl7d", needsPremium: true },
+  pack_2500: { mode: "payment", meta: "pack_2500", price: "price_1URprRGAOUmNDfnhDT6jKz5K", needsPremium: true },
+  pack_7500: { mode: "payment", meta: "pack_7500", price: "price_1URprRGAOUmNDfnhotFDBYu6", needsPremium: true },
 };
 
 // No "*" fallback: an unset SITE_URL means no origin allowance at all — the
@@ -76,7 +78,9 @@ Deno.serve(async (request) => {
 
   const premium = profile.plan === "premium";
   if (p.needsPremium && !premium) return json({ error: "token packs require Premium" }, 403);
-  if (product === "premium" && premium) return json({ error: "already premium" }, 409);
+  // Any subscription-mode product: a premium account must not stack a second
+  // sub — to move between monthly and yearly, cancel first then resubscribe.
+  if (p.mode === "subscription" && premium) return json({ error: "already premium" }, 409);
 
   const params = new URLSearchParams({
     mode: p.mode,

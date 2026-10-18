@@ -33,12 +33,19 @@ const PACK_LINKS: Record<string, number> = {
 // The premium subscription link — sessions from it get mode === "subscription".
 const PREMIUM_LINK = "plink_1UQoEiGAOUmNDfnh04xXiYkf";
 // checkout_kind metadata → tokens, for sessions minted by create-checkout
-// (payment_link is null on API-created sessions). Values mirror PACK_LINKS —
-// keep the three in sync with dashboard.js PRODUCTS.
-const PACK_META: Record<string, number> = { pack_500: 500, pack_1500: 1500, pack_5000: 5000 };
-// The premium price on prod_VRhdA8UQOkzj2r — subscription events are only
-// ours if the sub carries this item; foreign products can't touch `plan`.
-const PREMIUM_PRICE_ID = "price_1UQoE5GAOUmNDfnhulTyoL1o";
+// (payment_link is null on API-created sessions). The retired pack sizes stay
+// mapped so a session minted just before a resize still fulfils at the
+// amount it was sold at; current keys mirror dashboard.js PRODUCTS.
+const PACK_META: Record<string, number> = {
+  pack_500: 500, pack_1500: 1500, pack_5000: 5000,
+  pack_750: 750, pack_2500: 2500, pack_7500: 7500,
+};
+// The premium prices on prod_VRhdA8UQOkzj2r (monthly + yearly) — subscription
+// events are only ours if the sub carries one; foreign products can't touch `plan`.
+const PREMIUM_PRICE_IDS: ReadonlySet<string> = new Set([
+  "price_1UQoE5GAOUmNDfnhulTyoL1o", // monthly $7.99
+  "price_1URprSGAOUmNDfnhEoiONeTP", // yearly $79.99
+]);
 
 // supabase-js resolves { data, error } instead of throwing on PostgREST/RPC
 // failures — an unchecked result returns 200 to Stripe and drops the event
@@ -134,7 +141,7 @@ Deno.serve(async (request) => {
 
       case "customer.subscription.updated":
       case "customer.subscription.deleted": {
-        const action = classifySubscription(event.data.object as never, event.type, PREMIUM_PRICE_ID);
+        const action = classifySubscription(event.data.object as never, event.type, PREMIUM_PRICE_IDS);
         if (action.kind === "ignore") break;
         if (action.kind === "activate") {
           // customer→account was recorded at checkout; matching by either id

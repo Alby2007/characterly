@@ -571,6 +571,7 @@ code, .cmd {
 .tier-tag-gold { color: var(--gold); }
 .tier-price { font-family: var(--serif); font-size: 46px; color: var(--gold-hi); margin: 14px 0 4px; line-height: 1; }
 .tier-price small { font-family: var(--sans); font-size: 15px; color: var(--paper-3); }
+.tier-alt { display: block; font-size: 13px !important; margin-top: 6px; }
 .tier-list { list-style: none; margin: 20px 0 30px; padding: 0; flex: 1; }
 .tier-list li { padding: 9px 0 9px 22px; border-top: 1px solid var(--hair); font-size: 15.5px; color: var(--paper-2); position: relative; }
 .tier-list li::before { content: "·"; position: absolute; left: 4px; color: var(--gold); font-family: var(--serif); font-size: 22px; line-height: 0.9; }
