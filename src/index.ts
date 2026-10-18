@@ -164,7 +164,7 @@ const LINK_PROMPT = `To use Characterly's hosted features, create a free account
 // Discord renders <t:sec:R> as "in 4 hours" in the viewer's timezone — the
 // daily token/cap reset is always the next UTC midnight.
 const dailyResetTag = () => `<t:${Math.floor(new Date().setUTCHours(24, 0, 0, 0) / 1000)}:R>`;
-const TOKEN_EMPTY = () => `You're out of tokens — next refill ${dailyResetTag()}. Premium refills to 150/day: ${config.siteUrl}/dashboard#billing`;
+const TOKEN_EMPTY = () => `You're out of tokens — next refill ${dailyResetTag()}. Premium refills to 150/day and makes them sharper: live memory, web lookups, first in line: ${config.siteUrl}/dashboard#billing`;
 const HOSTED_CAPACITY = () => `The hosted model is at today's capacity — it resets ${dailyResetTag()}. Bringing your own API key (\`/companion key\`) always works.`;
 
 // One "low tokens" DM per user per UTC day.

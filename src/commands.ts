@@ -1454,8 +1454,11 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       ]);
       const byokNote = keyRow ? "\nYour personal AI key is connected — chats don't spend tokens anyway." : "";
       if (!account) return interaction.reply({ content: `No hosted account yet — create one at ${config.siteUrl} and run \`/link\` here to start getting daily hosted tokens.` + byokNote, ephemeral: true });
-      const refill = account.plan === "premium" ? 150 : 30;
-      return interaction.reply({ content: `🪙 **${account.creditBalance.toLocaleString()} tokens** — **${account.plan}** plan, refills to **${refill}** each UTC day · next refill ${dailyResetTag()}.\nManage billing & packs: ${config.siteUrl}/dashboard` + byokNote, ephemeral: true });
+      const refill = account.plan === "premium" ? config.premiumDailyCredits : config.freeDailyCredits;
+      const tail = account.plan === "premium"
+        ? `Manage billing & packs: ${config.siteUrl}/dashboard`
+        : `Premium: ${config.premiumDailyCredits}/day + live memory, web lookups, first in line — ${config.siteUrl}/dashboard#billing`;
+      return interaction.reply({ content: `🪙 **${account.creditBalance.toLocaleString()} tokens** — **${account.plan}** plan, refills to **${refill}** each UTC day · next refill ${dailyResetTag()}.\n${tail}` + byokNote, ephemeral: true });
     }
     if (action === "status") {
       const dmScope = `dm:${interaction.user.id}`;
@@ -1509,7 +1512,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
             ? [{
                 name: "Tokens",
                 value: account
-                  ? `**${account.creditBalance.toLocaleString()}** on the **${account.plan}** plan — refreshes daily, next refill ${dailyResetTag()}.${account.plan === "free" && !keyRow ? ` Premium: 150/day, live memory, web tools — ${config.siteUrl}/dashboard#billing` : ` Details: ${config.siteUrl}/dashboard`}`
+                  ? `**${account.creditBalance.toLocaleString()}** on the **${account.plan}** plan — refreshes daily, next refill ${dailyResetTag()}.${account.plan === "free" && !keyRow ? ` Premium: 150/day + live memory, web lookups, first in line — ${config.siteUrl}/dashboard#billing` : ` Details: ${config.siteUrl}/dashboard`}`
                   : `Not linked — create an account at ${config.siteUrl} and run \`/link\` to get hosted tokens`,
                 inline: false,
               }]

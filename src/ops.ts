@@ -1577,7 +1577,7 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
   },
   {
     channel: "faqs",
-    version: 3,
+    version: 4,
     embeds: () => [
       new EmbedBuilder()
         .setTitle("Getting started")
@@ -1587,7 +1587,7 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
           "**Why did Add tell me to verify first?**\n" +
           `Adopting needs a linked Characterly account — it's what ties your companions, tokens, and data controls to you. Click **Verify** in ${config.houseVerifyChannelId ? `<#${config.houseVerifyChannelId}>` : "**#log-in**"}, it takes about 30 seconds, then come back and Add away.\n\n` +
           "**Do I have to pay?**\n" +
-          "Nope — every account gets **30 free tokens a day**, no card, no setup. If you start running out, **Premium ($7.99/mo)** bumps you to 150 a day plus live memory and web tools, and unlocks token packs in the dashboard. (Tinkerers can plug in their own API key with `/companion key`, but you never need to.)\n\n" +
+          "Nope — every account gets **30 free tokens a day**, no card, no setup. If you start running out, **Premium ($7.99/mo)** makes them present — memory writes live instead of on the hour, they can look things up mid-reply, they answer first when it's busy — plus 150 tokens a day, unlimited adoptions, and token packs in the dashboard. (Tinkerers can plug in their own API key with `/companion key`, but you never need to.)\n\n" +
           "**How many companions can I have?**\n" +
           "One awakened companion — that bond is permanent. On top of that, free accounts keep one adopted character at a time; Premium removes the cap.\n\n" +
           "**Where do they hang out?**\n" +
