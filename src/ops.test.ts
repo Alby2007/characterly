@@ -866,6 +866,15 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
   assert.equal(ticketEdit!.perms.SendMessages, false, "…but can't post in it");
   assert.equal(ticketEdit!.perms.SendMessagesInThreads, true, "opener + staff can talk inside the ticket thread");
   assert.equal(ticketEdit!.perms.CreatePrivateThreads, false, "…only the bot opens threads");
+  // Verified Members get the same open-threads grant — a stale Member deny
+  // (from an older readOnly-member layout) overrides the @everyone allow and
+  // silences the ticket opener; the grant must be re-written explicitly.
+  const ticketMember = edits.find(e => e.target === "support-ticket" && e.id === "r-member");
+  assert.ok(ticketMember, "#support-ticket needs a Member overwrite too");
+  assert.equal(ticketMember!.perms.ViewChannel, true, "verified members see the ticket desk");
+  assert.equal(ticketMember!.perms.SendMessagesInThreads, true, "verified openers can talk in their own ticket");
+  assert.equal(ticketMember!.perms.SendMessages, false, "…but still can't post in the channel");
+  assert.equal(ticketMember!.perms.CreatePrivateThreads, false, "…and can't open threads themselves");
   for (const rid of ["r-mod", "r-admin"]) {
     const e = edits.find(x => x.target === "support-ticket" && x.id === rid);
     assert.ok(e, `#support-ticket needs a ManageThreads allow for ${rid}`);

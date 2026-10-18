@@ -1403,6 +1403,10 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
         await ensureStaffOnly(target, created, `#${wanted.name}`, guild);
       } else if (target && wanted.readOnly === "openthreads") {
         await ensureOpenThreads(target, created, `#${wanted.name}`, guild.id);
+        // Members need the same open-threads grant — a leftover Member deny
+        // (from an older readOnly-member layout) would override the
+        // @everyone allow and silence verified ticket openers.
+        await ensureOpenThreads(target, created, `#${wanted.name} · Member`, config.houseMemberRoleId);
       } else if (target && (wanted.readOnly || (group.readOnly === true && syncBefore.get(normName(wanted.name)) !== true))) {
         const roleId = wanted.readOnly === "everyone" ? guild.id : config.houseMemberRoleId;
         await ensureReadOnly(target, created, `#${wanted.name}`, roleId);
