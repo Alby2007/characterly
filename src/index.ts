@@ -21,7 +21,7 @@ import {
   handleSetupModal,
   scopedCommandDefinitions,
 } from "./commands.js";
-import { containsPrivateSubtext, looksLikeSchemaLeak, recallTerms, shouldInspectForMemory, toolCues } from "./perception.js";
+import { containsPrivateSubtext, detectWakeWord, looksLikeSchemaLeak, recallTerms, shouldInspectForMemory, toolCues } from "./perception.js";
 import { ConversationTracker } from "./conversation.js";
 import { ReplyThrottle } from "./reply-throttle.js";
 import { EventStore } from "./events.js";
@@ -40,6 +40,7 @@ import { isSafeUrl } from "./tools.js";
 import { BudgetExceeded, meteredClient } from "./budget.js";
 import { runExtractJob, type ExtractJobPayload } from "./extract-job.js";
 import { runJournalJob, type JournalJobPayload } from "./journal-job.js";
+import { runSummaryJob, SUMMARY_REPLY_INTERVAL, type SummaryJobPayload } from "./summary-job.js";
 import { runChatImportJob, type ChatImportJobPayload } from "./chat-import-job.js";
 import { greetPendingInstalls } from "./install-greet.js";
 import { selectCompanionForTurn } from "./scene-router.js";
@@ -267,6 +268,9 @@ async function init() {
       }
       if (job.type === "journal-write") {
         return runJournalJob(job.guild_id, job.payload as JournalJobPayload, journalDeps);
+      }
+      if (job.type === "summary-update") {
+        return runSummaryJob(job.guild_id, job.payload as SummaryJobPayload, summaryDeps);
       }
       if (job.type === "chat-import") {
         return runChatImportJob(
@@ -866,6 +870,14 @@ const journalDeps = {
   get botId() { return client.user!.id; },
 };
 
+// Story-summary jobs — the rolling "story so far" recap folds in off the live
+// reply path, same deps-injection pattern. No throttle: the count-triggered
+// cadence is the rate limit, and the brain's metered client bounds the spend.
+const summaryDeps = {
+  get store() { return store; },
+  brainFor,
+};
+
 // Chat-import jobs — transcript distillation off the import path. sendDm is
 // the completion note; users.send fetches first so a cold cache still lands.
 const chatImportDeps = {
@@ -920,8 +932,8 @@ const opsDeps: OpsDeps = {
  * importance×confidence) merged with turn-aware contextual hits — a memory
  * below the spine cap still surfaces when the current message is about it.
  * The same consent/candidate gates apply on both legs. */
-async function promptMemories(scope: string, subjectId: string, text: string, vec: number[] | null): Promise<Memory[]> {
-  const spine = await store.relevantMemories(scope, subjectId);
+async function promptMemories(scope: string, subjectId: string, text: string, vec: number[] | null, companionId?: number | null): Promise<Memory[]> {
+  const spine = await store.relevantMemories(scope, subjectId, 8, companionId);
   const terms = recallTerms(text);
   let contextual: Memory[] = [];
   let semantic: Memory[] = [];
@@ -929,7 +941,7 @@ async function promptMemories(scope: string, subjectId: string, text: string, ve
   // entirely, which throws synchronously at the call site.
   if (terms.length) {
     try {
-      contextual = await store.contextualMemories(scope, subjectId, terms);
+      contextual = await store.contextualMemories(scope, subjectId, terms, 6, companionId);
     } catch (e) {
       inc("recall.context_error");
       logError("contextual memory recall failed", e);
@@ -937,7 +949,7 @@ async function promptMemories(scope: string, subjectId: string, text: string, ve
   }
   if (vec) {
     try {
-      semantic = await store.semanticMemories(scope, subjectId, vectorLiteral(vec), { maxDistance: config.embedMaxDistance });
+      semantic = await store.semanticMemories(scope, subjectId, vectorLiteral(vec), { maxDistance: config.embedMaxDistance, companionId });
     } catch (e) {
       inc("recall.semantic_error");
       logError("semantic memory recall failed", e);
@@ -973,6 +985,23 @@ async function promptJournal(
   }
   const seen = new Set(spine.map(j => j.id));
   return [...spine, ...semantic.filter(j => !seen.has(j.id))].slice(0, 10);
+}
+
+/** Count a companion reply toward the next story-summary fold. Crossing
+ * SUMMARY_REPLY_INTERVAL atomically claims the update (one enqueue per batch)
+ * and resets the counter. Unlike journal-write this runs live on every lane —
+ * it's the cheap always-on continuity net, absorbed in the hosted budget.
+ * A failed call must never sink the reply that already landed. */
+async function maybeEnqueueSummary(companionId: number, scope: string, channelId: string): Promise<void> {
+  try {
+    if (await store.bumpStoryCounter(companionId, scope, channelId) < SUMMARY_REPLY_INTERVAL) return;
+    if (!(await store.claimStoryUpdate(companionId, scope, channelId, SUMMARY_REPLY_INTERVAL))) return;
+    await enqueue(sql, scope, "summary-update", { companionId, channelId });
+    inc("summary.enqueued");
+  } catch (error) {
+    inc("jobs.enqueue_error");
+    logError("Summary enqueue failed", error);
+  }
 }
 
 async function handleDmMessage(
@@ -1311,7 +1340,7 @@ async function runCompanionTurn(opts: {
     try {
       // Free+hosted memory settles in hourly batches; premium/BYOK is live.
       const throttleMemory = account?.plan === "free" && isHostedScope(scope);
-      await enqueue(sql, scope, "extract", { event, replyToId, replyToContent }, throttleMemory ? nextHourBoundary() : undefined);
+      await enqueue(sql, scope, "extract", { event, replyToId, replyToContent, companionId: companion.id, fictionHint: companion.kind === "adopted" }, throttleMemory ? nextHourBoundary() : undefined);
       await store.setTriageResults([{ id: event.messageId, result: "queued" }]);
       inc("jobs.enqueued");
     } catch (error) { inc("jobs.enqueue_error"); logError("DM extraction enqueue failed", error); }
@@ -1387,7 +1416,10 @@ async function runCompanionTurn(opts: {
     }));
     const pair = await buildPairContext(store, eventStore, scope, userId, compSubj);
     const relationships = pair ? [pair] : [];
-    const context = (await store.recentContext(scope, channel.id))
+    // DM window is wider than the guild default (config.dmContextMessages,
+    // 40) — a 1:1 chat has no other voices competing for the transcript, and
+    // anything older than STORY_KEEP_RECENT is folded into the recap anyway.
+    const context = (await store.recentContext(scope, channel.id, config.dmContextMessages))
       .map(x => ({
         ...x,
         content: demangleMentions(x.content, lookups.names),
@@ -1415,6 +1447,7 @@ async function runCompanionTurn(opts: {
       backstory: companion.backstory,
       serverDigest,
       journal,
+      storySummary: (await store.getStorySummary(companion.id, scope, channel.id).catch(() => null))?.summary || undefined,
     };
 
     // visionClient is always operator-key spend (BYOK users' images run on it
@@ -1451,10 +1484,15 @@ async function runCompanionTurn(opts: {
     // per-call tool billing can run ~5x a plain reply. BYOK lanes keep tools.
     const toolsWanted = config.replyTools && toolCues(event.content);
     const toolsOn = toolsWanted && (!hostedDm || account?.plan === "premium");
+    // The companion's own memories (subject companion:<id>) — things it learned
+    // about itself, e.g. corrections to its persona — merge with the speaker's.
+    const dmMemories = await promptMemories(scope, userId, `${event.content} ${replyToContent ?? ""}`, queryVec, companion.id);
+    const dmSelfMems = await store.relevantMemories(scope, compSubj, 3, companion.id).catch(() => [] as Memory[]);
+    const dmSeen = new Set(dmMemories.map(m => m.id));
     const { text } = await brain.reply(
       { ...event, authorName: freshOwnerName },
       context,
-      await promptMemories(scope, userId, `${event.content} ${replyToContent ?? ""}`, queryVec),
+      [...dmMemories, ...dmSelfMems.filter(m => !dmSeen.has(m.id))],
       profiles,
       relationships,
       config.replyModel,
@@ -1523,6 +1561,7 @@ async function runCompanionTurn(opts: {
         companionId: companion.id, triggerMessageId: event.messageId,
         replyMessageId: sent.id, channelId: channel.id,
       }, journalDelay).catch(() => inc("jobs.enqueue_error"));
+      void maybeEnqueueSummary(companion.id, scope, channel.id);
       if (chargedDm) void maybeAlertLowCredit(userId, dmBalance);
       // Free+hosted users never see tools — a once-a-day hint that Premium
       // unlocks them is the only way they'd learn the feature exists.
@@ -1744,7 +1783,16 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
         ? await store.accountForDiscordUser(event.authorId).catch(() => null)
         : null;
       const throttleMemory = isHostedScope(event.guildId) && (!extractAcct || extractAcct.plan === "free");
-      await enqueue(sql, event.guildId, "extract", { event, replyToId, replyToContent }, throttleMemory ? nextHourBoundary() : undefined);
+      // Story facts need their companion — a reply to a companion's webhook
+      // turn or a wake word names it; ambient chatter lands unscoped (inert).
+      const storyCompanion = repliedToWebhook?.companionId
+        ?? guildCompanions.find(c => detectWakeWord(event.content, [c.name]))?.id;
+      const storyCompRow = storyCompanion ? guildCompanions.find(c => c.id === storyCompanion) : undefined;
+      await enqueue(sql, event.guildId, "extract", {
+        event, replyToId, replyToContent,
+        companionId: storyCompanion,
+        fictionHint: storyCompRow?.kind === "adopted" || undefined,
+      }, throttleMemory ? nextHourBoundary() : undefined);
       await store.setTriageResults([{ id: event.messageId, result: "queued" }]);
       inc("jobs.enqueued");
     } catch (error) { inc("jobs.enqueue_error"); logError("Extraction enqueue failed", error); }
@@ -1910,6 +1958,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       backstory: chosen.backstory,
       ownerSubtext,
       journal,
+      storySummary: (await store.getStorySummary(chosen.id, event.guildId, event.channelId).catch(() => null))?.summary || undefined,
     };
 
     const imgParts: string[] = [];
@@ -1928,10 +1977,15 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     };
     // Same premium gate as DMs — hosted free lanes get plain replies.
     const toolsOn = config.replyTools && (toolCues(event.content) || selection.isAddressed || engaged) && (!hostedGuild || payerPremium);
+    // The companion's own memories (subject companion:<id>) merge with the
+    // speaker's — corrections to its persona, things it learned about itself.
+    const authorMemories = await promptMemories(event.guildId, event.authorId, `${event.content} ${replyToContent ?? ""}`, queryVec, chosen.id);
+    const selfMems = await store.relevantMemories(event.guildId, compSubj, 3, chosen.id).catch(() => [] as Memory[]);
+    const memSeen = new Set(authorMemories.map(m => m.id));
     const { text, endConversation } = await companionBrain.reply(
       { ...event, authorName },
       context,
-      await promptMemories(event.guildId, event.authorId, `${event.content} ${replyToContent ?? ""}`, queryVec),
+      [...authorMemories, ...selfMems.filter(m => !memSeen.has(m.id))],
       profiles,
       relationships,
       config.replyModel,
@@ -2000,6 +2054,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
         companionId: chosen.id, triggerMessageId: event.messageId,
         replyMessageId: sent.id, channelId: event.channelId,
       }, journalDelay).catch(() => inc("jobs.enqueue_error"));
+      void maybeEnqueueSummary(chosen.id, event.guildId, event.channelId);
       // c2c hops spend the owner's tokens too — the alert is their spend
       // control, not just the human-payer path's.
       if (chargedGuild) void maybeAlertLowCredit(payerId, guildBalance);

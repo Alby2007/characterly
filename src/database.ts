@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto";
-import type { AppInstall, AttributeStatus, ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, EvidenceEffect, EvidenceType, GuildCompanion, JournalCandidate, JournalEntry, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, SupportTicket, VerificationVerdict, WebhookMessageRecord } from "./types.js";
+import type { AppInstall, AttributeStatus, ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, ConversationSummary, EvidenceEffect, EvidenceType, GuildCompanion, JournalCandidate, JournalEntry, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, SupportTicket, VerificationVerdict, WebhookMessageRecord } from "./types.js";
 import { sql as defaultSql, type Sql } from "./db.js";
 import { runMigrations } from "./migrations.js";
 import { findMentionedUsers } from "./entity-resolution.js";
@@ -31,6 +31,15 @@ export type Memory = Omit<MemoryCandidate, "confidence" | "importance" | "explic
   eventId: number | null;
   // v0.2 — display name of the subject at the time the memory was created.
   subjectName: string;
+  // Best-effort current display label (member known_name > stored name > raw id).
+  // Populated only by the recall queries that join members; undefined elsewhere.
+  subjectLabel?: string;
+  // v56 — owning companion for story_fact rows; NULL = real fact shared across
+  // all of the subject's companions.
+  companionId: number | null;
+  // v57 — user-asserted "never forget this": always recalled, never
+  // stale-quarantined.
+  pinned: boolean;
 };
 export type BehavioralPattern = { id: number; guildId: string; subjectId: string; description: string; episodeCount: number; confidence: number; createdAt: string; updatedAt: string; status: string };
 export type MemoryEvidence = { id: number; memoryId: number; messageId: string; authorId: string; quote: string; reason: string; explicitness: number; observedAt: string; evidenceType: string; effect: string; messageContentSnapshot: string; messageTimestamp: string; createdAt: string };
@@ -48,6 +57,9 @@ type MemoryRow = {
   explicitness: number; reason: string; net_score: number | null;
   frozen_confidence: number | null; pattern_id: number | null;
   primary_evidence_type: string; event_id: number | null;
+  companion_id?: number | null;
+  subject_label?: string | null;
+  pinned?: boolean | number;
 };
 
 type EvidenceRow = {
@@ -78,6 +90,7 @@ type MemberRow = {
   guild_id: string; user_id: string; known_names: string[];
   first_seen_at: Date | string; last_seen_at: Date | string;
   message_count: number; opted_out: number; opted_in: number;
+  share_facts_with_companion_owners?: number;
 };
 
 type RelationshipRow = {
@@ -111,6 +124,7 @@ function rowToMember(r: MemberRow): Member {
     firstSeenAt: ts(r.first_seen_at), lastSeenAt: ts(r.last_seen_at),
     messageCount: Number(r.message_count), optedOut: Number(r.opted_out) === 1,
     optedIn: Number(r.opted_in ?? 0) === 1,
+    shareFactsWithCompanionOwners: Number(r.share_facts_with_companion_owners ?? 0) === 1,
   };
 }
 
@@ -133,6 +147,9 @@ function rowToMemory(r: MemoryRow): Memory {
     primaryEvidenceType: r.primary_evidence_type,
     eventId: r.event_id != null ? Number(r.event_id) : null,
     reason: r.reason,
+    companionId: r.companion_id != null ? Number(r.companion_id) : null,
+    pinned: !!r.pinned,
+    ...(r.subject_label != null ? { subjectLabel: r.subject_label } : {}),
   };
 }
 
@@ -397,6 +414,7 @@ export class MemoryStore {
       await tx`DELETE FROM unresolved_names WHERE guild_id = ${guildId}`;
       await tx`DELETE FROM members WHERE guild_id = ${guildId}`;
       await tx`DELETE FROM companion_journal WHERE origin_scope = ${guildId}`;
+      await tx`DELETE FROM conversation_summaries WHERE origin_scope = ${guildId}`;
       await tx`DELETE FROM messages WHERE guild_id = ${guildId}`;
       await tx`DELETE FROM webhook_messages WHERE guild_id = ${guildId}`;
       await tx`DELETE FROM guild_companions WHERE guild_id = ${guildId}`;
@@ -428,7 +446,8 @@ export class MemoryStore {
       UNION SELECT guild_id FROM relationship_observations WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
       UNION SELECT guild_id FROM profile_attributes WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
       UNION SELECT guild_id FROM jobs WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
-      UNION SELECT origin_scope FROM companion_journal WHERE NOT (origin_scope = ANY(${guildIds})) AND origin_scope NOT LIKE 'dm:%'`;
+      UNION SELECT origin_scope FROM companion_journal WHERE NOT (origin_scope = ANY(${guildIds})) AND origin_scope NOT LIKE 'dm:%'
+      UNION SELECT origin_scope FROM conversation_summaries WHERE NOT (origin_scope = ANY(${guildIds})) AND origin_scope NOT LIKE 'dm:%'`;
     return rows.map(r => r.guild_id);
   }
 
@@ -546,6 +565,17 @@ export class MemoryStore {
       INSERT INTO members (guild_id, user_id, known_names, first_seen_at, last_seen_at, message_count, opted_in)
       VALUES (${guildId}, ${userId}, '{}', NOW(), NOW(), 0, ${optedIn ? 1 : 0})
       ON CONFLICT (guild_id, user_id) DO UPDATE SET opted_in = ${optedIn ? 1 : 0}
+    `;
+  }
+
+  /** Per-member opt-in for the server→DM digest to relay THEIR facts into a
+   *  companion owner's private DM. Independent of memory consent — digest
+   *  sharing is a second, explicit choice. */
+  async setMemberShareFacts(guildId: string, userId: string, share: boolean): Promise<void> {
+    await this.sql`
+      INSERT INTO members (guild_id, user_id, known_names, first_seen_at, last_seen_at, message_count, share_facts_with_companion_owners)
+      VALUES (${guildId}, ${userId}, '{}', NOW(), NOW(), 0, ${share ? 1 : 0})
+      ON CONFLICT (guild_id, user_id) DO UPDATE SET share_facts_with_companion_owners = ${share ? 1 : 0}
     `;
   }
 
@@ -1365,9 +1395,14 @@ export class MemoryStore {
     const effect = memory.effect ?? "context";
 
     return await this.sql.begin(async sql => {
+      // companion_id is meaningful only on story_fact rows — a real fact is
+      // always NULL (shared across the subject's companions) even when the
+      // extractor tried to scope it.
+      const companionId = memory.kind === "story_fact" ? memory.companionId ?? null : null;
       // Upsert the memory row (idempotent on the unique content key).
       const existing = await sql<MemoryRow[]>`
         SELECT id FROM memories WHERE guild_id = ${event.guildId} AND subject_id = ${memory.subjectId} AND kind = ${memory.kind} AND content = ${memory.content}
+          AND companion_id IS NOT DISTINCT FROM ${companionId}
       `;
 
       // Near-duplicate fast-path: when the exact key misses, fall back to a pg_trgm
@@ -1392,6 +1427,7 @@ export class MemoryStore {
           WHERE guild_id = ${event.guildId}
             AND subject_id = ${memory.subjectId}
             AND kind = ${memory.kind}
+            AND COALESCE(companion_id, 0) = COALESCE(${companionId}::bigint, 0)
             AND status IN ('candidate', 'active', 'quarantined')
             AND content % ${memory.content}
           ORDER BY sim DESC, id ASC
@@ -1423,10 +1459,14 @@ export class MemoryStore {
         // Persist the extracted name even when the subject couldn't be resolved to an ID —
         // it enables later re-attribution of `unknown` memories.
         const subjectName = memory.subjectName || (memory.subjectId === event.authorId ? event.authorName : "");
+        // story_facts land 'active' — they're fiction beats owned by one
+        // companion, not claims about reality that need verification to earn
+        // recall. The lifecycle still applies (contradict contests, etc.).
+        const initialStatus = memory.kind === "story_fact" ? "active" : "candidate";
         await sql`
-          INSERT INTO memories (guild_id, subject_id, subject_name, kind, content, confidence, importance, mentions, confirmation_count, created_at, updated_at, last_confirmed_at, status, explicitness, reason, primary_evidence_type)
-          VALUES (${event.guildId}, ${memory.subjectId}, ${subjectName}, ${memory.kind}, ${memory.content}, ${initialConfidence}, ${importance}, 0, 0, NOW(), NOW(), NOW(), 'candidate', ${explicitness}, ${memory.reason}, ${evidenceType})
-          ON CONFLICT (guild_id, subject_id, kind, content) DO NOTHING
+          INSERT INTO memories (guild_id, subject_id, subject_name, kind, content, confidence, importance, mentions, confirmation_count, created_at, updated_at, last_confirmed_at, status, explicitness, reason, primary_evidence_type, companion_id)
+          VALUES (${event.guildId}, ${memory.subjectId}, ${subjectName}, ${memory.kind}, ${memory.content}, ${initialConfidence}, ${importance}, 0, 0, NOW(), NOW(), NOW(), ${initialStatus}, ${explicitness}, ${memory.reason}, ${evidenceType}, ${companionId})
+          ON CONFLICT DO NOTHING
         `;
       }
 
@@ -1434,6 +1474,7 @@ export class MemoryStore {
         ? await sql<MemoryRow[]>`SELECT * FROM memories WHERE id = ${matchedId}`
         : await sql<MemoryRow[]>`
             SELECT * FROM memories WHERE guild_id = ${event.guildId} AND subject_id = ${memory.subjectId} AND kind = ${memory.kind} AND content = ${memory.content}
+              AND companion_id IS NOT DISTINCT FROM ${companionId}
           `;
       const saved = rowToMemory(savedRows[0]);
       const applied = await this._applyEvidence(sql, saved, event, evidenceType, effectiveEffect, memory.reason, memory.explicitness, candidateThreshold);
@@ -1577,17 +1618,25 @@ export class MemoryStore {
     return { memories: rows.map(rowToMemory), total: Number(countResult[0].count), page };
   }
 
-  async relevantMemories(guildId: string, subjectId: string, limit = 8): Promise<Memory[]> {
+  async relevantMemories(guildId: string, subjectId: string, limit = 8, companionId?: number | null): Promise<Memory[]> {
     // Candidates with promotable primary evidence are included so fresh direct
     // self-reports ("call me Riley") reach replies before nightly verification
     // promotes them; sarcasm/joke/uncertain candidates stay gated out. The reply
     // prompt annotates each memory's confidence so the model can weigh them.
     const rows = await this.sql<MemoryRow[]>`
-      SELECT * FROM memories WHERE guild_id = ${guildId}
-        AND (status = 'active' OR (status = 'candidate' AND primary_evidence_type IN ('explicit_fact', 'clear_preference', 'correction')))
-        AND (subject_id = 'server' OR (subject_id = ${subjectId}
-          AND subject_id IN (SELECT user_id FROM members WHERE guild_id = ${guildId} AND opted_in = 1 AND opted_out = 0)))
-      ORDER BY importance * confidence DESC, last_confirmed_at DESC LIMIT ${limit}
+      SELECT m.*, COALESCE(NULLIF(mb.known_names[1], ''), NULLIF(m.subject_name, ''), m.subject_id) AS subject_label
+      FROM memories m
+      LEFT JOIN members mb ON mb.guild_id = m.guild_id AND mb.user_id = m.subject_id
+      WHERE m.guild_id = ${guildId}
+        AND (m.status = 'active' OR (m.status = 'candidate' AND m.primary_evidence_type IN ('explicit_fact', 'clear_preference', 'correction')))
+        AND (m.subject_id = 'server' OR (m.subject_id = ${subjectId}
+          AND (m.subject_id LIKE 'companion:%'
+            OR m.subject_id IN (SELECT user_id FROM members WHERE guild_id = ${guildId} AND opted_in = 1 AND opted_out = 0))))
+        -- companion_id carries only on story_fact rows: real facts (NULL,
+        -- non-story) pass for everyone; story beats only for their companion.
+        AND ((m.companion_id IS NULL AND m.kind <> 'story_fact')
+          OR m.companion_id = ${companionId ?? 0})
+      ORDER BY m.pinned DESC, m.importance * m.confidence DESC, m.last_confirmed_at DESC LIMIT ${limit}
     `;
     return rows.map(rowToMemory);
   }
@@ -1597,16 +1646,22 @@ export class MemoryStore {
    * half of prompt recall alongside relevantMemories' static spine — a fact
    * ranked below the spine cap still surfaces when the conversation is about
    * it. Same consent + candidate gates as relevantMemories. */
-  async contextualMemories(guildId: string, subjectId: string, terms: string[], limit = 6): Promise<Memory[]> {
+  async contextualMemories(guildId: string, subjectId: string, terms: string[], limit = 6, companionId?: number | null): Promise<Memory[]> {
     if (!terms.length) return [];
     const patterns = terms.slice(0, 10).map(t => `%${escapeLike(t)}%`);
     const rows = await this.sql<MemoryRow[]>`
-      SELECT * FROM memories WHERE guild_id = ${guildId}
-        AND (status = 'active' OR (status = 'candidate' AND primary_evidence_type IN ('explicit_fact', 'clear_preference', 'correction')))
-        AND (subject_id = 'server' OR (subject_id = ${subjectId}
-          AND subject_id IN (SELECT user_id FROM members WHERE guild_id = ${guildId} AND opted_in = 1 AND opted_out = 0)))
-        AND content ILIKE ANY(${patterns})
-      ORDER BY importance * confidence DESC, last_confirmed_at DESC LIMIT ${limit}
+      SELECT m.*, COALESCE(NULLIF(mb.known_names[1], ''), NULLIF(m.subject_name, ''), m.subject_id) AS subject_label
+      FROM memories m
+      LEFT JOIN members mb ON mb.guild_id = m.guild_id AND mb.user_id = m.subject_id
+      WHERE m.guild_id = ${guildId}
+        AND (m.status = 'active' OR (m.status = 'candidate' AND m.primary_evidence_type IN ('explicit_fact', 'clear_preference', 'correction')))
+        AND (m.subject_id = 'server' OR (m.subject_id = ${subjectId}
+          AND (m.subject_id LIKE 'companion:%'
+            OR m.subject_id IN (SELECT user_id FROM members WHERE guild_id = ${guildId} AND opted_in = 1 AND opted_out = 0))))
+        AND ((m.companion_id IS NULL AND m.kind <> 'story_fact')
+          OR m.companion_id = ${companionId ?? 0})
+        AND m.content ILIKE ANY(${patterns})
+      ORDER BY m.pinned DESC, m.importance * m.confidence DESC, m.last_confirmed_at DESC LIMIT ${limit}
     `;
     return rows.map(rowToMemory);
   }
@@ -1615,16 +1670,22 @@ export class MemoryStore {
    * the turn's query vector — the leg that catches paraphrases ILIKE can't
    * ("her dad" vs "father"). Same consent + candidate gates as the lexical
    * legs; maxDistance bounds how loose a match can be. */
-  async semanticMemories(guildId: string, subjectId: string, vector: string, opts: { limit?: number; maxDistance?: number } = {}): Promise<Memory[]> {
+  async semanticMemories(guildId: string, subjectId: string, vector: string, opts: { limit?: number; maxDistance?: number; companionId?: number | null } = {}): Promise<Memory[]> {
     const rows = await this.sql<MemoryRow[]>`
-      SELECT *, (embedding <=> ${vector}::vector) AS distance FROM memories
-      WHERE guild_id = ${guildId}
-        AND (status = 'active' OR (status = 'candidate' AND primary_evidence_type IN ('explicit_fact', 'clear_preference', 'correction')))
-        AND (subject_id = 'server' OR (subject_id = ${subjectId}
-          AND subject_id IN (SELECT user_id FROM members WHERE guild_id = ${guildId} AND opted_in = 1 AND opted_out = 0)))
-        AND embedding IS NOT NULL
-        AND embedding <=> ${vector}::vector < ${opts.maxDistance ?? 0.55}
-      ORDER BY distance ASC LIMIT ${opts.limit ?? 6}
+      SELECT m.*, (m.embedding <=> ${vector}::vector) AS distance,
+             COALESCE(NULLIF(mb.known_names[1], ''), NULLIF(m.subject_name, ''), m.subject_id) AS subject_label
+      FROM memories m
+      LEFT JOIN members mb ON mb.guild_id = m.guild_id AND mb.user_id = m.subject_id
+      WHERE m.guild_id = ${guildId}
+        AND (m.status = 'active' OR (m.status = 'candidate' AND m.primary_evidence_type IN ('explicit_fact', 'clear_preference', 'correction')))
+        AND (m.subject_id = 'server' OR (m.subject_id = ${subjectId}
+          AND (m.subject_id LIKE 'companion:%'
+            OR m.subject_id IN (SELECT user_id FROM members WHERE guild_id = ${guildId} AND opted_in = 1 AND opted_out = 0))))
+        AND ((m.companion_id IS NULL AND m.kind <> 'story_fact')
+          OR m.companion_id = ${opts.companionId ?? 0})
+        AND m.embedding IS NOT NULL
+        AND m.embedding <=> ${vector}::vector < ${opts.maxDistance ?? 0.55}
+      ORDER BY m.pinned DESC, distance ASC LIMIT ${opts.limit ?? 6}
     `;
     return rows.map(rowToMemory);
   }
@@ -1646,9 +1707,14 @@ export class MemoryStore {
     return rows.map(r => ({ id: Number(r.id), content: r.content }));
   }
 
-  async allActiveMemories(guildId: string, subjectId: string): Promise<Memory[]> {
+  /** All active memories for a subject. Story facts are excluded by default —
+   *   profile/dossier builders consume this list and fiction beats must not
+   *   feed real facets. Pass includeStoryFacts for surfaces that should show
+   *   them (the /memory correction list). */
+  async allActiveMemories(guildId: string, subjectId: string, opts: { includeStoryFacts?: boolean } = {}): Promise<Memory[]> {
     const rows = await this.sql<MemoryRow[]>`
       SELECT * FROM memories WHERE guild_id = ${guildId} AND subject_id = ${subjectId} AND status = 'active'
+      ${opts.includeStoryFacts ? this.sql`` : this.sql`AND kind <> 'story_fact'`}
       ORDER BY importance * confidence DESC, last_confirmed_at DESC
     `;
     return rows.map(rowToMemory);
@@ -1815,6 +1881,10 @@ export class MemoryStore {
       WHERE guild_id = ${guildId}
         AND status IN ('candidate', 'active')
         AND kind != 'episode'
+        -- Story facts are companion-scoped: merging two across companions
+        -- would leak one character's fiction into another's. Write-time trigram
+        -- dedup already covers same-companion rephrases.
+        AND kind != 'story_fact'
         AND subject_id != 'unknown'
       ORDER BY subject_id, id
     `;
@@ -1932,7 +2002,10 @@ export class MemoryStore {
       // weak-evidence candidate could launder itself into an active fact via
       // contradict → contested → resolve. Candidates reap via stale-quarantine.
       // 'unknown' subjects are inert until claimed — never resolve to active.
-      const promotable = PROMOTABLE_EVIDENCE_TYPES.includes(memory.primaryEvidenceType as EvidenceType) && memory.subjectId !== "unknown";
+      // story_fact rows were active on insert (fiction beats don't need
+      // real-world corroboration), so they resolve back to active, not
+      // candidate — a demoted story fact would be invisible forever.
+      const promotable = (PROMOTABLE_EVIDENCE_TYPES.includes(memory.primaryEvidenceType as EvidenceType) || memory.kind === "story_fact") && memory.subjectId !== "unknown";
       const target: MemoryStatus = promotable ? "active" : "candidate";
       await this.sql`UPDATE memories SET status = ${target}, frozen_confidence = NULL, net_score = NULL, updated_at = NOW() WHERE guild_id = ${guildId} AND id = ${memoryId}`;
       await recomputeForMemories(this.sql, guildId, [memoryId]);
@@ -1976,7 +2049,9 @@ export class MemoryStore {
   async subjectConfirm(guildId: string, memoryId: number): Promise<void> {
     const memory = await this.getMemory(guildId, memoryId);
     if (!memory || memory.status !== "contested") return;
-    const promotable = PROMOTABLE_EVIDENCE_TYPES.includes(memory.primaryEvidenceType as EvidenceType) && memory.subjectId !== "unknown";
+    // story_fact stays restorable — fiction beats start active and a resolved
+    // dispute must return them there, not to the candidate dead-zone.
+    const promotable = (PROMOTABLE_EVIDENCE_TYPES.includes(memory.primaryEvidenceType as EvidenceType) || memory.kind === "story_fact") && memory.subjectId !== "unknown";
     const target: MemoryStatus = promotable ? "active" : "candidate";
     await this.sql`UPDATE memories SET status = ${target}, frozen_confidence = NULL, net_score = NULL, updated_at = NOW() WHERE guild_id = ${guildId} AND id = ${memoryId}`;
     await recomputeForMemories(this.sql, guildId, [memoryId]);
@@ -2115,17 +2190,45 @@ export class MemoryStore {
   // subject name > raw id). opts.consentedOnly applies the same subject gate
   // the recall paths use (server facts or opted-in members only) — required
   // for anything that leaves the guild, like the private-DM digest.
-  async recentMemories(guildId: string, limit = 15, opts?: { consentedOnly?: boolean }): Promise<Array<Memory & { subjectLabel: string }>> {
+  // `digestFor` = the private-DM digest lane: the strictest subject gate.
+  // Only server lore, the recipient's own facts, companion subjects, and
+  // members who explicitly opted into sharing cross the boundary — plain
+  // memory opt-in was never consent to being gossiped into someone else's DM.
+  async recentMemories(guildId: string, limit = 15, opts?: { consentedOnly?: boolean; status?: string; excludeSubjects?: string[]; includeStoryFacts?: boolean; digestFor?: string }): Promise<Array<Memory & { subjectLabel: string }>> {
     const rows = await this.sql<Array<MemoryRow & { subject_label: string }>>`
       SELECT m.*, COALESCE(NULLIF(mb.known_names[1], ''), NULLIF(m.subject_name, ''), m.subject_id) AS subject_label
       FROM memories m
       LEFT JOIN members mb ON mb.guild_id = m.guild_id AND mb.user_id = m.subject_id
       WHERE m.guild_id = ${guildId}
-        ${opts?.consentedOnly
-          ? this.sql`AND (m.subject_id = 'server' OR m.subject_id IN
-              (SELECT user_id FROM members
-               WHERE guild_id = ${guildId} AND opted_in = 1 AND opted_out = 0))`
-          : this.sql``}
+        ${opts?.status ? this.sql`AND m.status = ${opts.status}` : this.sql``}
+        -- Companion-scoped fiction is private to that character — triage views
+        -- can opt in, but the server→DM digest never relays it.
+        ${opts?.includeStoryFacts ? this.sql`` : this.sql`AND m.kind <> 'story_fact'`}
+        ${opts?.excludeSubjects?.length ? this.sql`AND NOT (m.subject_id = ANY(${opts.excludeSubjects}))` : this.sql``}
+        ${opts?.digestFor
+          ? this.sql`AND (m.subject_id = 'server' OR m.subject_id = ${opts.digestFor}
+              -- Companion self-facts ride the digest only when the recipient
+              -- manages that companion, or the companion's owner opted into
+              -- sharing — otherwise member A's companion gossiped into
+              -- member B's DM without A's consent.
+              OR (m.subject_id ~ '^companion:[0-9]+$' AND EXISTS (
+                SELECT 1 FROM companions c
+                WHERE c.id = substring(m.subject_id from 11)::bigint
+                  AND (c.owner_user_id = ${opts.digestFor}
+                       OR EXISTS (SELECT 1 FROM companion_adoptions a
+                         WHERE a.companion_id = c.id AND a.user_id = ${opts.digestFor} AND a.dropped_at IS NULL)
+                       OR EXISTS (SELECT 1 FROM members mo
+                         WHERE mo.guild_id = ${guildId} AND mo.user_id = c.owner_user_id
+                           AND mo.opted_in = 1 AND mo.opted_out = 0
+                           AND mo.share_facts_with_companion_owners = 1))))
+              OR m.subject_id IN (SELECT user_id FROM members
+                WHERE guild_id = ${guildId} AND opted_in = 1 AND opted_out = 0
+                  AND share_facts_with_companion_owners = 1))`
+          : opts?.consentedOnly
+            ? this.sql`AND (m.subject_id = 'server' OR m.subject_id LIKE 'companion:%' OR m.subject_id IN
+                (SELECT user_id FROM members
+                 WHERE guild_id = ${guildId} AND opted_in = 1 AND opted_out = 0))`
+            : this.sql``}
       ORDER BY m.created_at DESC, m.id DESC
       LIMIT ${limit}
     `;
@@ -2143,6 +2246,9 @@ export class MemoryStore {
     const rows = await this.sql<Array<{ subject_id: string; content: string; confidence: number }>>`
       SELECT subject_id, content, confidence FROM memories
       WHERE guild_id = ${guildId} AND status = 'active' AND content ILIKE ${`%${escapeLike(query)}%`}
+      -- Story facts are fiction scoped to one companion — the shared lookup
+      -- tool must not surface another character's roleplay beats.
+      AND kind <> 'story_fact'
       AND (subject_id = 'server' OR subject_id IN (SELECT user_id FROM members WHERE guild_id = ${guildId} AND opted_in = 1 AND opted_out = 0))
       ${kinds?.length ? this.sql`AND kind = ANY(${kinds})` : this.sql``}
       ORDER BY importance * confidence DESC LIMIT ${limit}
@@ -2223,12 +2329,18 @@ export class MemoryStore {
            OR subject_id IN (SELECT user_id FROM members WHERE guild_id = ${guildId} AND opted_in = 1 AND opted_out = 0))
       RETURNING id
     `;
+    // Pinned rows are user-asserted "never forget this" — the stale ladders
+    // must never reap them.
     const quarantinedCandidatesRows = await this.sql<Array<{ id: number }>>`
-      UPDATE memories SET status = 'quarantined' WHERE guild_id = ${guildId} AND status = 'candidate' AND last_confirmed_at < ${candidateCutoff}
+      UPDATE memories SET status = 'quarantined' WHERE guild_id = ${guildId} AND status = 'candidate' AND last_confirmed_at < ${candidateCutoff} AND NOT pinned
       RETURNING id
     `;
     const quarantinedActiveRows = await this.sql<Array<{ id: number }>>`
-      UPDATE memories SET status = 'quarantined' WHERE guild_id = ${guildId} AND status = 'active' AND confidence < 0.75 AND last_confirmed_at < ${staleCutoff}
+      UPDATE memories SET status = 'quarantined' WHERE guild_id = ${guildId} AND status = 'active' AND confidence < 0.75 AND last_confirmed_at < ${staleCutoff} AND NOT pinned
+        -- Fiction beats start below the 0.75 floor by design (in_fiction =
+        -- 0.60) — without the exemption every story fact would silently
+        -- quarantine at the cutoff. Contradict/forget still reach them.
+        AND kind <> 'story_fact'
       RETURNING id
     `;
     // Status changes cascade to citing attributes — quarantined provenance no
@@ -2273,7 +2385,7 @@ export class MemoryStore {
     return { messages: messages[0].count, memories: memories[0].count, lore: lore[0].count };
   }
 
-  async exportSubject(guildId: string, subjectId: string): Promise<{ memories: Array<Memory & { evidence: MemoryEvidence[] }>; attributes: ProfileAttribute[]; journal: JournalEntry[] }> {
+  async exportSubject(guildId: string, subjectId: string): Promise<{ memories: Array<Memory & { evidence: MemoryEvidence[] }>; attributes: ProfileAttribute[]; journal: JournalEntry[]; summaries: ConversationSummary[] }> {
     const rows = await this.sql<MemoryRow[]>`SELECT * FROM memories WHERE guild_id = ${guildId} AND subject_id = ${subjectId} ORDER BY id`;
     const memories = await Promise.all(rows.map(async r => {
       const mem = rowToMemory(r);
@@ -2281,7 +2393,11 @@ export class MemoryStore {
     }));
     const attributes = await listAttributes(this.sql, guildId, subjectId);
     const journal = await this.journalAboutSubject(guildId, subjectId);
-    return { memories, attributes, journal };
+    // Story summaries hold no per-subject link — they're exported only when
+    // the scope IS the subject's own DM (where they're their companion's recap
+    // of their shared conversation).
+    const summaries = guildId === `dm:${subjectId}` ? await this.summariesForScope(guildId) : [];
+    return { memories, attributes, journal, summaries };
   }
 
   /** Structured profile attributes for a subject — the provenance-backed facet set. */
@@ -3299,6 +3415,22 @@ export class MemoryStore {
     return this.getCompanionByOwner(userId);
   }
 
+  /** Companion-management check matching the dashboard RPCs exactly:
+   *  the owner OR an active adopter of the companion row. Discord surfaces
+   *  (/companion story/reset-story, /memory pin, Pin-to-memory) must agree
+   *  with what the web RPCs allow, or the two surfaces drift. */
+  async canManageCompanion(userId: string, companionId: number): Promise<boolean> {
+    const rows = await this.sql<Array<{ ok: number }>>`
+      SELECT 1 AS ok FROM companions c
+      WHERE c.id = ${companionId}
+        AND (c.owner_user_id = ${userId} OR EXISTS (
+          SELECT 1 FROM companion_adoptions a
+          WHERE a.companion_id = c.id AND a.user_id = ${userId} AND a.dropped_at IS NULL))
+      LIMIT 1
+    `;
+    return rows.length > 0;
+  }
+
   /** Active adoptions that actually occupy a slot — clones of banned
    *  listings are frozen and hidden (the user can't drop what they can't
    *  see), so they don't consume the slot while the ban stands. */
@@ -3747,13 +3879,34 @@ export class MemoryStore {
     opts: { aboutIds?: string[]; limit?: number } = {},
   ): Promise<JournalEntry[]> {
     const limit = opts.limit ?? 6;
-    const rows = await this.sql<Array<any>>`
-      SELECT * FROM companion_journal
-      WHERE companion_id = ${companionId} AND origin_scope = ${scope} AND status = 'active'
-      ORDER BY importance DESC, created_at DESC
-      LIMIT ${limit * 4}
-    `;
-    const entries = rows.map(r => this.rowToJournal(r));
+    const [importanceRows, recentRows, pinnedRows] = await Promise.all([
+      this.sql<Array<any>>`
+        SELECT * FROM companion_journal
+        WHERE companion_id = ${companionId} AND origin_scope = ${scope} AND status = 'active'
+        ORDER BY importance DESC, created_at DESC
+        LIMIT ${limit * 4}
+      `,
+      // Recency leg: the newest entries always keep a slot so "what we did
+      // yesterday" surfaces even when every importance-ranked row is older.
+      this.sql<Array<any>>`
+        SELECT * FROM companion_journal
+        WHERE companion_id = ${companionId} AND origin_scope = ${scope} AND status = 'active'
+        ORDER BY created_at DESC
+        LIMIT 3
+      `,
+      // Pinned leg: owner-pinned entries always lead the pack.
+      this.sql<Array<any>>`
+        SELECT * FROM companion_journal
+        WHERE companion_id = ${companionId} AND origin_scope = ${scope} AND status = 'active' AND pinned
+        ORDER BY created_at DESC
+      `,
+    ]);
+    const seenIds = new Set<number>();
+    const entries: JournalEntry[] = [];
+    for (const r of [...pinnedRows, ...importanceRows, ...recentRows]) {
+      const e = this.rowToJournal(r);
+      if (!seenIds.has(e.id)) { seenIds.add(e.id); entries.push(e); }
+    }
     const optedOut = new Set<string>();
     for (const e of entries) {
       for (const s of e.aboutSubjectIds) {
@@ -3764,14 +3917,71 @@ export class MemoryStore {
     }
     const kept = entries.filter(e => !e.aboutSubjectIds.some(s => optedOut.has(s)));
     const aboutSet = new Set(opts.aboutIds ?? []);
-    const ranked = aboutSet.size
-      ? kept.sort((a, b) => Number(b.aboutSubjectIds.some(s => aboutSet.has(s))) - Number(a.aboutSubjectIds.some(s => aboutSet.has(s))))
-      : kept;
-    const out = ranked.slice(0, limit);
+    const aboutSort = (list: JournalEntry[]) => aboutSet.size
+      ? list.sort((a, b) => Number(b.aboutSubjectIds.some(s => aboutSet.has(s))) - Number(a.aboutSubjectIds.some(s => aboutSet.has(s))))
+      : list;
+    // Pinned entries lead the pack (always recalled), then recent (the "what
+    // we did yesterday" slots), then the importance spine fills the rest.
+    const pinnedIds = new Set(pinnedRows.map(r => Number(r.id)));
+    const recentIds = new Set(recentRows.map(r => Number(r.id)));
+    const out = [
+      ...aboutSort(kept.filter(e => pinnedIds.has(e.id))),
+      ...aboutSort(kept.filter(e => recentIds.has(e.id) && !pinnedIds.has(e.id))).slice(0, 3),
+      ...aboutSort(kept.filter(e => !recentIds.has(e.id) && !pinnedIds.has(e.id))),
+    ].slice(0, limit);
     if (out.length) {
       await this.sql`UPDATE companion_journal SET last_recalled_at = NOW() WHERE id = ANY(${out.map(e => e.id)})`;
     }
     return out;
+  }
+
+  /** Owner pin/unpin for a journal entry (Discord /companion pin or the web
+   *  editor) — pinned entries always recall and never prune. */
+  async setJournalPinned(id: number, pinned: boolean): Promise<boolean> {
+    const res = await this.sql`UPDATE companion_journal SET pinned = ${pinned} WHERE id = ${id} AND status = 'active'`;
+    return res.count > 0;
+  }
+
+  /** Owner pin/unpin for a memory row — pinned always recalls first and is
+   *  exempt from stale-quarantine. Pinning is itself the assertion, so a
+   *  candidate/contested/quarantined row the user pins promotes to active —
+   *  otherwise "always recalled" would be a lie for gated rows. Forgotten and
+   *  superseded rows refuse (un-dead requires an explicit path). */
+  async setMemoryPinned(guildId: string, id: number, pinned: boolean): Promise<boolean> {
+    const res = await this.sql`
+      UPDATE memories SET pinned = ${pinned}, updated_at = NOW(),
+        status = CASE WHEN ${pinned} AND status IN ('candidate','contested','quarantined') THEN 'active' ELSE status END
+      WHERE guild_id = ${guildId} AND id = ${id} AND status NOT IN ('forgotten','superseded')`;
+    if (res.count) await this._logHistory(this.sql, id, pinned ? "pinned" : "unpinned", null, null, null, null, null, {});
+    return res.count > 0;
+  }
+
+  /** /remember + "Pin to memory": the subject asserts a fact directly, so it
+   *  lands active + pinned — no candidate ladder, no corroboration needed.
+   *  Dedup still applies through saveMemory: pinning an existing near-dup
+   *  reinforces and pins that row instead of spawning a twin. An exact dup of
+   *  a forgotten row is a deliberate re-assertion — it comes back pinned; a
+   *  superseded dup is refused (reactivating it would twin the replacement),
+   *  which callers surface by checking saved.pinned. */
+  async pinFact(event: MessageEvent, content: string, subjectId?: string, companionId?: number | null, kind: MemoryCandidate["kind"] = "person_fact"): Promise<Memory> {
+    const isStory = kind === "story_fact";
+    const saved = await this.saveMemory(event, {
+      subjectId: subjectId ?? event.authorId,
+      kind,
+      content,
+      companionId: isStory ? companionId ?? null : undefined,
+      reason: "pinned by the user",
+      evidenceType: isStory ? "in_fiction" : "explicit_fact",
+      effect: "support",
+      importance: 0.9,
+    });
+    await this.sql`
+      UPDATE memories SET status = 'active', pinned = TRUE,
+        confidence = GREATEST(confidence, 0.9), last_confirmed_at = NOW(), updated_at = NOW()
+      WHERE id = ${saved.id} AND status <> 'superseded'
+    `;
+    await this._logHistory(this.sql, saved.id, "pinned", null, null, null, "active", null, { source: "remember" });
+    return (await this.getMemory(event.guildId, saved.id)) ?? saved;
   }
 
   /** Hard-delete journal entries in a scope that mention a subject — opt-out
@@ -3784,9 +3994,181 @@ export class MemoryStore {
     return res.count;
   }
 
+  // ── Rolling story summaries (v55) ──────────────────────────────────────────
+  // One row per (companion, scope, channel). The counter bumps per companion
+  // reply; crossing the threshold claims the slot (msgs_since → 0) and the
+  // job folds messages between covered_until and the live-window tail into
+  // the summary, then advances the watermark.
+
+  private rowToSummary(r: {
+    id: number | string; companion_id: number | string; origin_scope: string;
+    channel_id: string; summary: string; user_edited: boolean;
+    covered_until: Date | string | null; msgs_since: number;
+    created_at: Date | string; updated_at: Date | string;
+  }): ConversationSummary {
+    return {
+      id: Number(r.id), companionId: Number(r.companion_id),
+      originScope: r.origin_scope, channelId: r.channel_id,
+      summary: r.summary, userEdited: !!r.user_edited,
+      coveredUntil: r.covered_until ? ts(r.covered_until) : null,
+      msgsSince: Number(r.msgs_since),
+      createdAt: ts(r.created_at), updatedAt: ts(r.updated_at),
+    };
+  }
+
+  async getStorySummary(companionId: number, scope: string, channelId: string): Promise<ConversationSummary | null> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM conversation_summaries
+      WHERE companion_id = ${companionId} AND origin_scope = ${scope} AND channel_id = ${channelId}
+    `;
+    return rows[0] ? this.rowToSummary(rows[0]) : null;
+  }
+
+  /** All summaries in a scope — export surface for DM scopes. */
+  async summariesForScope(scope: string): Promise<ConversationSummary[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM conversation_summaries WHERE origin_scope = ${scope} AND summary <> ''
+      ORDER BY updated_at DESC
+    `;
+    return rows.map(r => this.rowToSummary(r));
+  }
+
+  /** Summary rows in one channel of a scope — the reset-story picker needs
+   *  every companion's row, not just one. */
+  async summariesForChannel(scope: string, channelId: string): Promise<ConversationSummary[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM conversation_summaries
+      WHERE origin_scope = ${scope} AND channel_id = ${channelId} AND summary <> ''
+    `;
+    return rows.map(r => this.rowToSummary(r));
+  }
+
+  /** Count one companion reply toward the next summary fold. Returns the new
+   *  count — the caller compares against the threshold. */
+  async bumpStoryCounter(companionId: number, scope: string, channelId: string): Promise<number> {
+    const rows = await this.sql<Array<{ msgs_since: number }>>`
+      INSERT INTO conversation_summaries (companion_id, origin_scope, channel_id, msgs_since)
+      VALUES (${companionId}, ${scope}, ${channelId}, 1)
+      ON CONFLICT (companion_id, origin_scope, channel_id)
+      DO UPDATE SET msgs_since = conversation_summaries.msgs_since + 1
+      RETURNING msgs_since
+    `;
+    return Number(rows[0].msgs_since);
+  }
+
+  /** Atomically claim a due summary update: resets the counter only when it
+   *  has crossed the threshold, so concurrent bumps enqueue exactly one job.
+   *  Returns true when this call won the claim. */
+  async claimStoryUpdate(companionId: number, scope: string, channelId: string, threshold: number): Promise<boolean> {
+    const rows = await this.sql<Array<{ id: number }>>`
+      UPDATE conversation_summaries SET msgs_since = 0
+      WHERE companion_id = ${companionId} AND origin_scope = ${scope} AND channel_id = ${channelId}
+        AND msgs_since >= ${threshold}
+      RETURNING id
+    `;
+    return rows.length > 0;
+  }
+
+  /** Fold a new summary in and advance the watermark. The job's text is
+   *  machine-written, so user_edited clears — the flag marks the CURRENT row
+   *  as owner-authored, and this fold just consumed the owner's prior text.
+   *  expectedUpdatedAt is the row's updated_at as the job read it: a user
+   *  edit landing between read and write bumps it, the WHERE fails, and the
+   *  fold drops instead of clobbering fresh canon — the next claim refolds
+   *  with the new prior state. */
+  async upsertStorySummary(
+    companionId: number, scope: string, channelId: string,
+    summary: string, coveredUntil: string, expectedUpdatedAt?: string | null,
+  ): Promise<void> {
+    await this.sql`
+      INSERT INTO conversation_summaries (companion_id, origin_scope, channel_id, summary, covered_until, msgs_since)
+      VALUES (${companionId}, ${scope}, ${channelId}, ${summary}, ${coveredUntil}::timestamptz, 0)
+      ON CONFLICT (companion_id, origin_scope, channel_id)
+      DO UPDATE SET summary = ${summary}, covered_until = ${coveredUntil}::timestamptz,
+        user_edited = FALSE, updated_at = NOW()
+      WHERE date_trunc('milliseconds', conversation_summaries.updated_at)
+        IS NOT DISTINCT FROM ${expectedUpdatedAt ?? null}::timestamptz
+    `;
+  }
+
+  /** Owner edit — stored verbatim and marked so the summarizer folds around
+   *  it rather than rewriting it. Upserts: the /companion story modal can open
+   *  on a lane with no row yet, and an UPDATE-only write would silently drop
+   *  the owner's text. A fresh row seeds covered_until at now() so a first
+   *  fold doesn't drag the whole backlog into brand-new canon. */
+  async setStoryUserText(companionId: number, scope: string, channelId: string, summary: string): Promise<void> {
+    await this.sql`
+      INSERT INTO conversation_summaries (companion_id, origin_scope, channel_id, summary, user_edited, covered_until)
+      VALUES (${companionId}, ${scope}, ${channelId}, ${summary}, TRUE, NOW())
+      ON CONFLICT (companion_id, origin_scope, channel_id)
+      DO UPDATE SET summary = ${summary}, user_edited = TRUE, updated_at = NOW()
+    `;
+  }
+
+  /** Fresh chapter (/companion reset-story, clearing the story modal): clears
+   *  the recap AND parks the watermark at now() so the next fold only sees
+   *  post-reset messages. Deleting the row instead would reset covered_until
+   *  to epoch and re-summarize the whole backlog — the "cleared" story would
+   *  come right back. */
+  async resetStorySummary(companionId: number, scope: string, channelId: string): Promise<number> {
+    const res = await this.sql`
+      UPDATE conversation_summaries
+      SET summary = '', user_edited = FALSE, covered_until = NOW(), msgs_since = 0, updated_at = NOW()
+      WHERE companion_id = ${companionId} AND origin_scope = ${scope} AND channel_id = ${channelId}
+    `;
+    return res.count;
+  }
+
+  async deleteStorySummary(companionId: number, scope: string, channelId: string): Promise<number> {
+    const res = await this.sql`
+      DELETE FROM conversation_summaries
+      WHERE companion_id = ${companionId} AND origin_scope = ${scope} AND channel_id = ${channelId}
+    `;
+    return res.count;
+  }
+
+  /** Wipe every summary in a scope — guild purge and DM opt-out both run it;
+   *  the next job regenerates cleanly since opted-out authors' messages are
+   *  excluded from the window. */
+  async deleteSummariesForScope(scope: string): Promise<number> {
+    const res = await this.sql`DELETE FROM conversation_summaries WHERE origin_scope = ${scope}`;
+    return res.count;
+  }
+
+  /** Messages eligible for folding into the summary: older than the newest
+   *  `keepRecent` (those stay live in the transcript) and newer than the
+   *  watermark. Opted-out authors' rows are excluded so a summary never
+   *  persists their words; bot/system rows are included for continuity.
+   *  Returns [] when the channel has ≤ keepRecent messages total. */
+  async storyWindow(
+    scope: string, channelId: string, coveredUntil: string | null,
+    keepRecent = 20, limit = 60,
+  ): Promise<Array<{ authorName: string; content: string; createdAt: string }>> {
+    const rows = await this.sql<Array<{ author_name: string; content: string; created_at: Date | string }>>`
+      SELECT m.author_name, m.content, m.created_at
+      FROM messages m
+      LEFT JOIN members mb ON mb.guild_id = m.guild_id AND mb.user_id = m.author_id
+      WHERE m.guild_id = ${scope} AND m.channel_id = ${channelId}
+        AND COALESCE(mb.opted_out, 0) = 0
+        AND m.created_at > COALESCE(${coveredUntil}::timestamptz, 'epoch'::timestamptz)
+        AND m.created_at <= (
+          SELECT ref.created_at FROM messages ref
+          WHERE ref.guild_id = ${scope} AND ref.channel_id = ${channelId}
+          ORDER BY ref.created_at DESC OFFSET ${keepRecent} LIMIT 1
+        )
+      ORDER BY m.created_at DESC
+      LIMIT ${limit}
+    `;
+    // Newest-eligible-first, then flip to chronological: on a fresh or reset
+    // row the window reaches deep into the backlog, and folding the newest
+    // slice (rather than the oldest) keeps the recap near the present.
+    return rows.reverse().map(r => ({ authorName: r.author_name, content: r.content, createdAt: ts(r.created_at) }));
+  }
+
   /** Cap entries per (companion, scope): evict the least important stale rows
    * first, then oldest. Runs from the nightly maintenance loop. */
   async pruneJournal(cap = 200): Promise<number> {
+    // Pinned entries are user-asserted keeps — never evicted by the cap.
     const res = await this.sql`
       DELETE FROM companion_journal WHERE id IN (
         SELECT id FROM (
@@ -3794,7 +4176,7 @@ export class MemoryStore {
             PARTITION BY companion_id, origin_scope
             ORDER BY importance * EXP(-EXTRACT(EPOCH FROM (NOW() - COALESCE(last_recalled_at, created_at))) / 86400.0 / 30) DESC,
                      created_at DESC
-          ) rn FROM companion_journal WHERE status = 'active'
+          ) rn FROM companion_journal WHERE status = 'active' AND NOT pinned
         ) ranked WHERE rn > ${cap}
       )
     `;
@@ -3825,6 +4207,7 @@ export class MemoryStore {
       sourceMessageId: r.source_message_id,
       source: r.source === "import" ? "import" : "live",
       importId: r.import_id != null ? Number(r.import_id) : null,
+      pinned: !!r.pinned,
       createdAt: ts(r.created_at),
     };
   }

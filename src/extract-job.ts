@@ -32,6 +32,12 @@ export type ExtractJobPayload = {
   event: Omit<MessageEvent, "createdAt"> & { createdAt: string };
   replyToId?: string;
   replyToContent?: string;
+  /** Companion the turn belongs to — story_fact rows are scoped to it. Absent
+   *  for ambient server messages with no addressee; those land unscoped. */
+  companionId?: number;
+  /** True when the turn's companion is roleplay-flagged (adopted personas) —
+   *  biases the extractor toward in_fiction unless plainly real-world. */
+  fictionHint?: boolean;
 };
 
 export interface ExtractJobDeps {
@@ -141,7 +147,7 @@ export async function runExtractJob(payload: ExtractJobPayload, deps: ExtractJob
     // Established nature labels — the model reuses "close friends" instead of
     // fragmenting the vocabulary into synonym churn. One cheap indexed query.
     const natureVocab = await store.relationshipNatureVocab(guildId);
-    const { memories: candidates, relationships } = await withRetry(() => brain.extractMemories(event, replyToContent, note, imageContext, natureVocab), 3);
+    const { memories: candidates, relationships } = await withRetry(() => brain.extractMemories(event, replyToContent, note, imageContext, natureVocab, payload.fictionHint), 3);
     const aliases = (candidates.length || relationships.length) ? await deps.getAliases(guildId) : new Map<string, string>();
     // Opt-in consent — identical rule to the sweep/ingest paths: derived person
     // data persists only for consenting members; the bot and summoned/active
@@ -159,7 +165,7 @@ export async function runExtractJob(payload: ExtractJobPayload, deps: ExtractJob
     const persisted = await persistExtraction(
       { memories: candidates, relationships },
       event,
-      { store, aliases, isConsented, onMemorySaved: () => inc("memory.saved") },
+      { store, aliases, isConsented, companionId: payload.companionId, onMemorySaved: () => inc("memory.saved") },
     );
     savedIds = persisted.savedIds;
     // Terminal mark — extraction ran even if it yielded nothing.

@@ -33,6 +33,11 @@ export type PersistExtractionCtx = {
   onMemorySaved?: (memoryId: number) => void;
   /** Fires once per newly recorded relationship observation. */
   onRelationshipRecorded?: () => void;
+  /** The companion this turn belonged to — story_fact rows are scoped to it.
+   *  Undefined means the message had no companion context: fiction still
+   *  persists but lands unscoped (inert in recall) rather than leaking into
+   *  shared real-world facts. */
+  companionId?: number | null;
 };
 
 export async function persistExtraction(
@@ -46,6 +51,13 @@ export async function persistExtraction(
 
   for (const memory of result.memories) {
     memory.subjectId = resolveSubject(memory, aliases, event);
+    // Fiction stays fiction: in-fiction evidence or a story_fact kind both
+    // normalize to a companion-scoped story beat — never a real-world fact,
+    // never a behavioral-pattern episode.
+    if (memory.evidenceType === "in_fiction" || memory.kind === "story_fact") {
+      memory.kind = "story_fact";
+      memory.companionId = ctx.companionId ?? null;
+    }
     if (!(await isConsented(memory.subjectId))) continue;
     if (memory.subjectId === "unknown" && memory.subjectName) {
       await store.logUnresolvedName(event.guildId, memory.subjectName, event.messageId);

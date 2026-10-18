@@ -20,8 +20,13 @@ export type MemoryCandidate = {
   // The subject's name exactly as written in the message — resolved to a user ID
   // via the alias map when subjectId can't be determined directly.
   subjectName?: string;
-  kind: "person_fact" | "person_preference" | "server_lore" | "episode";
+  // story_fact = an in-fiction/roleplay beat — stored on companion_id so it
+  // only surfaces for the character it was told to, never as a real-world fact.
+  kind: "person_fact" | "person_preference" | "server_lore" | "episode" | "story_fact";
   content: string;
+  /** Companion this memory is scoped to — set only for story_fact rows. NULL
+   *  means a real-world fact shared by all of the subject's companions. */
+  companionId?: number | null;
   // Optional: the LLM does not set these; the database calculates them deterministically.
   confidence?: number;
   importance?: number;
@@ -72,6 +77,10 @@ export type Member = {
   guildId: string; userId: string; knownNames: string[];
   firstSeenAt: string; lastSeenAt: string; messageCount: number; optedOut: boolean;
   optedIn: boolean;
+  /** v57 — opt-in for the server→DM digest to carry this member's facts into
+   *  a companion owner's private DM. Default off: only server lore and the
+   *  owner's own data cross that boundary without it. */
+  shareFactsWithCompanionOwners: boolean;
 };
 
 export type Profile = {
@@ -175,7 +184,7 @@ export type ProfileSynthesis = {
 export type VerificationVerdict = "literal" | "joke" | "unclear" | "misattributed";
 
 export type MemoryStatus = "candidate" | "quarantined" | "active" | "contested" | "superseded" | "forgotten";
-export type EvidenceType = "explicit_fact" | "clear_preference" | "direct_observation" | "reported_by_other" | "sarcasm_or_joke" | "uncertain_inference" | "correction";
+export type EvidenceType = "explicit_fact" | "clear_preference" | "direct_observation" | "reported_by_other" | "sarcasm_or_joke" | "uncertain_inference" | "correction" | "in_fiction";
 export type EvidenceEffect = "support" | "contradict" | "correct" | "context";
 
 export type Decision = {
@@ -381,6 +390,8 @@ export type JournalEntry = {
    *  uploaded chat history (import_id traces it back). */
   source?: "live" | "import";
   importId?: number | null;
+  /** v57 — owner-pinned entries always ride recall and never get pruned. */
+  pinned?: boolean;
   createdAt: string;
 };
 
@@ -389,6 +400,24 @@ export type JournalCandidate = {
   content: string;
   importance?: number;
   aboutSubjects?: string[];
+};
+
+/** Rolling "story so far" recap for one (companion, scope, channel) — the
+ *  always-on continuity layer that outlives the 25-message transcript window.
+ *  coveredUntil is the watermark; msgs_since counts replies waiting to fold in. */
+export type ConversationSummary = {
+  id: number;
+  companionId: number;
+  originScope: string;
+  channelId: string;
+  summary: string;
+  /** True once the owner rewrote the summary — the summarizer treats it as
+   *  authoritative prior state instead of proposing freely. */
+  userEdited: boolean;
+  coveredUntil: string | null;
+  msgsSince: number;
+  createdAt: string;
+  updatedAt: string;
 };
 
 /** A queued/running/finished chat-history import (v44). The transcript lives
@@ -457,6 +486,8 @@ export type CompanionPersona = {
   serverDigest?: string;
   /** The companion's own first-person journal entries, origin-scoped to where it's speaking. */
   journal?: JournalEntry[];
+  /** Rolling recap of this conversation older than the live transcript window. */
+  storySummary?: string;
 };
 
 export type GuildCompanion = Companion & {

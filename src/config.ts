@@ -58,6 +58,10 @@ const env = z.object({
   REQUIRE_GUILD_KEYS: z.string().optional(),
   // Per-user daily LLM call cap for 1:1 DMs (dm:<userId> scope, always uses operator envKey).
   DM_LLM_DAILY_CAP: z.coerce.number().int().min(0).max(100_000).default(250),
+  // Live transcript window for DM replies — wider than the shared-guild
+  // default (25) because a 1:1 chat has no other voices; the story recap
+  // still covers everything older than STORY_KEEP_RECENT.
+  DM_CONTEXT_MESSAGES: z.coerce.number().int().min(10).max(100).default(40),
   // Maximum consecutive companion-to-companion replies per human message in a server channel.
   MAX_COMPANION_CHAIN_DEPTH: z.coerce.number().int().min(0).max(5).default(2),
   // Where the public website lives — /link replies point users here to claim
@@ -213,6 +217,7 @@ export const config = {
   keyEncryptionSecret: env.KEY_ENCRYPTION_SECRET,
   requireGuildKeys: env.REQUIRE_GUILD_KEYS === "1",
   dmLlmDailyCap: env.DM_LLM_DAILY_CAP,
+  dmContextMessages: env.DM_CONTEXT_MESSAGES,
   maxCompanionChainDepth: env.MAX_COMPANION_CHAIN_DEPTH,
   siteUrl: env.SITE_URL,
   avatarUploadSecret: env.AVATAR_UPLOAD_SECRET,

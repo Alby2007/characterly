@@ -14,6 +14,10 @@ export function calculateInitialConfidence(evidenceType: EvidenceType): number {
     correction: 0.80,
     sarcasm_or_joke: 0.10,
     uncertain_inference: 0.20,
+    // In-fiction evidence asserts a story beat, not a real-world claim — it
+    // starts as reliable as a direct statement within its fiction. The
+    // promotable-types allowlist still excludes it from real-world promotion.
+    in_fiction: 0.60,
   };
   return confidenceMap[evidenceType] ?? 0.20;
 }
@@ -48,12 +52,15 @@ export function updateConfidence(currentConfidence: number, effect: "support" | 
  * Calculate default importance for a memory kind.
  * Used when LLM doesn't provide importance (now that LLM doesn't set numeric values).
  */
-export function calculateDefaultImportance(kind: "person_fact" | "person_preference" | "server_lore" | "episode"): number {
+export function calculateDefaultImportance(kind: "person_fact" | "person_preference" | "server_lore" | "episode" | "story_fact"): number {
   const importanceMap: Record<typeof kind, number> = {
     person_fact: 0.5,
     person_preference: 0.6,
     server_lore: 0.7,
     episode: 0.4,
+    // Plot beats matter within their story but must not outrank real facts
+    // in any shared ranking — mid-band, below person knowledge.
+    story_fact: 0.45,
   };
   return importanceMap[kind];
 }
@@ -71,6 +78,8 @@ export function calculateDefaultExplicitness(evidenceType: EvidenceType): number
     correction: 0.95,
     sarcasm_or_joke: 0.2,
     uncertain_inference: 0.3,
+    // Fiction narration is explicit about what happened in-scene.
+    in_fiction: 0.7,
   };
   return explicitnessMap[evidenceType] ?? 0.5;
 }

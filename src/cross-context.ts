@@ -20,9 +20,12 @@ export async function gatherOwnerSubtextForServer(
 ): Promise<string | undefined> {
   const dmScope = `dm:${ownerUserId}`;
   const compSubj = MemoryStore.companionSubjectId(companionId);
+  // companionId rides along so this companion's in-fiction story facts keep
+  // continuity in the server lane — the vault treats them as private subtext
+  // exactly like DM memories, never verbatim.
   const [ownerMemories, compMemories, attrs, dmJournal] = await Promise.all([
-    store.relevantMemories(dmScope, ownerUserId, maxMemories),
-    store.relevantMemories(dmScope, compSubj, 3),
+    store.relevantMemories(dmScope, ownerUserId, maxMemories, companionId),
+    store.relevantMemories(dmScope, compSubj, 3, companionId),
     store.attributesFor(dmScope, ownerUserId),
     // The companion's private-DM journal rides the same confidential-subtext
     // lane as owner memories — first-person beats from 1:1 time together.
@@ -71,7 +74,11 @@ export async function gatherServerDigestForDm(
       eventStore.listEvents(guildId, { limit: 3 }),
       store.relationshipsFor(guildId, compSubj),
       store.relationshipsFor(guildId, ownerUserId),
-      store.recentMemories(guildId, 5, { consentedOnly: true }),
+      // Active-only + no unknown subjects in SQL — filtering after LIMIT meant
+      // a burst of fresh candidates starved the digest to nothing. digestFor
+      // restricts subjects to server lore, the owner, companions, and members
+      // who explicitly opted into fact-sharing.
+      store.recentMemories(guildId, 5, { status: "active", excludeSubjects: ["unknown"], digestFor: ownerUserId }),
     ]);
 
     const items: string[] = [];
@@ -97,9 +104,10 @@ export async function gatherServerDigestForDm(
       }
     }
 
-    // Unknown-subject claims are pre-resolution data — inert until claimed —
-    // so the digest must not surface one even if it reached 'active'.
-    for (const m of recentMems.filter(x => x.status === "active" && x.subjectId !== "unknown").slice(0, 3)) {
+    // Unknown-subject claims are excluded in SQL — they're pre-resolution
+    // data, inert until claimed, so the digest never surfaces one. The belt-
+    // and-braces filter here keeps that true even if a caller drops the flag.
+    for (const m of recentMems.filter(m => m.subjectId !== "unknown").slice(0, 3)) {
       items.push(`Server note (${m.subjectLabel}): ${m.content}`);
     }
 

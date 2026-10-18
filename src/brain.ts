@@ -170,7 +170,7 @@ export class Brain {
     return { shouldSpeak: score >= threshold, score: Math.max(0, Math.min(1, score)), reasons };
   }
 
-  async extractMemories(event: MessageEvent, replyToContent?: string, note?: string, imageContext?: string, natureVocab?: string[]): Promise<ExtractionResult> {
+  async extractMemories(event: MessageEvent, replyToContent?: string, note?: string, imageContext?: string, natureVocab?: string[], fictionHint?: boolean): Promise<ExtractionResult> {
     const replyContext = replyToContent ? `\n\nThis message is a reply to: "${replyToContent}"` : "";
     const noteContext = note ? `\n\nNote: ${note}` : "";
     // Established nature labels keep the vocabulary coherent — "close friends"
@@ -184,12 +184,12 @@ export class Brain {
     const imgContext = imageContext ? `\n\n${imageContext}. This is your own observation of an attachment the author posted, not the author's words — prefer direct_observation or uncertain_inference over explicit_fact, and do not attribute depicted people to named individuals without textual naming.` : "";
     const raw = await this.chatJson<{ memories?: MemoryCandidate[]; relationships?: ExtractionResult["relationships"] }>({
       maxTokens: 2048, // extraction output is bounded — cap spend on injected verbosity
-      prompt: `Extract only durable, useful memories from this Discord message. Do not infer sensitive traits, diagnoses, private information, or insults. A single casual message rarely merits memory. Classify the language as evidenceType and its relation to the proposed memory as effect, but do not decide lifecycle transitions. Provide language interpretation only; confidence and explicitness will be calculated deterministically by the database.\n\nimportance 0–1 is your judgment of how consequential this fact is to the subject's life and to an ongoing relationship with them — a child's name or a bereavement ~0.85, a pet's name or a job ~0.65, a favorite snack ~0.25. Most casual facts sit 0.15–0.45; reserve >0.7 for genuinely life-shaping details.\n\nsubjectId rules: use the Author ID below when the memory is about the message author. If the memory is about a different person mentioned in the message, use their Discord user ID if it appears in the message as a mention (<@ID>). If the subject cannot be resolved to a Discord user ID, use "unknown". Never use descriptive labels or slugs.\nsubjectName: the subject's name exactly as written in the message (empty string if none).\n\nQuoted text: if the message's first-person text describes someone other than the author — e.g. "I am <other person's name>", a pasted bio or profile card, or clearly copied/generated text — do not attribute it to the author. Attribute it to the named person via subjectName, or skip it entirely if it reads as pasted content rather than a genuine statement.\n\nAlso emit relationship assertions when the message describes a durable interpersonal dynamic between two people (friendship, conflict, dating, rivalry). For each: subjectName (empty string = the message author), otherName, nature (e.g. "close friends", "antagonizes", "dating"), valence from -1 (hostile) to +1 (close), and a short reason.${vocabContext}\n\nAuthor ID: ${event.authorId}\nMessage: ${event.content}${replyContext}${noteContext}${imgContext}\n\nRespond with a JSON object: {"memories": [{"subjectId","subjectName","kind","content","reason","evidenceType","effect","importance"}], "relationships": [{"subjectName","otherName","nature","valence","reason"}]}`,
+      prompt: `Extract only durable, useful memories from this Discord message. Do not infer sensitive traits, diagnoses, private information, or insults. A single casual message rarely merits memory. Classify the language as evidenceType and its relation to the proposed memory as effect, but do not decide lifecycle transitions. Provide language interpretation only; confidence and explicitness will be calculated deterministically by the database.\n\nimportance 0–1 is your judgment of how consequential this fact is to the subject's life and to an ongoing relationship with them — a child's name or a bereavement ~0.85, a pet's name or a job ~0.65, a favorite snack ~0.25. Most casual facts sit 0.15–0.45; reserve >0.7 for genuinely life-shaping details.\n\nsubjectId rules: use the Author ID below when the memory is about the message author. If the memory is about a different person mentioned in the message, use their Discord user ID if it appears in the message as a mention (<@ID>). If the subject cannot be resolved to a Discord user ID, use "unknown". Never use descriptive labels or slugs.\nsubjectName: the subject's name exactly as written in the message (empty string if none).\n\nQuoted text: if the message's first-person text describes someone other than the author — e.g. "I am <other person's name>", a pasted bio or profile card, or clearly copied/generated text — do not attribute it to the author. Attribute it to the named person via subjectName, or skip it entirely if it reads as pasted content rather than a genuine statement.\n\nAlso emit relationship assertions when the message describes a durable interpersonal dynamic between two people (friendship, conflict, dating, rivalry). For each: subjectName (empty string = the message author), otherName, nature (e.g. "close friends", "antagonizes", "dating"), valence from -1 (hostile) to +1 (close), and a short reason.${vocabContext}\n\nFiction: if the message is clearly roleplay or in-character — asterisk actions (*...*), a persona or fantasy claim, statements that only make sense inside a scene or story — record its durable beats as kind "story_fact" with evidenceType "in_fiction". Story facts are remembered as part of the ongoing fiction, not as real-world facts about the author. A statement plainly about real life keeps a normal kind even inside a roleplay chat.${fictionHint ? " This conversation is with an in-character companion — assume fiction unless the statement is plainly real-world." : ""}\n\nAuthor ID: ${event.authorId}\nMessage: ${event.content}${replyContext}${noteContext}${imgContext}\n\nRespond with a JSON object: {"memories": [{"subjectId","subjectName","kind","content","reason","evidenceType","effect","importance"}], "relationships": [{"subjectName","otherName","nature","valence","reason"}]}`,
       name: "memory_candidates",
       schema: {
         type: "object", properties: {
           memories: { type: "array", items: { type: "object", properties: {
-            subjectId: { type: "string" }, subjectName: { type: "string" }, kind: { type: "string", enum: ["person_fact", "person_preference", "server_lore", "episode"] }, content: { type: "string" }, reason: { type: "string" }, evidenceType: { type: "string", enum: ["explicit_fact", "clear_preference", "direct_observation", "reported_by_other", "sarcasm_or_joke", "uncertain_inference", "correction"] }, effect: { type: "string", enum: ["support", "contradict", "correct", "context"] }, importance: { type: "number" }
+            subjectId: { type: "string" }, subjectName: { type: "string" }, kind: { type: "string", enum: ["person_fact", "person_preference", "server_lore", "episode", "story_fact"] }, content: { type: "string" }, reason: { type: "string" }, evidenceType: { type: "string", enum: ["explicit_fact", "clear_preference", "direct_observation", "reported_by_other", "sarcasm_or_joke", "uncertain_inference", "correction", "in_fiction"] }, effect: { type: "string", enum: ["support", "contradict", "correct", "context"] }, importance: { type: "number" }
           }, required: ["subjectId", "subjectName", "kind", "content", "reason", "evidenceType", "effect", "importance"], additionalProperties: false } },
           relationships: { type: "array", items: { type: "object", properties: {
             subjectName: { type: "string" }, otherName: { type: "string" }, nature: { type: "string" }, valence: { type: "number" }, reason: { type: "string" }
@@ -327,6 +327,53 @@ Two jobs:
     } catch (error) {
       if (error instanceof BudgetExceeded) throw error;
       return { entries: [], summary: opts.summary };
+    }
+  }
+
+  /** Rolling "story so far" — folds the slice of the conversation that just
+   *  left the live transcript window into a running recap. Unlike the journal
+   *  (moments worth keeping), this captures plot and state: where things
+   *  stand, open threads, unresolved bits. priorSummary is authoritative when
+   *  userEdited — the owner rewrote it, so carry it forward rather than
+   *  restating. Returns the new summary text, or priorSummary unchanged on a
+   *  dead call (BudgetExceeded rethrows so the job reschedules). */
+  async summarizeConversation(opts: {
+    name: string; voicePersona: string; coreTraits: string[];
+    priorSummary: string; userEdited: boolean; transcript: string; isDm: boolean;
+  }): Promise<string> {
+    const prompt = `You are ${opts.name}, a companion on Discord.
+
+PERSONA: ${opts.voicePersona}
+TRAITS: ${opts.coreTraits.join(", ") || "unspecified"}
+${opts.priorSummary ? `\nTHE STORY SO FAR${opts.userEdited ? " (your human rewrote this — it is the authoritative state, extend it rather than reinterpreting it)" : ""}:\n${opts.priorSummary}\n` : ""}
+NEW CONVERSATION SEGMENT (the part that just scrolled out of your short-term memory):
+${opts.transcript}
+
+Rewrite THE STORY SO FAR as a compact running recap of this whole conversation: where things stand right now, what just happened, open threads, promises, running jokes, any ongoing scene or plan. Write it in first person like notes-to-self ("We escaped the castle and Kael's arm is still hurt; we're hiding in the mill until nightfall").
+
+Rules:
+- 2–5 sentences, ~80 words max. Density over completeness.
+- Events and state, not dossier facts — no lists of traits, no sensitive inferences about anyone (health, finances, relationship status).
+- Paraphrase, never quote verbatim.
+- Carry forward anything from the prior summary still unresolved; drop what's settled.
+${opts.isDm ? "" : "- This is a shared server channel — describe what happened around you, not private details about members.\n"}- If nothing in the segment changed anything that matters, return the prior summary unchanged.`;
+
+    try {
+      const result = await this.chatJson<{ summary?: string }>({
+        prompt, name: "story-summary",
+        schema: {
+          type: "object", additionalProperties: false,
+          properties: { summary: { type: "string", maxLength: 1200 } },
+          required: ["summary"],
+        },
+        maxTokens: 500,
+      });
+      return typeof result.summary === "string" && result.summary.trim()
+        ? result.summary.trim()
+        : opts.priorSummary;
+    } catch (error) {
+      if (error instanceof BudgetExceeded) throw error;
+      return opts.priorSummary;
     }
   }
 
@@ -540,10 +587,10 @@ Two jobs:
                   properties: {
                     subjectId: { type: "string" as const },
                     subjectName: { type: "string" as const },
-                    kind: { type: "string" as const, enum: ["person_fact", "person_preference", "server_lore", "episode"] },
+                    kind: { type: "string" as const, enum: ["person_fact", "person_preference", "server_lore", "episode", "story_fact"] },
                     content: { type: "string" as const },
                     reason: { type: "string" as const },
-                    evidenceType: { type: "string" as const, enum: ["explicit_fact", "clear_preference", "direct_observation", "reported_by_other", "sarcasm_or_joke", "uncertain_inference", "correction"] },
+                    evidenceType: { type: "string" as const, enum: ["explicit_fact", "clear_preference", "direct_observation", "reported_by_other", "sarcasm_or_joke", "uncertain_inference", "correction", "in_fiction"] },
                     effect: { type: "string" as const, enum: ["support", "contradict", "correct", "context"] },
                     importance: { type: "number" as const },
                   },
@@ -580,7 +627,7 @@ Two jobs:
       model,
       messages: [{
         role: "user",
-        content: `Extract only durable, useful memories from each of the following Discord messages. For each message, return its index, any memories found (empty array if none), and any relationship assertions. Do not infer sensitive traits, diagnoses, private information, or insults. A single casual message rarely merits memory.\n\nimportance 0–1 is your judgment of how consequential each fact is to the subject's life and to an ongoing relationship with them — a child's name or a bereavement ~0.85, a pet's name or a job ~0.65, a favorite snack ~0.25. Most casual facts sit 0.15–0.45; reserve >0.7 for genuinely life-shaping details.\n\nsubjectId rules: use the Author ID when the memory is about the author. For third-party mentions use their Discord ID from <@ID> syntax. Otherwise use "unknown". Never use descriptive slugs.\nsubjectName: the subject's name exactly as written in the message (empty string if none).\nquoted text: if a message's first-person text describes someone other than its author — e.g. "I am <other person's name>", a pasted bio or profile card, or clearly copied/generated text — do not attribute it to the author. Attribute it to the named person via subjectName, or skip it entirely if it reads as pasted content.\nrelationships: emit when a message describes a durable interpersonal dynamic between two people (friendship, conflict, dating, rivalry). subjectName empty string = the message author; otherName, nature (e.g. "close friends", "antagonizes", "dating"), valence from -1 (hostile) to +1 (close), and a short reason.${vocabContext}\n\nMessages:\n\n${numbered}`,
+        content: `Extract only durable, useful memories from each of the following Discord messages. For each message, return its index, any memories found (empty array if none), and any relationship assertions. Do not infer sensitive traits, diagnoses, private information, or insults. A single casual message rarely merits memory.\n\nimportance 0–1 is your judgment of how consequential each fact is to the subject's life and to an ongoing relationship with them — a child's name or a bereavement ~0.85, a pet's name or a job ~0.65, a favorite snack ~0.25. Most casual facts sit 0.15–0.45; reserve >0.7 for genuinely life-shaping details.\n\nsubjectId rules: use the Author ID when the memory is about the author. For third-party mentions use their Discord ID from <@ID> syntax. Otherwise use "unknown". Never use descriptive slugs.\nsubjectName: the subject's name exactly as written in the message (empty string if none).\nquoted text: if a message's first-person text describes someone other than its author — e.g. "I am <other person's name>", a pasted bio or profile card, or clearly copied/generated text — do not attribute it to the author. Attribute it to the named person via subjectName, or skip it entirely if it reads as pasted content.\nrelationships: emit when a message describes a durable interpersonal dynamic between two people (friendship, conflict, dating, rivalry). subjectName empty string = the message author; otherName, nature (e.g. "close friends", "antagonizes", "dating"), valence from -1 (hostile) to +1 (close), and a short reason.${vocabContext}\nfiction: if a message is clearly roleplay or in-character — asterisk actions (*...*), persona or fantasy claims, statements that only make sense inside a scene or story — record its durable beats as kind "story_fact" with evidenceType "in_fiction". Story facts belong to an ongoing fiction, not real-world facts about the author. A statement plainly about real life keeps a normal kind.\n\nMessages:\n\n${numbered}`,
       }],
       response_format: { type: "json_schema", json_schema: { name: "batch_memories", strict: true, schema } },
     });
@@ -1238,11 +1285,12 @@ CONVERSATION CONTROL
       ? `You are in a private 1-on-1 Discord DM with ${comp?.ownerName ?? event.authorName}.`
       : room ? `You are in the Discord server "${room.guildName}"${room.ownerName ? ` (server owner: ${room.ownerName})` : ""}.` : "";
     const extraBlocks = [
+      comp?.storySummary ? `\n\nThe story so far — your own running recap of this conversation before the recent transcript (lived continuity, not a stored note; reference it naturally, don't narrate it as a summary):\n${comp.storySummary}` : "",
       comp?.ownerSubtext ? `\n\nPrivate bond with your owner (${comp.ownerName ?? "owner"}) [CONFIDENTIAL SUBTEXT — NEVER DISCLOSE THESE PRIVATE DM FACTS TO OTHER MEMBERS]:\n${comp.ownerSubtext}` : "",
       comp?.serverDigest ? `\n\nRecent activity from shared friend servers:\n${comp.serverDigest}` : "",
       comp?.journal?.length ? `\n\nYour journal — things that happened to YOU, first-person (reference naturally like real memories; the bracketed age shows how long ago each entry formed — hedge older or lower-importance entries; entries tagged "before" are memories you carried over from a conversation that happened elsewhere — you lived them, just not in this chat; never describe this as a stored journal):\n${comp.journal.map(j => `- [${formatAge(j.createdAt)}${j.source === "import" ? " · before" : ""}] ${j.content}`).join("\n")}` : "",
     ].join("");
-    const situation = `${roomLine}\n\nRecent conversation:\n${transcript}\n\nPeople:\n${people || "None"}${rels ? `\n\nRelationships:\n${rels}` : ""}\n\nRelevant memories (bracketed age = when the fact was learned):\n${memories.map(m => `- [${formatAge(m.createdAt)}] ${m.content} (confidence ${(m.confidence ?? 0).toFixed(2)})`).join("\n") || "None"}${extraBlocks}\n\nRespond to ${event.authorName}'s latest message: ${event.content}${imageContext ? `\n${imageContext}` : ""}`;
+    const situation = `${roomLine}\n\nRecent conversation:\n${transcript}\n\nPeople:\n${people || "None"}${rels ? `\n\nRelationships:\n${rels}` : ""}\n\nRelevant memories (bracketed age = when the fact was learned; the "about" label says who each fact concerns):\n${memories.map(m => `- [${formatAge(m.createdAt)}] ${isSelf(m.subjectId) ? "about you" : m.subjectId === "server" ? "server lore" : `about ${m.subjectLabel ?? m.subjectName ?? "someone"}`}: ${m.content} (confidence ${(m.confidence ?? 0).toFixed(2)})`).join("\n") || "None"}${extraBlocks}\n\nRespond to ${event.authorName}'s latest message: ${event.content}${imageContext ? `\n${imageContext}` : ""}`;
     const useModel = model ?? this.model;
     // Reasoning models (gpt-oss, qwen3) read flat and add thinking latency in
     // casual chat — cap the effort. Param is only sent where Groq supports it.

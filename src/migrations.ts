@@ -4828,6 +4828,749 @@ const migrations: Migration[] = [
       await sql`ALTER TABLE companion_adoptions DROP COLUMN IF EXISTS chat_thread_id`;
     },
   },
+
+  // ── v55: rolling "story so far" summaries ──────────────────────────────────
+  // One row per (companion, scope, channel): a rolling first-person recap of
+  // everything older than the live transcript window. `covered_until` is the
+  // watermark — the summary job only folds in messages between it and the
+  // live window's tail. `msgs_since` is the enqueue counter (reset atomically
+  // when a job is claimed). `user_edited` marks a summary the owner rewrote —
+  // the summarizer treats it as authoritative prior state.
+  {
+    version: 55,
+    name: "v55_story_summaries",
+    up: async (sql) => {
+      await sql`
+        CREATE TABLE IF NOT EXISTS conversation_summaries (
+          id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          companion_id  BIGINT NOT NULL REFERENCES companions(id) ON DELETE CASCADE,
+          origin_scope  TEXT NOT NULL,
+          channel_id    TEXT NOT NULL DEFAULT '',
+          summary       TEXT NOT NULL DEFAULT '',
+          user_edited   BOOLEAN NOT NULL DEFAULT FALSE,
+          covered_until TIMESTAMPTZ,
+          msgs_since    INTEGER NOT NULL DEFAULT 0,
+          created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(companion_id, origin_scope, channel_id)
+        )
+      `;
+      // Same lockdown as v23/v25 — public table needs RLS on Supabase.
+      await sql`ALTER TABLE conversation_summaries ENABLE ROW LEVEL SECURITY`;
+    },
+    down: async (sql) => {
+      await sql`DROP TABLE IF EXISTS conversation_summaries`;
+    },
+  },
+
+  // ── v56: fiction-scoped memories ──────────────────────────────────────────
+  // `companion_id` on memories scopes a row to one character. NULL = a real
+  // fact shared across every companion of the subject's; a set id = a
+  // 'story_fact' (roleplay beat) that only that companion recalls. The old
+  // four-column unique constraint becomes an expression index so NULL and
+  // set ids don't collide — NULL is folded to 0 (ids are identity ≥1).
+  {
+    version: 56,
+    name: "v56_story_facts",
+    up: async (sql) => {
+      // FK + CASCADE: deleting a companion deletes its story_facts outright —
+      // fiction belongs to the character, so nothing should linger orphaned.
+      await addColumn(sql, "memories", "companion_id BIGINT REFERENCES companions(id) ON DELETE CASCADE");
+      await sql`ALTER TABLE memories DROP CONSTRAINT IF EXISTS memories_guild_id_subject_id_kind_content_key`;
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS memories_unique_key ON memories(guild_id, subject_id, kind, content, COALESCE(companion_id, 0))`;
+      await sql`CREATE INDEX IF NOT EXISTS memories_companion ON memories(companion_id) WHERE companion_id IS NOT NULL`;
+      // The cascade has to reach dependents too: evidence/history/event links
+      // for a deleted memory must go with it, not block the delete. These were
+      // previously un-cascaded because nothing ever hard-deleted a memories row
+      // — guild purge removed dependents first by hand.
+      await sql`ALTER TABLE memory_evidence DROP CONSTRAINT IF EXISTS memory_evidence_memory_id_fkey`;
+      await sql`ALTER TABLE memory_evidence ADD CONSTRAINT memory_evidence_memory_id_fkey FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE`;
+      await sql`ALTER TABLE memory_history DROP CONSTRAINT IF EXISTS memory_history_memory_id_fkey`;
+      await sql`ALTER TABLE memory_history ADD CONSTRAINT memory_history_memory_id_fkey FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE`;
+      await sql`ALTER TABLE event_memories DROP CONSTRAINT IF EXISTS event_memories_memory_id_fkey`;
+      await sql`ALTER TABLE event_memories ADD CONSTRAINT event_memories_memory_id_fkey FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE`;
+    },
+    down: async (sql) => {
+      await sql`ALTER TABLE memory_evidence DROP CONSTRAINT IF EXISTS memory_evidence_memory_id_fkey`;
+      await sql`ALTER TABLE memory_evidence ADD CONSTRAINT memory_evidence_memory_id_fkey FOREIGN KEY (memory_id) REFERENCES memories(id)`;
+      await sql`ALTER TABLE memory_history DROP CONSTRAINT IF EXISTS memory_history_memory_id_fkey`;
+      await sql`ALTER TABLE memory_history ADD CONSTRAINT memory_history_memory_id_fkey FOREIGN KEY (memory_id) REFERENCES memories(id)`;
+      await sql`ALTER TABLE event_memories DROP CONSTRAINT IF EXISTS event_memories_memory_id_fkey`;
+      await sql`ALTER TABLE event_memories ADD CONSTRAINT event_memories_memory_id_fkey FOREIGN KEY (memory_id) REFERENCES memories(id)`;
+      await sql`DROP INDEX IF EXISTS memories_companion`;
+      await sql`DROP INDEX IF EXISTS memories_unique_key`;
+      // Story facts let the same content exist once per companion — restoring
+      // the 4-column constraint needs those rows collapsed first.
+      await sql`
+        DELETE FROM memories a USING memories b
+        WHERE a.id > b.id AND a.guild_id = b.guild_id AND a.subject_id = b.subject_id
+          AND a.kind = b.kind AND a.content = b.content
+      `;
+      await sql`ALTER TABLE memories DROP COLUMN IF EXISTS companion_id`;
+      await sql`ALTER TABLE memories ADD CONSTRAINT memories_guild_id_subject_id_kind_content_key UNIQUE(guild_id, subject_id, kind, content)`;
+    },
+  },
+
+  // ── v57: user memory control + digest consent ────────────────────────────
+  // `pinned` on memories/companion_journal: user-asserted "never forget this"
+  // rows — always recalled, excluded from prune/stale-quarantine.
+  // `members.share_facts_with_companion_owners`: per-member opt-in for the
+  // server→DM digest to relay THEIR facts into a companion owner's private
+  // DM. Default off — before this, any consented member's lore could ride the
+  // digest into someone else's inbox.
+  // RPCs give the website dashboard a memory editor over the caller's own DM
+  // scope — same auth pattern as my_companions (auth.uid → web_profiles →
+  // discord_user_id resolved server-side; nothing is client-trusted).
+  {
+    version: 57,
+    name: "v57_user_memory_control",
+    up: async (sql) => {
+      await addColumn(sql, "memories", "pinned BOOLEAN NOT NULL DEFAULT FALSE");
+      await addColumn(sql, "companion_journal", "pinned BOOLEAN NOT NULL DEFAULT FALSE");
+      await addColumn(sql, "members", "share_facts_with_companion_owners SMALLINT NOT NULL DEFAULT 0");
+      await sql`CREATE INDEX IF NOT EXISTS memories_pinned ON memories(guild_id, subject_id) WHERE pinned`;
+
+      await sql`
+        DO $web$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'web_profiles') THEN
+
+            -- Everything the caller's companion holds about them in their DM
+            -- lane: their real facts (shared across their companions), this
+            -- companion's story facts, its journal entries, and the rolling
+            -- "story so far" recap. One round trip for the memory page.
+            EXECUTE $dfn$
+              CREATE OR REPLACE FUNCTION public.my_memory_overview(p_companion_id bigint)
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+                v_scope text;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RAISE EXCEPTION 'discord not linked'; END IF;
+                v_scope := 'dm:' || did;
+                -- The companion must be on the caller's roster (owned or
+                -- actively adopted) — otherwise this leaks a stranger's lane.
+                IF NOT EXISTS (
+                  SELECT 1 FROM public.companions c
+                  WHERE c.id = p_companion_id
+                    AND (c.owner_user_id = did OR EXISTS (
+                      SELECT 1 FROM public.companion_adoptions a
+                      WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL))
+                ) THEN RAISE EXCEPTION 'not your companion'; END IF;
+
+                RETURN json_build_object(
+                  'memories', coalesce((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', m.id, 'kind', m.kind, 'content', m.content,
+                      'status', m.status, 'confidence', m.confidence,
+                      'pinned', m.pinned, 'subject_id', m.subject_id,
+                      'created_at', m.created_at
+                    ) ORDER BY m.pinned DESC, m.importance * m.confidence DESC)
+                    FROM public.memories m
+                    WHERE m.guild_id = v_scope AND m.status <> 'forgotten'
+                      AND (m.subject_id = did
+                           OR m.subject_id = 'companion:' || p_companion_id
+                           OR m.companion_id = p_companion_id)
+                  ), '[]'::jsonb),
+                  'journal', coalesce((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', j.id, 'kind', j.kind, 'content', j.content,
+                      'pinned', j.pinned, 'importance', j.importance,
+                      'created_at', j.created_at
+                    ) ORDER BY j.created_at DESC)
+                    FROM public.companion_journal j
+                    WHERE j.origin_scope = v_scope AND j.companion_id = p_companion_id
+                      AND j.status = 'active'
+                  ), '[]'::jsonb),
+                  'summaries', coalesce((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', s.id, 'channel_id', s.channel_id, 'summary', s.summary,
+                      'user_edited', s.user_edited, 'updated_at', s.updated_at
+                    ))
+                    FROM public.conversation_summaries s
+                    WHERE s.origin_scope = v_scope AND s.companion_id = p_companion_id
+                      AND s.summary <> ''
+                  ), '[]'::jsonb)
+                );
+              END
+              $body$
+            $dfn$;
+
+            -- Pin/unpin one of the caller's DM memories. Pins always ride the
+            -- prompt; a user can only pin rows inside their own DM scope
+            -- (their facts, their companion's facts, or that companion's
+            -- story facts).
+            EXECUTE $dfn2$
+              CREATE OR REPLACE FUNCTION public.memory_pin(p_id bigint, p_pinned boolean)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RAISE EXCEPTION 'discord not linked'; END IF;
+                UPDATE public.memories m SET pinned = p_pinned, updated_at = NOW()
+                WHERE m.id = p_id AND m.guild_id = 'dm:' || did
+                  AND (m.subject_id = did
+                       OR (m.subject_id LIKE 'companion:%' AND EXISTS (
+                         SELECT 1 FROM public.companions c
+                         WHERE c.id = substring(m.subject_id from 11)::bigint
+                           AND (c.owner_user_id = did OR EXISTS (
+                             SELECT 1 FROM public.companion_adoptions a
+                             WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL))))
+                       OR (m.companion_id IS NOT NULL AND EXISTS (
+                         SELECT 1 FROM public.companions c
+                         WHERE c.id = m.companion_id
+                           AND (c.owner_user_id = did OR EXISTS (
+                             SELECT 1 FROM public.companion_adoptions a
+                             WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL)))));
+                IF NOT FOUND THEN RAISE EXCEPTION 'not your memory'; END IF;
+                INSERT INTO public.memory_history (memory_id, action, details_json)
+                VALUES (p_id, 'web_pin', jsonb_build_object('pinned', p_pinned));
+              END
+              $body$
+            $dfn2$;
+
+            -- Edit the text of one of the caller's DM memories.
+            EXECUTE $dfn3$
+              CREATE OR REPLACE FUNCTION public.memory_update(p_id bigint, p_content text)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+                v_old text;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RAISE EXCEPTION 'discord not linked'; END IF;
+                IF length(btrim(coalesce(p_content, ''))) < 2 THEN RAISE EXCEPTION 'empty content'; END IF;
+                SELECT m.content INTO v_old FROM public.memories m
+                WHERE m.id = p_id AND m.guild_id = 'dm:' || did
+                  AND (m.subject_id = did
+                       OR (m.subject_id LIKE 'companion:%' AND EXISTS (
+                         SELECT 1 FROM public.companions c
+                         WHERE c.id = substring(m.subject_id from 11)::bigint
+                           AND (c.owner_user_id = did OR EXISTS (
+                             SELECT 1 FROM public.companion_adoptions a
+                             WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL))))
+                       OR (m.companion_id IS NOT NULL AND EXISTS (
+                         SELECT 1 FROM public.companions c
+                         WHERE c.id = m.companion_id
+                           AND (c.owner_user_id = did OR EXISTS (
+                             SELECT 1 FROM public.companion_adoptions a
+                             WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL)))));
+                IF v_old IS NULL THEN RAISE EXCEPTION 'not your memory'; END IF;
+                UPDATE public.memories SET content = left(p_content, 1000), status = 'active',
+                  confidence = GREATEST(confidence, 0.9), updated_at = NOW(), last_confirmed_at = NOW()
+                WHERE id = p_id;
+                INSERT INTO public.memory_history (memory_id, action, details_json)
+                VALUES (p_id, 'web_edit', jsonb_build_object('previousContent', left(v_old, 500)));
+              END
+              $body$
+            $dfn3$;
+
+            -- Forget (soft-delete) one of the caller's DM memories — same
+            -- semantics as /forget in Discord.
+            EXECUTE $dfn4$
+              CREATE OR REPLACE FUNCTION public.memory_forget(p_id bigint)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RAISE EXCEPTION 'discord not linked'; END IF;
+                UPDATE public.memories m SET status = 'forgotten', pinned = FALSE, updated_at = NOW()
+                WHERE m.id = p_id AND m.guild_id = 'dm:' || did
+                  AND (m.subject_id = did
+                       OR (m.subject_id LIKE 'companion:%' AND EXISTS (
+                         SELECT 1 FROM public.companions c
+                         WHERE c.id = substring(m.subject_id from 11)::bigint
+                           AND (c.owner_user_id = did OR EXISTS (
+                             SELECT 1 FROM public.companion_adoptions a
+                             WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL))))
+                       OR (m.companion_id IS NOT NULL AND EXISTS (
+                         SELECT 1 FROM public.companions c
+                         WHERE c.id = m.companion_id
+                           AND (c.owner_user_id = did OR EXISTS (
+                             SELECT 1 FROM public.companion_adoptions a
+                             WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL)))));
+                IF NOT FOUND THEN RAISE EXCEPTION 'not your memory'; END IF;
+                INSERT INTO public.memory_history (memory_id, action, details_json)
+                VALUES (p_id, 'web_forgot', '{}'::jsonb);
+              END
+              $body$
+            $dfn4$;
+
+            -- Drop one of the caller's companion's journal entries (their DM
+            -- lane only — guild journal entries stay a Discord-side surface).
+            EXECUTE $dfn5$
+              CREATE OR REPLACE FUNCTION public.journal_forget(p_id bigint)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RAISE EXCEPTION 'discord not linked'; END IF;
+                UPDATE public.companion_journal j SET status = 'forgotten', pinned = FALSE
+                WHERE j.id = p_id AND j.origin_scope = 'dm:' || did
+                  AND EXISTS (SELECT 1 FROM public.companions c
+                    WHERE c.id = j.companion_id
+                      AND (c.owner_user_id = did OR EXISTS (
+                        SELECT 1 FROM public.companion_adoptions a
+                        WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL)));
+                IF NOT FOUND THEN RAISE EXCEPTION 'not your journal entry'; END IF;
+              END
+              $body$
+            $dfn5$;
+
+            -- Owner-authored "story so far" — the editable story box. Writes
+            -- mark user_edited so the summarizer folds around the owner's text.
+            EXECUTE $dfn6$
+              CREATE OR REPLACE FUNCTION public.story_summary_save(p_companion_id bigint, p_channel_id text, p_summary text)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RAISE EXCEPTION 'discord not linked'; END IF;
+                IF NOT EXISTS (
+                  SELECT 1 FROM public.companions c
+                  WHERE c.id = p_companion_id
+                    AND (c.owner_user_id = did OR EXISTS (
+                      SELECT 1 FROM public.companion_adoptions a
+                      WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL))
+                ) THEN RAISE EXCEPTION 'not your companion'; END IF;
+                UPDATE public.conversation_summaries
+                SET summary = left(coalesce(p_summary, ''), 4000), user_edited = TRUE, updated_at = NOW()
+                WHERE companion_id = p_companion_id AND origin_scope = 'dm:' || did
+                  AND channel_id = coalesce(p_channel_id, '');
+                IF NOT FOUND THEN
+                  INSERT INTO public.conversation_summaries (companion_id, origin_scope, channel_id, summary, user_edited)
+                  VALUES (p_companion_id, 'dm:' || did, coalesce(p_channel_id, ''), left(coalesce(p_summary, ''), 4000), TRUE);
+                END IF;
+              END
+              $body$
+            $dfn6$;
+
+            -- Same exposure as every other account RPC: authenticated only.
+            -- REVOKE from PUBLIC is what actually removes the implicit grant.
+            EXECUTE 'REVOKE ALL ON FUNCTION public.my_memory_overview(bigint) FROM PUBLIC';
+            EXECUTE 'REVOKE ALL ON FUNCTION public.memory_pin(bigint, boolean) FROM PUBLIC';
+            EXECUTE 'REVOKE ALL ON FUNCTION public.memory_update(bigint, text) FROM PUBLIC';
+            EXECUTE 'REVOKE ALL ON FUNCTION public.memory_forget(bigint) FROM PUBLIC';
+            EXECUTE 'REVOKE ALL ON FUNCTION public.journal_forget(bigint) FROM PUBLIC';
+            EXECUTE 'REVOKE ALL ON FUNCTION public.story_summary_save(bigint, text, text) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.my_memory_overview(bigint) FROM anon';
+              EXECUTE 'REVOKE ALL ON FUNCTION public.memory_pin(bigint, boolean) FROM anon';
+              EXECUTE 'REVOKE ALL ON FUNCTION public.memory_update(bigint, text) FROM anon';
+              EXECUTE 'REVOKE ALL ON FUNCTION public.memory_forget(bigint) FROM anon';
+              EXECUTE 'REVOKE ALL ON FUNCTION public.journal_forget(bigint) FROM anon';
+              EXECUTE 'REVOKE ALL ON FUNCTION public.story_summary_save(bigint, text, text) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.my_memory_overview(bigint) TO authenticated';
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.memory_pin(bigint, boolean) TO authenticated';
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.memory_update(bigint, text) TO authenticated';
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.memory_forget(bigint) TO authenticated';
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.journal_forget(bigint) TO authenticated';
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.story_summary_save(bigint, text, text) TO authenticated';
+            END IF;
+          END IF;
+        END
+        $web$
+      `;
+    },
+    down: async (sql) => {
+      await sql`
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+            DROP FUNCTION IF EXISTS public.my_memory_overview(bigint);
+            DROP FUNCTION IF EXISTS public.memory_pin(bigint, boolean);
+            DROP FUNCTION IF EXISTS public.memory_update(bigint, text);
+            DROP FUNCTION IF EXISTS public.memory_forget(bigint);
+            DROP FUNCTION IF EXISTS public.journal_forget(bigint);
+            DROP FUNCTION IF EXISTS public.story_summary_save(bigint, text, text);
+          END IF;
+        END
+        $$
+      `;
+      await sql`DROP INDEX IF EXISTS memories_pinned`;
+      await sql`ALTER TABLE members DROP COLUMN IF EXISTS share_facts_with_companion_owners`;
+      await sql`ALTER TABLE companion_journal DROP COLUMN IF EXISTS pinned`;
+      await sql`ALTER TABLE memories DROP COLUMN IF EXISTS pinned`;
+    },
+  },
+
+  // ── v58: dashboard memory-editor hardening ────────────────────────────────
+  // Bug-fix pass over the v57 RPCs:
+  //  • memory_pin / memory_update now refuse forgotten/superseded rows —
+  //    editing a dead row used to silently resurrect it (superseded edits
+  //    could twin the replacement). Pinning also activates live-but-gated
+  //    rows (candidate/contested/quarantined), else "always recalled" lied.
+  //  • The companion-subject check uses a numeric regex before the ::bigint
+  //    cast — a non-numeric 'companion:x' subject would 500 the call.
+  //  • story_summary_save upserts with covered_until=NOW() on insert, and an
+  //    empty save is a reset (watermark parked at now), matching Discord's
+  //    /companion story + reset-story — otherwise the next fold dragged the
+  //    whole backlog into fresh "canon".
+  //  • my_memory_overview no longer lists superseded rows.
+  //  • journal_pin: the pin surface companion_journal.pinned was missing —
+  //    the flag existed but nothing could set it.
+  {
+    version: 58,
+    name: "v58_memory_editor_hardening",
+    up: async (sql) => {
+      await sql`
+        DO $web$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'web_profiles') THEN
+
+            EXECUTE $dfn$
+              CREATE OR REPLACE FUNCTION public.my_memory_overview(p_companion_id bigint)
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+                v_scope text;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RAISE EXCEPTION 'discord not linked'; END IF;
+                v_scope := 'dm:' || did;
+                IF NOT EXISTS (
+                  SELECT 1 FROM public.companions c
+                  WHERE c.id = p_companion_id
+                    AND (c.owner_user_id = did OR EXISTS (
+                      SELECT 1 FROM public.companion_adoptions a
+                      WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL))
+                ) THEN RAISE EXCEPTION 'not your companion'; END IF;
+
+                RETURN json_build_object(
+                  'memories', coalesce((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', m.id, 'kind', m.kind, 'content', m.content,
+                      'status', m.status, 'confidence', m.confidence,
+                      'pinned', m.pinned, 'subject_id', m.subject_id,
+                      'created_at', m.created_at
+                    ) ORDER BY m.pinned DESC, m.importance * m.confidence DESC)
+                    FROM public.memories m
+                    WHERE m.guild_id = v_scope AND m.status NOT IN ('forgotten','superseded')
+                      AND (m.subject_id = did
+                           OR m.subject_id = 'companion:' || p_companion_id
+                           OR m.companion_id = p_companion_id)
+                  ), '[]'::jsonb),
+                  'journal', coalesce((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', j.id, 'kind', j.kind, 'content', j.content,
+                      'pinned', j.pinned, 'importance', j.importance,
+                      'created_at', j.created_at
+                    ) ORDER BY j.created_at DESC)
+                    FROM public.companion_journal j
+                    WHERE j.origin_scope = v_scope AND j.companion_id = p_companion_id
+                      AND j.status = 'active'
+                  ), '[]'::jsonb),
+                  'summaries', coalesce((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id', s.id, 'channel_id', s.channel_id, 'summary', s.summary,
+                      'user_edited', s.user_edited, 'updated_at', s.updated_at
+                    ))
+                    FROM public.conversation_summaries s
+                    WHERE s.origin_scope = v_scope AND s.companion_id = p_companion_id
+                      AND s.summary <> ''
+                  ), '[]'::jsonb)
+                );
+              END
+              $body$
+            $dfn$;
+
+            -- Pin/unpin a DM memory. Pinning is itself the assertion, so a
+            -- candidate/contested/quarantined row promotes to active — a
+            -- pinned row that stayed gated would never ride recall anyway.
+            EXECUTE $dfn2$
+              CREATE OR REPLACE FUNCTION public.memory_pin(p_id bigint, p_pinned boolean)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RAISE EXCEPTION 'discord not linked'; END IF;
+                UPDATE public.memories m SET pinned = p_pinned, updated_at = NOW(),
+                  status = CASE WHEN p_pinned AND m.status IN ('candidate','contested','quarantined') THEN 'active' ELSE m.status END
+                WHERE m.id = p_id AND m.guild_id = 'dm:' || did
+                  AND m.status NOT IN ('forgotten','superseded')
+                  AND (m.subject_id = did
+                       OR (m.subject_id ~ '^companion:[0-9]+$' AND EXISTS (
+                         SELECT 1 FROM public.companions c
+                         WHERE c.id = substring(m.subject_id from 11)::bigint
+                           AND (c.owner_user_id = did OR EXISTS (
+                             SELECT 1 FROM public.companion_adoptions a
+                             WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL))))
+                       OR (m.companion_id IS NOT NULL AND EXISTS (
+                         SELECT 1 FROM public.companions c
+                         WHERE c.id = m.companion_id
+                           AND (c.owner_user_id = did OR EXISTS (
+                             SELECT 1 FROM public.companion_adoptions a
+                             WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL)))));
+                IF NOT FOUND THEN RAISE EXCEPTION 'not your memory'; END IF;
+                INSERT INTO public.memory_history (memory_id, action, details_json)
+                VALUES (p_id, 'web_pin', jsonb_build_object('pinned', p_pinned));
+              END
+              $body$
+            $dfn2$;
+
+            -- Edit the text of a live DM memory. Dead rows refuse — a status
+            -- filter, not just the resurrect-to-active write.
+            EXECUTE $dfn3$
+              CREATE OR REPLACE FUNCTION public.memory_update(p_id bigint, p_content text)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+                v_old text;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RAISE EXCEPTION 'discord not linked'; END IF;
+                IF length(btrim(coalesce(p_content, ''))) < 2 THEN RAISE EXCEPTION 'empty content'; END IF;
+                SELECT m.content INTO v_old FROM public.memories m
+                WHERE m.id = p_id AND m.guild_id = 'dm:' || did
+                  AND m.status NOT IN ('forgotten','superseded')
+                  AND (m.subject_id = did
+                       OR (m.subject_id ~ '^companion:[0-9]+$' AND EXISTS (
+                         SELECT 1 FROM public.companions c
+                         WHERE c.id = substring(m.subject_id from 11)::bigint
+                           AND (c.owner_user_id = did OR EXISTS (
+                             SELECT 1 FROM public.companion_adoptions a
+                             WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL))))
+                       OR (m.companion_id IS NOT NULL AND EXISTS (
+                         SELECT 1 FROM public.companions c
+                         WHERE c.id = m.companion_id
+                           AND (c.owner_user_id = did OR EXISTS (
+                             SELECT 1 FROM public.companion_adoptions a
+                             WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL)))));
+                IF v_old IS NULL THEN RAISE EXCEPTION 'not your memory'; END IF;
+                UPDATE public.memories SET content = left(p_content, 1000), status = 'active',
+                  confidence = GREATEST(confidence, 0.9), updated_at = NOW(), last_confirmed_at = NOW()
+                WHERE id = p_id;
+                INSERT INTO public.memory_history (memory_id, action, details_json)
+                VALUES (p_id, 'web_edit', jsonb_build_object('previousContent', left(v_old, 500)));
+              END
+              $body$
+            $dfn3$;
+
+            -- Forget (soft-delete) a DM memory — same semantics as /forget.
+            EXECUTE $dfn4$
+              CREATE OR REPLACE FUNCTION public.memory_forget(p_id bigint)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RAISE EXCEPTION 'discord not linked'; END IF;
+                UPDATE public.memories m SET status = 'forgotten', pinned = FALSE, updated_at = NOW()
+                WHERE m.id = p_id AND m.guild_id = 'dm:' || did
+                  AND (m.subject_id = did
+                       OR (m.subject_id ~ '^companion:[0-9]+$' AND EXISTS (
+                         SELECT 1 FROM public.companions c
+                         WHERE c.id = substring(m.subject_id from 11)::bigint
+                           AND (c.owner_user_id = did OR EXISTS (
+                             SELECT 1 FROM public.companion_adoptions a
+                             WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL))))
+                       OR (m.companion_id IS NOT NULL AND EXISTS (
+                         SELECT 1 FROM public.companions c
+                         WHERE c.id = m.companion_id
+                           AND (c.owner_user_id = did OR EXISTS (
+                             SELECT 1 FROM public.companion_adoptions a
+                             WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL)))));
+                IF NOT FOUND THEN RAISE EXCEPTION 'not your memory'; END IF;
+                INSERT INTO public.memory_history (memory_id, action, details_json)
+                VALUES (p_id, 'web_forgot', '{}'::jsonb);
+              END
+              $body$
+            $dfn4$;
+
+            -- Pin/unpin a journal entry — the missing counterpart to
+            -- journal_forget. Pinned entries always ride recall and never
+            -- prune; only the caller's own DM lane is writable.
+            EXECUTE $dfn5$
+              CREATE OR REPLACE FUNCTION public.journal_pin(p_id bigint, p_pinned boolean)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RAISE EXCEPTION 'discord not linked'; END IF;
+                UPDATE public.companion_journal j SET pinned = p_pinned
+                WHERE j.id = p_id AND j.origin_scope = 'dm:' || did AND j.status = 'active'
+                  AND EXISTS (SELECT 1 FROM public.companions c
+                    WHERE c.id = j.companion_id
+                      AND (c.owner_user_id = did OR EXISTS (
+                        SELECT 1 FROM public.companion_adoptions a
+                        WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL)));
+                IF NOT FOUND THEN RAISE EXCEPTION 'not your journal entry'; END IF;
+              END
+              $body$
+            $dfn5$;
+
+            EXECUTE $dfn6$
+              CREATE OR REPLACE FUNCTION public.journal_forget(p_id bigint)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RAISE EXCEPTION 'discord not linked'; END IF;
+                UPDATE public.companion_journal j SET status = 'forgotten', pinned = FALSE
+                WHERE j.id = p_id AND j.origin_scope = 'dm:' || did
+                  AND EXISTS (SELECT 1 FROM public.companions c
+                    WHERE c.id = j.companion_id
+                      AND (c.owner_user_id = did OR EXISTS (
+                        SELECT 1 FROM public.companion_adoptions a
+                        WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL)));
+                IF NOT FOUND THEN RAISE EXCEPTION 'not your journal entry'; END IF;
+              END
+              $body$
+            $dfn6$;
+
+            -- Owner-authored "story so far". Upserts so a first write on a
+            -- rowless lane lands; covered_until=NOW() on insert keeps a fresh
+            -- canon from dragging the whole backlog in on the next fold. An
+            -- empty save is a reset — the watermark parks at now instead of
+            -- rewinding to epoch.
+            EXECUTE $dfn7$
+              CREATE OR REPLACE FUNCTION public.story_summary_save(p_companion_id bigint, p_channel_id text, p_summary text)
+              RETURNS void
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+              BEGIN
+                IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO did FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN RAISE EXCEPTION 'discord not linked'; END IF;
+                IF NOT EXISTS (
+                  SELECT 1 FROM public.companions c
+                  WHERE c.id = p_companion_id
+                    AND (c.owner_user_id = did OR EXISTS (
+                      SELECT 1 FROM public.companion_adoptions a
+                      WHERE a.companion_id = c.id AND a.user_id = did AND a.dropped_at IS NULL))
+                ) THEN RAISE EXCEPTION 'not your companion'; END IF;
+                IF length(btrim(coalesce(p_summary, ''))) > 0 THEN
+                  INSERT INTO public.conversation_summaries (companion_id, origin_scope, channel_id, summary, user_edited, covered_until)
+                  VALUES (p_companion_id, 'dm:' || did, coalesce(p_channel_id, ''), left(p_summary, 4000), TRUE, NOW())
+                  ON CONFLICT (companion_id, origin_scope, channel_id)
+                  DO UPDATE SET summary = EXCLUDED.summary, user_edited = TRUE, updated_at = NOW();
+                ELSE
+                  UPDATE public.conversation_summaries
+                  SET summary = '', user_edited = FALSE, covered_until = NOW(), msgs_since = 0, updated_at = NOW()
+                  WHERE companion_id = p_companion_id AND origin_scope = 'dm:' || did
+                    AND channel_id = coalesce(p_channel_id, '');
+                END IF;
+              END
+              $body$
+            $dfn7$;
+
+            -- journal_pin joins the same exposure contract as the other
+            -- account RPCs (the rest were granted in v57).
+            EXECUTE 'REVOKE ALL ON FUNCTION public.journal_pin(bigint, boolean) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.journal_pin(bigint, boolean) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.journal_pin(bigint, boolean) TO authenticated';
+            END IF;
+          END IF;
+        END
+        $web$
+      `;
+    },
+    down: async (sql) => {
+      // journal_pin is the only new surface — drop it. The v57 functions it
+      // replaces were strictly less safe; downgrading them back isn't useful.
+      await sql`
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+            DROP FUNCTION IF EXISTS public.journal_pin(bigint, boolean);
+          END IF;
+        END
+        $$
+      `;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

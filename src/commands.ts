@@ -1014,7 +1014,14 @@ export const commandDefinitions = [
     { name: "about", description: "Member to inspect", type: 6, required: false }, { name: "search", description: "Search your memories", type: 3, required: false },
     { name: "page", description: "Page number", type: 4, required: false }, { name: "server", description: "Show server lore", type: 5, required: false },
     { name: "stats", description: "Show server memory statistics", type: 5, required: false }, { name: "memory_id", description: "Show provenance for a memory", type: 4, required: false },
-    { name: "candidates", description: "Show unconfirmed candidate memories", type: 5, required: false }
+    { name: "candidates", description: "Show unconfirmed candidate memories", type: 5, required: false },
+    { name: "pin", description: "Pin (always recall) or unpin a memory — use with memory_id", type: 5, required: false }
+  ] },
+  { name: "remember", description: "Tell Characterly a fact to never forget — pinned into memory instantly", options: [
+    { name: "text", description: "What to remember (e.g. \"my dog is called Biscuit\")", type: 3, required: true }
+  ] },
+  { name: "share-facts", description: "Let companions carry facts about you into their owners' private DM digests", options: [
+    { name: "enabled", description: "true = companions may relay your facts to owners' DMs; omit to see your setting", type: 5, required: false }
   ] },
   { name: "forget", description: "Request deletion of one of your memories", options: [{ name: "memory_id", description: "The memory number", type: 4, required: true }] },
   { name: "correct", description: "Correct or update something remembered about you", options: [{ name: "statement", description: "For example: I don't support Arsenal anymore", type: 3, required: true }] },
@@ -1084,6 +1091,8 @@ export const commandDefinitions = [
     { name: "imports", type: 1, description: "View or undo your chat-history imports" },
     { name: "edit", type: 1, description: "Edit your companion's persona before awakening" },
     { name: "reset", type: 1, description: "Restart your companion's persona before awakening" },
+    { name: "reset-story", type: 1, description: "Start a fresh chapter — clear your companion's running recap of this chat" },
+    { name: "story", type: 1, description: "View or edit your companion's running 'story so far' recap of this chat" },
   ] },
   // In a server this is the guild-scope key (admin only); in DMs it stores the
   // user's personal key — the same modal backs both paths.
@@ -1110,6 +1119,8 @@ export const commandDefinitions = [
   { name: "Report message", type: 3 },
   // "Staff pick" — marketplace-mod toggle for the curated forum badge.
   { name: "Staff pick", type: 3 },
+  // "Pin to memory" — right-click any message to store it as a pinned memory.
+  { name: "Pin to memory", type: 3 },
 ];
 
 const confidence = (value: number | undefined) => {
@@ -1160,7 +1171,7 @@ async function buildImportsManager(store: MemoryStore, userId: string) {
 /** One profile build per member at a time — claimed synchronously before any
  * await so a double-invoke can't slip past the check and double the LLM spend. */
 const profileBuildsRunning = new Set<string>();
-const display = (memory: Memory) => `**#${memory.id} · ${confidence(memory.confidence)} confidence**\n${memory.content}\n*${memory.mentions} confirmation${memory.mentions === 1 ? "" : "s"}; last confirmed ${new Date(memory.lastConfirmedAt).toLocaleDateString()}*`;
+const display = (memory: Memory) => `**#${memory.id}${memory.pinned ? " 📌" : ""} · ${confidence(memory.confidence)} confidence**\n${memory.content}\n*${memory.mentions} confirmation${memory.mentions === 1 ? "" : "s"}; last confirmed ${new Date(memory.lastConfirmedAt).toLocaleDateString()}*`;
 
 type BrainFor = (guildId: string) => Promise<Brain | null>;
 const NO_KEY_MSG = "No AI key is configured yet — connect your personal API key with `/companion key` (or `/setup`).";
@@ -1170,6 +1181,7 @@ export const SERVER_ONLY_COMMANDS = new Set([
   "companions-pause", "companions-resume",
   "status", "memory-triage",
   "limits", "ignore-channel", "unignore-channel", "quiet-channel", "unquiet-channel",
+  "share-facts",
 ]);
 
 /** Command definitions with Discord install contexts applied — the app
@@ -1280,6 +1292,64 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         });
       }
       return dismissPickedCompanion(interaction, active[0], store);
+    }
+    if (action === "reset-story") {
+      const channelId = interaction.channelId;
+      const roster = await store.listCompanionsForUser(interaction.user.id);
+      const rows = await store.summariesForChannel(guildId, channelId);
+      // Owner-or-adopter, same rule the dashboard RPCs enforce — adopters
+      // manage their adoptee's story too, not just owned clones.
+      const manageable = new Set<number>();
+      for (const r of rows) {
+        if (await store.canManageCompanion(interaction.user.id, r.companionId)) manageable.add(r.companionId);
+      }
+      const resettable = rows.filter(r => manageable.has(r.companionId));
+      if (!resettable.length) {
+        return interaction.reply({ content: "Nothing to reset — none of your companions have a running story recap in this chat.", ephemeral: true });
+      }
+      const names: string[] = [];
+      for (const r of resettable) {
+        // Keep the row and park the watermark at now() — deleting it would
+        // reset covered_until to epoch and the next fold would rebuild the
+        // "cleared" recap from the whole backlog.
+        await store.resetStorySummary(r.companionId, guildId, channelId);
+        names.push(roster.find(c => c.id === r.companionId)?.name ?? `Companion ${r.companionId}`);
+      }
+      return interaction.reply({
+        content: `**${names.join("**, **")}**'s running recap of this chat was cleared — the next ~10 replies will start a fresh chapter. Their long-term memories and journal are untouched.`,
+        ephemeral: true,
+      });
+    }
+    if (action === "story") {
+      // The editable story box: the companion's rolling recap for this chat.
+      // Owner-edited text is authoritative — the summarizer folds around it.
+      const roster = await store.listCompanionsForUser(interaction.user.id);
+      const rows = await store.summariesForChannel(guildId, interaction.channelId);
+      const manageable = new Set<number>();
+      for (const r of rows) {
+        if (await store.canManageCompanion(interaction.user.id, r.companionId)) manageable.add(r.companionId);
+      }
+      const row = rows.filter(r => manageable.has(r.companionId))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+      const companionId = row?.companionId ?? roster.find(c => c.onboardingState === "active")?.id;
+      if (companionId == null) {
+        return promptUnawakenedCompanion(interaction, "You haven't awakened your companion yet!", brainFor);
+      }
+      const companionName = roster.find(c => c.id === companionId)?.name ?? "your companion";
+      const input = new TextInputBuilder()
+        .setCustomId("story-text")
+        .setLabel(`The story so far with ${companionName}`.slice(0, 45))
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(false)
+        .setMaxLength(4000)
+        .setPlaceholder("What has happened so far — the companion treats this as canon.");
+      if (row?.summary) input.setValue(row.summary.slice(0, 4000));
+      return interaction.showModal(
+        new ModalBuilder()
+          .setCustomId(`story-edit:${companionId}`)
+          .setTitle("The story so far")
+          .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input)),
+      );
     }
     if (action === "edit" || action === "reset") {
       const existing = await store.getCompanionByOwner(interaction.user.id);
@@ -1960,6 +2030,28 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       const value = await store.stats(guildId); return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle("Memory statistics").setDescription(`${value.messages.toLocaleString()} raw messages\n${value.memories.toLocaleString()} active memories\n${value.lore.toLocaleString()} server-lore memories`)] });
     }
     const detailId = interaction.options.getInteger("memory_id");
+    const pinFlag = interaction.options.getBoolean("pin");
+    if (pinFlag != null && !detailId) {
+      return interaction.reply({ content: "Tell me which memory — `/memory memory_id:<number> pin:true`.", ephemeral: true });
+    }
+    if (detailId && pinFlag != null) {
+      // Pin control: the subject can pin their own rows; a companion owner
+      // can pin their companion's rows and that companion's story facts.
+      const memory = await store.getMemory(guildId, detailId);
+      if (!memory) return interaction.reply({ content: "I couldn't find that memory.", ephemeral: true });
+      let allowed = memory.subjectId === interaction.user.id;
+      if (!allowed) {
+        const compId = memory.companionId
+          ?? (memory.subjectId.startsWith("companion:") ? Number(memory.subjectId.slice(10)) : null);
+        if (compId != null) {
+          allowed = await store.canManageCompanion(interaction.user.id, compId);
+        }
+      }
+      if (!allowed) return interaction.reply({ content: "You can only pin your own memories or your companion's.", ephemeral: true });
+      const ok = await store.setMemoryPinned(guildId, memory.id, pinFlag);
+      if (!ok) return interaction.reply({ content: "That memory can't be pinned — it's already forgotten or replaced.", ephemeral: true });
+      return interaction.reply({ content: `Memory **#${memory.id}** ${pinFlag ? "pinned — it will always be in context" : "unpinned — back to normal ranking"}.`, ephemeral: true });
+    }
     if (detailId) {
       const memory = await store.getMemory(guildId, detailId);
       const canInspect = memory && (memory.subjectId === interaction.user.id || interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild));
@@ -1985,6 +2077,49 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     const description = result.memories.length ? result.memories.map(display).join("\n\n") : "Nothing active yet.";
     return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle(`🧠 ${title}`).setDescription(description).setFooter({ text: `Page ${result.page} · ${result.total} ${candidates ? "candidate" : "active"} memories` })] });
   }
+  if (interaction.commandName === "remember") {
+    // Same consent gate as /correct — user-asserted facts are still derived
+    // person data, so the caller must be opted in here (awakened DM owners
+    // already are).
+    const caller = await store.getMember(guildId, interaction.user.id);
+    if (!caller?.optedIn || caller.optedOut) return interaction.reply({ content: OPT_IN_HINT_SELF, ephemeral: true });
+    const text = interaction.options.getString("text", true).trim();
+    if (text.length < 2 || text.length > 500) {
+      return interaction.reply({ content: "Keep it to a single fact — between 2 and 500 characters.", ephemeral: true });
+    }
+    const event: MessageEvent = {
+      guildId, channelId: interaction.channelId ?? "dm", messageId: `remember:${interaction.id}`,
+      authorId: interaction.user.id, authorName: interaction.user.username,
+      content: text, createdAt: new Date(), mentionsBot: false,
+    };
+    const saved = await store.pinFact(event, text);
+    if (!saved.pinned) {
+      return interaction.reply({ content: "That matches a memory that's already been replaced — reword it slightly to pin it fresh.", ephemeral: true });
+    }
+    return interaction.reply({
+      content: `Pinned **#${saved.id}**: "${saved.content}" — it will always be in context here. Manage it with \`/memory\` or on your account page.`,
+      ephemeral: true,
+    });
+  }
+  if (interaction.commandName === "share-facts") {
+    const enabled = interaction.options.getBoolean("enabled");
+    const member = await store.getMember(guildId, interaction.user.id);
+    if (enabled == null) {
+      return interaction.reply({
+        ephemeral: true,
+        content: member?.shareFactsWithCompanionOwners
+          ? "**On** — companions may carry recent facts about you from this server into their owners' private DM digests."
+          : "**Off** — only server lore and the owner's own data cross into private DM digests. Facts about you stay in this server.",
+      });
+    }
+    await store.setMemberShareFacts(guildId, interaction.user.id, enabled);
+    return interaction.reply({
+      ephemeral: true,
+      content: enabled
+        ? "Sharing **on** — when a companion debriefs its owner in DMs, recent facts about you from this server may be included. This only ever travels owner→their-companion, never publicly."
+        : "Sharing **off** — facts about you stay in this server's memory and out of private DM digests.",
+    });
+  }
   if (interaction.commandName === "forget") {
     const id = interaction.options.getInteger("memory_id", true), memory = await store.getMemory(guildId, id);
     if (!memory || memory.subjectId !== interaction.user.id) return interaction.reply({ content: "I couldn't find one of your memories with that ID.", ephemeral: true });
@@ -2003,7 +2138,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     if (!brain) return interaction.reply({ content: NO_KEY_MSG, ephemeral: true });
     await interaction.deferReply({ ephemeral: true });
     try {
-      const existing = await store.allActiveMemories(guildId, interaction.user.id);
+      const existing = await store.allActiveMemories(guildId, interaction.user.id, { includeStoryFacts: true });
       const correction = await brain.correctMemory(interaction.user.id, interaction.options.getString("statement", true), existing);
       correction.replacement.subjectId = interaction.user.id;
       correction.replacement.evidenceType = "correction";
@@ -2274,6 +2409,12 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     // hard-delete them in this scope (and the user's DM scope if they have one).
     await store.forgetJournalAbout(guildId, userId);
     await store.forgetJournalAbout(`dm:${userId}`, userId);
+    // Story summaries are derived conversation data too — a DM-scope opt-out
+    // wipes that scope's recaps; a guild opt-out wipes the guild's so the
+    // next fold regenerates without the member's messages (the window query
+    // excludes opted-out authors).
+    await store.deleteSummariesForScope(`dm:${userId}`);
+    await store.deleteSummariesForScope(guildId);
     await store.deleteAttributesFor(guildId, userId);
     // Consolidated behavioral patterns are derived person data too — without
     // this a pattern built from now-forgotten episodes would resurface on
@@ -2417,6 +2558,29 @@ export async function handleCompanionModal(
   store: MemoryStore,
   invalidateLookups?: (scopeId: string) => void,
 ) {
+  // story-edit — owner-authored running recap, written over whatever the
+  // summarizer produced and marked user_edited so the fold treats it as canon.
+  if (interaction.customId.startsWith("story-edit:")) {
+    const companionId = Number(interaction.customId.slice("story-edit:".length));
+    if (!Number.isFinite(companionId) || !(await store.canManageCompanion(interaction.user.id, companionId))) {
+      return interaction.reply({ content: "That isn't your companion.", ephemeral: true });
+    }
+    const scope = interaction.guildId ?? `dm:${interaction.user.id}`;
+    const text = interaction.fields.getTextInputValue("story-text").trim().slice(0, 4000);
+    if (text) {
+      await store.setStoryUserText(companionId, scope, interaction.channelId ?? "dm", text);
+    } else {
+      // Clearing the box is a reset, not an edit — park the watermark so the
+      // next fold doesn't drag the pre-clear backlog into the fresh recap.
+      await store.resetStorySummary(companionId, scope, interaction.channelId ?? "dm");
+    }
+    return interaction.reply({
+      content: text
+        ? "Story recap saved — your companion treats it as canon until you change it or `/companion reset-story`."
+        : "Recap cleared — a fresh one builds up from here.",
+      ephemeral: true,
+    });
+  }
   // market_create — author a freehand marketplace character (no awakened
   // companion backs it). Listing cap applies here at submit time too — the
   // action-level check alone could be raced past.
@@ -4094,5 +4258,65 @@ async function handleStaffPickCommand(interaction: MessageContextMenuCommandInte
  *  report, "Staff pick" toggles the curated badge. */
 export async function handleMarketplaceContext(interaction: MessageContextMenuCommandInteraction, store: MemoryStore) {
   if (interaction.commandName === "Staff pick") return handleStaffPickCommand(interaction, store);
+  if (interaction.commandName === "Pin to memory") return handlePinToMemory(interaction, store);
   return handleReportMessageCommand(interaction);
+}
+
+/** "Pin to memory" — right-click any message to keep it verbatim. A member's
+ *  message lands as a pinned person_fact about them (subject consent required,
+ *  same rule as extraction); a companion's message lands as a story_fact
+ *  scoped to that companion — "the exact line they said" is fiction
+ *  continuity, not a real-world claim about the owner. Companion lines can
+ *  only be pinned by someone on that companion's roster — a pinned story beat
+ *  rides recall forever, so it isn't a surface strangers get to write on. */
+async function handlePinToMemory(interaction: MessageContextMenuCommandInteraction, store: MemoryStore) {
+  const target = interaction.targetMessage;
+  const guildId = interaction.guildId ?? `dm:${interaction.user.id}`;
+  const wh = await store.getWebhookMessage(target.id).catch(() => null);
+  let subjectId = target.author.id;
+  let companionId: number | null = null;
+  let kind: "person_fact" | "story_fact" = "person_fact";
+  let label = "that member";
+  if (wh) {
+    companionId = wh.companionId;
+  } else if (target.author.bot) {
+    // Bot-authored messages can't be pinned — except our own in a DM, where
+    // the only bot voice is the caller's awakened companion.
+    if (interaction.guildId || target.author.id !== interaction.client.user.id) {
+      return interaction.reply({ content: "There's nothing to pin — bot messages aren't remembered.", ephemeral: true });
+    }
+    const awakened = await store.getCompanionByOwner(interaction.user.id);
+    if (!awakened || awakened.onboardingState !== "active") {
+      return interaction.reply({ content: "There's nothing to pin — that message isn't one of your companion's.", ephemeral: true });
+    }
+    companionId = awakened.id;
+  } else {
+    const member = await store.getMember(guildId, subjectId);
+    if (!member?.optedIn || member.optedOut) {
+      return interaction.reply({ content: "They haven't opted in to memory — nothing can be stored about them.", ephemeral: true });
+    }
+  }
+  if (companionId != null) {
+    if (!(await store.canManageCompanion(interaction.user.id, companionId))) {
+      return interaction.reply({ content: "Only that companion's owner can pin its lines.", ephemeral: true });
+    }
+    subjectId = `companion:${companionId}`;
+    kind = "story_fact";
+    label = "your companion";
+  }
+  const content = target.content?.trim();
+  if (!content) return interaction.reply({ content: "Nothing to pin — the message has no text.", ephemeral: true });
+  const event: MessageEvent = {
+    guildId, channelId: interaction.channelId, messageId: `pin:${target.id}`,
+    authorId: subjectId, authorName: target.author.username ?? "unknown",
+    content, createdAt: new Date(target.createdTimestamp), mentionsBot: false,
+  };
+  const saved = await store.pinFact(event, content.slice(0, 500), subjectId, companionId, kind);
+  if (!saved.pinned) {
+    return interaction.reply({ content: "That matches a memory that's already been replaced — reword it slightly to pin it fresh.", ephemeral: true });
+  }
+  return interaction.reply({
+    content: `Pinned **#${saved.id}** — "${saved.content.slice(0, 120)}" will always be in ${label}'s context here. Manage with \`/memory\`.`,
+    ephemeral: true,
+  });
 }

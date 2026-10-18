@@ -142,6 +142,25 @@
         <div class="form-error" id="botset-msg" role="alert" hidden></div>
       </section>
 
+      <section class="plate rv" id="memory" aria-labelledby="memory-h">
+        <div class="plate-head"><h2 id="memory-h">What they remember</h2></div>
+        <p class="plate-desc">Everything a companion carries in your private DMs — the facts it keeps, its journal, and the running recap of your story. Pin what must never fade, fix what's wrong, forget what shouldn't be there.</p>
+        <div id="memory-body" hidden>
+          <label class="field-label" for="mem-companion">Companion</label>
+          <select class="hist-select" id="mem-companion"></select>
+          <div id="mem-lists" hidden>
+            <h3 class="plate-sub">The story so far</h3>
+            <div id="mem-summaries"></div>
+            <h3 class="plate-sub">Memories</h3>
+            <ul class="mem-list" id="mem-memories"></ul>
+            <h3 class="plate-sub">Journal</h3>
+            <ul class="mem-list" id="mem-journal"></ul>
+          </div>
+        </div>
+        <p class="plate-note" id="memory-locked" hidden>Link Discord above to see what your companion remembers — the facts, journal, and story recap it keeps in your DMs.</p>
+        <div class="form-error" id="memory-msg" role="alert" hidden></div>
+      </section>
+
       <section class="plate rv" id="import" aria-labelledby="import-h">
         <div class="plate-head"><h2 id="import-h">Import a character</h2></div>
         <p class="plate-desc">Bring a character card from another platform — a <code>.png</code> card or <code>.json</code> export. The persona becomes a companion in your Discord DMs, private to you unless you publish it there.</p>

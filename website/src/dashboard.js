@@ -9,6 +9,7 @@ import {
 } from "./auth.js";
 import { initImportCard } from "./import-card.js";
 import { initImportHistory } from "./import-history.js";
+import { initMemories } from "./memories.js";
 
 const $ = sel => document.querySelector(sel);
 const guard = (p, ms = 8000) => withTimeout(p, ms).catch(e => console.warn("dashboard section failed:", e));
@@ -372,6 +373,7 @@ await guard(renderTokens());
 await guard(renderBotSettings());
 initImportCard({ linked: Boolean(profile?.discord_user_id), uid: user.id });
 initImportHistory({ linked: Boolean(profile?.discord_user_id), uid: user.id });
+initMemories({ linked: Boolean(profile?.discord_user_id) });
 
 // ── Password change ────────────────────────────────────────────────────────
 $("#form-password").addEventListener("submit", async e => {

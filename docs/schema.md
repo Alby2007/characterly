@@ -515,7 +515,13 @@ A companion's own first-person episodic memory (v25) — what *it* experienced (
 | `last_recalled_at` | TIMESTAMPTZ NULL | Stamped on each `journalFor` hit — drives the 30-day decay in `pruneJournal` |
 | `embedding` | VECTOR NULL | Semantic-recall vector (v40) — powers `semanticJournal` alongside `journalFor` |
 
-**Unique constraint:** `(companion_id, origin_scope, source_message_id, kind, content)` — a crashed job resaving identical output can't stack rows. **Indexes:** `companion_journal_lookup (companion_id, origin_scope, status, importance DESC)`; `companion_journal_about` GIN on `about_subject_ids`. RLS enabled (v25) with no policies — Data-API deny-all. Write-time trgm dedup drops paraphrases (similarity ≥ 0.75); nightly `pruneJournal` caps 200 active entries per (companion, scope). Imported entries (v44) carry `created_at` backdated to their transcript window's end so `[age]` reads honestly in recall.
+**Unique constraint:** `(companion_id, origin_scope, source_message_id, kind, content)` — a crashed job resaving identical output can't stack rows. **Indexes:** `companion_journal_lookup (companion_id, origin_scope, status, importance DESC)`; `companion_journal_about` GIN on `about_subject_ids`. RLS enabled (v25) with no policies — Data-API deny-all. Write-time trgm dedup drops paraphrases (similarity ≥ 0.75); nightly `pruneJournal` caps 200 active entries per (companion, scope). Imported entries (v44) carry `created_at` backdated to their transcript window's end so `[age]` reads honestly in recall. `pinned` (v57) entries always recall first and are exempt from pruning.
+
+---
+
+### `conversation_summaries`
+
+The rolling "story so far" recap (v55) — one row per `(companion_id, origin_scope, channel_id)` holding a first-person summary of everything older than the live transcript window. Written by the `summary-update` job (`src/summary-job.ts`), triggered every `SUMMARY_REPLY_INTERVAL` (10) companion replies via an atomic `msgs_since` counter + claim; `storyWindow` folds the slice between `covered_until` and the newest `STORY_KEEP_RECENT` (25 guild / `DM_CONTEXT_MESSAGES` in DM lanes) archived rows, capped at 60 per pass — newest-eligible first, so a fresh lane's first recap seeds near the present instead of grinding the whole backlog. `user_edited` marks owner-authored recaps (`/companion story` modal or the dashboard RPC) — the summarizer treats them as canon, and clears the flag when it next writes (a fold that loses the read-check-write race drops rather than clobbering a newer edit). Owner reset (`/companion reset-story`, or an empty save) clears the text and parks `covered_until` at now so the wiped backlog can't re-fold; `/opt-out` wipes the scope's rows; guild purge and companion deletion (`ON DELETE CASCADE`) cover them. RLS enabled, deny-all — the site reaches them only through the `my_memory_overview` / `story_summary_save` owner-scoped RPCs (v57, hardened in v58).
 
 ---
 

@@ -167,6 +167,23 @@ export const myChatImports = () => supabase.rpc("my_chat_imports");
 export const importChatHistory = payload => supabase.rpc("import_chat_history", { p_payload: payload });
 export const deleteChatImport = p_id => supabase.rpc("delete_chat_import", { p_id });
 
+// ── Memory editor ───────────────────────────────────────────────────────────
+// Per-companion "what they remember" panel — all calls resolve the caller's
+// own discord_user_id server-side (dm:<id> lane) and refuse anything outside
+// their roster, so the client never names a user id itself.
+export const myMemoryOverview = companionId =>
+  supabase.rpc("my_memory_overview", { p_companion_id: companionId });
+export const pinMemory = (id, pinned) =>
+  supabase.rpc("memory_pin", { p_id: id, p_pinned: pinned });
+export const updateMemory = (id, content) =>
+  supabase.rpc("memory_update", { p_id: id, p_content: content });
+export const forgetMemory = id => supabase.rpc("memory_forget", { p_id: id });
+export const pinJournalEntry = (id, pinned) =>
+  supabase.rpc("journal_pin", { p_id: id, p_pinned: pinned });
+export const forgetJournalEntry = id => supabase.rpc("journal_forget", { p_id: id });
+export const saveStorySummary = (companionId, channelId, summary) =>
+  supabase.rpc("story_summary_save", { p_companion_id: companionId, p_channel_id: channelId, p_summary: summary });
+
 // ── Terms/Privacy consent ────────────────────────────────────────────────────
 // The consent_events table is RLS-locked; both calls go through security
 // definer RPCs keyed on auth.uid(). The version constant lives in config.js
