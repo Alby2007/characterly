@@ -11,7 +11,7 @@ import { inc, metricsSnapshot } from "./metrics.js";
 import type { ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, MessageEvent } from "./types.js";
 import { config } from "./config.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
-import { handleOpsCommand, handleHouseButton, handleTicketButton, isHouse, isMarketplaceThread, getOpsDeps, ensureAdopteeThread, ensureAdopteeThreadsForUser, setAdopteeThreadLocked } from "./ops.js";
+import { handleOpsCommand, handleHouseButton, handleTicketButton, isHouse, isMarketplaceThread, getOpsDeps, ensureAdopteeThread, ensureAdopteeThreadsForUser, setAdopteeThreadLocked, adopteeManagePayload } from "./ops.js";
 import { CURATED_TAGS, postListingThread, buildListingCard, buildListingComponents } from "./marketplace.js";
 import { parseCardFile, cardToPersona, cardImportMeta, cardFileHash, CARD_MAX_BYTES, type ImportPersona, type CardImportMeta, type ParsedCard } from "./charcard.js";
 import { parseChatFile, chatImportMeta, chatFileHash, type ParsedChat, type ChatImportMeta } from "./chathist.js";
@@ -3433,7 +3433,47 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         : dismissPickedCompanion(interaction, companion, store);
     }
 
+    // Two-click drop: the button opens a confirm step rather than dropping
+    // outright — one stray tap shouldn't lock a companion out for 12 hours.
     if (sub === "drop") {
+      const comp = (await store.listCompanionsForUser(userId).catch(() => [] as Companion[]))
+        .find(c => c.id === id);
+      if (!comp) {
+        return interaction.update({ content: "That adoption is no longer active.", components: [] });
+      }
+      const hours = Math.max(1, Math.round(config.adoptionCooldownMs / 3600000));
+      return interaction.update({
+        content: `Really drop **${comp.name}**? They leave your roster and the thread locks — your history is kept, but you can't re-adopt them for ${hours} hours.`,
+        components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setCustomId(`market:dropconfirm:${id}:${Date.now()}`).setLabel("Confirm Drop").setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId(`market:dropcancel:${id}`).setLabel("Cancel").setStyle(ButtonStyle.Secondary),
+        )],
+      });
+    }
+
+    if (sub === "dropcancel") {
+      const comp = (await store.listCompanionsForUser(userId).catch(() => [] as Companion[]))
+        .find(c => c.id === id);
+      return interaction.update(comp
+        ? adopteeManagePayload(comp)
+        : { content: "That adoption is no longer active.", components: [] });
+    }
+
+    if (sub === "dropconfirm") {
+      const comp = (await store.listCompanionsForUser(userId).catch(() => [] as Companion[]))
+        .find(c => c.id === id);
+      if (!comp) {
+        return interaction.update({ content: "That adoption is no longer active.", components: [] });
+      }
+      // The confirm row sits until clicked — a stale one (pinned manage
+      // messages outlive their confirm window) must not fire a lockout.
+      const issuedAt = Number(parts[3]);
+      if (!Number.isFinite(issuedAt) || Date.now() - issuedAt > 10 * 60 * 1000) {
+        return interaction.update({
+          ...adopteeManagePayload(comp),
+          content: "That drop confirmation expired — press **Drop** again if you still want to.",
+        });
+      }
       const dropped = await store.dropAdoption(userId, id, config.adoptionCooldownMs);
       if (!dropped) {
         return interaction.update({ content: "That adoption is no longer active.", components: [] });

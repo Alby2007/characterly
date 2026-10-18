@@ -935,7 +935,7 @@ export type EnsureAdopteeThreadResult =
 
 /** The pinned manage row every adoptee thread carries — one Danger Drop
  *  button keyed to the adoption's companion, reusing the market:drop path. */
-function adopteeManagePayload(companion: Companion) {
+export function adopteeManagePayload(companion: Companion) {
   return {
     content: `*Manage **${companion.name || "Companion"}** —*`,
     components: [new ActionRowBuilder<ButtonBuilder>().addComponents(

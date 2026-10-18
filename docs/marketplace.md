@@ -333,13 +333,19 @@ screen, and refund semantics all carry over. Registered adoptee threads are
 the one exception to the house's private-thread bypass (`isAdopteeThread` +
 `companionThreadForChannel`); support-ticket threads still bypass entirely.
 
-Roster commands: `switch` (where each companion lives — DM link vs thread
-links), `drop` (picker → `market:drop`), `summon`/`dismiss` (pickers when
->1), `card`, `status`. `market:talk` buttons open/create the thread.
+Roster commands: `homes` (where each companion lives — DM link vs thread
+links, plus a Drop button per adoptee), `drop` (picker → `market:drop`),
+`summon`/`dismiss` (pickers when >1), `card`, `status`. `market:talk`
+buttons open/create the thread.
 
 ## Dropping & cooldown
 
-`/companion drop` → picker → `dropAdoption` transactionally: sets
+Every Drop button (`market:drop`) — the pinned thread manage row, `homes`,
+the picker, the Add re-click — opens a two-click confirm first:
+`update()` swaps in **Confirm Drop** (`market:dropconfirm:{id}:{ts}`) +
+**Cancel** (`market:dropcancel:{id}`). Cancel or an expired confirm (>10
+min) restores the manage row; only the confirm runs `dropAdoption`
+transactionally: sets
 `dropped_at` + `cooldown_until` (12h), deactivates the clone's
 `guild_companions` rows everywhere, and archives+locks its adoptee thread
 (`setAdopteeThreadLocked`). The clone's `companions` row, its memories, and

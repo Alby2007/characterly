@@ -1391,3 +1391,42 @@ test("/companion homes — subcommand path; each adopted companion gets its Drop
   await handleMemoryCommand(legacy.interaction, store, brainFor);
   assert.match(legacy.replies[0]?.content ?? "", /Where your companions live/);
 });
+
+test("market:drop is two-click — confirm drops, cancel restores the row, stale confirm refuses", async () => {
+  const adopted = { id: 2, name: "Wren", kind: "adopted", onboardingState: "active" };
+  let drops = 0;
+  const store = {
+    listCompanionsForUser: async () => [adopted],
+    dropAdoption: async () => {
+      drops++;
+      return { chatThreadId: null, cooldownUntil: new Date(Date.now() + 43200000).toISOString() };
+    },
+  } as unknown as MemoryStore;
+
+  // Click 1 — confirm prompt renders, nothing dropped.
+  const open = stubButton({ customId: "market:drop:2", userId: "u-1" });
+  await handleMemoryButton(open.interaction, store, brainFor);
+  assert.equal(drops, 0);
+  assert.match(open.updates[0]?.content ?? "", /Really drop \*\*Wren\*\*/);
+  const confirmJson = JSON.stringify(open.updates[0]?.components ?? []);
+  assert.ok(confirmJson.includes("market:dropconfirm:2:"), "confirm carries the timestamp");
+  assert.ok(confirmJson.includes("market:dropcancel:2"), "cancel offered");
+
+  // Cancel — the manage row comes back, still nothing dropped.
+  const cancel = stubButton({ customId: "market:dropcancel:2", userId: "u-1" });
+  await handleMemoryButton(cancel.interaction, store, brainFor);
+  assert.equal(drops, 0);
+  assert.ok(JSON.stringify(cancel.updates[0]?.components ?? []).includes("market:drop:2"), "drop row restored");
+
+  // Stale confirm (>10m) — refuses and restores the row.
+  const stale = stubButton({ customId: `market:dropconfirm:2:${Date.now() - 11 * 60 * 1000}`, userId: "u-1" });
+  await handleMemoryButton(stale.interaction, store, brainFor);
+  assert.equal(drops, 0);
+  assert.match(stale.updates[0]?.content ?? "", /expired/i);
+
+  // Fresh confirm — actually drops.
+  const ok = stubButton({ customId: `market:dropconfirm:2:${Date.now()}`, userId: "u-1" });
+  await handleMemoryButton(ok.interaction, store, brainFor);
+  assert.equal(drops, 1);
+  assert.match(ok.updates[0]?.content ?? "", /Dropped — you can't re-adopt/);
+});
