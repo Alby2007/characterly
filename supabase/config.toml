@@ -12,3 +12,34 @@ verify_jwt = false
 # `true` keeps a careless `deploy --no-verify-jwt` from opening it.
 [functions.create-checkout]
 verify_jwt = true
+
+# Branded auth emails (parchment "journal sheet" style). Used by `supabase
+# start` locally; on the hosted project the same files are pasted into
+# Authentication → Email Templates (keep the two in sync if you edit one).
+[auth.email.template.confirmation]
+subject = "Confirm your email — Characterly"
+content_path = "./templates/confirm.html"
+
+[auth.email.template.magic_link]
+subject = "Your Characterly sign-in link"
+content_path = "./templates/magic-link.html"
+
+[auth.email.template.recovery]
+subject = "Reset your Characterly password"
+content_path = "./templates/recovery.html"
+
+[auth.email.template.invite]
+subject = "You're invited to Characterly"
+content_path = "./templates/invite.html"
+
+[auth.email.template.email_change]
+subject = "Confirm your new email — Characterly"
+content_path = "./templates/email-change.html"
+
+[auth.email.template.reauthentication]
+subject = "Your Characterly verification code"
+content_path = "./templates/reauthentication.html"
+
+# The dashboard's security-notification emails (password changed, email
+# changed, sign-in linked/removed) aren't configurable via config.toml — the
+# matching notify-*.html files in templates/ are pasted in by hand.

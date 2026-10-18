@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<body style="margin:0;padding:0;background-color:#ece0c6;">
+  <!-- Preheader: inbox preview text, hidden in the body -->
+  <div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">A request to reset your Characterly password.</div>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#ece0c6;">
+    <tr>
+      <td align="center" style="padding:40px 16px 32px;">
+        <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="width:100%;max-width:560px;">
+
+          <!-- Brand -->
+          <tr>
+            <td align="center" style="padding-bottom:24px;">
+              <table role="presentation" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="padding-right:10px;">
+                    <img src="https://characterly.app/apple-touch-icon.png" width="40" height="40" alt="" style="display:block;border-radius:9px;" />
+                  </td>
+                  <td style="font-family:Georgia,'Times New Roman',serif;font-size:21px;color:#241c12;letter-spacing:0.5px;">Characterly</td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Card -->
+          <tr>
+            <td>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f8f1de;border:1px solid #d9c9a3;border-radius:10px;">
+                <tr><td style="height:3px;line-height:3px;font-size:3px;background-color:#b98a45;border-radius:10px 10px 0 0;">&nbsp;</td></tr>
+                <tr>
+                  <td style="padding:38px 40px 34px;">
+
+                    <h1 style="margin:0 0 6px;font-family:Georgia,'Times New Roman',serif;font-size:27px;font-weight:normal;line-height:1.25;color:#241c12;">
+                      A fresh start.
+                    </h1>
+                    <p style="margin:0 0 18px;font-family:Georgia,'Times New Roman',serif;font-style:italic;font-size:16px;color:#8a6a2f;">
+                      A request to reset your password.
+                    </p>
+
+                    <p style="margin:0 0 26px;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.7;color:#4a4236;">
+                      We got a request to reset the password on the Characterly
+                      account for <strong>{{ .Email }}</strong>. Choose a new one below —
+                      the link only works once and expires soon.
+                    </p>
+
+                    <!-- Bulletproof button -->
+                    <table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:0 auto 26px;">
+                      <tr>
+                        <td align="center" bgcolor="#b98a45" style="border-radius:7px;">
+                          <!--[if mso]>
+                          <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="{{ .ConfirmationURL }}" style="height:46px;v-text-anchor:middle;width:260px;" fillcolor="#b98a45" stroke="f" arcsize="15%">
+                            <center style="color:#241505;font-family:Arial,sans-serif;font-size:15px;font-weight:bold;">Choose a new password</center>
+                          </v:roundrect>
+                          <![endif]-->
+                          <!--[if !mso]><!-->
+                          <a href="{{ .ConfirmationURL }}" style="display:inline-block;padding:14px 34px;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:15px;font-weight:bold;color:#241505;text-decoration:none;letter-spacing:0.4px;">Choose a new password</a>
+                          <!--<![endif]-->
+                        </td>
+                      </tr>
+                    </table>
+
+                    <p style="margin:0 0 4px;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:12px;line-height:1.6;color:#8a7a5c;">
+                      Button not working? Paste this into your browser:
+                    </p>
+                    <p style="margin:0;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:12px;line-height:1.6;word-break:break-all;">
+                      <a href="{{ .ConfirmationURL }}" style="color:#8a6a2f;">{{ .ConfirmationURL }}</a>
+                    </p>
+
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td align="center" style="padding:24px 24px 0;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:12px;line-height:1.7;color:#8a7a5c;">
+              Didn't ask for this? Your password stays as it is — you can safely ignore this email.<br />
+              Characterly · companions that live in Discord ·
+              <a href="https://characterly.app" style="color:#8a6a2f;text-decoration:none;">characterly.app</a> ·
+              <a href="https://characterly.app/privacy" style="color:#8a6a2f;text-decoration:none;">privacy</a>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

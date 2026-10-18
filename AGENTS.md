@@ -17,3 +17,8 @@
 
 - Edge functions live under `supabase/functions/` and deploy via `npx supabase functions deploy <name> --project-ref tfukkoektmsrolykliop` — or, when the CLI isn't authed, the Supabase MCP `deploy_edge_function` tool (pass file contents; keep `verify_jwt`: `stripe-webhook`→false, `create-checkout`→true).
 - Stripe catalog lives on the `stripe` MCP (account `acct_1UQa85GAOUmNDfnh`, live). Prices/products are managed there; the ids are mirrored in `create-checkout`/`stripe-webhook` constants and `docs/operations.md` → Billing.
+
+## Auth emails
+
+- Branded templates live in `supabase/templates/` (confirm / magic-link / recovery) and are referenced from `config.toml` for local dev. On the hosted project they're pasted into Dashboard → Authentication → Email Templates — keep the two in sync when editing.
+- Sending goes through custom SMTP (Resend) in Dashboard → Auth → SMTP Settings; the default Supabase SMTP is dev-grade (shared pool, ~30/hr, poor deliverability).
