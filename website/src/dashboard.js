@@ -292,6 +292,24 @@ function renderBilling() {
   $("#pack-note").hidden = premium;
 }
 
+// The daily grant tops the balance back up to the plan amount on the first
+// chat after UTC midnight — the countdown to that boundary is the actionable
+// "when", so render it live rather than restating "refills daily".
+const nextRefillAt = () => { const d = new Date(); d.setUTCHours(24, 0, 0, 0); return d; };
+const fmtCountdown = ms => {
+  const m = Math.max(0, Math.ceil(ms / 60000));
+  const h = Math.floor(m / 60);
+  return h ? `${h}h ${m % 60}m` : `${m}m`;
+};
+let grantTimer = null;
+function renderGrantLine() {
+  const premium = profile?.plan === "premium";
+  const wait = fmtCountdown(nextRefillAt() - Date.now());
+  $("#tokens-grant").textContent = premium
+    ? `Premium refills to 150 tokens each UTC day — next refill in ${wait} (00:00 UTC).`
+    : `Your free allowance refills to 30 tokens each UTC day — next refill in ${wait} (00:00 UTC).`;
+}
+
 async function renderTokens() {
   const linked = Boolean(profile?.discord_user_id);
   $("#tokens-body").hidden = !linked;
@@ -301,9 +319,8 @@ async function renderTokens() {
   $("#tokens-plan").textContent = premium ? "Premium" : "Free";
   $("#tokens-plan").className = premium ? "badge badge-ok" : "badge badge-soon";
   $("#tokens-balance").textContent = Number(profile.credit_balance ?? 0).toLocaleString();
-  $("#tokens-grant").textContent = premium
-    ? "Premium refills to 150 tokens each UTC day — practically unlimited."
-    : "Your free allowance refills each UTC day — applied automatically as you chat.";
+  renderGrantLine();
+  if (!grantTimer) grantTimer = setInterval(renderGrantLine, 30_000);
   const ul = $("#tokens-ledger");
   ul.innerHTML = "";
   const { data: ledger } = await getCreditLedger(8).catch(() => ({ data: null }));
