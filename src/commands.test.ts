@@ -903,7 +903,7 @@ test("market:add refuses unlinked users ephemerally — verify pointer, no adopt
       const ix = stubButton({ customId: `market:add:${listing.id}`, userId: "u-windowshopper" });
       await handleMemoryButton(ix.interaction, store);
       assert.equal(ix.replies[0]?.ephemeral, true);
-      assert.match(ix.replies[0]?.content ?? "", /linked Characterly account/);
+      assert.match(ix.replies[0]?.content ?? "", /log in/i);
       assert.match(ix.replies[0]?.content ?? "", /<#c-login>/, "points at the verify channel");
       assert.equal((await store.listCompanionsForUser("u-windowshopper")).length, 0, "no adoption must be written");
     } finally { config.houseVerifyChannelId = saved; }
@@ -965,7 +965,7 @@ test("market:add — house members need Member to adopt; Administrator bypasses"
       const outsider = stubButton({ customId: `market:add:${listing.id}`, userId: "u-linked-2",
         member: { roles: { cache: { has: () => false } }, permissions: { has: () => false } } });
       await handleMemoryButton(outsider.interaction, store);
-      assert.match(outsider.replies[0]?.content ?? "", /Verify first/i);
+      assert.match(outsider.replies[0]?.content ?? "", /log in/i);
       assert.match(outsider.replies[0]?.content ?? "", /<#c-verify>/);
       assert.equal((await store.listCompanionsForUser("u-linked-2")).length, 0, "no adoption while unverified");
 

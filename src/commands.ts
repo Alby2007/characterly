@@ -3230,8 +3230,8 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         return interaction.reply({
           ephemeral: true,
           content: config.houseVerifyChannelId
-            ? `You need a linked Characterly account to adopt companions — press **Verify** in <#${config.houseVerifyChannelId}> and it'll walk you through it, then come back.`
-            : `You need a linked Characterly account to adopt companions — create one free at ${config.siteUrl} and run \`/link\` in my DMs, then come back.`,
+            ? `You need to **log in** to adopt companions — press **Verify** in <#${config.houseVerifyChannelId}> to link your free Characterly account, then hit **Add** again.`
+            : `You need to **log in** to adopt companions — create a free account at ${config.siteUrl} and run \`/link\` in my DMs, then hit **Add** again.`,
         });
       }
       // In-house adoptions require Member — adoptee threads live here where
@@ -3239,7 +3239,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       // talk in. Administrator bypasses (the owner never holds Member).
       if (isHouse(interaction.guildId) && config.houseMemberRoleId && !isVerifiedHouseMember(interaction)) {
         return interaction.reply({ ephemeral: true,
-          content: `Verify first — press **Verify** in ${config.houseVerifyChannelId ? `<#${config.houseVerifyChannelId}>` : "the gate channel"} (linked account or BYOK + Terms), then come back and hit **Add** again.` });
+          content: `You need to **log in** to adopt companions — press **Verify** in ${config.houseVerifyChannelId ? `<#${config.houseVerifyChannelId}>` : "the gate channel"} to link your account or add a personal BYOK key, then hit **Add** again.` });
       }
       // Self-host lane has no billing → no adoption cap; hosted free = FREE_ADOPTION_SLOTS, premium uncapped.
       // The daily anti-farming cap is enforced inside the transaction so
