@@ -1392,6 +1392,43 @@ test("/companion homes — subcommand path; each adopted companion gets its Drop
   assert.match(legacy.replies[0]?.content ?? "", /Where your companions live/);
 });
 
+test("/companion tokens — balance, refill amount, relative reset timestamp", async () => {
+  const store = {
+    creditsSupported: true,
+    accountForDiscordUser: async () => ({ creditBalance: 28, plan: "free" }),
+    getGuildKey: async () => null,
+  } as unknown as MemoryStore;
+
+  const cmd = stubCommand({ commandName: "companion", subcommand: "tokens" });
+  await handleMemoryCommand(cmd.interaction, store, brainFor);
+  const reply = cmd.replies[0]?.content ?? "";
+  assert.match(reply, /\*\*28 tokens\*\*/, "balance shows");
+  assert.match(reply, /refills to \*\*30\*\*/, "free-plan refill amount");
+  assert.match(reply, /<t:\d+:R>/, "relative reset timestamp renders");
+  assert.equal(cmd.replies[0]?.ephemeral, true, "token counts stay private");
+
+  // BYOK connected — the reply notes chats don't spend tokens anyway.
+  const byokStore = {
+    ...store,
+    getGuildKey: async () => ({ keyHint: "…abc" }),
+  } as unknown as MemoryStore;
+  const cmd2 = stubCommand({ commandName: "companion", subcommand: "tokens" });
+  await handleMemoryCommand(cmd2.interaction, byokStore, brainFor);
+  assert.match(cmd2.replies[0]?.content ?? "", /chats don't spend tokens/);
+
+  // Premium shows the 150 refill.
+  const premStore = { ...store, accountForDiscordUser: async () => ({ creditBalance: 150, plan: "premium" }) } as unknown as MemoryStore;
+  const cmd3 = stubCommand({ commandName: "companion", subcommand: "tokens" });
+  await handleMemoryCommand(cmd3.interaction, premStore, brainFor);
+  assert.match(cmd3.replies[0]?.content ?? "", /refills to \*\*150\*\*/);
+
+  // Unlinked — signup pointer, no balance claim.
+  const unlinked = { ...store, accountForDiscordUser: async () => null } as unknown as MemoryStore;
+  const cmd4 = stubCommand({ commandName: "companion", subcommand: "tokens" });
+  await handleMemoryCommand(cmd4.interaction, unlinked, brainFor);
+  assert.match(cmd4.replies[0]?.content ?? "", /No hosted account yet/);
+});
+
 test("market:drop is two-click — confirm drops, cancel restores the row, stale confirm refuses", async () => {
   const adopted = { id: 2, name: "Wren", kind: "adopted", onboardingState: "active" };
   let drops = 0;

@@ -829,6 +829,12 @@ function verifyRef(): string {
   return config.houseVerifyChannelId ? `<#${config.houseVerifyChannelId}>` : "the gate channel";
 }
 
+/** Discord renders <t:sec:R> as "in 4 hours" in the viewer's own timezone —
+ * every daily quota/cap resets at the next UTC midnight. */
+function dailyResetTag(): string {
+  return `<t:${Math.floor(new Date().setUTCHours(24, 0, 0, 0) / 1000)}:R>`;
+}
+
 /** Verified in-house: Member role or Administrator (the owner never holds
  *  Member). memberPermissions is authoritative on real interactions — the raw
  *  API member carries no .permissions; the m.permissions branch covers stubs. */
@@ -1063,6 +1069,7 @@ export const commandDefinitions = [
       { name: "user", description: "Member whose companion to remove", type: 6, required: true }] },
     { name: "key", type: 1, description: "Connect or update your personal AI API key" },
     { name: "status", type: 1, description: "Check your personal API key, DM usage, and active servers" },
+    { name: "tokens", type: 1, description: "See your hosted-token balance and when the daily refill lands" },
     { name: "avatar", type: 1, description: "Set your companion's avatar (URL or upload)", options: [
       { name: "avatar_url", description: "Public http(s) image URL", type: 3, required: false },
       { name: "avatar_file", description: "Uploaded image — also used as the marketplace cover", type: 11, required: false }] },
@@ -1438,6 +1445,18 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         ephemeral: true,
       });
     }
+    if (action === "tokens") {
+      if (!store.creditsSupported) return interaction.reply({ content: "This deployment doesn't use hosted tokens — every chat is on the house.", ephemeral: true });
+      const dmScope = `dm:${interaction.user.id}`;
+      const [account, keyRow] = await Promise.all([
+        store.accountForDiscordUser(interaction.user.id).catch(() => null),
+        typeof store.getGuildKey === "function" ? store.getGuildKey(dmScope) : Promise.resolve(null),
+      ]);
+      const byokNote = keyRow ? "\nYour personal AI key is connected — chats don't spend tokens anyway." : "";
+      if (!account) return interaction.reply({ content: `No hosted account yet — create one at ${config.siteUrl} and run \`/link\` here to start getting daily hosted tokens.` + byokNote, ephemeral: true });
+      const refill = account.plan === "premium" ? 150 : 30;
+      return interaction.reply({ content: `🪙 **${account.creditBalance.toLocaleString()} tokens** — **${account.plan}** plan, refills to **${refill}** each UTC day · next refill ${dailyResetTag()}.\nManage billing & packs: ${config.siteUrl}/dashboard` + byokNote, ephemeral: true });
+    }
     if (action === "status") {
       const dmScope = `dm:${interaction.user.id}`;
       const [companion, keyRow, dmUsage, account] = await Promise.all([
@@ -1483,14 +1502,14 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
           { name: "Active Servers", value: serversStatus, inline: true },
           {
             name: "Today's DM Usage",
-            value: `${dmUsage.toLocaleString()} / ${config.dmLlmDailyCap.toLocaleString()} calls (resets at UTC midnight)`,
+            value: `${dmUsage.toLocaleString()} / ${config.dmLlmDailyCap.toLocaleString()} calls (resets ${dailyResetTag()})`,
             inline: true,
           },
           ...(store.creditsSupported
             ? [{
                 name: "Tokens",
                 value: account
-                  ? `**${account.creditBalance.toLocaleString()}** on the **${account.plan}** plan — refreshes daily at UTC midnight.${account.plan === "free" && !keyRow ? ` Premium: 150/day, live memory, web tools — ${config.siteUrl}/dashboard#billing` : ` Details: ${config.siteUrl}/dashboard`}`
+                  ? `**${account.creditBalance.toLocaleString()}** on the **${account.plan}** plan — refreshes daily, next refill ${dailyResetTag()}.${account.plan === "free" && !keyRow ? ` Premium: 150/day, live memory, web tools — ${config.siteUrl}/dashboard#billing` : ` Details: ${config.siteUrl}/dashboard`}`
                   : `Not linked — create an account at ${config.siteUrl} and run \`/link\` to get hosted tokens`,
                 inline: false,
               }]

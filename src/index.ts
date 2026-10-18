@@ -161,8 +161,11 @@ function linkPromptDue(key: string): boolean {
   return true;
 }
 const LINK_PROMPT = `To use Characterly's hosted features, create a free account at ${config.siteUrl} and run \`/link\` here to connect it to your Discord — it takes about a minute.`;
-const TOKEN_EMPTY = `You're out of tokens — they refresh daily at midnight UTC. Premium refills to 150/day: ${config.siteUrl}/dashboard#billing`;
-const HOSTED_CAPACITY = `The hosted model is at today's capacity — it resets at midnight UTC. Bringing your own API key (\`/companion key\`) always works.`;
+// Discord renders <t:sec:R> as "in 4 hours" in the viewer's timezone — the
+// daily token/cap reset is always the next UTC midnight.
+const dailyResetTag = () => `<t:${Math.floor(new Date().setUTCHours(24, 0, 0, 0) / 1000)}:R>`;
+const TOKEN_EMPTY = () => `You're out of tokens — next refill ${dailyResetTag()}. Premium refills to 150/day: ${config.siteUrl}/dashboard#billing`;
+const HOSTED_CAPACITY = () => `The hosted model is at today's capacity — it resets ${dailyResetTag()}. Bringing your own API key (\`/companion key\`) always works.`;
 
 // One "low tokens" DM per user per UTC day.
 const lowCreditAlertedAt = new Map<string, string>();
@@ -175,7 +178,7 @@ async function maybeAlertLowCredit(userId: string, balance: number): Promise<voi
   if (lowCreditAlertedAt.size > 10_000) lowCreditAlertedAt.clear();
   lowCreditAlertedAt.set(userId, today);
   const user = await client.users.fetch(userId).catch(() => null);
-  await user?.send(`You're down to ${balance} token${balance === 1 ? "" : "s"} — they refresh daily at midnight UTC. Settings: ${config.siteUrl}/dashboard`).catch(() => {});
+  await user?.send(`You're down to ${balance} token${balance === 1 ? "" : "s"} — next refill ${dailyResetTag()}. Settings: ${config.siteUrl}/dashboard`).catch(() => {});
   inc("credits.low_alert");
 }
 
@@ -1115,7 +1118,7 @@ async function handleDmMessage(
         inc("budget.reply_blocked");
         replyThrottle.refund(dmScope, userId);
         if (budgetNoticeOnce(message.channel.id)) {
-          await message.reply({ content: "We've hit today's DM message limit — it resets at midnight UTC.", allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+          await message.reply({ content: `We've hit today's DM message limit — it resets ${dailyResetTag()}.`, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
         }
         return;
       }
@@ -1315,7 +1318,7 @@ async function runCompanionTurn(opts: {
       inc("gate.hosted_pressure");
       replyThrottle.refund(scope, userId);
       if (budgetNoticeOnce(channel.id)) {
-        await sendSystem({ content: HOSTED_CAPACITY });
+        await sendSystem({ content: HOSTED_CAPACITY() });
       }
       return;
     }
@@ -1327,7 +1330,7 @@ async function runCompanionTurn(opts: {
         // A cached account can outlive a dashboard unlink by a minute — the
         // live miss above evicted it, so a re-check says which notice fits.
         const stillLinked = await store.accountForDiscordUser(userId).catch(() => null);
-        await sendSystem({ content: stillLinked ? TOKEN_EMPTY : LINK_PROMPT });
+        await sendSystem({ content: stillLinked ? TOKEN_EMPTY() : LINK_PROMPT });
       }
       return;
     }
@@ -1506,7 +1509,7 @@ async function runCompanionTurn(opts: {
       if (chargedDm && !dmReplied) refundTurn(userId, chargedDm, "dm_turn_refund");
       if (budgetNoticeOnce(channel.id)) {
         const hostedOut = error.guildId === "hosted:global";
-        await sendSystem({ content: hostedOut ? HOSTED_CAPACITY : "We've hit today's DM message limit — it resets at midnight UTC." });
+        await sendSystem({ content: hostedOut ? HOSTED_CAPACITY() : `We've hit today's DM message limit — it resets ${dailyResetTag()}.` });
       }
       return;
     }
@@ -1796,7 +1799,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       inc("gate.hosted_pressure");
       replyThrottle.refund(event.guildId, throttleActor);
       if (!senderCompanion && budgetNoticeOnce(event.channelId)) {
-        await message.reply({ content: HOSTED_CAPACITY, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+        await message.reply({ content: HOSTED_CAPACITY(), allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
       }
       return;
     }
@@ -1809,7 +1812,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       // notice fits (c2c owners get silence either way).
       if (!senderCompanion && budgetNoticeOnce(event.channelId)) {
         const stillLinked = await store.accountForDiscordUser(payerId).catch(() => null);
-        await message.reply({ content: stillLinked ? TOKEN_EMPTY : LINK_PROMPT, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+        await message.reply({ content: stillLinked ? TOKEN_EMPTY() : LINK_PROMPT, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
       }
       return;
     }
@@ -1979,7 +1982,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       if (chargedGuild && !guildReplied) refundTurn(payerId, chargedGuild, "guild_turn_refund");
       if (budgetNoticeOnce(event.channelId)) {
         const hostedOut = error.guildId === "hosted:global";
-        await message.reply({ content: hostedOut ? HOSTED_CAPACITY : "I've hit this server's daily LLM limit, so I can't respond right now — it resets at midnight UTC. An admin can raise it with `/limits`.", allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+        await message.reply({ content: hostedOut ? HOSTED_CAPACITY() : `I've hit this server's daily LLM limit, so I can't respond right now — it resets ${dailyResetTag()}. An admin can raise it with \`/limits\`.`, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
       }
       return;
     }
