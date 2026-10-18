@@ -978,7 +978,7 @@ test("DM lane: awakening owns DMs; adopted companions get private #adoptees thre
     await handleMemoryButton(talk.interaction, store);
     assert.match(talk.box.replied?.content ?? "", /<#t-wren>/);
     assert.equal(createdThreads.length, 1);
-    assert.match(createdThreads[0].name as string, /Wren.*Pat/);
+    assert.equal(createdThreads[0].name, "Wren");
     assert.deepEqual(addedMembers, ["u-pat"]);
     assert.deepEqual(stampedThreads, ["t-wren"]);
     assert.deepEqual(introduced, [9]);
