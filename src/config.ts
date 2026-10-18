@@ -62,7 +62,7 @@ const env = z.object({
   MAX_COMPANION_CHAIN_DEPTH: z.coerce.number().int().min(0).max(5).default(2),
   // Where the public website lives — /link replies point users here to claim
   // their code. Override for self-hosted/front-end forks.
-  SITE_URL: z.string().default("https://characterly-website.albertjemmettwaite.workers.dev"),
+  SITE_URL: z.string().default("https://characterly.app"),
   // Durable avatar lane: the website worker's PUT /avatar proxies uploads into
   // a public Supabase Storage bucket behind this shared secret. Unset = lane
   // off — every avatar_url set-point keeps the source URL (today's behavior).

@@ -191,7 +191,7 @@ Migrations (`v1`–`v42`) apply automatically on first boot — no manual SQL.
 | `GROQ_API_KEY` | *(optional)* | Operator fallback key when `REQUIRE_GUILD_KEYS=0` |
 | `REQUIRE_GUILD_KEYS` | `0` | `1` requires users to connect their own personal API key (`dm:<userId>`) |
 | `GROQ_MODEL` | `openai/gpt-oss-120b` | Default base model |
-| `SITE_URL` | `…workers.dev` | Public website URL — where `/link` and verify flows point users |
+| `SITE_URL` | `https://characterly.app` | Public website URL — where `/link` and verify flows point users |
 | `MARKETPLACE_CHANNEL_ID` | *(off)* | Forum channel in the hub server — unset disables publishing |
 | `HOUSE_GUILD_ID` | *(off)* | Hub server id — gates welcomes, verify gate, automod, `/ops` |
 | `DM_LLM_DAILY_CAP` | `250` | Per-user daily LLM call cap in 1:1 DMs |

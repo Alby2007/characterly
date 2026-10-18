@@ -32,7 +32,7 @@ Characterly is configured through environment variables validated at startup by 
 | `REPLY_BURST` | `4` | Per-user/actor token-bucket burst capacity before reply throttling kicks in (refunded automatically if a reply is unsent). |
 | `REPLY_REFILL_MS` | `30000` | Milliseconds to refill 1 token in the per-user reply throttle bucket. |
 | `GUILD_ID` | (empty) | If set, restricts the bot to a single Discord server. **Recommended during development** to avoid accidental activity in other servers. Leave empty to enable all servers the bot has joined. |
-| `SITE_URL` | `https://characterly-website.albertjemmettwaite.workers.dev` | Public URL of the Characterly website — `/link` replies point users at `${SITE_URL}/dashboard` to claim their link code. |
+| `SITE_URL` | `https://characterly.app` | Public URL of the Characterly website — `/link` replies point users at `${SITE_URL}/dashboard` to claim their link code. |
 | `AVATAR_UPLOAD_SECRET` | (off) | Shared secret for the website worker's `PUT /avatar` lane — every `avatar_url` set-point re-hosts the source image into a public Supabase Storage bucket (`companion-avatars`, lazily created) so avatars outlive Discord CDN signatures and link rot. Must match the `AVATAR_UPLOAD_SECRET` secret on the website worker. Unset disables the lane — set-points keep the source URL. |
 | `SPEAK_THRESHOLD` | `0.70` | Minimum `selectCompanionForTurn()` / `brain.decide()` score required to send a reply. Range 0–1. |
 | `RAW_MESSAGE_RETENTION_DAYS` | `30` | How many days of raw Discord messages to keep in the `messages` table. Messages older than this are deleted by the daily maintenance job. Evidence quotes in `memory_evidence` are **not** affected by this purge. Range 1–365. |
