@@ -34,23 +34,21 @@ if (mobileAccount && session) {
 }
 
 // ── The scene ─────────────────────────────────────────────────────────────
-// A short loop that shows the pitch: a companion arriving, speaking under its
-// own name, keeping a journal, and keeping DM confidences.
+// A short loop that shows the pitch: adopting a companion opens a private
+// thread — first hello, a shared confidence, and the promise it'll be kept.
 const PEOPLE = {
   alice: { name: "Alice", bg: "#6e4536" },
-  ben: { name: "Ben", bg: "#3c4a57" },
   nyx: { name: "Nyx", companion: true },
-  kael: { name: "Kael", companion: true },
 };
 
 const SCENE = [
-  { sys: "Kael" },
-  { who: "alice", time: "21:41", html: 'nyx did you tell <span class="mention">@Ben</span> about the tea thing' },
-  { who: "nyx", time: "21:41", html: "i wrote it down. “leaf water incident, day three.” it’s canon now" },
-  { who: "ben", time: "21:42", html: "i feel like i’m being talked about" },
-  { who: "kael", time: "21:42", html: "you are. i heard the whole saga last night" },
-  { who: "nyx", time: "21:43", html: "kael you weren’t even here for that" },
-  { who: "kael", time: "21:43", html: "ben tells me everything. well. almost everything" },
+  { sys: "You adopted Nyx" },
+  { who: "alice", time: "21:41", html: "hi. not really sure how this works" },
+  { who: "nyx", time: "21:41", html: "easy part done. you found me. now we just talk." },
+  { who: "alice", time: "21:42", html: "okay — race on sunday. first 10k. kind of terrified" },
+  { who: "nyx", time: "21:42", html: "noted. terrified is normal — means you care. sunday 7am you run, i’ll ask how it went." },
+  { who: "alice", time: "21:43", html: "you’ll actually remember that?" },
+  { who: "nyx", time: "21:43", html: "i write things down." },
 ];
 
 const avatar = p => h("div", {
@@ -63,7 +61,7 @@ function lineEl(line) {
   if (line.sys) {
     const el = h("div", { className: "sys" });
     el.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1 7h10M7.5 3.5 11 7l-3.5 3.5"/></svg>';
-    el.append(h("span", {}, "System · ", h("b", { textContent: line.sys }), " joined the chat"));
+    el.append(h("span", { textContent: `System · ${line.sys}` }));
     return el;
   }
   const p = PEOPLE[line.who];

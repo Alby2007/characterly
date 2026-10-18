@@ -125,7 +125,7 @@ export function initImportCard({ linked, uid }) {
       drop.hidden = false;
       done.hidden = false;
       const name = data?.name ?? pending.persona.name;
-      const discord = LINKS.addToDiscord;
+      const discord = LINKS.discord;
       done.innerHTML = data?.reused
         ? `<strong>${escapeHtml(name)}</strong> was already imported — they're on your roster. <a href="${discord}" target="_blank" rel="noopener noreferrer">Open Discord</a> and say hi.`
         : `<strong>${escapeHtml(name)}</strong> is home. <a href="${discord}" target="_blank" rel="noopener noreferrer">Open Discord</a> and say hi — they'll introduce themselves.<br><span class="plate-note">Imported personas stay private — publishing to the marketplace is a separate step in Discord (/companion → publish).</span>`;
