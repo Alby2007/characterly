@@ -1524,7 +1524,7 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
   },
   {
     channel: "privacy-policy",
-    version: 4,
+    version: 5,
     embeds: () => [new EmbedBuilder()
       .setTitle("Privacy — the short version")
       .setDescription(
@@ -1624,7 +1624,7 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
   },
   {
     channel: "characterly-web",
-    version: 1,
+    version: 2,
     embeds: () => [new EmbedBuilder()
       .setTitle("Characterly on the web")
       .setDescription(
