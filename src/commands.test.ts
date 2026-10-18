@@ -23,6 +23,7 @@ function stubCommand(opts: {
   username?: string;
   admin?: boolean;
   options?: Record<string, unknown>;
+  subcommand?: string;
   channel?: { id: string; parentId?: string | null };
 }): { interaction: ChatInputCommandInteraction; replies: Replies } {
   const replies: Replies = [];
@@ -35,6 +36,7 @@ function stubCommand(opts: {
     user: { id: opts.userId ?? "u-user", username: opts.username ?? "User" },
     memberPermissions: { has: () => !!opts.admin },
     options: {
+      getSubcommand: (_required?: boolean) => opts.subcommand ?? null,
       getBoolean: (name: string) => opts.options?.[name] ?? null,
       getInteger: (name: string, _required?: boolean) => opts.options?.[name] ?? null,
       getString: (name: string, _required?: boolean) => opts.options?.[name] ?? null,
@@ -1360,4 +1362,32 @@ test("/companion action:avatar — file upload wins over URL path, both-refused,
     await handleMemoryCommand(neither.interaction, store, brainFor);
     assert.match(neither.replies[0]?.content ?? "", /avatar_url|avatar_file/);
   } finally { await sql.end(); }
+});
+
+test("/companion homes — subcommand path; each adopted companion gets its Drop button", async () => {
+  const store = {
+    listCompanionsForUser: async () => [
+      { id: 1, name: "Sage", kind: "awakened", onboardingState: "active" },
+      { id: 2, name: "Wren", kind: "adopted", onboardingState: "active" },
+      { id: 3, name: "Beans", kind: "adopted", onboardingState: "active" },
+    ],
+    adoptionForCompanion: async (id: number) => ({ chatThreadId: `t-${id}` }),
+  } as unknown as MemoryStore;
+
+  // New-style invocation — the subcommand name resolves the action even
+  // when a stale client still echoes the old action string.
+  const sub = stubCommand({ commandName: "companion", subcommand: "homes", options: { action: "summon" } });
+  await handleMemoryCommand(sub.interaction, store, brainFor);
+  const reply = sub.replies[0];
+  assert.match(reply?.content ?? "", /Where your companions live/);
+  const rowJson = JSON.stringify(reply?.components ?? []);
+  assert.ok(rowJson.includes("market:drop:2"), "Wren gets a Drop button");
+  assert.ok(rowJson.includes("market:drop:3"), "Beans gets a Drop button");
+  // The awakened bond is permanent — no Drop affordance for it.
+  assert.ok(!rowJson.includes("market:drop:1"));
+
+  // Legacy invocation — action: "switch" still lands on the homes roster.
+  const legacy = stubCommand({ commandName: "companion", options: { action: "switch" } });
+  await handleMemoryCommand(legacy.interaction, store, brainFor);
+  assert.match(legacy.replies[0]?.content ?? "", /Where your companions live/);
 });

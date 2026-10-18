@@ -132,7 +132,7 @@ never publishes, distills into the importer's own companion journal
 entries), and the raw turns are deleted at completion — there is no stored
 corpus to exfiltrate or re-publish. A failed import retracts its partial
 journal by `import_id`; the user can also retract a finished import outright
-(`delete_chat_import`, `/companion action:imports`, or the dashboard Undo
+(`delete_chat_import`, `/companion imports`, or the dashboard Undo
 button — the row delete cascades every memory it wrote). The moderation
 boundary is ingestion, not display: third-party speakers in group exports are
 dropped before storage, and the distill prompt paraphrases rather than quotes.

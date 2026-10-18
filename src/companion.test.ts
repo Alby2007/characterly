@@ -982,7 +982,8 @@ test("DM lane: awakening owns DMs; adopted companions get private #adoptees thre
     assert.deepEqual(addedMembers, ["u-pat"]);
     assert.deepEqual(stampedThreads, ["t-wren"]);
     assert.deepEqual(introduced, [9]);
-    assert.equal(sentPayloads.length, 1, "the greeting posted as the companion's first message");
+    assert.equal(sentPayloads.length, 2, "the greeting + pinned manage row posted");
+    assert.ok(JSON.stringify(sentPayloads[1]).includes("market:drop:"), "manage row carries the drop button");
 
     // market:talk on the awakened companion → permanent-bond copy, no threads.
     const storeWoke = { ...store, listCompanionsForUser: async () => [awakenedActive] } as unknown as MemoryStore;
@@ -997,10 +998,21 @@ test("DM lane: awakening owns DMs; adopted companions get private #adoptees thre
     const add = ix(`market:add:${listing.id}`);
     await handleMemoryButton(add.interaction, store);
     assert.match(add.box.replied?.content ?? "", /<#t-wren>/);
-    assert.match(add.box.replied?.content ?? "", /action:summon/);
+    assert.match(add.box.replied?.content ?? "", /\/companion summon/);
     assert.doesNotMatch(add.box.replied?.content ?? "", /answer your DMs|in your DMs/i);
     assert.ok(add.box.replied?.components?.length, "awaken nudge offered while unawakened");
     assert.equal(createdThreads.length, 1, "existing chat_thread_id short-circuits");
+
+    // Re-clicking a listing they already hold (reused, not revived) names the
+    // existing bond and offers the Drop escape hatch — no fake re-adopt copy.
+    const storeDup = {
+      ...store,
+      adoptListing: async () => ({ ok: true, companion: adopted, adoption, reused: true, revived: false }),
+    } as unknown as MemoryStore;
+    const again = ix(`market:add:${listing.id}`);
+    await handleMemoryButton(again.interaction, storeDup);
+    assert.match(again.box.replied?.content ?? "", /already in your companions/);
+    assert.ok(JSON.stringify(again.box.replied?.components ?? []).includes("market:drop:"), "drop button offered on re-click");
   } finally {
     config.houseAdopteesChannelId = savedAdoptees;
     config.houseGuildId = savedHouse;

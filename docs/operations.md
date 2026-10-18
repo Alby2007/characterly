@@ -131,7 +131,7 @@ SELECT kind, sum(delta) FROM credit_ledger
 | `DISCORD_TOKEN` | VM `.env` | None besides restart. **Do not commit** — rotate in the Developer Portal if it ever leaks (it has appeared in chat history; treat as compromised-adjacent until rotated). |
 | `DATABASE_URL` | VM `.env` | Restart after change; pooler password rotation also rotates the Supabase DB password. |
 | `GROQ_API_KEY` | VM `.env` | Operator fallback key only — BYOK users unaffected. |
-| `KEY_ENCRYPTION_SECRET` | VM `.env` | **Rotating orphans every `guild_keys` row** — users must re-run `/companion action:key`. |
+| `KEY_ENCRYPTION_SECRET` | VM `.env` | **Rotating orphans every `guild_keys` row** — users must re-run `/companion key`. |
 | Supabase service-role key | website worker secret (`SUPABASE_SERVICE_ROLE_KEY`) | Publishable key only in `website/src/config.js` (safe by design — RLS enforces); the service key is server-side only, used by `/discord/events` → `record_app_install`. Rotate via Supabase → API keys, then re-set the worker secret (dashboard → Variables and Secrets, or the per-secret API `PUT` in the install-greeting runbook below). |
 | `DISCORD_APP_PUBLIC_KEY` | website worker secret | App's public key (dev portal → General Information) — verifies Discord's signed webhook events. Rotates with the app key; not secret-grade but required for the endpoint. |
 | `STRIPE_WEBHOOK_SECRET` | Supabase fn secrets | Missing → webhook 500s, Stripe retries; rotating = update endpoint + secret together. |
@@ -152,7 +152,7 @@ Ops utilities (run via `npx tsx scripts/<name>.mjs` with env loaded): `maintain.
 Listings live in a **forum channel in the hub Discord server**. One-time setup:
 
 1. Create a forum channel in the hub server; grant the bot `Create Public Threads` (and `Manage Threads` if you want unpublish to archive threads).
-2. Set `MARKETPLACE_CHANNEL_ID=<forum channel id>` in the VM `.env` and restart — unset disables `/companion action:publish` and hides the surface.
+2. Set `MARKETPLACE_CHANNEL_ID=<forum channel id>` in the VM `.env` and restart — unset disables `/companion publish` and hides the surface.
 3. Optional: `MARKETPLACE_MOD_CHANNEL_ID=<text channel id>` — gets a ping on every listing report, with **Keep up / Delist / Ban listing / Ban creator** action buttons gated to `MARKETPLACE_MOD_ROLE_IDS` (ManageGuild members can always act).
 
 Related env (defaults are sane): `ADOPTION_COOLDOWN_MS=43200000` (12h re-adopt cooldown), `FREE_ADOPTION_SLOTS=1` (Premium is uncapped in code), `FREE_LISTING_SLOTS=2` (live listings per free account — Premium uncapped), `MARKETPLACE_REPORT_FLAG_THRESHOLD=3`, `MARKET_PUBLISH_DAILY_CAP=5` / `MARKET_REPORT_DAILY_CAP=20` / `MARKET_ADOPT_DAILY_CAP=20` (per-UTC-day rate limits), `SAFETY_MODEL` (defaults to `GROQ_MODEL` — the listing/reply classifier).

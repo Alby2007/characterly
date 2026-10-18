@@ -67,7 +67,7 @@ export function buildOnboardingWelcomePayload(userId: string) {
       {
         name: "3. Avatar (Optional)",
         value:
-          "Attach an image in this DM anytime to give me a face, or use `/companion action:avatar` later.",
+          "Attach an image in this DM anytime to give me a face, or use `/companion avatar` later.",
       },
     )
     .setFooter({
@@ -193,7 +193,7 @@ export function buildAwakenedCompanionPayload(
     .setDescription(
       `**${companion.name}** is now permanently bound to your account! Keep chatting right here in DMs, or summon them into a server.\n\n` +
         (companion.backstory ? `${companion.backstory}\n\n` : "") +
-        `*Use \`/companion action:summon\` in any server to bring them into the hangout, or \`/companion action:avatar\` to update their avatar.*`,
+        `*Use \`/companion summon\` in any server to bring them into the hangout, or \`/companion avatar\` to update their avatar.*`,
     )
     .addFields(
       { name: "Voice & Vibe", value: companion.voicePersona || "—", inline: false },
@@ -635,7 +635,7 @@ function listingCapFor(store: MemoryStore, account: { plan: string } | null): nu
     : config.freeListingSlots;
 }
 
-const LISTING_CAP_MSG = `You can run **${config.freeListingSlots} live listing${config.freeListingSlots === 1 ? "" : "s"}** on the free plan — \`/companion action:unpublish\` one first, or go Premium for unlimited: ${config.siteUrl}/dashboard#billing`;
+const LISTING_CAP_MSG = `You can run **${config.freeListingSlots} live listing${config.freeListingSlots === 1 ? "" : "s"}** on the free plan — \`/companion unpublish\` one first, or go Premium for unlimited: ${config.siteUrl}/dashboard#billing`;
 
 const BANNED_CREATOR_MSG = "Your marketplace access has been suspended — you can't publish new characters. If you think this is a mistake, contact a moderator.";
 
@@ -769,7 +769,7 @@ async function unlistListing(interaction: ChatInputCommandInteraction | ButtonIn
       : null;
     if (thread) await thread.setLocked(true).then(() => thread.setArchived(true)).catch(() => {});
   }
-  const content = `**${listing.name}** has been removed from the marketplace. Bring it back anytime with \`/companion action:relist\`.`;
+  const content = `**${listing.name}** has been removed from the marketplace. Bring it back anytime with \`/companion relist\`.`;
   if (typeof (interaction as ButtonInteraction).isButton === "function" && (interaction as ButtonInteraction).isButton()) {
     return (interaction as ButtonInteraction).update({ content, components: [] });
   }
@@ -848,6 +848,15 @@ function isVerifiedHouseMember(interaction: { member?: unknown; memberPermission
 function needsVerify(interaction: { guildId?: string | null; member?: unknown; memberPermissions?: { has?(f: bigint): boolean } | null }): boolean {
   if (!isHouse(interaction.guildId) || !config.houseMemberRoleId) return false;
   return !isVerifiedHouseMember(interaction);
+}
+
+/** `/companion <subcommand>` after the subcommand split — falls back to the
+ *  legacy `action:` string enum so stale clients (mid-deploy registration
+ *  gap, cached command defs) keep working for a few minutes. */
+function companionAction(interaction: { options: { getSubcommand?(required?: boolean): string | null; getString(name: string, required?: boolean): string | null } }): string {
+  const sub = (() => { try { return interaction.options.getSubcommand?.(false) ?? null; } catch { return null; } })();
+  if (sub) return sub;
+  return (() => { try { return interaction.options.getString("action", false); } catch { return null; } })() ?? "";
 }
 
 /** Adopt-time thread setup shared by every adoption path — creates/reopens the
@@ -939,7 +948,7 @@ export async function dismissPickedCompanion(interaction: ChatInputCommandIntera
     );
   }
   const content = removed
-    ? `**${companion.name}** has stepped out of this server. You can bring them back anytime with \`/companion action:summon\`.`
+    ? `**${companion.name}** has stepped out of this server. You can bring them back anytime with \`/companion summon\`.`
     : `**${companion.name}** wasn't active in this server.`;
   if (typeof (interaction as ButtonInteraction).isButton === "function" && (interaction as ButtonInteraction).isButton()) {
     return (interaction as ButtonInteraction).update({ content, components: [] });
@@ -1041,29 +1050,33 @@ export const commandDefinitions = [
   { name: "unquiet-channel", description: "Admin: let companions speak in a channel again", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
     { name: "channel", description: "Channel to unquiet (default: this one)", type: 7, required: false, channel_types: [0, 5, 10, 11, 12, 15, 16] }
   ] },
+  // Real subcommands — Discord renders each with its own description and
+  // scoped options, so the picker teaches the surface itself. The handler
+  // still accepts the legacy action: string enum for stale clients.
   { name: "companion", description: "Manage your personal AI companion and summon them into servers", options: [
-    { name: "action", description: "Companion action", type: 3, required: true, choices: [
-      { name: "card — View a companion's profile card", value: "card" },
-      { name: "list — See all companions active in this server", value: "list" },
-      { name: "summon — Bring your companion into this server", value: "summon" },
-      { name: "dismiss — Dismiss your companion from this server", value: "dismiss" },
-      { name: "kick — Admin: remove a member's companion from this server", value: "kick" },
-      { name: "key — Connect or update your personal AI API key", value: "key" },
-      { name: "status — Check your personal API key, DM usage, and active servers", value: "status" },
-      { name: "avatar — Set your companion's avatar (URL or upload)", value: "avatar" },
-      { name: "publish — List your companion in the hub server's marketplace", value: "publish" },
-      { name: "create — Author an extra marketplace character (counts toward listing slots)", value: "create" },
-      { name: "unpublish — Remove your companion from the marketplace", value: "unpublish" },
-      { name: "relist — Bring back an unpublished listing", value: "relist" },
-      { name: "switch — Where each of your companions lives (DM or thread)", value: "switch" },
-      { name: "drop — Give up an adopted companion (12h re-adopt cooldown)", value: "drop" },
-      { name: "import — Bring in a character card (.png/.json) from another platform", value: "import" },
-      { name: "imports — View or undo your chat-history imports", value: "imports" },
-    ] },
-    { name: "avatar_url", description: "Public http(s) image URL when action is avatar", type: 3, required: false },
-    { name: "avatar_file", description: "Uploaded image when action is avatar — also used as the marketplace cover", type: 11, required: false },
-    { name: "card_file", description: "File to import (.png/.json character card, or .jsonl/.json chat export)", type: 11, required: false },
-    { name: "user", description: "Member whose companion to inspect (card) or remove (kick)", type: 6, required: false }
+    { name: "card", type: 1, description: "View a companion's profile card", options: [
+      { name: "user", description: "Member whose companion to inspect", type: 6, required: false }] },
+    { name: "list", type: 1, description: "See all companions active in this server" },
+    { name: "summon", type: 1, description: "Bring your companion into this server" },
+    { name: "dismiss", type: 1, description: "Dismiss your companion from this server" },
+    { name: "kick", type: 1, description: "Admin: remove a member's companion from this server", options: [
+      { name: "user", description: "Member whose companion to remove", type: 6, required: true }] },
+    { name: "key", type: 1, description: "Connect or update your personal AI API key" },
+    { name: "status", type: 1, description: "Check your personal API key, DM usage, and active servers" },
+    { name: "avatar", type: 1, description: "Set your companion's avatar (URL or upload)", options: [
+      { name: "avatar_url", description: "Public http(s) image URL", type: 3, required: false },
+      { name: "avatar_file", description: "Uploaded image — also used as the marketplace cover", type: 11, required: false }] },
+    { name: "publish", type: 1, description: "List your companion in the hub server's marketplace" },
+    { name: "create", type: 1, description: "Author an extra marketplace character (counts toward listing slots)" },
+    { name: "unpublish", type: 1, description: "Remove your companion from the marketplace" },
+    { name: "relist", type: 1, description: "Bring back an unpublished listing" },
+    { name: "homes", type: 1, description: "Where each of your companions lives (DM or thread)" },
+    { name: "drop", type: 1, description: "Give up an adopted companion (12h re-adopt cooldown)" },
+    { name: "import", type: 1, description: "Bring in a character card (.png/.json) from another platform", options: [
+      { name: "card_file", description: ".png/.json character card, or .jsonl/.json chat export", type: 11, required: false }] },
+    { name: "imports", type: 1, description: "View or undo your chat-history imports" },
+    { name: "edit", type: 1, description: "Edit your companion's persona before awakening" },
+    { name: "reset", type: 1, description: "Restart your companion's persona before awakening" },
   ] },
   // In a server this is the guild-scope key (admin only); in DMs it stores the
   // user's personal key — the same modal backs both paths.
@@ -1106,13 +1119,13 @@ const pendingImports = new Map<string, { persona: ImportPersona; meta: CardImpor
 const pendingChatImports = new Map<string, { bytes: Uint8Array; filename: string; sha256: string; chat: ParsedChat; meta: ChatImportMeta; expires: number }>();
 const PENDING_IMPORT_TTL_MS = 15 * 60 * 1000;
 
-/** `/companion action:imports` + the "keep" path of the undo confirm — the
+/** `/companion imports` + the "keep" path of the undo confirm — the
  *  user's import rows as an embed with per-row undo/cancel buttons. */
 async function buildImportsManager(store: MemoryStore, userId: string) {
   const imports = await store.listChatImports(userId).catch(() => [] as Array<ChatImport & { companionName: string }>);
   if (!imports.length) {
     return {
-      content: "No chat-history imports yet — `/companion action:import` with a `.jsonl` or `.json` export brings them over.",
+      content: "No chat-history imports yet — `/companion import` with a `.jsonl` or `.json` export brings them over.",
       embeds: [] as EmbedBuilder[],
       components: [] as ActionRowBuilder<ButtonBuilder>[],
     };
@@ -1128,7 +1141,7 @@ async function buildImportsManager(store: MemoryStore, userId: string) {
   const embed = new EmbedBuilder()
     .setTitle("Your chat-history imports")
     .setDescription(lines.join("\n") + "\n\n*Undoing removes every memory that import wrote — permanently.*")
-    .setFooter({ text: "Importing a new history: /companion action:import" });
+    .setFooter({ text: "Importing a new history: /companion import" });
   const components = imports.slice(0, 4).map(i => new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(`market:histundo:${i.id}`)
@@ -1143,7 +1156,7 @@ const profileBuildsRunning = new Set<string>();
 const display = (memory: Memory) => `**#${memory.id} · ${confidence(memory.confidence)} confidence**\n${memory.content}\n*${memory.mentions} confirmation${memory.mentions === 1 ? "" : "s"}; last confirmed ${new Date(memory.lastConfirmedAt).toLocaleDateString()}*`;
 
 type BrainFor = (guildId: string) => Promise<Brain | null>;
-const NO_KEY_MSG = "No AI key is configured yet — connect your personal API key with `/companion action:key` (or `/setup`).";
+const NO_KEY_MSG = "No AI key is configured yet — connect your personal API key with `/companion key` (or `/setup`).";
 
 export const SERVER_ONLY_COMMANDS = new Set([
   "memory-purge", "memory-pause", "memory-resume", "memory-settings",
@@ -1192,8 +1205,8 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
   const gatedAction =
     interaction.commandName === "profile-build" ||
     (interaction.commandName === "companion" &&
-      (interaction.options.getString("action") === "summon" ||
-        interaction.options.getString("action") === "import"));
+      (companionAction(interaction) === "summon" ||
+        companionAction(interaction) === "import"));
   if (gatedAction && store.creditsSupported) {
     // BYOK is exempt — a personal key means their lane never spends tokens.
     const [account, ownKey] = await Promise.all([
@@ -1210,10 +1223,10 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     }
   }
   if (interaction.commandName === "companion") {
-    const action = interaction.options.getString("action", true);
+    const action = companionAction(interaction);
     if (action === "summon") {
       if (!interaction.guildId) {
-        return interaction.reply({ content: "Run `/companion action:summon` inside the Discord server where you want to bring your companion.", ephemeral: true });
+        return interaction.reply({ content: "Run `/companion summon` inside the Discord server where you want to bring your companion.", ephemeral: true });
       }
       const roster = await store.listCompanionsForUser(interaction.user.id);
       const active = roster.filter(c => c.onboardingState === "active");
@@ -1239,7 +1252,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     }
     if (action === "dismiss") {
       if (!interaction.guildId) {
-        return interaction.reply({ content: "Run `/companion action:dismiss` inside the Discord server you want your companion to leave.", ephemeral: true });
+        return interaction.reply({ content: "Run `/companion dismiss` inside the Discord server you want your companion to leave.", ephemeral: true });
       }
       const roster = await store.listCompanionsForUser(interaction.user.id);
       const active = roster.filter(c => c.onboardingState === "active");
@@ -1346,7 +1359,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     if (action === "list") {
       if (!interaction.guildId) {
         return interaction.reply({
-          content: "Run `/companion action:list` inside a Discord server to see which companions are hanging out there.",
+          content: "Run `/companion list` inside a Discord server to see which companions are hanging out there.",
           ephemeral: true,
         });
       }
@@ -1361,7 +1374,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         const emptyEmbed = new EmbedBuilder()
           .setTitle("Active Companions in This Server")
           .setDescription(
-            "No companions are currently summoned in this server.\n\nClick **Awaken / Summon Companion** below (or run `/companion action:summon`) to bring your companion into the hangout!",
+            "No companions are currently summoned in this server.\n\nClick **Awaken / Summon Companion** below (or run `/companion summon`) to bring your companion into the hangout!",
           );
         return interaction.reply({ ephemeral: true, embeds: [emptyEmbed], components: [row] });
       }
@@ -1379,7 +1392,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     if (action === "kick") {
       if (!interaction.guildId) {
         return interaction.reply({
-          content: "Run `/companion action:kick` inside the Discord server where you want to remove a companion.",
+          content: "Run `/companion kick` inside the Discord server where you want to remove a companion.",
           ephemeral: true,
         });
       }
@@ -1447,8 +1460,8 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       const keyStatus = keyRow
         ? `Connected (\`${keyRow.keyHint}\`)${keyRow.validatedAt ? ` · verified ${new Date(keyRow.validatedAt).toLocaleDateString()}` : " · unverified"}`
         : config.groqKey && !config.requireGuildKeys
-          ? "Using operator default key (connect your own anytime with `/companion action:key`)"
-          : "No personal key connected — run `/companion action:key` to connect one";
+          ? "Using operator default key (connect your own anytime with `/companion key`)"
+          : "No personal key connected — run `/companion key` to connect one";
       const serversStatus = guildIds.length
         ? `Summoned in **${guildIds.length}** server${guildIds.length === 1 ? "" : "s"}`
         : "Not currently summoned in any server";
@@ -1651,7 +1664,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         const res = await store.adoptListing(interaction.user.id, dupe.id, { maxSlots, maxDaily: config.marketAdoptDailyCap });
         if (!res.ok) {
           const msg = res.reason === "cap"
-            ? `Your roster is full — drop a companion with \`/companion action:drop\` (or go Premium) to bring **${dupe.name}** back.`
+            ? `Your roster is full — drop a companion with \`/companion drop\` (or go Premium) to bring **${dupe.name}** back.`
             : "You've already imported this card, and it can't rejoin your roster right now — try again later.";
           return interaction.reply({ content: msg, ephemeral: true });
         }
@@ -1825,7 +1838,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       }
       return doRelist(interaction, delisted[0], store, account);
     }
-    if (action === "switch") {
+    if (action === "homes" || action === "switch") {
       const roster = await store.listCompanionsForUser(interaction.user.id);
       const active = roster.filter(c => c.onboardingState === "active");
       if (!active.length) {
@@ -1852,6 +1865,17 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       if (!awakened) {
         rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
           new ButtonBuilder().setCustomId("onboard:start").setLabel("Awaken your own companion").setStyle(ButtonStyle.Primary),
+        ));
+      }
+      // Each adoptee gets a labeled Drop button — the roster is where the
+      // relationship is listed, so it's where ending it should live too.
+      if (adopted.length) {
+        rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+          ...adopted.slice(0, 5).map(c =>
+            new ButtonBuilder()
+              .setCustomId(`market:drop:${c.id}`)
+              .setLabel(`Drop ${c.name || "companion"}`.slice(0, 80))
+              .setStyle(ButtonStyle.Danger)),
         ));
       }
       const hint = awakened ? "" : "\n\nYou haven't awakened a permanent companion yet — that's the one bond that's yours forever, in my DMs.";
@@ -1894,7 +1918,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         : "**Enabled but no active companion key** — nothing is being recorded until a companion with a connected personal AI key is summoned.";
     const consent = member?.optedOut ? "opted out — nothing derived forms about you"
       : member?.optedIn ? "opted in — derived memories and a profile may form about you"
-      : "not opted in — derived memories and a profile only form if you opt in (`/opt-in`, `/profile-build`, or `/companion action:summon`)";
+      : "not opted in — derived memories and a profile only form if you opt in (`/opt-in`, `/profile-build`, or `/companion summon`)";
     return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder()
       .setTitle("What Characterly stores in this server")
       .addFields(
@@ -1902,7 +1926,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         { name: "Raw messages", value: `Kept for **${s.rawRetentionDays} days**, then permanently deleted.` },
         { name: "Derived data", value: "Memories, profiles, and relationship notes form **only for members who opt in** — never automatically." },
         { name: "Your consent", value: consent },
-        { name: "Processing", value: "Messages are sent to an OpenAI-compatible LLM provider for analysis using each companion owner's personal API key (`/companion action:key`) or the operator's default." },
+        { name: "Processing", value: "Messages are sent to an OpenAI-compatible LLM provider for analysis using each companion owner's personal API key (`/companion key`) or the operator's default." },
         { name: "Controls & guarantees", value: "`/opt-out` forgets your memories and deletes your profile, attributes, relationships, stored quotes, and companion journal entries about you · `/memory-export` downloads everything stored about you · **removing Characterly from this server deletes every row it holds here**." },
       )] });
   }
@@ -2273,7 +2297,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
   }
   if (interaction.commandName === "setup") {
     if (interaction.guildId && !interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
-      return interaction.reply({ content: "Only server administrators can configure the LLM key. Use `/companion action:key` to connect your personal API key.", ephemeral: true });
+      return interaction.reply({ content: "Only server administrators can configure the LLM key. Use `/companion key` to connect your personal API key.", ephemeral: true });
     }
     if (!config.keyEncryptionSecret) {
       return interaction.reply({ content: "The bot operator hasn't configured key storage (KEY_ENCRYPTION_SECRET) — per-guild keys are unavailable.", ephemeral: true });
@@ -2358,7 +2382,7 @@ export async function handleSetupModal(
     }
 
     return interaction.editReply(result.ok
-      ? `Key stored (${maskKey(key)})${providerLabel} — this scope now runs on this key. Re-run /setup or \`/companion action:key\` any time to rotate it.`
+      ? `Key stored (${maskKey(key)})${providerLabel} — this scope now runs on this key. Re-run /setup or \`/companion key\` any time to rotate it.`
       : `Couldn't reach the provider to verify, but the key (${maskKey(key)})${providerLabel} is stored unverified — it'll be checked on first use.`);
   } catch (error) {
     logError("/setup failed", error);
@@ -2792,7 +2816,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       }
       if (!pending || pending.expires < Date.now()) {
         pendingImports.delete(userId);
-        return interaction.update({ content: "That import preview expired — run `/companion action:import` again.", components: [] });
+        return interaction.update({ content: "That import preview expired — run `/companion import` again.", components: [] });
       }
       pendingImports.delete(userId);
       const account = await store.accountForDiscordUser(userId).catch(() => null);
@@ -2823,7 +2847,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         // retry isn't told "already imported".
         await store.deleteUnlistedListing(created.listing.id, userId).catch(() => {});
         const msg = res.reason === "cap"
-          ? `Your companion roster is full — free accounts hold ${config.freeAdoptionSlots} adopted companion${config.freeAdoptionSlots === 1 ? "" : "s"}. Drop one with \`/companion action:drop\` or go Premium, then import again: ${config.siteUrl}/dashboard#billing`
+          ? `Your companion roster is full — free accounts hold ${config.freeAdoptionSlots} adopted companion${config.freeAdoptionSlots === 1 ? "" : "s"}. Drop one with \`/companion drop\` or go Premium, then import again: ${config.siteUrl}/dashboard#billing`
           : res.reason === "daily_cap"
             ? "That's a lot of new companions today — try again tomorrow."
             : "Couldn't bring that character in — try again in a moment.";
@@ -2836,7 +2860,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       return interaction.update({
         content:
           `**${res.companion.name}** is here —${adoptPointerCopy({ ...t, needsVerify: needsVerify(interaction) })}` +
-          `\n\n*Imported personas stay private — publishing to the marketplace is a separate choice (\`/companion action:publish\`).*`,
+          `\n\n*Imported personas stay private — publishing to the marketplace is a separate choice (\`/companion publish\`).*`,
         components: [],
       });
     }
@@ -2852,7 +2876,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       const pending = pendingChatImports.get(userId);
       if (!pending || pending.expires < Date.now()) {
         pendingChatImports.delete(userId);
-        return interaction.update({ content: "That import preview expired — run `/companion action:import` again.", components: [] });
+        return interaction.update({ content: "That import preview expired — run `/companion import` again.", components: [] });
       }
       const roster = await store.listCompanionsForUser(userId).catch(() => []);
       const target = roster.find(c => c.id === companionId);
@@ -3266,17 +3290,30 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       // the permanent awakened bond discoverable.
       const awakened = await store.getCompanionByOwner(userId);
       const hasAwakened = isAwakenedCompanionActive(awakened);
+      // A re-click on a listing they already hold (reused && !revived) isn't a
+      // re-adopt — offer the escape hatch right there instead of pointing
+      // them at a buried slash action.
+      const alreadyHave = res.reused && !res.revived;
       const rows = hasAwakened
         ? []
         : [new ActionRowBuilder<ButtonBuilder>().addComponents(
             new ButtonBuilder().setCustomId("onboard:start").setLabel("Awaken your own companion").setStyle(ButtonStyle.Primary),
           )];
+      if (alreadyHave) {
+        rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`market:drop:${res.companion.id}`)
+            .setLabel(`Drop ${res.companion.name || "companion"}`.slice(0, 80))
+            .setStyle(ButtonStyle.Danger),
+        ));
+      }
       return interaction.reply({
         ephemeral: true,
-        content:
-          `**${res.companion.name}** has joined your companions${res.reused ? " (re-adopted — your history with them continues)" : ""} —${adoptPointerCopy(t)}` +
-          " Once they've said hello there, `/companion action:summon` works in other servers too." +
-          (hasAwakened ? "" : " Awaken a permanent companion of your own — that's the bond that stays yours forever, in my DMs."),
+        content: alreadyHave
+          ? `**${res.companion.name}** is already in your companions${adoptPointerCopy(t)} — done with them? Drop below.`
+          : `**${res.companion.name}** has joined your companions${res.reused ? " (re-adopted — your history with them continues)" : ""} —${adoptPointerCopy(t)}` +
+            " Once they've said hello there, `/companion summon` works in other servers too." +
+            (hasAwakened ? "" : " Awaken a permanent companion of your own — that's the bond that stays yours forever, in my DMs."),
         components: rows,
       });
     }
@@ -3287,7 +3324,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         return interaction.reply({ content: "That listing is no longer available.", ephemeral: true });
       }
       if (listing.creatorUserId === userId) {
-        return interaction.reply({ content: "This is your own listing — use `/companion action:unpublish` to take it down.", ephemeral: true });
+        return interaction.reply({ content: "This is your own listing — use `/companion unpublish` to take it down.", ephemeral: true });
       }
       // Two-step: pick a category first — categorized reports triage far
       // better than a bare counter, and each row carries it for the queue.
@@ -3492,7 +3529,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
     }
     await store.setPaused(interaction.guildId, false);
     return interaction.reply({
-      content: "Characterly is now **enabled** for this server! Members can awaken their personal companions in DMs and bring them here anytime with `/companion action:summon`.",
+      content: "Characterly is now **enabled** for this server! Members can awaken their personal companions in DMs and bring them here anytime with `/companion summon`.",
       ephemeral: true,
     });
   }

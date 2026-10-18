@@ -992,6 +992,21 @@ export async function ensureAdopteeThread(
     deps, thread, parent, companion, ctx.listing?.greeting ?? "",
   );
   if (greeted) await deps.store.markDmIntroduced(adoption.id).catch(() => {});
+  // Pinned manage row — Drop is the one destructive act every adopter
+  // eventually needs, and burying it in a 16-item slash enum made it
+  // undiscoverable. The market:drop handler reuses the shared path (row
+  // tombstones itself and archives the thread).
+  const manageMsg = await thread.send({
+    content: `*Manage **${companion.name || "Companion"}** —*`,
+    components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`market:drop:${companion.id}`)
+        .setLabel(`Drop ${companion.name || "companion"}`.slice(0, 80))
+        .setStyle(ButtonStyle.Danger),
+    )],
+    allowedMentions: { parse: [] },
+  }).catch(e => { inc("ops.adoptee_manage_error"); logError("adoptee manage row failed", e); return null; });
+  await (manageMsg as { pin?(): Promise<unknown> } | null)?.pin?.().catch(() => {});
   inc("ops.adoptee_thread_created");
   return { thread, greeted, created: true };
 }
@@ -1403,7 +1418,7 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
   },
   {
     channel: "what-is-companionly",
-    version: 1,
+    version: 2,
     embeds: () => [new EmbedBuilder()
       .setTitle("What is Companionly?")
       .setDescription(
@@ -1413,12 +1428,12 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
         "• **Lives in your DMs** — talk anytime; they remember your history together\n" +
         "• **Bring them anywhere** — summon them into servers running Characterly\n" +
         "• **One per account** — a bond, not a collection\n" +
-        "• **Publishable** — `/companion action:publish` puts them on the shelf as a character others can adopt",
+        "• **Publishable** — `/companion publish` puts them on the shelf as a character others can adopt",
       )],
   },
   {
     channel: "get-companionly",
-    version: 1,
+    version: 2,
     embeds: () => [new EmbedBuilder()
       .setTitle("Get Companionly")
       .setDescription(
@@ -1426,8 +1441,8 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
         `**1. Verify** — click **Verify** in ${config.houseVerifyChannelId ? `<#${config.houseVerifyChannelId}>` : "**#log-in**"}. It links your free Characterly account (that's what moderation and your data controls hang off) and unlocks the server.\n` +
         "**2. Say hi** — DM me and talk. The first conversation awakens your Companion.\n" +
         `**3. Browse the shelf** — ${config.marketplaceChannelId ? `<#${config.marketplaceChannelId}>` : "**#characters**"} is the marketplace. **Add** any character you want alongside yours.\n` +
-        "**4. Bring them to a server** — where the bot's installed, `/companion action:summon` pulls them into the channel.\n" +
-        "**5. Publish** — `/companion action:publish` or `action:create` when you have a character worth sharing.",
+        "**4. Bring them to a server** — where the bot's installed, `/companion summon` pulls them into the channel.\n" +
+        "**5. Publish** — `/companion publish` or `/companion create` when you have a character worth sharing.",
       )],
   },
   {
@@ -1451,13 +1466,13 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
   },
   {
     channel: "how-to-publish-bots",
-    version: 1,
+    version: 2,
     embeds: () => [new EmbedBuilder()
       .setTitle("Publish a character")
       .setDescription(
         "Two ways onto the shelf:\n\n" +
-        "**`/companion action:publish`** — publish your awakened companion as a character others can adopt. The modal takes a display name, tagline, greeting, and an optional cover image URL — the cover becomes its gallery art.\n\n" +
-        "**`/companion action:create`** — author a character from scratch, no awakened companion needed.\n\n" +
+        "**`/companion publish`** — publish your awakened companion as a character others can adopt. The modal takes a display name, tagline, greeting, and an optional cover image URL — the cover becomes its gallery art.\n\n" +
+        "**`/companion create`** — author a character from scratch, no awakened companion needed.\n\n" +
         "**After it's live**\n" +
         "• **Edit persona** on the card — voice, traits, bond, backstory\n" +
         "• **Cover image** on the card — set or clear the gallery art anytime\n" +
@@ -1468,7 +1483,7 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
   },
   {
     channel: "adoptees",
-    version: 1,
+    version: 2,
     embeds: () => [new EmbedBuilder()
       .setTitle("Where your adopted companions live")
       .setDescription(
@@ -1478,15 +1493,15 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
         "• One thread per adoption — adopt another character, get another thread.\n" +
         "• Thread privacy is enforced by Discord, not just politeness — other members can't see yours at all.\n\n" +
         "**Useful commands**\n" +
-        "• `/companion action:list` — your roster (adopted + your awakened companion)\n" +
-        "• `/companion action:switch` — jump back into a companion's thread\n" +
-        "• `/companion action:summon` — bring one along to other servers with the bot\n" +
-        "• `/companion action:drop` — release one (12h cooldown before re-adopting the same character)",
+        "• `/companion list` — your roster (adopted + your awakened companion)\n" +
+        "• `/companion homes` — jump back into a companion's thread\n" +
+        "• `/companion summon` — bring one along to other servers with the bot\n" +
+        "• `/companion drop` — release one (12h cooldown before re-adopting the same character)",
       )],
   },
   {
     channel: "faqs",
-    version: 2,
+    version: 3,
     embeds: () => [
       new EmbedBuilder()
         .setTitle("Getting started")
@@ -1496,17 +1511,17 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
           "**Why did Add tell me to verify first?**\n" +
           `Adopting needs a linked Characterly account — it's what ties your companions, tokens, and data controls to you. Click **Verify** in ${config.houseVerifyChannelId ? `<#${config.houseVerifyChannelId}>` : "**#log-in**"}, it takes about 30 seconds, then come back and Add away.\n\n` +
           "**Do I have to pay?**\n" +
-          "Nope — every account gets **30 free tokens a day**, no card, no setup. If you start running out, **Premium ($7.99/mo)** bumps you to 150 a day plus live memory and web tools, and unlocks token packs in the dashboard. (Tinkerers can plug in their own API key with `/companion action:key`, but you never need to.)\n\n" +
+          "Nope — every account gets **30 free tokens a day**, no card, no setup. If you start running out, **Premium ($7.99/mo)** bumps you to 150 a day plus live memory and web tools, and unlocks token packs in the dashboard. (Tinkerers can plug in their own API key with `/companion key`, but you never need to.)\n\n" +
           "**How many companions can I have?**\n" +
           "One awakened companion — that bond is permanent. On top of that, free accounts keep one adopted character at a time; Premium removes the cap.\n\n" +
           "**Where do they hang out?**\n" +
-          "In your DMs, always. To bring one into a server where I'm installed, run `/companion action:summon` — they'll chat with everyone there, not just you.",
+          "In your DMs, always. To bring one into a server where I'm installed, run `/companion summon` — they'll chat with everyone there, not just you.",
         ),
       new EmbedBuilder()
         .setTitle("Characters & the marketplace")
         .setDescription(
           "**Can I make my own character?**\n" +
-          "Three ways: `/companion action:publish` turns your awakened companion into a listing, `action:create` builds one from scratch, and `action:import` pulls in a character card file you already have.\n\n" +
+          "Three ways: `/companion publish` turns your awakened companion into a listing, `/companion create` builds one from scratch, and `/companion import` pulls in a character card file you already have.\n\n" +
           "**How do I edit a listing?**\n" +
           "Right on its card — the buttons let you rewrite the persona, swap the cover art (that's the pretty picture in gallery view), and tag up to 3 genres so browsers can find it.\n\n" +
           "**Why is a companion ignoring me?**\n" +

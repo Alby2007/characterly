@@ -162,7 +162,7 @@ function linkPromptDue(key: string): boolean {
 }
 const LINK_PROMPT = `To use Characterly's hosted features, create a free account at ${config.siteUrl} and run \`/link\` here to connect it to your Discord — it takes about a minute.`;
 const TOKEN_EMPTY = `You're out of tokens — they refresh daily at midnight UTC. Premium refills to 150/day: ${config.siteUrl}/dashboard#billing`;
-const HOSTED_CAPACITY = `The hosted model is at today's capacity — it resets at midnight UTC. Bringing your own API key (\`/companion action:key\`) always works.`;
+const HOSTED_CAPACITY = `The hosted model is at today's capacity — it resets at midnight UTC. Bringing your own API key (\`/companion key\`) always works.`;
 
 // One "low tokens" DM per user per UTC day.
 const lowCreditAlertedAt = new Map<string, string>();
@@ -1619,7 +1619,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     );
     const activeList = guildCompanions.length
       ? `Active companions here: ${guildCompanions.map(c => `**${c.name}**`).join(", ")}. Say a companion's name in chat (or reply to their message) to talk to them!`
-      : "No companions have been summoned to this server yet! Click below (or send me a DM) to awaken your personal companion, then summon them here with `/companion action:summon`.";
+      : "No companions have been summoned to this server yet! Click below (or send me a DM) to awaken your personal companion, then summon them here with `/companion summon`.";
     await message.reply({
       content: `*System — Characterly Host:* ${activeList}`,
       components: [row],

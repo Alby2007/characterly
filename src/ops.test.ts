@@ -974,6 +974,7 @@ test("ensureResourcePosts posts marked embeds once; dedupes extras; edits stale 
   const marked = (key: string, v: number) => [{ footer: { text: `Char.ly resources · ${key} · v${v}` } }];
   // Current marker derived from RESOURCE_POSTS so a version bump doesn't stale the fixture.
   const privacyV = RESOURCE_POSTS.find(p => p.channel === "privacy-policy")!.version;
+  const publishV = RESOURCE_POSTS.find(p => p.channel === "how-to-publish-bots")!.version;
   msgsById.set("m-new", mkMsg("m-new", marked("privacy-policy", privacyV)));   // current — kept
   msgsById.set("m-dup", mkMsg("m-dup", marked("privacy-policy", privacyV)));   // duplicate — deleted
   msgsById.set("m-stale", mkMsg("m-stale", marked("how-to-publish-bots", 0))); // stale — edited
@@ -1003,7 +1004,7 @@ test("ensureResourcePosts posts marked embeds once; dedupes extras; edits stale 
   assert.deepEqual(deleted, ["m-dup"], "older duplicate deleted, newest kept");
   assert.deepEqual(edited, ["m-stale"], "stale post edited in place, not reposted");
   const staleAfter = msgsById.get("m-stale")!.embeds;
-  assert.match(JSON.stringify(staleAfter), /how-to-publish-bots · v1/, "edit carries the new version marker");
+  assert.match(JSON.stringify(staleAfter), new RegExp(`how-to-publish-bots · v${publishV}`), "edit carries the new version marker");
   assert.ok(!deps.sent.some(s => s.id === "c-privacy-policy"), "no repost where a current marker exists");
 
   // Second run: everything marked current — total no-op.
@@ -1604,19 +1605,24 @@ type FakeAdopteeThread = {
   id: string;
   sentPayloads: unknown[];
   addedMembers: string[];
+  pinnedIds: string[];
   locked: boolean;
   archived: boolean;
   members: { add(id: string): Promise<void> };
-  send(p: unknown): Promise<void>;
+  send(p: unknown): Promise<{ id: string; pin(): Promise<void> }>;
   setLocked(b: boolean): Promise<void>;
   setArchived(b: boolean): Promise<void>;
 };
 
 function makeAdopteeThread(id: string, opts: { addFails?: boolean } = {}): FakeAdopteeThread {
   const t: FakeAdopteeThread = {
-    id, sentPayloads: [], addedMembers: [], locked: false, archived: false,
+    id, sentPayloads: [], addedMembers: [], pinnedIds: [], locked: false, archived: false,
     members: { add: async uid => { if (opts.addFails) throw new Error("no access"); t.addedMembers.push(uid); } },
-    send: async p => { t.sentPayloads.push(p); },
+    send: async p => {
+      t.sentPayloads.push(p);
+      const mid = `m-${t.sentPayloads.length}`;
+      return { id: mid, pin: async () => { t.pinnedIds.push(mid); } };
+    },
     setLocked: async b => { t.locked = b; },
     setArchived: async b => { t.archived = b; },
   };
@@ -1697,8 +1703,13 @@ test("ensureAdopteeThread: creates a named private thread, adds the adopter, gre
   assert.deepEqual(stamped, [[7, "t-new"]]);
   assert.deepEqual(introduced, [7]);
   // The greeting landed — webhook lane is dead on the fake parent, so the
-  // bold-name fallback posted into the thread.
-  assert.equal(thread.sentPayloads.length, 1);
+  // bold-name fallback posted into the thread — then the pinned manage row
+  // with the companion's own Drop button.
+  assert.equal(thread.sentPayloads.length, 2);
+  const manage = thread.sentPayloads[1] as { content: string; components: unknown[] };
+  assert.match(manage.content, /Manage \*\*Wren\*\*/);
+  assert.ok(JSON.stringify(manage.components).includes("market:drop:11"), "manage row carries the drop button");
+  assert.deepEqual(thread.pinnedIds, ["m-2"], "the manage row pins itself");
 });
 
 test("ensureAdopteeThread: non-members get needsInvite — no thread created", async () => {

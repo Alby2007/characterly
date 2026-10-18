@@ -23,7 +23,7 @@ uniqueness survives via the partial index
 
 ## Publishing — two paths
 
-### Path A: publish your awakened companion — `/companion action:publish`
+### Path A: publish your awakened companion — `/companion publish`
 
 Gates, in order: `MARKETPLACE_CHANNEL_ID` set → caller owns an awakened
 `active` companion → linked web account (`/link` + site account — accountability
@@ -41,7 +41,7 @@ on republish the existing listing persona is preserved and only the modal
 fields update — persona edits go through **Edit persona** (`market:editmodal`
 → `market_edit:<listingId>` modal: name, voice, traits, bond, backstory).
 
-### Path B: author a freehand character — `/companion action:create`
+### Path B: author a freehand character — `/companion create`
 
 For characters not tied to your awakened bond (v35 — `source_companion_id` is
 nullable and stays NULL). Gates: marketplace configured → linked account → slot
@@ -51,7 +51,7 @@ persona** button on the success reply fills them in, and **Cover image** adds
 the art. `create` does *not* require an awakened companion — a pure creator
 can join, link, and stock the shelf.
 
-### Path C: import a character card — `/companion action:import` or the dashboard
+### Path C: import a character card — `/companion import` or the dashboard
 
 Users can bring a standard **character card** (`.json` or a `.png` card with an
 embedded `tEXt`/`ccv3` payload — the portable v1/v2/v3 format shared by
@@ -79,7 +79,7 @@ line on its marketplace card — authorship is never asserted, only provenance.
 
 ### Path D: import a chat history — same command, transcript files
 
-`/companion action:import` and the dashboard plate also accept exported
+`/companion import` and the dashboard plate also accept exported
 **transcripts** (`.jsonl` Tavern format, `.json` Oobabooga pairs or generic
 message-arrays — `src/chathist.ts`). Unlike card imports these are **never
 publishable**: the transcript distills into the chosen roster companion's
@@ -88,7 +88,7 @@ private journal — first-person entries stamped `source='import'` +
 `kind='bond'` summary of the relationship — then the transcript itself is
 deleted (`chat_imports.turns` cleared at done). A failed import retracts its
 partial journal via `import_id`, and the importer can undo a finished import
-at any time (`/companion action:imports` or the dashboard Undo button — the
+at any time (`/companion imports` or the dashboard Undo button — the
 row delete cascades every memory it wrote). Third-party speakers in group
 exports are dropped before anything is stored.
 
@@ -251,7 +251,7 @@ Three doors, one field (`companion_listings.avatar_url`):
   current value. Whatever's in the box at submit is the new truth — blank
   clears. This also fixes the old republish semantics where an existing
   cover always won over a freshly-set companion avatar.
-- **`/companion action:avatar`** — accepts `avatar_url` (validated public
+- **`/companion avatar`** — accepts `avatar_url` (validated public
   URL) *or* `avatar_file` (a Discord attachment upload; its CDN URL is used
   directly). Supplying both is refused. On an awakened companion it sets
   `companions.avatar_url`, which the publish modal picks up on next publish.
@@ -288,7 +288,7 @@ Forum card → **Add** → `store.adoptListing` in one transaction:
   refusal points at the verify channel; Administrator bypasses (the owner
   never holds Member). Adoptee-thread pointers carry the same hint —
   `— verify in #… to chat` on `adoptPointerCopy`, `market:talk`, the import
-  paths, and the `action:switch` roster's invite line.
+  paths, and the /companion homes roster's invite line.
 - **Slot check** — free: `FREE_ADOPTION_SLOTS` active adoptions; Premium:
   uncapped; self-host lane: uncapped (no billing to meter). Enforced
   atomically inside the adoption transaction under a per-user advisory lock:
@@ -339,7 +339,7 @@ links), `drop` (picker → `market:drop`), `summon`/`dismiss` (pickers when
 
 ## Dropping & cooldown
 
-`/companion action:drop` → picker → `dropAdoption` transactionally: sets
+`/companion drop` → picker → `dropAdoption` transactionally: sets
 `dropped_at` + `cooldown_until` (12h), deactivates the clone's
 `guild_companions` rows everywhere, and archives+locks its adoptee thread
 (`setAdopteeThreadLocked`). The clone's `companions` row, its memories, and

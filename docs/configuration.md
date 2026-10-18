@@ -20,7 +20,7 @@ Characterly is configured through environment variables validated at startup by 
 |----------|---------|-------------|
 | `GROQ_MODEL` | `openai/gpt-oss-120b` | Default model name passed to Groq (or custom provider). |
 | `GROQ_BASE_URL` | `https://api.groq.com/openai/v1` | Default OpenAI-compatible base URL when not auto-detected from a user's key prefix. |
-| `KEY_ENCRYPTION_SECRET` | unset | Master passphrase encrypting user API keys at rest (AES-256-GCM, SHA-256-derived). Required for `/companion action:key`, `/setup`, and the onboarding **Paste API Key** modal. When users leave Base URL blank, Characterly auto-detects Groq (`gsk_...`), OpenRouter (`sk-or-...`), OpenAI (`sk-...`), or xAI (`xai-...`). Any string; rotating it orphans existing `guild_keys` rows (recovery = re-run `/companion action:key` or `/setup`). |
+| `KEY_ENCRYPTION_SECRET` | unset | Master passphrase encrypting user API keys at rest (AES-256-GCM, SHA-256-derived). Required for `/companion key`, `/setup`, and the onboarding **Paste API Key** modal. When users leave Base URL blank, Characterly auto-detects Groq (`gsk_...`), OpenRouter (`sk-or-...`), OpenAI (`sk-...`), or xAI (`xai-...`). Any string; rotating it orphans existing `guild_keys` rows (recovery = re-run `/companion key` or `/setup`). |
 | `REQUIRE_GUILD_KEYS` | `0` | Hosted BYOK mode: `1` disables the operator `GROQ_API_KEY` fallback so companions and servers run strictly on user-supplied personal keys (`dm:<userId>`) — a keyless guild goes fully dormant (no archive, no replies, no LLM spend). Self-hosters leave this off. Note this is a *key* gate, orthogonal to the consent posture: every guild also starts dormant (`memory_enabled=0`) until an admin runs `/memory-resume`. |
 | `DM_LLM_DAILY_CAP` | `250` | Per-user daily LLM call cap for 1:1 DMs (`dm:<userId>` scope, resets at UTC midnight). |
 | `FREE_DAILY_CREDITS` | `30` | Free-plan hosted accounts refill to this balance each UTC day (hosted lane only). Applied lazily inside `spendCredits` — no scheduler. A refill tops up to the floor; a balance already above it keeps its headroom (grants don't stack). |
@@ -57,7 +57,7 @@ Characterly is configured through environment variables validated at startup by 
 
 ### Companion marketplace
 
-The marketplace lives in a forum channel on the hub server. **`MARKETPLACE_CHANNEL_ID` unset disables publishing entirely** (`/companion action:publish`/`create` refuse; adoption and chat are unaffected). Behavior detail in [marketplace.md](marketplace.md).
+The marketplace lives in a forum channel on the hub server. **`MARKETPLACE_CHANNEL_ID` unset disables publishing entirely** (`/companion publish`/`create` refuse; adoption and chat are unaffected). Behavior detail in [marketplace.md](marketplace.md).
 
 | Variable | Default | Description |
 |---|---|---|

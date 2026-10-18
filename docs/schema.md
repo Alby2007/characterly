@@ -44,7 +44,7 @@ Tracks which personal companions have been summoned into which Discord servers (
 | `guild_id` | TEXT | Discord server ID (composite PK) |
 | `companion_id` | BIGINT | FK → `companions.id ON DELETE CASCADE` (composite PK) |
 | `summoned_by` | TEXT | Discord user ID of the owner who summoned them |
-| `active` | SMALLINT | `1` = active in server (`listGuildCompanions`); `0` = dismissed (`/companion action:dismiss`) |
+| `active` | SMALLINT | `1` = active in server (`listGuildCompanions`); `0` = dismissed (`/companion dismiss`) |
 | `summoned_at` | TIMESTAMPTZ | Timestamp of most recent summon |
 
 **Index:** `guild_companions_lookup (guild_id, active)`.
@@ -247,7 +247,7 @@ Per-guild daily LLM-call counters (v17) — the `meteredClient` seam charges her
 
 ### `guild_keys`
 
-Encrypted LLM API keys (BYOK), written by `/companion action:key`, `/setup`, or the onboarding **Paste API Key** modal. Keyed by scope (`dm:<userId>` for a user's personal key, or `<guildId>`). Lives in a dedicated table so export/purge paths never casually touch ciphertext.
+Encrypted LLM API keys (BYOK), written by `/companion key`, `/setup`, or the onboarding **Paste API Key** modal. Keyed by scope (`dm:<userId>` for a user's personal key, or `<guildId>`). Lives in a dedicated table so export/purge paths never casually touch ciphertext.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -259,7 +259,7 @@ Encrypted LLM API keys (BYOK), written by `/companion action:key`, `/setup`, or 
 | `validated_at` | TIMESTAMPTZ NULL | NULL = stored but never verified live (provider unreachable at setup time) |
 | `created_at` / `updated_at` | TIMESTAMPTZ | Upsert timestamps |
 
-Decryption requires `KEY_ENCRYPTION_SECRET`; rotating that secret orphans existing rows (recovery = re-run `/companion action:key` or `/setup`).
+Decryption requires `KEY_ENCRYPTION_SECRET`; rotating that secret orphans existing rows (recovery = re-run `/companion key` or `/setup`).
 
 ---
 
@@ -677,7 +677,7 @@ Per-Discord-user bot toggles (v29), keyed by `discord_user_id` **outside** the a
 
 ### `companion_listings`
 
-The marketplace's publishable persona (v34): a creator's awakened companion projected into the hub server's forum channel via `/companion action:publish`. Editable and versioned — adopters hold *live references*: persona edits bump `version` and propagate into every adopted clone's `companions` row.
+The marketplace's publishable persona (v34): a creator's awakened companion projected into the hub server's forum channel via `/companion publish`. Editable and versioned — adopters hold *live references*: persona edits bump `version` and propagate into every adopted clone's `companions` row.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -868,7 +868,7 @@ Version tracking for the migration system.
 | 32 | `v32_stripe_webhook_hardening` | `grant_pack` gains a positive-amount guard; `account_id_for_email` rpc (service_role only) resolves checkout emails → `web_profiles.id` for bare payment links |
 | 33 | `v33_message_image_context` | `messages.image_context` — cached vision description shared by the extract job and reply paths |
 | 34 | `v34_companion_marketplace` | Companion marketplace: `companions.kind`/`adopted_from_listing_id`/`listing_version`, partial unique index `companions_one_awakened` replaces the blanket owner uniqueness, `companion_listings`/`companion_persona_versions`/`companion_adoptions`/`listing_reports` tables, `user_bot_settings.active_dm_companion_id` |
-| 35 | `v35_listing_source_nullable` | `companion_listings.source_companion_id` drops `NOT NULL` — freehand creator-authored listings (`/companion action:create`) have no awakened source |
+| 35 | `v35_listing_source_nullable` | `companion_listings.source_companion_id` drops `NOT NULL` — freehand creator-authored listings (`/companion create`) have no awakened source |
 | 36 | `v36_moderation_surface` | `listing_reports.category`, `marketplace_bans`, `moderation_events`, and the per-day rate-limit indexes (`reporter_user_id`/`creator_user_id`/`user_id` + timestamps) |
 | 37 | `v37_ratings_and_comment_reports` | `listing_ratings` (upsert-per-rater, `stars` 1–5 CHECK) + `comment_reports` (dedupe per `(message_id, reporter_user_id)`, shared daily report budget) — listing threads become the comment + rating surface |
 | 38 | `v38_discord_profile_snapshot` | `link_codes` + `web_profiles` gain `discord_username`/`discord_avatar_url`; `claim_link_code` copies the mint-time snapshot, the identity trigger stamps it from `identity_data`, `unlink_discord` clears it; OAuth rows backfilled — code-linked accounts render name/avatar like OAuth ones |
@@ -878,7 +878,7 @@ Version tracking for the migration system.
 | 42 | `v42_character_import` | `persona_source`/`import_meta` on `companions` + `companion_listings` (import provenance), auth-gated `import_companion_card` security-definer RPC (private `unlisted` listing + adopted clone + DM-pick claim, idempotent on `sha256`), `card-avatars` storage bucket with uid-folder policies; rollback refuses while imports exist |
 | 43 | `v43_import_hardening` | `companion_listings.published_at` (first-live stamp — the daily publish cap counts this, not `created_at`; live rows backfilled from `created_at`), hardened `import_companion_card` (reuse branch pays cooldown/slot/daily-adopt checks like `adoptListing`, card tags carried into provenance), `card_avatars_update` gains `WITH CHECK` so objects can't be renamed into another uid's folder |
 | 44 | `v44_chat_import` | `chat_imports` (transcript → journal distillation pipeline: `turns` cleared at done/failed — distill-and-discard), `companion_journal.source`/`import_id` (import provenance + retraction scope), `kind='bond'` for the pinned "what we were" summary, auth-gated `my_companions`/`my_chat_imports`/`import_chat_history` security-definer RPCs; rollback refuses while imports exist |
-| 45 | `v45_chat_import_undo` | auth-gated `delete_chat_import(p_id)` security-definer RPC — owner-scoped row delete; the `import_id` cascade retracts the distilled journal (the website's Undo button + `/companion action:imports`) |
+| 45 | `v45_chat_import_undo` | auth-gated `delete_chat_import(p_id)` security-definer RPC — owner-scoped row delete; the `import_id` cascade retracts the distilled journal (the website's Undo button + `/companion imports`) |
 | 46 | `v46_quiet_channels` | `server_settings.quiet_channels TEXT[]` — companion silence without blindness: replies and system cards suppressed while archiving/extraction continue; threads inherit via `parentId` |
 | 47 | `v47_app_installs` | `app_installs` (install ledger for the welcome-DM sweep) + `record_app_install` security-definer RPC (service-role only — the website worker's webhook sink); rollback refuses while installs exist |
 | 48 | `v48_support_tickets` | `support_tickets` + partial unique index `one_open_per_user` — the house ticket system's ledger; rollback refuses while tickets exist |
