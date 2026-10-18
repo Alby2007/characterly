@@ -249,7 +249,9 @@ export async function handleHouseMemberAdd(member: MemberLike, deps: OpsDeps): P
 }
 
 export async function handleHouseMemberUpdate(
-  oldMember: Pick<MemberLike, "pending">,
+  // `roles` is absent on uncached partials — treat unknown as "no role held"
+  // so a verified grant still triggers the adoptee-threads re-attach.
+  oldMember: Pick<MemberLike, "pending"> & { roles?: MemberLike["roles"] },
   newMember: MemberLike,
   deps: OpsDeps,
 ): Promise<void> {
@@ -264,6 +266,19 @@ export async function handleHouseMemberUpdate(
     // pending member couldn't be added to a private thread at join.
     await ensureAdopteeThreadsForUser(newMember.user.id, deps).catch(e => {
       inc("ops.adoptee_thread_error"); logError("member-update adoptee ensure failed", e);
+    });
+  }
+  // Verification lands as a Member-role grant — and it's the moment the
+  // adoptee-threads re-attach becomes possible: rejoiners arrive role-less
+  // (roles don't persist across leave/join) and can't be re-added to private
+  // threads under a @everyone-hidden parent until they hold Member. Covers
+  // verify-gate grants and manual mod grants alike.
+  const memberRole = config.houseMemberRoleId;
+  if (memberRole
+    && newMember.roles?.cache?.has?.(memberRole) === true
+    && oldMember.roles?.cache?.has?.(memberRole) !== true) {
+    await ensureAdopteeThreadsForUser(newMember.user.id, deps).catch(e => {
+      inc("ops.adoptee_thread_error"); logError("member-role adoptee ensure failed", e);
     });
   }
 }
@@ -937,7 +952,9 @@ export async function ensureAdopteeThread(
       // the house — re-add idempotently so a live thread reappears for them,
       // and resurface anything Discord auto-archived out from under them.
       await ex.setArchived?.(false).catch(() => {});
-      await ex.members?.add?.(adoption.userId).catch(() => {});
+      await ex.members?.add?.(adoption.userId).catch(e => {
+        inc("ops.adoptee_reattach_error"); logError("adoptee thread re-attach failed", e);
+      });
       return { thread: ex, greeted: false, created: false };
     }
     // Deleted thread (mod cleanup) — fall through and rebuild.

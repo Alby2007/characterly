@@ -1796,3 +1796,27 @@ test("house member add: rejoining adopters are re-added to their live thread", a
   assert.deepEqual(live.addedMembers, ["u-adopter"]);
   assert.equal(live.archived, false);
 });
+
+test("house member update: gaining the Member role re-attaches adoptee threads", async () => {
+  // Rejoiners arrive role-less — roles don't persist — so the join-time
+  // re-attach fails under the @everyone-hidden parent; the role grant is
+  // where it can finally succeed.
+  const live = makeAdopteeThread("t-live2");
+  const { deps } = adopteeDeps({ channels: { "t-live2": live } });
+  const adoption = { ...adopteeFixture().adoption, chatThreadId: "t-live2" };
+  const rows = [{ ...adopteeFixture({ adoption }), username: "Joiner" }];
+  (deps.store as { activeAdoptionsForUser(uid: string): Promise<unknown[]> })
+    .activeAdoptionsForUser = async uid => uid === "u-adopter" ? rows : [];
+  const saved = config.houseMemberRoleId;
+  config.houseMemberRoleId = "r-member";
+  const noRole = { pending: false, roles: { add: async () => {}, cache: { has: () => false } } };
+  const hasRole = { pending: false, roles: { add: async () => {}, cache: { has: (id: string) => id === "r-member" } } };
+  try {
+    await handleHouseMemberUpdate(noRole, makeMember({ id: "u-adopter", hasRole: true }), deps);
+    assert.deepEqual(live.addedMembers, ["u-adopter"]);
+    // Already held the role on the old side → not a gain, no re-run.
+    live.addedMembers.length = 0;
+    await handleHouseMemberUpdate(hasRole, makeMember({ id: "u-adopter", hasRole: true }), deps);
+    assert.deepEqual(live.addedMembers, []);
+  } finally { config.houseMemberRoleId = saved; }
+});
