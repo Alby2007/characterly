@@ -1406,7 +1406,12 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
       await ensureReadOnly(cat, created, `📁 ${group.category}`, readOnlyRoleId);
     }
     for (const wanted of group.channels) {
-      const exists = guild.channels.cache.find(c => normName(c.name) === normName(wanted.name));
+      // Prefer a name match whose TYPE matches too — a stale same-named
+      // channel (e.g. a text channel later replaced by a forum) must not
+      // absorb the reconcile's edits. Falls back to name-only so channels
+      // created under an older declaration still reconcile.
+      const exists = guild.channels.cache.find(c => normName(c.name) === normName(wanted.name) && c.type === wanted.type)
+        ?? guild.channels.cache.find(c => normName(c.name) === normName(wanted.name));
       let target = exists;
       if (!exists) {
         // New channels inherit the category's overwrites — a fresh
