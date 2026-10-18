@@ -1067,9 +1067,10 @@ export const WANTED_LAYOUT: Array<{
     category: "CHARACTER MARKETPLACE",
     channels: [
       { name: "characters", type: ChannelType.GuildForum },
-      // Adopted companions' private chat threads — members talk inside
-      // threads the bot opens for them; the channel itself is silent.
-      { name: "adoptees", type: ChannelType.GuildText, readOnly: "everyone", staffModerate: ["Admin"], memberThreads: true },
+      // Adopted companions' private chat threads — gated until verify
+      // (hidden: @everyone loses ViewChannel; the memberThreads grant keeps
+      // verified Members viewing + typing inside bot-opened threads).
+      { name: "adoptees", type: ChannelType.GuildText, hidden: true, staffModerate: ["Admin"], memberThreads: true },
     ],
   },
   {

@@ -869,6 +869,15 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
     assert.ok(e, `#support-ticket needs a ManageThreads allow for ${rid}`);
     assert.equal(e!.perms.ManageThreads, true, "staff see + join ticket threads");
   }
+  // #adoptees is hidden pre-verify — @everyone loses ViewChannel, verified
+  // Members keep it via the memberThreads grant.
+  const adopteeHide = edits.find(e => e.target === "adoptees" && e.id === "g-house");
+  assert.ok(adopteeHide, "#adoptees needs its own @everyone hide");
+  assert.equal(adopteeHide!.perms.ViewChannel, false, "unverified can't see #adoptees");
+  const adopteeMember = edits.find(e => e.target === "adoptees" && e.id === "r-member");
+  assert.ok(adopteeMember, "#adoptees needs a Member grant");
+  assert.equal(adopteeMember!.perms.ViewChannel, true, "verified members see it");
+  assert.equal(adopteeMember!.perms.SendMessagesInThreads, true, "…and can talk in their threads");
   // #adoptees narrows staffModerate to Admin only — Mods must never hold
   // ManageThreads there (private adoptee chats are admin-visible only).
   const adopteeAdmin = edits.find(e => e.target === "adoptees" && e.id === "r-admin");
