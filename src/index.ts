@@ -1,4 +1,4 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client, Events, GatewayIntentBits, Partials, type Guild, type Message, type MessageReplyOptions, type OmitPartialGroupDMChannel } from "discord.js";
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client, Events, GatewayIntentBits, Options, Partials, type Guild, type Message, type MessageReplyOptions, type OmitPartialGroupDMChannel } from "discord.js";
 import OpenAI from "openai";
 import { config } from "./config.js";
 import { sql } from "./db.js";
@@ -99,6 +99,28 @@ const client = new Client({
   // Reactions on uncached messages arrive as partials — the listener resolves
   // them explicitly before interpreting.
   partials: [Partials.Message, Partials.Channel, Partials.Reaction, Partials.User],
+  // Bound every unbounded manager — defaults keep members/users/threads/etc
+  // forever, which is baseline heap growth as guilds and traffic accumulate.
+  // Keep what the code actually reads: channels (structure lookups are always
+  // complete anyway), messages (MessageUpdate partial handling), members
+  // (findMutualGuilds is best-effort on an already-partial cache). Everything
+  // load-bearing resolves via the DB or explicit .fetch() — caps just stop
+  // the tail from pinning objects no one looks at twice.
+  makeCache: Options.cacheWithLimits({
+    ...Options.DefaultMakeCacheSettings,
+    MessageManager: 100,
+    GuildMemberManager: 1000,
+    UserManager: 2000,
+    ThreadManager: 200,
+    PresenceManager: 0,
+    VoiceStateManager: 0,
+    StageInstanceManager: 0,
+    GuildScheduledEventManager: 0,
+    GuildEmojiManager: 0,
+    ReactionManager: 50,
+    ReactionUserManager: 50,
+    DMMessageManager: 100,
+  }),
 });
 // Per-guild Brain resolver (BYOK): a guild's own key when /setup stored one,
 // env key otherwise, null (dormant) when REQUIRE_GUILD_KEYS blocks the fallback.
@@ -783,6 +805,17 @@ function noCompanionNoticeOnce(channelId: string): boolean {
   return noticeOnce(noCompanionNotices, channelId);
 }
 
+// Discord's typing indicator expires ~10s after the last sendTyping — a
+// single call before a slow generation reads as "typed, stopped, died" even
+// though the reply is still coming. Fire once, then refresh every 8s until
+// the caller clears the returned handle; a lingering extra ping is harmless.
+function startTyping(channel: { sendTyping?(): Promise<unknown> }): () => void {
+  void channel.sendTyping?.().catch(() => {});
+  const timer = setInterval(() => void channel.sendTyping?.().catch(() => {}), 8000);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 async function guildLookups(guildId: string): Promise<{ map: AliasMap; names: Map<string, string> }> {
   const cached = lookupCache.get(guildId);
   if (cached && Date.now() - cached.at < LOOKUP_TTL_MS) return cached;
@@ -1019,8 +1052,8 @@ async function handleDmMessage(
       }
     }
     if (!replyThrottle.consume(dmScope, userId)) { inc("reply.cooldown"); return; }
+    const stopTyping = startTyping(message.channel);
     try {
-      await message.channel.sendTyping();
       const recent = await store.recentContext(dmScope, message.channel.id, 12);
       const transcript = recent.map(r => ({
         authorName: r.authorName,
@@ -1125,6 +1158,8 @@ async function handleDmMessage(
       inc("llm.reply_error");
       logError("DM onboarding turn failed", error);
       replyThrottle.refund(dmScope, userId);
+    } finally {
+      stopTyping();
     }
     return;
   }
@@ -1338,8 +1373,8 @@ async function runCompanionTurn(opts: {
     dmBalance = spend.balance;
   }
 
+  const stopTyping = startTyping(channel);
   try {
-    await channel.sendTyping?.();
     const lookups = await guildLookups(scope);
     const peopleIds = [userId, compSubj];
     const profileRows = await profileStore.getProfiles(scope, peopleIds);
@@ -1517,6 +1552,8 @@ async function runCompanionTurn(opts: {
     logError("DM reply generation failed", error);
     replyThrottle.refund(scope, userId);
     if (chargedDm && !dmReplied) refundTurn(userId, chargedDm, "dm_turn_refund");
+  } finally {
+    stopTyping();
   }
 }
 
@@ -1820,8 +1857,8 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     guildBalance = spend.balance;
   }
 
+  const stopTyping = startTyping(message.channel);
   try {
-    await message.channel.sendTyping();
     const lookups = await guildLookups(event.guildId);
     const peopleIds = new Set<string>([
       event.authorId,
@@ -1989,6 +2026,8 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     inc("llm.reply_error"); logError("Reply generation failed", error);
     replyThrottle.refund(event.guildId, throttleActor);
     if (chargedGuild && !guildReplied) refundTurn(payerId, chargedGuild, "guild_turn_refund");
+  } finally {
+    stopTyping();
   }
 }
 

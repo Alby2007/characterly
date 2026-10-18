@@ -1,4 +1,5 @@
 import os from "node:os";
+import v8 from "node:v8";
 import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, ForumLayoutType, ModalBuilder, PermissionFlagsBits, TextInputBuilder, TextInputStyle, type ButtonInteraction, type ChatInputCommandInteraction, type ModalSubmitInteraction } from "discord.js";
 import { config } from "./config.js";
 import { inc } from "./metrics.js";
@@ -1686,6 +1687,7 @@ export interface HostHealth {
   rssMb: number;
   heapUsedMb: number;
   heapTotalMb: number;
+  heapLimitMb: number;
   heapPct: number;
   lagMs: number;
   diskPct: number | null;
@@ -1699,6 +1701,11 @@ export async function collectHostHealth(deps: OpsDeps): Promise<HostHealth> {
   const mem = process.memoryUsage();
   const heapTotalMb = mem.heapTotal / 1_048_576;
   const heapUsedMb = mem.heapUsed / 1_048_576;
+  // heapTotal is only V8's committed pool — it grows on demand and idles
+  // near-full before expanding, so heapUsed/heapTotal reads ~90% on a healthy
+  // process. heap_size_limit is the actual ceiling (--max-old-space-size or
+  // the memory-derived default); usage against THAT is proximity to OOM.
+  const heapLimitMb = v8.getHeapStatistics().heap_size_limit / 1_048_576;
   let diskPct: number | null = null;
   try {
     const { stdout } = await deps.exec("df -P /");
@@ -1715,7 +1722,8 @@ export async function collectHostHealth(deps: OpsDeps): Promise<HostHealth> {
     rssMb: mem.rss / 1_048_576,
     heapUsedMb,
     heapTotalMb,
-    heapPct: heapTotalMb ? (heapUsedMb / heapTotalMb) * 100 : 0,
+    heapLimitMb,
+    heapPct: heapLimitMb ? (heapUsedMb / heapLimitMb) * 100 : 0,
     lagMs: deps.lagMs(),
     diskPct,
     dbPingMs,
@@ -1770,7 +1778,7 @@ function healthEmbed(h: HostHealth): EmbedBuilder {
     .setTitle("Characterly host — status")
     .addFields(
       { name: "Uptime", value: `${uptime} · sha \`${h.gitSha ?? "?"}\``, inline: true },
-      { name: "Heap", value: `${h.heapUsedMb.toFixed(0)}/${h.heapTotalMb.toFixed(0)} MB (${h.heapPct.toFixed(0)}%)`, inline: true },
+      { name: "Heap", value: `${h.heapUsedMb.toFixed(0)}/${h.heapLimitMb.toFixed(0)} MB (${h.heapPct.toFixed(0)}% of limit; pool ${h.heapTotalMb.toFixed(0)} MB)`, inline: true },
       { name: "RSS", value: `${h.rssMb.toFixed(0)} MB`, inline: true },
       { name: "Event-loop lag", value: `${h.lagMs.toFixed(0)} ms`, inline: true },
       { name: "Disk /", value: fmt(h.diskPct, "%"), inline: true },
