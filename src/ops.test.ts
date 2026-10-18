@@ -1692,7 +1692,7 @@ test("ensureAdopteeThread: creates a named private thread, adds the adopter, gre
   assert.equal(created.length, 1);
   assert.equal(created[0].type, 12); // ChannelType.PrivateThread
   assert.equal(created[0].invitable, false);
-  assert.match(created[0].name as string, /Wren.*Joiner/);
+  assert.equal(created[0].name, "Wren");
   assert.deepEqual(thread.addedMembers, ["u-adopter"]);
   assert.deepEqual(stamped, [[7, "t-new"]]);
   assert.deepEqual(introduced, [7]);

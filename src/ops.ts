@@ -951,7 +951,9 @@ export async function ensureAdopteeThread(
     inc("ops.adoptee_thread_missing_channel");
     return { failed: true };
   }
-  const name = `${companion.name || "Companion"} — ${ctx.username || member.user.username || adoption.userId}`.slice(0, 95);
+  // Companion name only — these threads are private to one adopter, so the
+  // username suffix just added noise to an already-personal row.
+  const name = (companion.name || "Companion").slice(0, 95);
   const thread = await parent.threads.create({
     name,
     type: ChannelType.PrivateThread,
