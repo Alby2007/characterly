@@ -931,11 +931,14 @@ export async function ensureAdopteeThread(
   if (adoption.chatThreadId) {
     const existing = await deps.fetchChannel(adoption.chatThreadId).catch(() => null);
     if (existing) {
-      if (ctx.reopen) {
-        await (existing as TicketThreadLike).setLocked?.(false).catch(() => {});
-        await (existing as TicketThreadLike).setArchived?.(false).catch(() => {});
-      }
-      return { thread: existing as TicketThreadLike, greeted: false, created: false };
+      const ex = existing as TicketThreadLike;
+      if (ctx.reopen) await ex.setLocked?.(false).catch(() => {});
+      // Private-thread membership lapses when the adopter leaves and rejoins
+      // the house — re-add idempotently so a live thread reappears for them,
+      // and resurface anything Discord auto-archived out from under them.
+      await ex.setArchived?.(false).catch(() => {});
+      await ex.members?.add?.(adoption.userId).catch(() => {});
+      return { thread: ex, greeted: false, created: false };
     }
     // Deleted thread (mod cleanup) — fall through and rebuild.
   }
@@ -995,11 +998,13 @@ export async function setAdopteeThreadLocked(
   }
 }
 
-/** Ensure every active adoption of a user has its thread — the member-join
- *  hook and the interactive paths both drain through here. */
+/** Ensure every active adoption of a user has its thread AND that the adopter
+ *  is still a member of it — leaving the guild drops private-thread
+ *  membership, so the join hook and the interactive paths both drain the full
+ *  active set through here (create missing, re-attach live, rebuild deleted). */
 export async function ensureAdopteeThreadsForUser(userId: string, deps: OpsDeps): Promise<void> {
-  const missing = await deps.store.adoptionsMissingThreadsForUser(userId).catch(() => []);
-  for (const row of missing) {
+  const rows = await deps.store.activeAdoptionsForUser(userId).catch(() => []);
+  for (const row of rows) {
     await ensureAdopteeThread(deps, row).catch(e => {
       inc("ops.adoptee_thread_error"); logError("ensure adoptee thread failed", e);
     });

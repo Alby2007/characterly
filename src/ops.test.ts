@@ -1663,7 +1663,7 @@ function adopteeDeps(opts: {
     store: {
       setAdoptionThread: async (a: number, t: string) => { stamped.push([a, t]); },
       markDmIntroduced: async (a: number) => { introduced.push(a); },
-      adoptionsMissingThreadsForUser: async () => [],
+      activeAdoptionsForUser: async () => [],
       activeAdoptionsMissingThreads: async () => opts.missingRows ?? [],
     } as unknown as MemoryStore,
     fetchMember: async () => opts.member === undefined ? makeMember({ id: "u-adopter" }) : opts.member,
@@ -1772,10 +1772,27 @@ test("house member add: deferred adoptees get their threads on join", async () =
   const thread = makeAdopteeThread("t-join");
   const missing = [{ ...adopteeFixture(), username: "Joiner" }];
   const { deps } = adopteeDeps({ thread, created, stamped });
-  (deps.store as { adoptionsMissingThreadsForUser(uid: string): Promise<unknown[]> })
-    .adoptionsMissingThreadsForUser = async uid => uid === "u-adopter" ? missing : [];
+  (deps.store as { activeAdoptionsForUser(uid: string): Promise<unknown[]> })
+    .activeAdoptionsForUser = async uid => uid === "u-adopter" ? missing : [];
   const m = makeMember({ id: "u-adopter" });
   await handleHouseMemberAdd(m, deps);
   assert.equal(created.length, 1);
   assert.deepEqual(stamped, [[7, "t-join"]]);
+});
+
+test("house member add: rejoining adopters are re-added to their live thread", async () => {
+  // Leaving the guild drops private-thread membership — the join hook must
+  // re-attach the adopter to the thread they already have, not rebuild it.
+  const live = makeAdopteeThread("t-live");
+  live.archived = true;
+  const created: Array<Record<string, unknown>> = [];
+  const { deps } = adopteeDeps({ created, channels: { "t-live": live } });
+  const adoption = { ...adopteeFixture().adoption, chatThreadId: "t-live" };
+  const rows = [{ ...adopteeFixture({ adoption }), username: "Joiner" }];
+  (deps.store as { activeAdoptionsForUser(uid: string): Promise<unknown[]> })
+    .activeAdoptionsForUser = async uid => uid === "u-adopter" ? rows : [];
+  await handleHouseMemberAdd(makeMember({ id: "u-adopter" }), deps);
+  assert.equal(created.length, 0);
+  assert.deepEqual(live.addedMembers, ["u-adopter"]);
+  assert.equal(live.archived, false);
 });

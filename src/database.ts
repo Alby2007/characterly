@@ -3404,7 +3404,11 @@ export class MemoryStore {
     }));
   }
 
-  async adoptionsMissingThreadsForUser(userId: string): Promise<Array<{ adoption: CompanionAdoption; companion: Companion; listing: { id: number; greeting: string } | null }>> {
+  /** Every active adoption for a user — the member-join hook drains this to
+   *  create missing threads AND repair lapsed private-thread membership
+   *  (leaving the guild drops thread membership; chat_thread_id rows are
+   *  re-attached, not rebuilt). */
+  async activeAdoptionsForUser(userId: string): Promise<Array<{ adoption: CompanionAdoption; companion: Companion; listing: { id: number; greeting: string } | null }>> {
     const rows = await this.sql<Array<any>>`
       SELECT a.*, c.id AS c_id, c.owner_user_id AS c_owner_user_id, c.name AS c_name,
              coalesce(c.avatar_url, l.avatar_url) AS c_avatar_url, c.voice_persona AS c_voice_persona,
@@ -3418,7 +3422,7 @@ export class MemoryStore {
       FROM companion_adoptions a
       JOIN companions c ON c.id = a.companion_id
       LEFT JOIN companion_listings l ON l.id = a.listing_id
-      WHERE a.dropped_at IS NULL AND a.chat_thread_id IS NULL AND a.user_id = ${userId}
+      WHERE a.dropped_at IS NULL AND a.user_id = ${userId}
         AND (l.id IS NULL OR l.status <> 'banned')
       ORDER BY a.adopted_at ASC
     `;
