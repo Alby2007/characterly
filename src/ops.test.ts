@@ -811,7 +811,7 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
     mkCh("adoptees", "cat-character marketplace", true),
     ...["what-is-characterly", "what-is-companionly", "get-companionly", "privacy-policy", "how-to-publish-bots"]
       .map(n => mkCh(n, "cat-resources", true)),
-    mkCh("faqs", "cat-help", true), mkCh("support-ticket", "cat-help", true), mkCh("suggest-a-feature", "cat-help", true),
+    mkCh("faqs", "cat-help", true), mkCh("support-ticket", "cat-help", true), mkCh("suggest-a-feature", "cat-help", true, 15),
     mkCh("admins-chat", "cat-services", true), mkCh("mods-chat", "cat-services", true),
   ];
   const guild = {
@@ -838,7 +838,7 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
   assert.ok(!edits.some(x => x.target === "cat:RESOURCES" && x.id === "r-member"),
     "RESOURCES doesn't need a separate Member deny — @everyone's covers it");
   // Synced children are left alone — they inherit the parent deny.
-  for (const n of ["suggest-a-feature", "privacy-policy", "what-is-characterly", "what-is-companionly"]) {
+  for (const n of ["privacy-policy", "what-is-characterly", "what-is-companionly"]) {
     assert.ok(!edits.some(e => e.target === n), `synced #${n} inherits the category deny — no per-channel write`);
   }
   // The two gated RESOURCES channels get their own @everyone hide overwrite —
@@ -896,6 +896,22 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
   assert.equal(adopteeAdmin!.perms.ManageThreads, true, "admins can see + moderate adoptee threads");
   assert.ok(!edits.some(e => e.target === "adoptees" && e.id === "r-mod" && e.perms.ManageThreads === true),
     "Mod must not be granted ManageThreads on #adoptees");
+  // #suggest-a-feature is the verified-only suggestion forum: hidden from
+  // @everyone, Members get the full post/reply/react grant, staff moderate.
+  const suggHide = edits.find(e => e.target === "suggest-a-feature" && e.id === "g-house");
+  assert.ok(suggHide, "#suggest-a-feature needs its own @everyone hide");
+  assert.equal(suggHide!.perms.ViewChannel, false, "unverified can't see the suggestion board");
+  const suggMember = edits.find(e => e.target === "suggest-a-feature" && e.id === "r-member");
+  assert.ok(suggMember, "#suggest-a-feature needs the Member forum grant");
+  assert.equal(suggMember!.perms.ViewChannel, true, "verified members see the board");
+  assert.equal(suggMember!.perms.CreatePublicThreads, true, "members create suggestion posts");
+  assert.equal(suggMember!.perms.SendMessagesInThreads, true, "members reply inside posts");
+  assert.equal(suggMember!.perms.CreatePrivateThreads, false, "…but can't open private threads");
+  for (const rid of ["r-mod", "r-admin"]) {
+    const e = edits.find(x => x.target === "suggest-a-feature" && x.id === rid);
+    assert.ok(e, `#suggest-a-feature needs a ManageThreads allow for ${rid}`);
+    assert.equal(e!.perms.ManageThreads, true, "staff moderate suggestion posts");
+  }
   // #characterly-web is staff-posted: @everyone visible-silent, Mod+Admin write.
   const webLock = edits.find(e => e.target === "characterly-web" && e.id === "g-house");
   assert.ok(webLock, "#characterly-web needs the @everyone visible-silent overwrite");

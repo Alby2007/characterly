@@ -1124,8 +1124,10 @@ export const WANTED_LAYOUT: Array<{
    *  string[] narrows the grant (unlisted staff roles get the bits revoked).
    *  `memberThreads` lets the Member role SEND inside threads while every
    *  create stays denied — #adoptees, where adopters chat in private
-   *  threads only the bot opens. */
-  channels: Array<{ name: string; type: ChannelType; readOnly?: true | "member" | "everyone" | "openthreads" | "staff"; hidden?: true; staffModerate?: true | string[]; memberThreads?: true }>;
+   *  threads only the bot opens. `memberPosts` is the forum version —
+   *  Members can create + reply to posts (pair it with `hidden` to gate the
+   *  board behind verify). */
+  channels: Array<{ name: string; type: ChannelType; readOnly?: true | "member" | "everyone" | "openthreads" | "staff"; hidden?: true; staffModerate?: true | string[]; memberThreads?: true; memberPosts?: true }>;
 }> = [
   {
     category: "SYSTEM",
@@ -1174,7 +1176,10 @@ export const WANTED_LAYOUT: Array<{
       // private threads: openers type via the openthreads send-allow (thread
       // membership already hides everyone else's tickets).
       { name: "support-ticket", type: ChannelType.GuildText, readOnly: "openthreads", staffModerate: true },
-      { name: "suggest-a-feature", type: ChannelType.GuildText },
+      // The suggestion board — a forum hidden until verify; Members post,
+      // reply, and vote, staff pin/close. Gallery view so screenshot
+      // attachments render as covers.
+      { name: "suggest-a-feature", type: ChannelType.GuildForum, hidden: true, memberPosts: true, staffModerate: true },
     ],
   },
   {
@@ -1310,6 +1315,32 @@ async function ensureMemberThreadChat(ch: GuildChannelLike, created: string[], l
     .catch(() => {});
 }
 
+/** Forum surface the Member role fully uses: verified members create posts,
+ *  reply inside them, and react — while `hidden` keeps @everyone out.
+ *  CreatePublicThreads is allowed because in a forum, posts ARE threads;
+ *  only private threads stay denied. Every bit is written explicitly so the
+ *  overwrite converges even if a stale typing-deny (e.g. an inherited
+ *  readOnly-member sync) is sitting on the role. */
+async function ensureMemberPosts(ch: GuildChannelLike, created: string[], label: string, roleId: string | undefined): Promise<void> {
+  const overwrites = ch.permissionOverwrites;
+  if (!roleId || typeof overwrites?.edit !== "function") return;
+  const cur = overwriteEntries(overwrites).find(o => o.id === roleId);
+  if (cur
+    && permHas(cur.allow, PermissionFlagsBits.ViewChannel)
+    && permHas(cur.allow, PermissionFlagsBits.SendMessages)
+    && permHas(cur.allow, PermissionFlagsBits.SendMessagesInThreads)
+    && permHas(cur.allow, PermissionFlagsBits.CreatePublicThreads)
+    && permHas(cur.deny, PermissionFlagsBits.CreatePrivateThreads)) return;
+  await overwrites.edit(roleId, {
+    ViewChannel: true,
+    SendMessages: true,
+    SendMessagesInThreads: true,
+    CreatePublicThreads: true,
+    CreatePrivateThreads: false,
+  }).then(() => { created.push(`💡 ${label} → Member posts`); })
+    .catch(() => {});
+}
+
 /** Granted staff roles get ManageThreads on a surface — private threads are
  *  only visible to members + ManageThreads holders, and the house roles may
  *  not carry the perm guild-wide. SendMessagesInThreads lets staff reply
@@ -1417,6 +1448,7 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
       if (target && wanted.hidden) await ensureHiddenFromEveryone(target, created, `#${wanted.name}`, guild.id);
       if (target && wanted.staffModerate) await ensureStaffModerate(target, created, `#${wanted.name}`, guild, wanted.staffModerate === true ? undefined : wanted.staffModerate);
       if (target && wanted.memberThreads) await ensureMemberThreadChat(target, created, `#${wanted.name}`, config.houseMemberRoleId);
+      if (target && wanted.memberPosts) await ensureMemberPosts(target, created, `#${wanted.name}`, config.houseMemberRoleId);
     }
   }
   return created;
