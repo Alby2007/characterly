@@ -857,13 +857,15 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
   assert.equal(faqsEdit!.id, "g-house", "faqs overwrite targets @everyone (guild id)");
   assert.equal(faqsEdit!.perms.ViewChannel, true, "unverified can read it");
   assert.equal(faqsEdit!.perms.SendMessages, false, "…but can't post in it");
-  // #support-ticket is the pre-verify ticket desk: same visible-silent
-  // @everyone overwrite, plus ManageThreads allows for Mod/Admin so staff can
-  // see + join the private ticket threads.
+  // #support-ticket is the pre-verify ticket desk: visible + post-silent,
+  // but SendMessagesInThreads stays allowed so the opener can actually talk
+  // inside the private ticket thread (membership is the visibility gate).
   const ticketEdit = edits.find(e => e.target === "support-ticket" && e.id === "g-house");
   assert.ok(ticketEdit, "#support-ticket needs its own @everyone overwrite");
   assert.equal(ticketEdit!.perms.ViewChannel, true, "unverified can read the ticket desk");
   assert.equal(ticketEdit!.perms.SendMessages, false, "…but can't post in it");
+  assert.equal(ticketEdit!.perms.SendMessagesInThreads, true, "opener + staff can talk inside the ticket thread");
+  assert.equal(ticketEdit!.perms.CreatePrivateThreads, false, "…only the bot opens threads");
   for (const rid of ["r-mod", "r-admin"]) {
     const e = edits.find(x => x.target === "support-ticket" && x.id === rid);
     assert.ok(e, `#support-ticket needs a ManageThreads allow for ${rid}`);

@@ -1038,7 +1038,10 @@ export const WANTED_LAYOUT: Array<{
   /** Channel readOnly: "member" (default when true) denies the Member role;
    *  "everyone" denies @everyone — for channels the unverified can see (lobby,
    *  and #faqs: the channel overwrite allows ViewChannel where the category
-   *  denies it); "staff" is "everyone" plus send-access for the Mod/Admin
+   *  denies it); "openthreads" is "everyone" except SendMessagesInThreads is
+   *  allowed — private ticket threads stay typeable by their members while
+   *  the channel itself stays silent; "staff" is "everyone" plus send-access
+   *  for the Mod/Admin
    *  roles. `hidden` is the inverse: @everyone loses ViewChannel on that
    *  channel — used to keep select channels gated inside a visible category.
    *  `staffModerate` layers staff ManageThreads onto a channel — for
@@ -1048,7 +1051,7 @@ export const WANTED_LAYOUT: Array<{
    *  `memberThreads` lets the Member role SEND inside threads while every
    *  create stays denied — #adoptees, where adopters chat in private
    *  threads only the bot opens. */
-  channels: Array<{ name: string; type: ChannelType; readOnly?: true | "member" | "everyone" | "staff"; hidden?: true; staffModerate?: true | string[]; memberThreads?: true }>;
+  channels: Array<{ name: string; type: ChannelType; readOnly?: true | "member" | "everyone" | "openthreads" | "staff"; hidden?: true; staffModerate?: true | string[]; memberThreads?: true }>;
 }> = [
   {
     category: "SYSTEM",
@@ -1092,10 +1095,11 @@ export const WANTED_LAYOUT: Array<{
     channels: [
       { name: "faqs", type: ChannelType.GuildText, readOnly: "everyone" },
       // The ticket desk — visible pre-verify so "can't log in" cases can
-      // still reach staff; the panel card is the only thing in it since the
-      // @everyone deny keeps the channel itself silent. Conversation lives in
-      // private threads only ticket members + ManageThreads staff can see.
-      { name: "support-ticket", type: ChannelType.GuildText, readOnly: "everyone", staffModerate: true },
+      // still reach staff; the panel card is the only thing in it since
+      // @everyone can't post or create threads. Conversation lives in
+      // private threads: openers type via the openthreads send-allow (thread
+      // membership already hides everyone else's tickets).
+      { name: "support-ticket", type: ChannelType.GuildText, readOnly: "openthreads", staffModerate: true },
       { name: "suggest-a-feature", type: ChannelType.GuildText },
     ],
   },
@@ -1155,6 +1159,28 @@ async function ensureReadOnly(ch: GuildChannelLike, created: string[], label: st
   if (cur && READONLY_DENY_BITS.every(b => permHas(cur.deny, b)) && permHas(cur.allow, PermissionFlagsBits.ViewChannel)) return;
   await overwrites.edit(roleId, { ViewChannel: true, ...READONLY_DENY_PERMS })
     .then(() => { created.push(`🔒 ${label}`); })
+    .catch(() => {});
+}
+
+/** "openthreads" read-only — the ticket desk. @everyone reads the channel and
+ *  can't post or open threads, but SendMessagesInThreads stays allowed so the
+ *  opener (and staff) can actually talk inside the private ticket thread —
+ *  thread membership is already the visibility gate, so nothing else leaks. */
+async function ensureOpenThreads(ch: GuildChannelLike, created: string[], label: string, roleId: string | undefined): Promise<void> {
+  const overwrites = ch.permissionOverwrites;
+  if (!roleId || typeof overwrites?.edit !== "function") return;
+  const cur = overwriteEntries(overwrites).find(o => o.id === roleId);
+  const denyBits = READONLY_DENY_BITS.filter(b => b !== PermissionFlagsBits.SendMessagesInThreads);
+  if (cur && denyBits.every(b => permHas(cur.deny, b))
+    && permHas(cur.allow, PermissionFlagsBits.ViewChannel)
+    && permHas(cur.allow, PermissionFlagsBits.SendMessagesInThreads)) return;
+  await overwrites.edit(roleId, {
+    ViewChannel: true,
+    SendMessagesInThreads: true,
+    SendMessages: false,
+    CreatePublicThreads: false,
+    CreatePrivateThreads: false,
+  }).then(() => { created.push(`🎫 ${label}`); })
     .catch(() => {});
 }
 
@@ -1301,6 +1327,8 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
       // "everyone" targets the @everyone role — its id is the guild id.
       if (target && wanted.readOnly === "staff") {
         await ensureStaffOnly(target, created, `#${wanted.name}`, guild);
+      } else if (target && wanted.readOnly === "openthreads") {
+        await ensureOpenThreads(target, created, `#${wanted.name}`, guild.id);
       } else if (target && (wanted.readOnly || (group.readOnly === true && syncBefore.get(normName(wanted.name)) !== true))) {
         const roleId = wanted.readOnly === "everyone" ? guild.id : config.houseMemberRoleId;
         await ensureReadOnly(target, created, `#${wanted.name}`, roleId);
@@ -1317,8 +1345,9 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
 }
 
 // ── Resource posts ───────────────────────────────────────────────────────────
-// Static explainer embeds for the RESOURCES channels. Every post's footer
-// carries `Char.ly resources · <channel> · vN` — the reconcile keeps exactly
+// Static explainer embeds — mostly RESOURCES channels, plus #adoptees' pinned
+// orientation post. Every post's footer carries
+// `Char.ly resources · <channel> · vN` — the reconcile keeps exactly
 // one marked message per channel: extras are deleted, a stale version is
 // edited in place (no repost spam), and a missing one is posted fresh.
 
@@ -1411,6 +1440,24 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
         "• **Tags** on the card — up to 3 genre tags so browsers find it\n" +
         "• Adopters get independent copies — their memories and journals are theirs; your card keeps your name\n\n" +
         "**The rules** — keep it SFW. Personas are screened on publish; listings can be flagged and moderators can delist. A linked account is required so creators own what they ship.",
+      )],
+  },
+  {
+    channel: "adoptees",
+    version: 1,
+    embeds: () => [new EmbedBuilder()
+      .setTitle("Where your adopted companions live")
+      .setDescription(
+        "Every character you adopt from **#characters** gets a private thread right here — only you, them, and our Admin team can see it.\n\n" +
+        "**How the chats work**\n" +
+        "• Talk normally — it's a real conversation. Your companion keeps a private memory of *you*, so they always pick up where you left off.\n" +
+        "• One thread per adoption — adopt another character, get another thread.\n" +
+        "• Thread privacy is enforced by Discord, not just politeness — other members can't see yours at all.\n\n" +
+        "**Useful commands**\n" +
+        "• `/companion action:list` — your roster (adopted + your awakened companion)\n" +
+        "• `/companion action:switch` — jump back into a companion's thread\n" +
+        "• `/companion action:summon` — bring one along to other servers with the bot\n" +
+        "• `/companion action:drop` — release one (12h cooldown before re-adopting the same character)",
       )],
   },
   {
