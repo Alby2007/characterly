@@ -1606,23 +1606,32 @@ type FakeAdopteeThread = {
   sentPayloads: unknown[];
   addedMembers: string[];
   pinnedIds: string[];
+  msgs: Array<{ id: string; pinned: boolean; components?: unknown; pin(): Promise<void> }>;
   locked: boolean;
   archived: boolean;
   members: { add(id: string): Promise<void> };
   send(p: unknown): Promise<{ id: string; pin(): Promise<void> }>;
   setLocked(b: boolean): Promise<void>;
   setArchived(b: boolean): Promise<void>;
+  messages: { fetch(o: { limit: number }): Promise<Iterable<unknown>> };
 };
 
 function makeAdopteeThread(id: string, opts: { addFails?: boolean } = {}): FakeAdopteeThread {
   const t: FakeAdopteeThread = {
-    id, sentPayloads: [], addedMembers: [], pinnedIds: [], locked: false, archived: false,
+    id, sentPayloads: [], addedMembers: [], pinnedIds: [], msgs: [], locked: false, archived: false,
     members: { add: async uid => { if (opts.addFails) throw new Error("no access"); t.addedMembers.push(uid); } },
     send: async p => {
       t.sentPayloads.push(p);
       const mid = `m-${t.sentPayloads.length}`;
-      return { id: mid, pin: async () => { t.pinnedIds.push(mid); } };
+      const m = {
+        id: mid, pinned: false,
+        components: (p as { components?: unknown })?.components,
+        pin: async () => { m.pinned = true; t.pinnedIds.push(mid); },
+      };
+      t.msgs.push(m);
+      return m;
     },
+    messages: { fetch: async () => t.msgs },
     setLocked: async b => { t.locked = b; },
     setArchived: async b => { t.archived = b; },
   };
@@ -1731,8 +1740,16 @@ test("ensureAdopteeThread: existing chat_thread_id short-circuits; reopen unlock
   assert.equal(created.length, 0);
   assert.equal(existing.locked, false);
   assert.equal(existing.archived, false);
-  // Same thread, no greeting — greeting only happens on creation.
-  assert.equal(existing.sentPayloads.length, 0);
+  // Same thread, no greeting — greeting only happens on creation. But a
+  // thread missing the manage row gets it backfilled + pinned (threads that
+  // predate the row are exactly this case).
+  assert.equal(existing.sentPayloads.length, 1);
+  assert.ok(JSON.stringify(existing.sentPayloads[0]).includes("market:drop:11"), "manage row backfilled");
+  assert.deepEqual(existing.pinnedIds, ["m-1"], "backfilled row pins itself");
+
+  // Second ensure — the row is found already pinned and nothing re-posts.
+  await ensureAdopteeThread(deps, { ...fixture, reopen: true } as never);
+  assert.equal(existing.sentPayloads.length, 1, "no duplicate manage row");
 });
 
 test("ensureAdopteeThread: member-add failure tears the thread down and fails", async () => {

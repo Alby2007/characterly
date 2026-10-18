@@ -59,6 +59,12 @@ interface TicketThreadLike {
   send(payload: unknown): Promise<unknown>;
   setLocked?(locked: boolean): Promise<unknown>;
   setArchived?(archived: boolean): Promise<unknown>;
+  /** Real threads — the manage-row backfill inspects recent messages.
+   *  discord.js Collections yield [snowflake, message] pairs; plain iterables
+   *  yield messages — both shapes are unwrapped at the call site. */
+  messages?: {
+    fetch(opts: { limit: number }): Promise<Iterable<unknown>>;
+  };
 }
 
 interface SendableChannel {
@@ -927,6 +933,41 @@ export type EnsureAdopteeThreadResult =
   | { needsInvite: true }
   | { failed: true };
 
+/** The pinned manage row every adoptee thread carries — one Danger Drop
+ *  button keyed to the adoption's companion, reusing the market:drop path. */
+function adopteeManagePayload(companion: Companion) {
+  return {
+    content: `*Manage **${companion.name || "Companion"}** —*`,
+    components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`market:drop:${companion.id}`)
+        .setLabel(`Drop ${companion.name || "companion"}`.slice(0, 80))
+        .setStyle(ButtonStyle.Danger),
+    )],
+    allowedMentions: { parse: [] },
+  };
+}
+
+/** Backfill the pinned manage row on threads created before it existed —
+ *  a pinned row is left alone, an unpinned one is re-pinned, a missing one
+ *  is posted + pinned. Detection is the `market:drop:` custom id itself:
+ *  only the bot can post components, so no author check is needed. */
+async function ensureAdopteeManageRow(thread: TicketThreadLike, companion: Companion): Promise<void> {
+  if (typeof thread.messages?.fetch !== "function") return;
+  const fetched = await thread.messages.fetch({ limit: 30 }).catch(() => null);
+  if (!fetched) return;
+  for (const entry of fetched) {
+    const m = (Array.isArray(entry) ? entry[1] : entry) as { pinned?: boolean; components?: unknown[]; pin?(): Promise<unknown> } | undefined;
+    if (m && JSON.stringify(m.components ?? []).includes("market:drop:")) {
+      if (!m.pinned) await m.pin?.().catch(e => { inc("ops.adoptee_manage_error"); logError("adoptee manage row pin failed", e); });
+      return;
+    }
+  }
+  const sent = await thread.send(adopteeManagePayload(companion))
+    .catch(e => { inc("ops.adoptee_manage_error"); logError("adoptee manage row failed", e); return null; });
+  await (sent as { pin?(): Promise<unknown> } | null)?.pin?.().catch(() => {});
+}
+
 /** Create (or reuse) the private adoptee thread for an adoption. Idempotent —
  *  a live `chat_thread_id` short-circuits unless `reopen` is asked (re-adopt
  *  unarchives the locked thread so the history continues). The companion
@@ -955,6 +996,8 @@ export async function ensureAdopteeThread(
       await ex.members?.add?.(adoption.userId).catch(e => {
         inc("ops.adoptee_reattach_error"); logError("adoptee thread re-attach failed", e);
       });
+      // Threads created before the manage row shipped get it backfilled.
+      await ensureAdopteeManageRow(ex, companion).catch(() => {});
       return { thread: ex, greeted: false, created: false };
     }
     // Deleted thread (mod cleanup) — fall through and rebuild.
@@ -996,16 +1039,8 @@ export async function ensureAdopteeThread(
   // eventually needs, and burying it in a 16-item slash enum made it
   // undiscoverable. The market:drop handler reuses the shared path (row
   // tombstones itself and archives the thread).
-  const manageMsg = await thread.send({
-    content: `*Manage **${companion.name || "Companion"}** —*`,
-    components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`market:drop:${companion.id}`)
-        .setLabel(`Drop ${companion.name || "companion"}`.slice(0, 80))
-        .setStyle(ButtonStyle.Danger),
-    )],
-    allowedMentions: { parse: [] },
-  }).catch(e => { inc("ops.adoptee_manage_error"); logError("adoptee manage row failed", e); return null; });
+  const manageMsg = await thread.send(adopteeManagePayload(companion))
+    .catch(e => { inc("ops.adoptee_manage_error"); logError("adoptee manage row failed", e); return null; });
   await (manageMsg as { pin?(): Promise<unknown> } | null)?.pin?.().catch(() => {});
   inc("ops.adoptee_thread_created");
   return { thread, greeted, created: true };
