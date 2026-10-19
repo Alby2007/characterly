@@ -6,7 +6,6 @@ export const LINKS = {
   // Pinning scope=bot here would force guild-only and hide the DM option.
   addToDiscord: "https://discord.com/oauth2/authorize?client_id=1549171765056639048",
   discord: "https://discord.gg/vCjQ9v3md",
-  github: "https://github.com/Alby2007/characterly",
   // First-party charter pages — they render the repo's .md files at build.
   privacy: "/privacy",
   terms: "/terms",
