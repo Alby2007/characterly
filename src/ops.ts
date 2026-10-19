@@ -9,7 +9,7 @@ import { CURATED_TAGS, PARTNER_TAG_SET, archiveListingPosts, marketplaceAssetPat
 import { uploadAvatarFile } from "./avatars.js";
 import { SEED_LISTINGS } from "./seed-personas.js";
 import { sendAsCompanionInChannel } from "./webhooks.js";
-import type { MemoryStore } from "./database.js";
+import type { MemoryStore, OpsStats } from "./database.js";
 import type { Companion, CompanionAdoption, CompanionListing, GuildDeployment } from "./types.js";
 
 // ── House ops ────────────────────────────────────────────────────────────────
@@ -343,6 +343,7 @@ export async function handleHouseMemberAdd(member: MemberLike, deps: OpsDeps): P
   }
   // Welcome at join, screening or not — pending members can read channels even
   // though they can't interact, so "read rules → verify" lands when it matters.
+  void deps.store.trackEvent(member.user.id, "house_join", member.guild.id);
   if (await onboardMember(member, deps, { welcome: !raidHot })) welcomed.add(member.user.id);
   // Deferred adoptee threads — adopters who joined the house AFTER adopting
   // elsewhere (import paths) get their private threads opened on arrival.
@@ -560,6 +561,7 @@ export async function handleHouseButton(interaction: ButtonInteraction): Promise
     return interaction.reply({ content: "The role grant didn't stick — tell an admin to check my permissions.", ephemeral: true });
   }
   inc("ops.verified");
+  void deps.store.trackEvent(interaction.user.id, "verified", config.houseGuildId);
   await opsAlert(deps, `✅ <@${interaction.user.id}> verified — Member granted.`);
   return interaction.reply({ content: "Verified — the rest of the server is open to you. Welcome to Characterly!", ephemeral: true });
 }
@@ -2385,6 +2387,29 @@ function healthEmbed(h: HostHealth): EmbedBuilder {
     );
 }
 
+/** `/ops stats` — the 7-day product picture: activity, funnel (unique users
+ *  per step so re-prompts don't inflate), token flow, churn, and the top
+ *  durable counters. Parallel branches (summon/adopt/link, house join→verify)
+ *  get their own line rather than pretending to be one linear funnel. */
+function statsEmbed(s: OpsStats): EmbedBuilder {
+  const f = (e: string) => s.funnel[e]?.users ?? 0;
+  const step = (label: string, n: number, prev?: number) =>
+    `${label} ${n}${prev !== undefined && prev > 0 ? ` (${Math.round(100 * n / prev)}%)` : ""}`;
+  const counters = s.topCounters.slice(0, 10).map(c => `${c.name} ${c.total}`).join("\n") || "(no counter data yet)";
+  return new EmbedBuilder()
+    .setTitle("Characterly stats — last 7 days")
+    .addFields(
+      { name: "Activity", value: `Today: **${s.dauDm}** DM users, **${s.dauGuilds}** servers · ${s.llmToday} LLM calls (${s.hostedToday} hosted)\nWeek: **${s.wauDm}** DM users, **${s.wauGuilds}** servers` },
+      { name: "Funnel (unique users)", value:
+        `${step("install", s.installs)} → ${step("greeted", s.greeted, s.installs)} → ${step("onboard", f("onboard_start"), s.greeted)} → ${step("awaken", f("awaken"), f("onboard_start"))}\n` +
+        `summon ${f("summon")} · adopt ${s.adopted} · linked ${s.linkClaims} · dead-end summons ${f("summon_deadend")}\n` +
+        `${step("house join", f("house_join"))} → ${step("verified", f("verified"), f("house_join"))}` },
+      ...(s.tokens ? [{ name: "Tokens", value: `${s.tokens.spent} spent by ${s.tokens.spenders} accounts · ${s.tokens.purchased} pack-bought · ${s.tokens.premium} premium` }] : []),
+      { name: "Churn", value: `${s.deauthorized} uninstalls · ${s.dropped} dropped adoptions · ${f("guild_purged")} guilds purged` },
+      { name: "Top counters", value: `\`\`\`\n${counters}\n\`\`\`` },
+    );
+}
+
 /** Chunk a long log tail into fenced <2000-char replies — Discord's limit. */
 function chunkText(text: string, max = 1800): string[] {
   const chunks: string[] = [];
@@ -2415,6 +2440,12 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
   if (action === "status") {
     const h = await collectHostHealth(deps);
     return interaction.reply({ embeds: [healthEmbed(h)], ephemeral: true });
+  }
+
+  if (action === "stats") {
+    await interaction.deferReply({ ephemeral: true });
+    const s = await deps.store.opsStats();
+    return interaction.editReply({ embeds: [statsEmbed(s)] });
   }
 
   if (action === "logs") {

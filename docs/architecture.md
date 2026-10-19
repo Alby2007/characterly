@@ -29,9 +29,9 @@ Alongside the bot, `website/` is a Vite multi-page site (landing page, account s
 | `src/brain.ts` | `Brain` | All LLM calls: `runOnboardingTurn`, extract memories, correct, assess continuity, classify events, reply (with `CompanionPersona` + Vault Rule) |
 | `src/config.ts` | `config` | Env-variable validation (zod); single exported config object |
 | `src/types.ts` | `Companion`, `CompanionPersona`, `GuildCompanion`, `MessageEvent`, … | Shared TypeScript types across modules |
-| `src/database.ts` | `MemoryStore` | Postgres persistence: companions, guild summons, webhook attribution, memory CRUD, lifecycle, conflict resolution, episode consolidation |
+| `src/database.ts` | `MemoryStore` | Postgres persistence: companions, guild summons, webhook attribution, memory CRUD, lifecycle, conflict resolution, episode consolidation, analytics (`trackEvent`/`opsStats`/`flushMetricDeltas` — pseudonymous funnel events in `analytics_events`, opt-out gated) |
 | `src/events.ts` | `EventStore` | Postgres persistence: event CRUD, participants, message/memory attachments |
-| `src/migrations.ts` | `runMigrations`, `getMigrationVersion`, `LATEST_MIGRATION_VERSION` | Versioned schema migrations (v1–v46) with rollback support |
+| `src/migrations.ts` | `runMigrations`, `getMigrationVersion`, `LATEST_MIGRATION_VERSION` | Versioned schema migrations (v1–v62) with rollback support |
 | `src/confidence.ts` | `calculateInitialConfidence`, `updateConfidence`, `calculateDefaultImportance`, `calculateDefaultExplicitness` | Deterministic numeric formulas; no LLM involvement |
 | `src/perception.ts` | `shouldInspectForMemory`, `detectNamingRequest`, `detectSelfNaming`, `detectWakeWord`, `detectDismissal`, `contestCue`, `botMemoryCue`, `toolCues` | Cheap pre-filter: prevents LLM calls for ordinary chat; detects naming requests, self-naming, wake words, and dismissal cues |
 | `src/event-detection.ts` | `EventPipeline` | Heuristic + LLM continuity decisions; nightly maintenance |
@@ -49,7 +49,7 @@ Alongside the bot, `website/` is a Vite multi-page site (landing page, account s
 | `src/conversation.ts` | `ConversationTracker` | Per-channel and per-companion conversation objects: opens on addressed messages, closes when the last participant leaves; share-of-voice pacing is channel-level |
 | `src/journal-job.ts` | `runJournalJob`, `JournalJobPayload` | Deferred `journal-write` jobs: after a companion replies, writes 0–2 first-person journal entries origin-tagged to that scope, consent-gated like extraction |
 | `src/contest.ts` | `runContestCheck` | Bot-addressed denial/correction detection — `contestCue` gate → `Brain.detectContest` → `contradict`/`support` evidence |
-| `src/metrics.ts` | `inc`, `metricsSnapshot` | In-process operational counters (uptime + named counts), surfaced to admins via `/status` |
+| `src/metrics.ts` | `inc`, `metricsSnapshot`, `drainMetrics` | In-process operational counters (uptime + named counts), surfaced to admins via `/status` — `drainMetrics` deltas roll into `metrics_daily` every 5 min for durable history |
 | `src/retry.ts` | `withRetry` | Shared retry helper for LLM calls — honors Groq's `x-ratelimit-reset` headers, exponential backoff on transient failures |
 | `src/charcard.ts` | `parseCardFile`, `cardToPersona`, `cardImportMeta`, `cardFileHash` | Shared character-card parser (pure TS, no Node deps — bundled into the website): normalizes `.json` and PNG `tEXt`/`ccv3` v1/v2/v3 cards + CAI Tools aliases into bounded persona fields and provenance metadata; feeds `/companion import` and the dashboard import plate |
 | `src/chathist.ts` | `parseChatFile`, `chatImportMeta`, `chatFileHash` | Shared transcript parser (same pure-TS shape): Tavern `.jsonl`, Oobabooga `.json` pairs, and generic message-arrays → normalized `{speaker, text, ts}` turns with dominant-name speaker resolution, companion-name hint tiebreak, third-party drop count, bounds, and sha256 |

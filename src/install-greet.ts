@@ -50,7 +50,7 @@ export function buildInstallGreetPayload(siteUrl = config.siteUrl) {
  *  Users who already onboarded (any companion row) are marked greeted
  *  silently — the greeting is for the gap, not for users who found us first. */
 export async function greetPendingInstalls(
-  store: Pick<MemoryStore, "pendingInstallGreets" | "markInstallGreeted" | "markInstallGreetFailed">,
+  store: Pick<MemoryStore, "pendingInstallGreets" | "markInstallGreeted" | "markInstallGreetFailed" | "trackEvent">,
   deps: InstallGreetDeps,
   limit = 10,
 ): Promise<{ greeted: number; skipped: number; failed: number }> {
@@ -68,6 +68,7 @@ export async function greetPendingInstalls(
       const user = await deps.fetchUser(install.discordUserId);
       await user.send(buildInstallGreetPayload(deps.siteUrl));
       await store.markInstallGreeted(install.discordUserId);
+      void store.trackEvent(install.discordUserId, "install_greeted");
       greeted++;
       inc("install.greeted");
     } catch (e) {

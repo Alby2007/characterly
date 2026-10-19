@@ -992,6 +992,7 @@ export async function summonPickedCompanion(interaction: ChatInputCommandInterac
   if (!interaction.guildId) {
     // Warmest funnel moment — they tried to summon and have nowhere. Point at
     // the house instead of dead-ending on "only in a server".
+    void store.trackEvent(interaction.user.id, "summon_deadend");
     const invite = config.houseGuildId ? houseInviteRef() : null;
     return interaction.reply({
       content: `Summoning works inside a Discord server${invite ? ` — join the Characterly server to bring **${companion.name}** there.` : "."}`,
@@ -1077,6 +1078,10 @@ async function promptUnawakenedCompanion(
   prefixText: string,
   brainFor?: BrainFor,
 ) {
+  // Funnel: every unawakened prompt counts — opsStats reads DISTINCT users so
+  // repeat prompts inflate the event count (a useful "re-prompted" signal)
+  // without skewing conversion.
+  void getOpsDeps()?.store.trackEvent(interaction.user.id, "onboard_start");
   const hasBrain = brainFor ? Boolean(await brainFor(`dm:${interaction.user.id}`)) : true;
   let dmUrl: string | undefined;
   if (typeof interaction.user.send === "function") {
@@ -1216,6 +1221,7 @@ export const commandDefinitions = [
   { name: "ops", description: "Operator console — host health, deploy, house ops", options: [
     { name: "action", description: "What to do", type: 3, required: true, choices: [
       { name: "status — host + queue health", value: "status" },
+      { name: "stats — funnel + activity metrics", value: "stats" },
       { name: "logs — last N journal lines", value: "logs" },
       { name: "restart — restart the bot onto the same code", value: "restart" },
       { name: "deploy — git pull + npm ci + restart", value: "deploy" },
@@ -2647,11 +2653,15 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     // retention expiry — opt-out shouldn't wait days to stop holding the words.
     await store.scrubEvidenceFor(guildId, userId);
     await profileStore.deleteProfile(guildId, userId);
-    return interaction.reply({ content: `Opted out. ${forgotten} memor${forgotten === 1 ? "y" : "ies"} and ${relForgotten} relationship record${relForgotten === 1 ? "" : "s"} about you were forgotten; your profile, attributes, stored quotes, companion journal entries about you, and story recaps were deleted — no new memories, relationships, or profile data will be formed about you while you're opted out. Your messages still appear in the raw archive until the server's retention window removes them. Use /opt-in and /profile-build to start again.`, ephemeral: true });
+    // Analytics is global, not guild-scoped — opting out anywhere wipes the
+    // funnel history and stops future tracking; /opt-in re-enables it.
+    await store.setAnalyticsOptOut(userId, true);
+    return interaction.reply({ content: `Opted out. ${forgotten} memor${forgotten === 1 ? "y" : "ies"} and ${relForgotten} relationship record${relForgotten === 1 ? "" : "s"} about you were forgotten; your profile, attributes, stored quotes, companion journal entries about you, story recaps, and usage-analytics events were deleted — no new memories, relationships, or profile data will be formed about you while you're opted out. Your messages still appear in the raw archive until the server's retention window removes them. Use /opt-in and /profile-build to start again.`, ephemeral: true });
   }
   if (cmd === "opt-in") {
     await store.setMemberOptIn(guildId, interaction.user.id, true);
     await store.setMemberOptOut(guildId, interaction.user.id, false);
+    await store.setAnalyticsOptOut(interaction.user.id, false);
     return interaction.reply({ content: "Opted in — new memories about you can form from live activity. Run /profile-build to also scan your message history and build your profile now.", ephemeral: true });
   }
   if (cmd === "profile-build") {

@@ -16,11 +16,13 @@ interface Env {
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   AVATAR_UPLOAD_SECRET?: string;
+  ANALYTICS?: { writeDataPoint(d: { indexes?: string[]; blobs?: string[]; doubles?: number[] }): void };
 }
 
 const EVENTS_PATH = "/discord/events";
 const AVATAR_PATH = "/avatar";
 const AVATAR_GC_PATH = "/avatar/gc";
+const TRACK_PATH = "/track";
 const AVATAR_BUCKET = "companion-avatars";
 const AVATAR_MAX_BYTES = 8 * 1024 * 1024;
 const AVATAR_TYPES = /^image\/(png|jpe?g|webp|gif)$/;
@@ -69,12 +71,45 @@ export default {
     if (url.pathname === AVATAR_GC_PATH && request.method === "POST") {
       return handleAvatarGc(request, env);
     }
+    if (url.pathname === TRACK_PATH && request.method === "POST") {
+      return handleTrack(request, env);
+    }
     const res = await env.ASSETS.fetch(request);
+    // Page views: navigation loads only (a path with no file extension, or
+    // .html) — not every css/js/font fetch. Path + referer HOST + status is
+    // all we keep: no IPs, no query strings, no cookies.
+    if (request.method === "GET" && !/\.[a-z0-9]+$/i.test(url.pathname.replace(/\.html$/i, ""))) {
+      let refHost = "";
+      try { refHost = new URL(request.headers.get("referer") ?? "").hostname; } catch { /* none */ }
+      trackAe(env, "page_view", [url.pathname, refHost], [res.status]);
+    }
     const out = new Response(res.body, res);
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) out.headers.set(k, v);
     return out;
   },
 };
+
+/** One Analytics Engine datapoint. Guarded so local dev / a missing binding
+ *  is a silent no-op — analytics must never break the site. */
+function trackAe(env: Env, event: string, blobs: string[] = [], doubles: number[] = []): void {
+  try {
+    env.ANALYTICS?.writeDataPoint({ indexes: [event], blobs: [event, ...blobs], doubles });
+  } catch { /* binding absent or datapoint rejected */ }
+}
+
+// POST /track — the site's only client-side funnel hook (sendBeacon from
+// auth/dashboard flows). Event names are allowlisted and carry no user data;
+// anything else is a quiet 204, so the endpoint is useless for abuse.
+const TRACKED_EVENTS = new Set(["signup_start", "signup_done", "checkout_click", "link_attempt"]);
+async function handleTrack(request: Request, env: Env): Promise<Response> {
+  try {
+    const { e, p } = await request.json() as { e?: string; p?: string };
+    if (e && TRACKED_EVENTS.has(e)) {
+      trackAe(env, "web_event", [e, typeof p === "string" ? p.slice(0, 80) : ""]);
+    }
+  } catch { /* malformed body — still 204 */ }
+  return new Response(null, { status: 204 });
+}
 
 /** Constant-time shared-secret check — both sides are hashed to a fixed
  *  length first so neither early-exit nor a length mismatch leaks timing. */
@@ -131,6 +166,7 @@ async function handleAvatarUpload(request: Request, env: Env): Promise<Response>
     up = await put();
   }
   if (!up.ok) return new Response("upload failed", { status: 502 });
+  trackAe(env, "avatar_upload", [], [body.byteLength]);
   return Response.json({ url: `${base}/storage/v1/object/public/${AVATAR_BUCKET}/${key}` });
 }
 
@@ -193,6 +229,7 @@ async function handleAvatarGc(request: Request, env: Env): Promise<Response> {
     });
     if (!del.ok) return new Response("delete failed", { status: 502 });
   }
+  trackAe(env, "avatar_gc", [], [stale.length]);
   return Response.json({ referenced: referenced.size, deleted: stale.length });
 }
 
@@ -227,5 +264,6 @@ async function handleDiscordEvent(request: Request, env: Env): Promise<Response>
     // 500 → Discord retries delivery; acking a lost event would drop a greet.
     if (!res.ok) return new Response("upstream error", { status: 500 });
   }
+  if (action.kind === "install") trackAe(env, "discord_event", [action.event]);
   return new Response(null, { status: 204 });
 }

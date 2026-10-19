@@ -23,6 +23,7 @@ function fakeStore(pending: AppInstall[]) {
       pendingInstallGreets: async (limit = 10) => pending.slice(0, limit),
       markInstallGreeted: async (id: string) => { greeted.add(id); },
       markInstallGreetFailed: async (id: string, error: string) => { failures.push({ id, error }); },
+      trackEvent: async () => {},
     },
   };
 }

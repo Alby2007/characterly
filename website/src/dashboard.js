@@ -214,6 +214,7 @@ $("#form-link-code").addEventListener("submit", async e => {
   msg.hidden = true; msg.classList.remove("ok");
   const code = $("#input-link-code").value.trim();
   if (!code) return;
+  navigator.sendBeacon?.("/track", JSON.stringify({ e: "link_attempt" }));
   const { error } = await claimLinkCode(code);
   if (error) {
     // rpc raises "tag: message" — show just the message half.
@@ -274,7 +275,11 @@ async function openCheckout(product, btn) {
   }
 }
 for (const [sel, product] of [["#btn-subscribe", "premium"], ["#btn-subscribe-yearly", "premium_yearly"], ["#btn-pack-750", "pack_750"], ["#btn-pack-2500", "pack_2500"], ["#btn-pack-7500", "pack_7500"]]) {
-  $(sel).addEventListener("click", () => { if (!$(sel).disabled) openCheckout(product, $(sel)); });
+  $(sel).addEventListener("click", () => {
+    if ($(sel).disabled) return;
+    navigator.sendBeacon?.("/track", JSON.stringify({ e: "checkout_click", p: product }));
+    openCheckout(product, $(sel));
+  });
 }
 
 function renderBilling() {

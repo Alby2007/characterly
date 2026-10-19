@@ -5880,6 +5880,46 @@ export const migrations: Migration[] = [
       await sql`DROP INDEX IF EXISTS messages_pending_extract`;
     },
   },
+  {
+    // v62: first-party analytics. analytics_events = pseudonymous funnel rows
+    // (which product step a Discord id reached — never message content);
+    // metrics_daily = durable daily rollup of the in-process inc() counters.
+    // Both are deny-all under RLS (bot-owned; the Data API sees nothing, same
+    // posture as app_installs). analytics_opt_out on user_bot_settings gates
+    // future tracking and is set by /opt-out, cleared by /opt-in.
+    version: 62,
+    name: "v62_analytics",
+    up: async (sql) => {
+      await sql`
+        CREATE TABLE IF NOT EXISTS analytics_events (
+          id               BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          discord_user_id  TEXT,
+          event            TEXT NOT NULL,
+          scope            TEXT,
+          meta             JSONB NOT NULL DEFAULT '{}',
+          created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+      await sql`CREATE INDEX IF NOT EXISTS analytics_events_by_event ON analytics_events(event, created_at)`;
+      await sql`CREATE INDEX IF NOT EXISTS analytics_events_by_user ON analytics_events(discord_user_id)`;
+      await sql`ALTER TABLE analytics_events ENABLE ROW LEVEL SECURITY`;
+      await sql`
+        CREATE TABLE IF NOT EXISTS metrics_daily (
+          day    DATE NOT NULL,
+          name   TEXT NOT NULL,
+          count  BIGINT NOT NULL DEFAULT 0,
+          PRIMARY KEY (day, name)
+        )
+      `;
+      await sql`ALTER TABLE metrics_daily ENABLE ROW LEVEL SECURITY`;
+      await sql`ALTER TABLE user_bot_settings ADD COLUMN IF NOT EXISTS analytics_opt_out BOOLEAN NOT NULL DEFAULT FALSE`;
+    },
+    down: async (sql) => {
+      await sql`DROP TABLE IF EXISTS analytics_events`;
+      await sql`DROP TABLE IF EXISTS metrics_daily`;
+      await sql`ALTER TABLE user_bot_settings DROP COLUMN IF EXISTS analytics_opt_out`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

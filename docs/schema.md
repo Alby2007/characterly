@@ -564,6 +564,36 @@ Discord app-install ledger (v47) — one row per Discord user who authorized the
 
 ---
 
+### `analytics_events`
+
+Pseudonymous product-funnel events (v62) — which product step a Discord id reached, written fire-and-forget by `MemoryStore.trackEvent`. **Never** message content, prompts, or model output; `meta` carries coarse ids/counts only. The event name is a closed union (`AnalyticsEvent` in `src/database.ts`) so the `(event, created_at)` index can't be exploded by ad-hoc names. `/opt-out` deletes a user's rows and flips `user_bot_settings.analytics_opt_out`, which the INSERT itself guards on — tracking can't resume without `/opt-in`. Funnel reporting uses `count(DISTINCT discord_user_id)` so repeated prompts don't inflate conversion. `purgeGuild` deletes rows whose `scope` matches the dead guild, then writes its own `guild_purged` tombstone. Daily maintenance prunes rows past 400 days.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `discord_user_id` | TEXT NULL | The actor; NULL for guild-level events (`guild_added`, `guild_purged`) |
+| `event` | TEXT | One of the `AnalyticsEvent` names — `install_greeted`, `onboard_start`, `awaken`, `summon`, `summon_deadend`, `adopt`, `house_join`, `verified`, `guild_added`, `guild_purged` |
+| `scope` | TEXT NULL | Guild id or `dm:<uid>` when the event is scope-bound |
+| `meta` | JSONB | Coarse ids/counts only (`{}` default) |
+| `created_at` | TIMESTAMPTZ | |
+
+**Indexes:** `analytics_events_by_event (event, created_at)` for funnel windows; `analytics_events_by_user (discord_user_id)` for opt-out deletes. RLS deny-all — bot-owned only.
+
+---
+
+### `metrics_daily`
+
+Durable daily rollup of the in-process `inc()` counters (v62). `drainMetrics()` in `src/metrics.ts` returns per-name deltas since the last drain; a 5-minute interval plus a best-effort shutdown drain upserts them here (`ON CONFLICT … count + EXCLUDED.count`). Restarts lose at most one unflushed interval; `metricsSnapshot()`/`/ops logs` still read the live cumulative counters.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `day` | DATE | UTC day — composite PK with `name` |
+| `name` | TEXT | Counter name (the ~290 `inc()` call sites) |
+| `count` | BIGINT | Increments recorded that day |
+
+RLS deny-all. No retention bound — rows are a few hundred bytes each.
+
+---
+
 ### `support_tickets`
 
 House support-ticket ledger (v48) — one row per private thread under `#support-ticket`. Written by the ticket modal handler (`createSupportTicket`), read by the open/close buttons.
@@ -675,6 +705,7 @@ Per-Discord-user bot toggles (v29), keyed by `discord_user_id` **outside** the a
 | `c2c_enabled` | BOOLEAN | Default true — companion replies to other companions (those turns spend the owner's tokens) |
 | `low_credit_alerts` | BOOLEAN | Default true — once-per-UTC-day DM when the balance runs low |
 | `active_dm_companion_id` | BIGINT NULL | Which roster companion answers the user's DMs (v34); null = the awakened companion. Takes effect only once the awakened companion is active — onboarding owns the DM until then. Cleared automatically when the picked adoption is dropped |
+| `analytics_opt_out` | BOOLEAN | Default false — v62. Set by `/opt-out` (also wipes the user's `analytics_events` rows), cleared by `/opt-in`. `trackEvent`'s INSERT carries a `NOT EXISTS` guard against it — bot-managed only, not exposed through `upsert_my_settings` |
 | `updated_at` | TIMESTAMPTZ | |
 
 **RLS:** enabled, zero policies — the bot reads/writes via the postgres role; the site uses `my_bot_settings()` / `upsert_my_settings(patch)` / `my_byok_status()` security-definer rpcs (authenticated role only).
@@ -891,3 +922,4 @@ Version tracking for the migration system.
 | 54 | `v54_adoptee_threads` | `companion_adoptions.chat_thread_id` + partial index `adoptions_thread` — adoptee private-thread registry; drop→re-adopt reuses the same thread so history continues |
 | 60 | `v60_token_buckets_exact_clawback` | `web_profiles.purchased_balance` (persistent pack/bonus slice of `credit_balance`; backfilled from net unrefunded purchases), `credit_ledger.payment_intent` + index, `grant_bonus` ledger kind (launch-bonus rows reclassified), `grant_pack(…, p_payment_intent, p_kind)` and `clawback_pack(…, p_payment_intent, p_amount, p_amount_refunded, p_charged_at)` — exact-PI match (pre-v60 packs by grant time), prorated + cumulative partial refunds, subscription refunds never claw packs |
 | 61 | `v61_sweep_indexes` | partial indexes `messages_untriaged (created_at) WHERE triage_result IS NULL` and `messages_pending_extract (guild_id) WHERE triage_result IN ('durable','regex','queued')` — back `dmScopesNeedingSweep` so the 15-min sweep visits only DM scopes with work |
+| 62 | `v62_analytics` | `analytics_events` (pseudonymous funnel events, `NOT EXISTS analytics_opt_out` gate), `metrics_daily` (durable `inc()` rollup), `user_bot_settings.analytics_opt_out` — all RLS deny-all, bot-owned |

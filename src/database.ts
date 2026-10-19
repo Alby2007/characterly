@@ -3,6 +3,7 @@ import type { AppInstall, AttributeStatus, ChatImport, Companion, CompanionAdopt
 import { sql as defaultSql, type Sql } from "./db.js";
 import { runMigrations } from "./migrations.js";
 import { CreditStore } from "./credit-store.js";
+import { inc } from "./metrics.js";
 import { findMentionedUsers } from "./entity-resolution.js";
 import { calculateInitialConfidence, updateConfidence, calculateDefaultImportance, calculateDefaultExplicitness } from "./confidence.js";
 import { contentPolarity, listAttributes, listAttributesForSubjects, listContestedAttributes, recomputeForMemories, transferProvenance } from "./attributes.js";
@@ -117,6 +118,25 @@ function rowToEdge(r: RelationshipRow): RelationshipEdge {
 
 function ts(d: Date | string): string {
   return d instanceof Date ? d.toISOString() : d;
+}
+
+const num = (v: unknown) => Number(v ?? 0);
+
+/** The closed set of funnel events — a union so names can't proliferate ad
+ *  hoc (a free-text column would explode the (event, created_at) index). */
+export type AnalyticsEvent =
+  | "install_greeted" | "onboard_start" | "awaken"
+  | "summon" | "summon_deadend" | "adopt"
+  | "house_join" | "verified" | "guild_added" | "guild_purged";
+
+export interface OpsStats {
+  dauDm: number; dauGuilds: number; wauDm: number; wauGuilds: number;
+  llmToday: number; hostedToday: number;
+  installs: number; greeted: number; deauthorized: number;
+  linkClaims: number; adopted: number; dropped: number;
+  funnel: Record<string, { events: number; users: number }>;
+  tokens: { spent: number; purchased: number; spenders: number; premium: number } | null;
+  topCounters: Array<{ name: string; total: number }>;
 }
 
 function rowToMember(r: MemberRow): Member {
@@ -449,9 +469,13 @@ export class MemoryStore {
       await tx`DELETE FROM listing_posts WHERE guild_id = ${guildId}`;
       await tx`DELETE FROM guild_deployments WHERE guild_id = ${guildId}`;
       await tx`UPDATE companion_adoptions SET chat_guild_id = NULL, chat_channel_id = NULL, chat_thread_id = NULL WHERE chat_guild_id = ${guildId}`;
+      // Guild-scoped analytics rows die with the guild; the tombstone event
+      // below is written post-delete so the churn signal itself survives.
+      await tx`DELETE FROM analytics_events WHERE scope = ${guildId}`;
     });
     this.invalidateGuildCompanions(guildId);
     this.settingsCache.delete(guildId);
+    void this.trackEvent(null, "guild_purged", guildId);
   }
 
   /** Guild ids present in guild-scoped tables but absent from the given set —
@@ -475,6 +499,137 @@ export class MemoryStore {
       UNION SELECT origin_scope FROM companion_journal WHERE NOT (origin_scope = ANY(${guildIds})) AND origin_scope NOT LIKE 'dm:%'
       UNION SELECT origin_scope FROM conversation_summaries WHERE NOT (origin_scope = ANY(${guildIds})) AND origin_scope NOT LIKE 'dm:%'`;
     return rows.map(r => r.guild_id);
+  }
+
+  // ── Analytics ────────────────────────────────────────────────────────────
+  // First-party product analytics — pseudonymous funnel events plus durable
+  // rollups of the in-process inc() counters. Never message content, prompts,
+  // or model output; meta carries coarse ids/counts only.
+
+  /** Record a funnel event. The opt-out gate rides inside the INSERT so
+   *  tracking stays off without a cache round-trip; failures are counted,
+   *  never thrown — analytics must never break a product path. */
+  async trackEvent(discordUserId: string | null, event: AnalyticsEvent, scope: string | null = null, meta: Record<string, unknown> = {}): Promise<void> {
+    try {
+      await this.sql`
+        INSERT INTO analytics_events (discord_user_id, event, scope, meta)
+        SELECT ${discordUserId}, ${event}, ${scope}, ${JSON.stringify(meta)}::jsonb
+        WHERE ${discordUserId}::text IS NULL
+           OR NOT EXISTS (SELECT 1 FROM user_bot_settings WHERE discord_user_id = ${discordUserId} AND analytics_opt_out)
+      `;
+    } catch {
+      inc("analytics.event_error");
+    }
+  }
+
+  /** Persist the in-process counter deltas since the last drain into the
+   *  daily rollup — one upsert per flush; days are UTC. */
+  async flushMetricDeltas(deltas: Record<string, number>): Promise<void> {
+    const names = Object.keys(deltas).filter(n => deltas[n] > 0);
+    if (!names.length) return;
+    const counts = names.map(n => deltas[n]);
+    await this.sql`
+      INSERT INTO metrics_daily (day, name, count)
+      SELECT (now() AT TIME ZONE 'UTC')::date, k, v
+      FROM unnest(${names}::text[], ${counts}::bigint[]) AS t(k, v)
+      ON CONFLICT (day, name) DO UPDATE SET count = metrics_daily.count + EXCLUDED.count
+    `;
+  }
+
+  /** /opt-out turns analytics tracking off globally and wipes the user's
+   *  funnel history; /opt-in turns it back on. The flag lives on
+   *  user_bot_settings — the only global per-user table; a missing row
+   *  means tracking is on. */
+  async setAnalyticsOptOut(discordUserId: string, optOut: boolean): Promise<void> {
+    await this.sql`
+      INSERT INTO user_bot_settings (discord_user_id, analytics_opt_out)
+      VALUES (${discordUserId}, ${optOut})
+      ON CONFLICT (discord_user_id) DO UPDATE SET analytics_opt_out = ${optOut}, updated_at = now()
+    `;
+    if (optOut) await this.deleteAnalyticsEventsFor(discordUserId);
+  }
+
+  async deleteAnalyticsEventsFor(discordUserId: string): Promise<void> {
+    await this.sql`DELETE FROM analytics_events WHERE discord_user_id = ${discordUserId}`;
+  }
+
+  /** Operator bundle for `/ops stats` — activity, funnel, tokens, churn.
+   *  credit_ledger/web_profiles only exist where the Supabase accounts
+   *  schema is applied, so those queries are gated on creditsSupported. */
+  async opsStats(): Promise<OpsStats> {
+    const [activity] = await this.sql<Array<Record<string, number | string | null>>>`
+      SELECT
+        count(DISTINCT guild_id) FILTER (WHERE guild_id LIKE 'dm:%' AND day = (now() AT TIME ZONE 'UTC')::date) AS dau_dm,
+        count(DISTINCT guild_id) FILTER (WHERE guild_id NOT LIKE 'dm:%' AND guild_id NOT LIKE 'hosted:%' AND day = (now() AT TIME ZONE 'UTC')::date) AS dau_guilds,
+        count(DISTINCT guild_id) FILTER (WHERE guild_id LIKE 'dm:%') AS wau_dm,
+        count(DISTINCT guild_id) FILTER (WHERE guild_id NOT LIKE 'dm:%' AND guild_id NOT LIKE 'hosted:%') AS wau_guilds,
+        COALESCE(sum(llm_calls) FILTER (WHERE day = (now() AT TIME ZONE 'UTC')::date), 0) AS llm_today,
+        COALESCE(sum(llm_calls) FILTER (WHERE guild_id = 'hosted:global' AND day = (now() AT TIME ZONE 'UTC')::date), 0) AS hosted_today
+      FROM guild_usage
+      WHERE day >= (now() AT TIME ZONE 'UTC')::date - 6
+    `;
+    const funnel = await this.sql<Array<{ event: string; events: number; users: number }>>`
+      SELECT event, count(*)::int AS events, count(DISTINCT discord_user_id)::int AS users
+      FROM analytics_events
+      WHERE created_at > now() - interval '7 days'
+      GROUP BY event
+    `;
+    const [installs] = await this.sql<Array<{ installs: number; greeted: number; deauthorized: number }>>`
+      SELECT
+        count(*) FILTER (WHERE event <> 'deauthorized' AND created_at > now() - interval '7 days')::int AS installs,
+        count(*) FILTER (WHERE greeted_at > now() - interval '7 days')::int AS greeted,
+        count(*) FILTER (WHERE deauthorized_at > now() - interval '7 days')::int AS deauthorized
+      FROM app_installs
+    `;
+    const [links] = await this.sql<Array<{ claimed: number }>>`
+      SELECT count(*)::int AS claimed FROM link_codes
+      WHERE claimed_by IS NOT NULL AND created_at > now() - interval '7 days'
+    `;
+    const [adoptions] = await this.sql<Array<{ adopted: number; dropped: number }>>`
+      SELECT
+        count(*) FILTER (WHERE adopted_at > now() - interval '7 days')::int AS adopted,
+        count(*) FILTER (WHERE dropped_at > now() - interval '7 days')::int AS dropped
+      FROM companion_adoptions
+    `;
+    const topCounters = await this.sql<Array<{ name: string; total: number }>>`
+      SELECT name, sum(count)::int AS total
+      FROM metrics_daily
+      WHERE day >= (now() AT TIME ZONE 'UTC')::date - 6
+      GROUP BY name ORDER BY total DESC LIMIT 15
+    `;
+    let tokens: OpsStats["tokens"] = null;
+    if (this.creditsSupported) {
+      const [row] = await this.sql<Array<{ spent: number; purchased: number; spenders: number; premium: number }>>`
+        SELECT
+          COALESCE(-sum(delta) FILTER (WHERE kind = 'spend'), 0)::int AS spent,
+          COALESCE(sum(delta) FILTER (WHERE kind = 'purchase'), 0)::int AS purchased,
+          count(DISTINCT account_id) FILTER (WHERE kind = 'spend')::int AS spenders,
+          (SELECT count(*) FROM web_profiles WHERE plan = 'premium')::int AS premium
+        FROM credit_ledger
+        WHERE created_at > now() - interval '7 days'
+      `;
+      tokens = { spent: num(row?.spent), purchased: num(row?.purchased), spenders: num(row?.spenders), premium: num(row?.premium) };
+    }
+    return {
+      dauDm: num(activity?.dau_dm), dauGuilds: num(activity?.dau_guilds),
+      wauDm: num(activity?.wau_dm), wauGuilds: num(activity?.wau_guilds),
+      llmToday: num(activity?.llm_today), hostedToday: num(activity?.hosted_today),
+      installs: num(installs?.installs), greeted: num(installs?.greeted), deauthorized: num(installs?.deauthorized),
+      linkClaims: num(links?.claimed),
+      adopted: num(adoptions?.adopted), dropped: num(adoptions?.dropped),
+      funnel: Object.fromEntries(funnel.map(r => [r.event, { events: num(r.events), users: num(r.users) }])),
+      tokens,
+      topCounters: topCounters.map(r => ({ name: r.name, total: num(r.total) })),
+    };
+  }
+
+  /** Retention for analytics rows — funnel events beyond the window lose
+   *  their reporting value; rollups (non-identifying) keep forever. */
+  async pruneAnalyticsEvents(olderThanDays = 400): Promise<number> {
+    const rows = await this.sql`
+      DELETE FROM analytics_events WHERE created_at < now() - make_interval(days => ${olderThanDays})
+    `;
+    return rows.count;
   }
 
   // ── Messages ───────────────────────────────────────────────────────────────
@@ -2591,6 +2746,8 @@ export class MemoryStore {
       await this.recomputeEdges(dmScope);
     }
     this.invalidateGuildCompanions();
+    // Past the early-return — this is a real activation, not a re-entry.
+    void this.trackEvent(ownerUserId, "awaken");
     return companion;
   }
 
@@ -2641,6 +2798,7 @@ export class MemoryStore {
       `;
     }
     this.invalidateGuildCompanions(guildId);
+    void this.trackEvent(ownerUserId, "summon", guildId);
   }
 
   async dismissCompanion(guildId: string, companionId: number): Promise<boolean> {
@@ -3920,7 +4078,7 @@ export class MemoryStore {
     | { ok: true; companion: Companion; adoption: CompanionAdoption; reused: boolean; revived: boolean }
     | { ok: false; reason: "not_found" | "delisted" | "own_listing" | "cap" | "cooldown" | "daily_cap"; cooldownUntil?: string }
   > {
-    return this.sql.begin(async sql => {
+    const res = (await this.sql.begin(async sql => {
       // Serialize per-user adoption txs — without this, parallel Add clicks on
       // different listings both pass the slot count check under READ COMMITTED.
       await sql`SELECT pg_advisory_xact_lock(hashtext(${`adopt:${userId}`}))`;
@@ -4020,7 +4178,11 @@ export class MemoryStore {
       // revived = the adoption row existed but was dropped — "back on your
       // roster" rather than "still on your roster" (reused) or a fresh add.
       return { ok: true as const, companion, adoption, reused: Boolean(existing), revived: Boolean(existing?.dropped_at) };
-    }) as Promise<any>;
+    })) as any;
+    // A reused adoption is the same companion already on the roster — only
+    // fresh adds and revivals count as a new adoption for the funnel.
+    if (res.ok && !res.reused) void this.trackEvent(userId, "adopt", null, { listingId });
+    return res;
   }
 
   /** Drop an adoption: frees the slot, starts the per-listing re-adopt

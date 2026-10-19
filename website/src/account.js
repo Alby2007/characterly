@@ -160,9 +160,11 @@ forms.signup.addEventListener("submit", async e => {
   if (password.length < 8) { showError("Password must be at least 8 characters."); return; }
   if (!fd.get("tos")) { showError("Please agree to the Terms of Service and Privacy Policy first."); return; }
   busy(btn, true); showError("");
+  navigator.sendBeacon?.("/track", JSON.stringify({ e: "signup_start" }));
   const { data, error } = await signUp(email, password, fd.get("display_name").trim());
   busy(btn, false);
   if (error) return showError(error.message);
+  navigator.sendBeacon?.("/track", JSON.stringify({ e: "signup_done" }));
   if (data.session) {
     // Immediate-session setups (email confirm off) can record here; confirm-
     // required flows record at the dashboard consent gate on first sign-in.

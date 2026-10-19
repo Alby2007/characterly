@@ -955,6 +955,7 @@ test("DM lane: awakening owns DMs; adopted companions get private #adoptees thre
     creatorBan: async () => null,
     accountForDiscordUser: async () => null,
     creditsSupported: false,
+    trackEvent: async () => {},
     adoptListing: async () => ({ ok: true, companion: adopted, adoption, reused: false, revived: false }),
   } as unknown as MemoryStore;
   const savedAdoptees = config.houseAdopteesChannelId;

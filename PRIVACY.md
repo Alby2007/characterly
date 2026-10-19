@@ -28,6 +28,8 @@ Characterly ("the bot") is a Discord bot that hosts personal AI companions. This
 
 **Third-party processing.** Message content is sent to a large-language-model API (currently Groq; configurable to any OpenAI-compatible provider) for memory extraction, verification, and reply generation. Servers may supply their own provider key via `/setup` — stored encrypted, never shown after entry.
 
+**Usage analytics.** The bot records first-party product analytics: which Discord id reached which product step (install greeted, onboarding started, companion awakened, summoned, adopted, house joined, verified), plus aggregate daily counters of operational events. These rows never contain message content, prompts, or AI replies — only that an event happened. The website similarly counts page views and funnel clicks (sign-up, checkout, link) through Cloudflare Analytics Engine — first-party, no cookies, no cross-site tracking, no stored IP addresses or user identifiers. `/opt-out` deletes your event rows and stops future tracking; daily counter rollups and site page views are non-identifying aggregates that don't name you.
+
 ## What the bot does not do
 
 - It does not message users first in DMs, sell data, or share data between servers.
@@ -38,7 +40,7 @@ Characterly ("the bot") is a Discord bot that hosts personal AI companions. This
 
 - **Deleting a Discord message** removes its archived copy and scrubs the verbatim text from any evidence it produced (audit metadata like evidence type is kept).
 - **Editing a message** updates the archived copy. Evidence snapshots deliberately keep the original text, as the record of what a memory was derived from.
-- **`/opt-out`** removes all your derived data and prevents any new derived data about you: relationships, profile, and attributes are deleted outright; memories are marked forgotten (invisible to every read path — the row's audit metadata is kept, while its verbatim quotes are scrubbed immediately); companion journal entries involving you are deleted, and story recaps in your DM lane are removed. Your raw messages remain in the archive until retention expires.
+- **`/opt-out`** removes all your derived data and prevents any new derived data about you: relationships, profile, and attributes are deleted outright; memories are marked forgotten (invisible to every read path — the row's audit metadata is kept, while its verbatim quotes are scrubbed immediately); companion journal entries involving you are deleted, story recaps in your DM lane are removed, and your usage-analytics event rows are deleted with future tracking stopped. Your raw messages remain in the archive until retention expires.
 - **`/memory forget`** removes a single memory.
 - **`/memory remember`** pins a fact you state yourself so it's always in context; `/memory list` with `pin:` un-pins it, and right-clicking any message offers **Pin to memory**.
 - **`/companion story` / `reset-story`** let you read, rewrite, or clear the running story recap for the current chat.

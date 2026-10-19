@@ -63,16 +63,19 @@ process.on("exit", () => Object.assign(config, prev));
 
 function makeDeps(over: Partial<OpsDeps> = {}): OpsDeps & { sent: Array<{ id: string; payload: any }> } {
   const sent: Array<{ id: string; payload: any }> = [];
+  const defaultStore = {
+    queueStats: async () => ({ pending: 2, dead: 1, oldestPendingAt: null }),
+    creditsSupported: true,
+    accountForDiscordUser: async () => null,
+    getGuildKey: async () => null,
+    tosAcceptance: async () => null,
+    recordTosAcceptance: async () => {},
+    trackEvent: async () => {},
+  } as unknown as MemoryStore;
+  const { store: overStore, ...rest } = over;
   const deps: OpsDeps & { sent: typeof sent } = {
     sent,
-    store: {
-      queueStats: async () => ({ pending: 2, dead: 1, oldestPendingAt: null }),
-      creditsSupported: true,
-      accountForDiscordUser: async () => null,
-      getGuildKey: async () => null,
-      tosAcceptance: async () => null,
-      recordTosAcceptance: async () => {},
-    } as unknown as MemoryStore,
+    store: { ...defaultStore, ...(overStore ?? {}) } as unknown as MemoryStore,
     fetchChannel: async id => ({ send: async (p: unknown) => { sent.push({ id, payload: p }); } }),
     fetchGuild: async () => null,
     fetchMember: async () => null,
@@ -83,7 +86,7 @@ function makeDeps(over: Partial<OpsDeps> = {}): OpsDeps & { sent: Array<{ id: st
     dbPing: async () => 4,
     lagMs: () => 5,
     gitSha: "abc1234",
-    ...over,
+    ...rest,
   };
   return deps;
 }
@@ -1369,6 +1372,33 @@ test("/ops status replies with the health embed", async () => {
   assert.match(embed.data.title ?? "", /status/i);
   const lag = embed.data.fields?.find((f: any) => /lag/i.test(f.name));
   assert.ok(lag);
+});
+
+test("/ops stats defers and renders the funnel embed; non-operators refused", async () => {
+  const stats = {
+    dauDm: 4, dauGuilds: 2, wauDm: 9, wauGuilds: 5, llmToday: 120, hostedToday: 80,
+    installs: 6, greeted: 5, deauthorized: 1, linkClaims: 3, adopted: 2, dropped: 1,
+    funnel: {
+      onboard_start: { events: 5, users: 4 }, awaken: { events: 3, users: 3 },
+      summon: { events: 2, users: 2 }, summon_deadend: { events: 1, users: 1 },
+      house_join: { events: 4, users: 4 }, verified: { events: 3, users: 3 },
+    },
+    tokens: { spent: 200, purchased: 750, spenders: 3, premium: 2 },
+    topCounters: [{ name: "install.greeted", total: 5 }],
+  };
+  initOps(makeDeps({ store: { opsStats: async () => stats, trackEvent: async () => {} } as unknown as MemoryStore }));
+  const ix = makeIx({ strings: { action: "stats" } });
+  await handleOpsCommand(ix as any);
+  const embed = ix.edits[0]?.embeds?.[0];
+  assert.match(embed?.data?.title ?? "", /stats/i);
+  const funnel = embed.data.fields?.find((f: any) => /funnel/i.test(f.name));
+  assert.match(funnel?.value ?? "", /install 6 .*greeted 5 .*awaken 3/s);
+  const tokens = embed.data.fields?.find((f: any) => /tokens/i.test(f.name));
+  assert.match(tokens?.value ?? "", /200 spent/);
+
+  const stranger = makeIx({ ix: { user: { id: "u-rando" } }, strings: { action: "stats" } });
+  await handleOpsCommand(stranger as any);
+  assert.match(stranger.replies[0].content, /restricted/);
 });
 
 test("/ops restart replies then exits; /ops deploy pulls, then exits", async () => {

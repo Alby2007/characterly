@@ -34,7 +34,7 @@ import { runPairAnalysisJob, type PairAnalysisPayload } from "./pair-analysis-jo
 import { buildPairContext, type ToolCtx } from "./lookup-tools.js";
 import { qualifyingImages, formatImageContext, IMAGE_MAX_PER_MESSAGE, type AttachmentMeta } from "./vision.js";
 import { sleep, withRetry } from "./retry.js";
-import { inc } from "./metrics.js";
+import { inc, drainMetrics } from "./metrics.js";
 import { logError, redactSecrets, registerSecret, validateLlmKey } from "./secrets.js";
 import { announceIfNeeded, handleGuildDelete } from "./guild-lifecycle.js";
 import { isSafeUrl } from "./tools.js";
@@ -478,6 +478,11 @@ async function applyRetentionOnce() {
   // Same shape as the journal prune: one global pass per run collects
   // re-hosted avatar objects no row references anymore (replaced avatars).
   await gcRehostedAvatars();
+  // Funnel events past the window lose reporting value — the daily rollups
+  // (non-identifying aggregates) keep forever.
+  try {
+    await store.pruneAnalyticsEvents(400);
+  } catch (error) { inc("maintenance.analytics_error"); logError("Analytics prune failed", error); }
   // Retention/pruning covers every scope holding data; the LLM cognition
   // passes below only run for DM scopes active since yesterday (UTC) — an
   // idle DM has no new input to verify, dedup, or profile.
@@ -678,6 +683,17 @@ setInterval(() => {
   if (!client.isReady() || !config.houseGuildId) return;
   backfillAdopteeThreads(opsDeps).catch(e => { inc("ops.adoptee_backfill_error"); logError("adoptee backfill failed", e); });
 }, SWEEP_INTERVAL_MS).unref();
+
+// Metrics rollup — the in-process inc() counters drain into metrics_daily so
+// they survive restarts. 5-minute cadence bounds the unflushed window a
+// restart can lose; a final drain runs in the shutdown path.
+const METRICS_FLUSH_INTERVAL_MS = 5 * 60_000;
+async function flushMetricsOnce() {
+  const deltas = drainMetrics();
+  if (!Object.keys(deltas).length || !store) return;
+  await store.flushMetricDeltas(deltas);
+}
+setInterval(() => flushMetricsOnce().catch(e => { inc("metrics.flush_error"); logError("metrics flush failed", e); }), METRICS_FLUSH_INTERVAL_MS).unref();
 
 /** Backfill embeddings for rows saved before v40 or during embed outages.
  * Bounded batch per sweep tick — large corpora converge over several ticks.
@@ -2157,6 +2173,11 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
       }, SHUTDOWN_JOB_DRAIN_MS)),
     ]);
     client.destroy();
+    // Last metrics drain — best-effort; a hung pool must not pin the exit.
+    await Promise.race([
+      flushMetricsOnce().catch(() => {}),
+      new Promise<void>(resolve => setTimeout(resolve, 5_000)),
+    ]);
     await sql.end();
     process.exit(0);
   });

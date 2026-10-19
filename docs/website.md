@@ -45,7 +45,7 @@ cd website
 npm run deploy   # vite build (Cloudflare plugin emits the Build Output Spec) + cf deploy
 ```
 
-`cloudflare.config.ts` declares the `characterly-website` Worker (static assets only, SPA-style not-found handling, observability on). First deploy requires `cf login`. Deploys are manual — the site is not part of CI.
+`cloudflare.config.ts` declares the `characterly-website` Worker (static assets only, SPA-style not-found handling, observability on) plus the `ANALYTICS` Workers Analytics Engine binding (dataset `characterly_site`, auto-created on deploy). `worker.ts` writes first-party datapoints — `page_view` (path + referer host + status; no IPs, cookies, or query strings), `discord_event`, `avatar_upload`, `avatar_gc`, and `web_event` via `POST /track` (allowlisted names beaconed from `account.js`/`dashboard.js`: `signup_start`, `signup_done`, `checkout_click`, `link_attempt`). Query via the dashboard's Analytics Engine panel or the GraphQL `analyticsEngineAdaptiveGroups` node — see `docs/operations.md` → Product analytics. First deploy requires `cf login`. Deploys are manual — the site is not part of CI.
 
 Custom domains are attached through the Cloudflare API (`PUT /accounts/{account_id}/workers/domains` with `{ zone_id, hostname, service: "characterly-website", environment: "production" }`) since the `cf` beta CLI doesn't expose worker domains yet. Adding a new hostname still requires its `https://<host>/**` pattern in the Supabase redirect allowlist (below) or OAuth/magic links on that origin will fail.
 

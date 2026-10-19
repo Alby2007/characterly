@@ -56,7 +56,11 @@ export async function announceIfNeeded(guild: Guild, store: MemoryStore): Promis
       .setStyle(ButtonStyle.Danger),
   );
   await channel.send({ embeds: [embed], components: [row], allowedMentions: { parse: [] } });
-  return store.markAnnounced(guild.id);
+  const announced = await store.markAnnounced(guild.id);
+  // announced_at dedupes GuildCreate (connect + real joins) — this fires once
+  // per guild ever, which is exactly "first join".
+  if (announced) void store.trackEvent(null, "guild_added", guild.id);
+  return announced;
 }
 
 /** GuildDelete semantics — returns true when a purge ran. `unavailable` means
