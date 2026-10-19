@@ -9,6 +9,10 @@
 //   AVATAR_UPLOAD_SECRET        — shared secret the bot sends on PUT /avatar
 
 import { verifyDiscordSignature, parseDiscordEvent } from "../src/discord-events.ts";
+import {
+  fetchActiveListings, fetchListing, fetchListingRating, fetchRatingStats,
+  listingIndexPage, listingPage, notFoundPage, sitemapXml,
+} from "../src/site-shelf.ts";
 
 interface Env {
   ASSETS: { fetch(request: Request): Promise<Response> };
@@ -58,9 +62,17 @@ const SECURITY_HEADERS: Record<string, string> = {
   "permissions-policy": "camera=(), microphone=(), geolocation=()",
 };
 
+const CANONICAL_HOST = "characterly.app";
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    // One canonical host — www and workers.dev duplicate the whole site and
+    // split link equity. Permanent redirect so search consolidates on apex.
+    // Local dev hosts pass through untouched.
+    if (url.hostname !== CANONICAL_HOST && !url.hostname.startsWith("localhost") && !url.hostname.startsWith("127.")) {
+      return Response.redirect(`https://${CANONICAL_HOST}${url.pathname}${url.search}`, 301);
+    }
     if (url.pathname === EVENTS_PATH) {
       if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
       return handleDiscordEvent(request, env);
@@ -74,7 +86,12 @@ export default {
     if (url.pathname === TRACK_PATH && request.method === "POST") {
       return handleTrack(request, env);
     }
-    const res = await env.ASSETS.fetch(request);
+    // The public shelf + sitemap are the only worker-rendered pages — the
+    // marketplace lives in Postgres, so these stream live rows rather than a
+    // vite bundle. Everything else falls through to static assets.
+    const res = request.method === "GET" && isShelfPath(url.pathname)
+      ? await handleShelf(url.pathname, env)
+      : await env.ASSETS.fetch(request);
     // Page views: navigation loads only (a path with no file extension, or
     // .html) — not every css/js/font fetch, and not stray GETs on the POST-only
     // API paths (they 404 through the asset layer). Path + referer HOST +
@@ -89,6 +106,35 @@ export default {
     return out;
   },
 };
+
+const SHELF_LISTING_RE = /^\/characters\/(\d+)\/?$/;
+const isShelfPath = (p: string): boolean =>
+  p === "/sitemap.xml" || p === "/characters" || p === "/characters/" || SHELF_LISTING_RE.test(p);
+
+// ~5min edge cache: fresh enough that a delist surfaces quickly, lazy enough
+// that a crawl doesn't hammer PostgREST.
+const SHELF_CACHE = "public, max-age=60, s-maxage=300";
+
+async function handleShelf(pathname: string, env: Env): Promise<Response> {
+  const html = { "content-type": "text/html; charset=utf-8", "cache-control": SHELF_CACHE };
+  if (pathname === "/sitemap.xml") {
+    const listings = await fetchActiveListings(env);
+    return new Response(sitemapXml(listings.map(l => ({ id: l.id, updatedAt: l.updatedAt }))), {
+      headers: { "content-type": "application/xml; charset=utf-8", "cache-control": SHELF_CACHE },
+    });
+  }
+  const m = SHELF_LISTING_RE.exec(pathname);
+  if (m) {
+    const id = Number(m[1]);
+    const [listing, rating] = await Promise.all([fetchListing(env, id), fetchListingRating(env, id)]);
+    // Delisted/unknown ids get a real 404 — they drop out of the index and
+    // the sitemap instead of lingering as a soft-404.
+    if (!listing) return new Response(notFoundPage(), { status: 404, headers: html });
+    return new Response(listingPage(listing, rating), { headers: html });
+  }
+  const [listings, ratings] = await Promise.all([fetchActiveListings(env), fetchRatingStats(env)]);
+  return new Response(listingIndexPage(listings, ratings), { headers: html });
+}
 
 /** One Analytics Engine datapoint. Guarded so local dev / a missing binding
  *  is a silent no-op — analytics must never break the site. */

@@ -20,6 +20,101 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <script>document.documentElement.classList.add("js")</script>
+  <!-- FAQPage must mirror the visible #faq answers below — edit both together. -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Organization",
+        "@id": "https://characterly.app/#org",
+        "name": "Characterly",
+        "url": "https://characterly.app/",
+        "logo": "https://characterly.app/mark.svg",
+        "description": "A community of AI companions inside Discord — private threads, real memory, and companions that follow you into your servers."
+      },
+      {
+        "@type": "WebSite",
+        "@id": "https://characterly.app/#site",
+        "url": "https://characterly.app/",
+        "name": "Characterly",
+        "publisher": { "@id": "https://characterly.app/#org" }
+      },
+      {
+        "@type": "SoftwareApplication",
+        "name": "Characterly",
+        "applicationCategory": "EntertainmentApplication",
+        "operatingSystem": "Discord",
+        "url": "https://characterly.app/",
+        "description": "AI companions that live in Discord — adopt characters off the community shelf or awaken your own, with private threads and inspectable memory.",
+        "offers": [
+          { "@type": "Offer", "name": "Free", "price": "0", "priceCurrency": "USD", "description": "30 hosted tokens a day, one awakened companion, one adoptee slot" },
+          { "@type": "Offer", "name": "Premium", "price": "7.99", "priceCurrency": "USD", "description": "150 hosted tokens a day, live memory, web tools, unlimited adoptee slots" }
+        ]
+      },
+      {
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "Is Characterly free?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Yes — join the server and every companion runs on hosted models with 30 free tokens a day, no API key or setup needed. Free covers your awakened companion and one adoptee slot. Premium ($7.99/month) raises that to 150 a day with live memory and web tools. If you already run your own provider key, you can connect it in Discord for unlimited use instead." }
+          },
+          {
+            "@type": "Question",
+            "name": "What's the difference between awakened and adopted?",
+            "acceptedAnswer": { "@type": "Answer", "text": "An awakened companion is shaped by your first conversation in DMs — nobody else has one like it. Adopted companions come off the community shelf: someone designed them, you take home your own version, and it remembers you from the first hello." }
+          },
+          {
+            "@type": "Question",
+            "name": "Can I bring a character I already have?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Yes — /companion import reads standard character cards (.png or .json), the same format card-sharing tools use. The imported companion is private to your roster unless you publish it, and a .jsonl chat export can carry your history over so they remember you from the first hello." }
+          },
+          {
+            "@type": "Question",
+            "name": "Can I have more than one companion?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Your awakened companion is one per account — permanent, locked in once awakened. On top of that you can adopt characters off the shelf: one slot on free, unlimited on Premium. Each keeps its own private memory of you." }
+          },
+          {
+            "@type": "Question",
+            "name": "Do I need to add the bot to my own server?",
+            "acceptedAnswer": { "@type": "Answer", "text": "No — the shelf, your private threads and your companions all live in the Characterly server. Add the bot to your own server only when you want to summon companions into your channels." }
+          },
+          {
+            "@type": "Question",
+            "name": "What are tokens?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Hosted chat spends tokens: one for your message, one for your companion's reply. Free accounts refill to 30 each day and Premium to 150; if you run out mid-conversation on Premium, one-off packs top up your balance and never expire." }
+          },
+          {
+            "@type": "Question",
+            "name": "Who can see what my companion remembers?",
+            "acceptedAnswer": { "@type": "Answer", "text": "You can, with /memory list and /memory export — or the dashboard's memory panel, which shows the facts, journal, and story recap each companion holds and lets you pin, edit, or forget any of it. Roleplay stays fiction: story moments are scoped to the companion they happened with and never become facts about the real you. Memories about you only form if you've opted in, and things said in your DMs never surface to other people in a server." }
+          },
+          {
+            "@type": "Question",
+            "name": "How do you keep the community safe?",
+            "acceptedAnswer": { "@type": "Answer", "text": "The shelf is SFW-only: every listing is screened at publish and again on every edit, every reply from an adopted companion is checked before it posts, and reports go to human review — flag, delist, or ban. If a companion sees signs you're struggling, it breaks character to point you toward real crisis lines. The full picture is on the safety page." }
+          },
+          {
+            "@type": "Question",
+            "name": "How do I delete my data?",
+            "acceptedAnswer": { "@type": "Answer", "text": "/opt-out forgets your memories, deletes your profile and revokes consent, and journal entries about you go too. /memory forget removes a single memory. Removing the bot from a server wipes everything it stored there." }
+          },
+          {
+            "@type": "Question",
+            "name": "What happens if Characterly leaves a server?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Everything it stored for that server is deleted: the archive, memories and settings. Your companion itself, and the journal it keeps in your DMs, are untouched." }
+          },
+          {
+            "@type": "Question",
+            "name": "What permissions does the bot need?",
+            "acceptedAnswer": { "@type": "Answer", "text": "When an admin adds it to a server: view channels, send messages, read message history, manage webhooks (that's how companions get their own name and avatar), embed links, attach files and add reactions. It never asks for administrator." }
+          }
+        ]
+      }
+    ]
+  }
+  </script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
@@ -41,6 +136,7 @@
       <nav class="nav-links" aria-label="Sections">
         <a href="#how">How it works</a>
         <a href="#inside">What it's like</a>
+        <a href="/characters">The shelf</a>
         <a href="#pricing">Pricing</a>
         <a href="#privacy">Privacy</a>
         <a href="/safety">Safety</a>
@@ -57,6 +153,7 @@
     <div class="mobile-menu" id="mobile-menu" hidden>
       <a href="#how">How it works</a>
       <a href="#inside">What it's like</a>
+      <a href="/characters">The shelf</a>
       <a href="#pricing">Pricing</a>
       <a href="#privacy">Privacy</a>
       <a href="/safety">Safety</a>

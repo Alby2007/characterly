@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+Disallow: /account
+Disallow: /dashboard
+Disallow: /discord/events
+Disallow: /avatar
+Disallow: /avatar/gc
+Disallow: /track
+
+Sitemap: https://characterly.app/sitemap.xml

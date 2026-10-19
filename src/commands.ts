@@ -1227,6 +1227,7 @@ export const commandDefinitions = [
       { name: "deploy — git pull + npm ci + restart", value: "deploy" },
       { name: "announce — post an announcement (optional channel)", value: "announce" },
       { name: "layout — reconcile house channels, perms + resource posts", value: "layout" },
+      { name: "guide — apply the house Server Guide (featured channels + join prompt)", value: "guide" },
       { name: "seedmarket — populate the marketplace with the official roster", value: "seedmarket" },
       { name: "deploygrant — approve a partner server for marketplace deploy", value: "deploygrant" },
       { name: "deploystatus — show a server's marketplace deployment state", value: "deploystatus" },

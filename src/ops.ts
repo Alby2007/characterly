@@ -1,6 +1,6 @@
 import os from "node:os";
 import v8 from "node:v8";
-import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, ForumLayoutType, ModalBuilder, PermissionFlagsBits, TextInputBuilder, TextInputStyle, type ButtonInteraction, type ChatInputCommandInteraction, type ModalSubmitInteraction } from "discord.js";
+import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, ForumLayoutType, GuildOnboardingMode, GuildOnboardingPromptType, ModalBuilder, PermissionFlagsBits, TextInputBuilder, TextInputStyle, type ButtonInteraction, type ChatInputCommandInteraction, type GuildOnboardingEditOptions, type ModalSubmitInteraction } from "discord.js";
 import { config } from "./config.js";
 import { inc } from "./metrics.js";
 import { logError, redactSecrets } from "./secrets.js";
@@ -212,6 +212,11 @@ export interface GuildLike {
     me?: { permissions?: { has(flag: bigint): boolean } | null } | null;
     fetchMe?(): Promise<{ permissions?: { has(flag: bigint): boolean } | null } | null>;
   };
+  /** The Server Guide is the guild's onboarding object (featured channels +
+   *  join prompts) — /ops guide reconciles it. Absent on test fakes. */
+  editOnboarding?(opts: GuildOnboardingEditOptions): Promise<unknown>;
+  /** Guild description — the Server Guide page renders it. */
+  setDescription?(description: string): Promise<unknown>;
 }
 
 export interface MemberLike {
@@ -2061,6 +2066,68 @@ export async function ensureHouseLayout(guild: GuildLike): Promise<string[]> {
   return created;
 }
 
+// ── Server guide ─────────────────────────────────────────────────────────────
+// Discord's "Server Guide" page is the guild onboarding object: featured
+// channels (default_channel_ids) plus join prompts whose options surface
+// channels. Reconciled like the rest of the house layout — /ops guide applies
+// this declared spec. Channels resolve by NAME so a rebuilt channel doesn't
+// need an id update; verify-gated channels (get-companionly et al.) are
+// featured deliberately — the guide doubles as the "verify to unlock" teaser.
+// `enabled: true` + Advanced mode is what turns the guide on.
+
+const GUIDE_FEATURED_CHANNELS = [
+  "welcome", "log-in", "get-companionly", "characters", "the-hub", "what-is-characterly",
+];
+
+const GUIDE_DESCRIPTION =
+  "AI companions with a memory you can actually inspect. " +
+  "Bring your character card, meet them in your DMs, then hang out in the server.";
+
+const GUIDE_PROMPT = {
+  title: "What brings you to Characterly?",
+  singleSelect: true,
+  required: false,
+  inOnboarding: true,
+  type: GuildOnboardingPromptType.MultipleChoice,
+  options: [
+    { emoji: "🌙", title: "Meet a companion", description: "Your own — it lives in your DMs", channels: ["get-companionly", "what-is-characterly"] },
+    { emoji: "🛒", title: "Browse the shelf", description: "The community marketplace", channels: ["characters"] },
+    { emoji: "🛠️", title: "Publish companions", description: "Build your own and list them", channels: ["how-to-publish-bots", "characters"] },
+    { emoji: "🍸", title: "Just hanging out", description: "The social channels", channels: ["the-hub", "sitting at a bar"] },
+  ],
+};
+
+export interface GuideOutcome {
+  featuredCount: number;
+  optionCount: number;
+  missing: string[];
+  described: boolean;
+}
+
+/** Apply the house Server Guide — featured channels, the join prompt, and the
+ *  guild description — with every channel name resolved live against the
+ *  guild cache. Idempotent: the onboarding PATCH is declarative, so re-runs
+ *  re-assert the same spec. Unresolvable names are reported, not fatal. */
+export async function applyServerGuide(guild: GuildLike): Promise<GuideOutcome> {
+  if (typeof guild.editOnboarding !== "function") throw new Error("guild can't edit onboarding");
+  const missing = new Set<string>();
+  const idsOf = (names: string[]) => names.flatMap(n => {
+    const c = guild.channels.cache.find(ch => normName(ch.name) === normName(n));
+    if (!c?.id) { missing.add(n); return []; }
+    return [c.id];
+  });
+  const featuredIds = idsOf(GUIDE_FEATURED_CHANNELS);
+  await guild.editOnboarding({
+    defaultChannels: featuredIds,
+    prompts: [{ ...GUIDE_PROMPT, options: GUIDE_PROMPT.options.map(o => ({ ...o, channels: idsOf(o.channels) })) }],
+    enabled: true,
+    mode: GuildOnboardingMode.OnboardingAdvanced,
+    reason: "house server guide via /ops guide",
+  });
+  const described = await guild.setDescription?.(GUIDE_DESCRIPTION).then(() => true).catch(() => false) ?? false;
+  return { featuredCount: featuredIds.length, optionCount: GUIDE_PROMPT.options.length, missing: [...missing], described };
+}
+
 // ── Resource posts ───────────────────────────────────────────────────────────
 // Static explainer embeds — mostly RESOURCES channels, plus #adoptees' pinned
 // orientation post. Every post's footer carries
@@ -2540,6 +2607,25 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
     const did = [...created, ...(posted ?? []), ...(panel ? ["🎫 ticket panel"] : [])];
     return interaction.reply({
       content: did.length ? `Did: ${did.join(", ")}` : "Layout + resource posts already current — nothing to do.",
+      ephemeral: true,
+    });
+  }
+
+  if (action === "guide") {
+    if (!config.houseGuildId) return interaction.reply({ content: "HOUSE_GUILD_ID isn't set.", ephemeral: true });
+    const guild = await deps.fetchGuild(config.houseGuildId).catch(() => null);
+    if (!guild) return interaction.reply({ content: "Can't reach the house server.", ephemeral: true });
+    const res = await applyServerGuide(guild).catch(e => {
+      inc("ops.guide_error");
+      logError("server guide apply failed", e);
+      return null;
+    });
+    // Discord validates server-side: COMMUNITY + safety checks, channel
+    // visibility, prompt limits — a rejected patch surfaces here.
+    if (!res) return interaction.reply({ content: `Guide apply failed — see logs. Discord validates onboarding server-side (community mode, safety checks, channel visibility).`, ephemeral: true });
+    const miss = res.missing.length ? ` · unresolved channels: ${res.missing.map(n => `#${n}`).join(", ")}` : "";
+    return interaction.reply({
+      content: `Server guide applied — **${res.featuredCount}** featured channels, join prompt "${GUIDE_PROMPT.title}" (**${res.optionCount}** options)${res.described ? " · description set" : " · description unchanged"}${miss}.`,
       ephemeral: true,
     });
   }

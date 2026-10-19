@@ -1374,6 +1374,79 @@ test("/ops status replies with the health embed", async () => {
   assert.ok(lag);
 });
 
+test("/ops guide applies the Server Guide by channel name — featured order, prompt, description", async () => {
+  const applied: any[] = [];
+  const described: string[] = [];
+  const chans = [
+    { id: "c-welcome", name: "welcome", type: 0 },
+    { id: "c-login", name: "log-in", type: 0 },
+    { id: "c-get", name: "get-companionly", type: 0 },
+    { id: "c-chars", name: "characters", type: 15 },
+    { id: "c-hub", name: "the-hub", type: 0 },
+    { id: "c-what", name: "what-is-characterly", type: 0 },
+    { id: "c-pub", name: "how-to-publish-bots", type: 0 },
+    { id: "c-bar", name: "sitting at a bar", type: 2 }, // voice channel, spaced name
+  ];
+  const guild = {
+    id: HOUSE,
+    channels: { cache: { find: (fn: (c: any) => boolean) => chans.find(fn) } },
+    editOnboarding: async (o: any) => { applied.push(o); return o; },
+    setDescription: async (d: string) => { described.push(d); return null; },
+  };
+  initOps(makeDeps({ fetchGuild: async () => guild as never }));
+  const ix = makeIx({ strings: { action: "guide" } });
+  await handleOpsCommand(ix as any);
+
+  assert.equal(applied.length, 1);
+  const opts = applied[0];
+  assert.equal(opts.enabled, true);
+  assert.equal(opts.mode, 1, "OnboardingAdvanced");
+  assert.deepEqual(opts.defaultChannels,
+    ["c-welcome", "c-login", "c-get", "c-chars", "c-hub", "c-what"],
+    "featured channels in funnel order");
+  assert.equal(opts.prompts.length, 1);
+  const prompt = opts.prompts[0];
+  assert.match(prompt.title, /brings you/i);
+  assert.equal(prompt.singleSelect, true);
+  assert.equal(prompt.options.length, 4);
+  assert.deepEqual(prompt.options[0].channels, ["c-get", "c-what"], "meet → get-companionly + explainer");
+  assert.deepEqual(prompt.options[3].channels, ["c-hub", "c-bar"], "social → hub + voice");
+  assert.equal(described.length, 1, "guild description set for the guide page");
+  assert.match(ix.replies[0].content, /applied/i);
+  assert.match(ix.replies[0].content, /description set/i);
+});
+
+test("/ops guide reports unresolvable channels without failing the apply", async () => {
+  const applied: any[] = [];
+  const chans = [{ id: "c-welcome", name: "welcome", type: 0 }]; // everything else missing
+  const guild = {
+    id: HOUSE,
+    channels: { cache: { find: (fn: (c: any) => boolean) => chans.find(fn) } },
+    editOnboarding: async (o: any) => { applied.push(o); return o; },
+    // no setDescription — fakes may omit it; apply must tolerate
+  };
+  initOps(makeDeps({ fetchGuild: async () => guild as never }));
+  const ix = makeIx({ strings: { action: "guide" } });
+  await handleOpsCommand(ix as any);
+
+  assert.equal(applied.length, 1);
+  assert.deepEqual(applied[0].defaultChannels, ["c-welcome"]);
+  assert.match(ix.replies[0].content, /unresolved channels.*#log-in/i);
+  assert.match(ix.replies[0].content, /#the-hub/i);
+});
+
+test("/ops guide refuses cleanly when the guild rejects the onboarding patch", async () => {
+  const guild = {
+    id: HOUSE,
+    channels: { cache: { find: () => undefined } },
+    editOnboarding: async () => { throw new Error("onboarding not available"); },
+  };
+  initOps(makeDeps({ fetchGuild: async () => guild as never }));
+  const ix = makeIx({ strings: { action: "guide" } });
+  await handleOpsCommand(ix as any);
+  assert.match(ix.replies[0].content, /failed/i);
+});
+
 test("/ops stats defers and renders the funnel embed; non-operators refused", async () => {
   const stats = {
     dauDm: 4, dauGuilds: 2, wauDm: 9, wauGuilds: 5, llmToday: 120, hostedToday: 80,
