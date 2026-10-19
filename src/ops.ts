@@ -2096,7 +2096,7 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
   },
   {
     channel: "privacy-policy",
-    version: 5,
+    version: 6,
     embeds: () => [new EmbedBuilder()
       .setTitle("Privacy — the short version")
       .setDescription(
@@ -2108,8 +2108,10 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
         "• **Personal memory is opt-in** — derived facts, profile attributes, and relationship notes only exist for members who run `/profile-build` or `/opt-in`\n" +
         "• **Retention is bounded** — raw messages are held 30 days, then permanently deleted\n" +
         "• **Companion memory is yours** — your bond memories stay private to you and never leak into servers or other users' companions\n" +
+        "• **Story stays with the story** — companions keep a running recap of your chat plus *story facts* scoped to themselves; roleplay never becomes a real fact about you and never reaches your other companions\n" +
+        "• **Your facts don't travel unless you say so** — a companion's private DM digest to its owner carries server lore and the owner's own data only; facts about you cross only if you enable `/share-facts`\n" +
         "• **Adoptee chats are private, not staff-blind** — companions you adopt chat in private `#adoptees` threads; unlike DMs, Discord private threads are also visible to server admins (safety + support only, no automod inside — mods can't see them)\n" +
-        "• **You hold the delete key** — `/opt-out` wipes derived data, `/forget` removes one memory, `/memory-export` shows everything held\n" +
+        "• **You hold the delete key** — `/opt-out` wipes derived data, `/forget` removes one memory, `/remember` pins one, `/companion story` edits the recap, `/memory-export` shows everything held — and the dashboard's memory panel does the same on the web\n" +
         "• **Removing the bot wipes the server** — every row it stored there goes with it",
       )],
   },
@@ -2196,12 +2198,13 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
   },
   {
     channel: "characterly-web",
-    version: 2,
+    version: 3,
     embeds: () => [new EmbedBuilder()
       .setTitle("Characterly on the web")
       .setDescription(
         `Everything your account does lives at **[${config.siteUrl.replace(/\/+$/, "").replace(/^https?:\/\//, "")}](${config.siteUrl})** —\n\n` +
         "• **Dashboard** — token balance, Premium, token packs\n" +
+        "• **What X remembers** — every memory, journal entry, and story recap your companion holds, with pin / edit / forget controls\n" +
         "• **Imports** — upload a character card or a chat transcript and your companion becomes them / remembers it\n" +
         "• **Settings** — memory preferences, consent, your linked Discord\n" +
         "• **Delete** — your data, gone on request\n\n" +

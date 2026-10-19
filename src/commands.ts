@@ -2148,10 +2148,10 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       .addFields(
         { name: "Status", value: status },
         { name: "Raw messages", value: `Kept for **${s.rawRetentionDays} days**, then permanently deleted.` },
-        { name: "Derived data", value: "Memories, profiles, and relationship notes form **only for members who opt in** — never automatically." },
+        { name: "Derived data", value: "Memories, profiles, and relationship notes **about you** form only if you opt in — never automatically. Companions also keep a per-chat *story recap* and *story facts* scoped to themselves — roleplay stays fiction and never becomes fact about you." },
         { name: "Your consent", value: consent },
         { name: "Processing", value: "Messages are sent to an OpenAI-compatible LLM provider for analysis using each companion owner's personal API key (`/companion key`) or the operator's default." },
-        { name: "Controls & guarantees", value: "`/opt-out` forgets your memories and deletes your profile, attributes, relationships, stored quotes, and companion journal entries about you · `/memory-export` downloads everything stored about you · **removing Characterly from this server deletes every row it holds here**." },
+        { name: "Controls & guarantees", value: "`/remember` pins a fact · `/memory` lists them (`pin:` toggles) · `/forget` removes one · `/companion story` edits the recap · `/share-facts` decides whether your facts may cross into owners' DM digests (off by default) · `/opt-out` forgets memories and deletes your profile, attributes, relationships, quotes, journal entries, and recaps · `/memory-export` downloads everything · **removing Characterly from this server deletes every row it holds here**." },
       )] });
   }
   if (interaction.commandName === "memory") {
@@ -2556,7 +2556,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     // retention expiry — opt-out shouldn't wait days to stop holding the words.
     await store.scrubEvidenceFor(guildId, userId);
     await profileStore.deleteProfile(guildId, userId);
-    return interaction.reply({ content: `Opted out. ${forgotten} memor${forgotten === 1 ? "y" : "ies"} and ${relForgotten} relationship record${relForgotten === 1 ? "" : "s"} about you were forgotten and your profile, attributes, and stored quotes were deleted — no new memories, relationships, or profile data will be formed about you while you're opted out. Your messages still appear in the raw archive until the server's retention window removes them. Use /opt-in and /profile-build to start again.`, ephemeral: true });
+    return interaction.reply({ content: `Opted out. ${forgotten} memor${forgotten === 1 ? "y" : "ies"} and ${relForgotten} relationship record${relForgotten === 1 ? "" : "s"} about you were forgotten; your profile, attributes, stored quotes, companion journal entries about you, and story recaps were deleted — no new memories, relationships, or profile data will be formed about you while you're opted out. Your messages still appear in the raw archive until the server's retention window removes them. Use /opt-in and /profile-build to start again.`, ephemeral: true });
   }
   if (interaction.commandName === "opt-in") {
     await store.setMemberOptIn(guildId, interaction.user.id, true);
