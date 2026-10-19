@@ -2203,6 +2203,7 @@ async function cmdCompanion(c: SlashCtx): Promise<unknown> {
       components: [new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons)],
     });
   }
+  return interaction.reply({ content: "Unknown companion action.", ephemeral: true });
 }
 
 async function cmdPrivacy(c: SlashCtx): Promise<unknown> {
