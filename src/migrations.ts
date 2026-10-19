@@ -6012,6 +6012,9 @@ export async function runMigrations(sql: Sql, targetVersion?: number): Promise<v
       if (migration.version > current && migration.version <= target) {
         console.log(`Applying migration ${migration.version}: ${migration.name}`);
         await sql.begin(async sql => {
+          // The pool's statement_timeout bounds migrations too — a heavy index
+          // build would otherwise die mid-boot. Migrations are meant to finish.
+          await sql`SET LOCAL statement_timeout = 0`;
           await migration.up(sql as unknown as Sql);
           await sql`INSERT INTO schema_migrations (version) VALUES (${migration.version}) ON CONFLICT DO NOTHING`;
         });
@@ -6022,6 +6025,7 @@ export async function runMigrations(sql: Sql, targetVersion?: number): Promise<v
       if (migration.version <= current && migration.version > target) {
         console.log(`Rolling back migration ${migration.version}: ${migration.name}`);
         await sql.begin(async sql => {
+          await sql`SET LOCAL statement_timeout = 0`;
           await migration.down(sql as unknown as Sql);
           await sql`DELETE FROM schema_migrations WHERE version = ${migration.version}`;
         });

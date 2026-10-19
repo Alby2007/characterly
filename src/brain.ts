@@ -4,7 +4,7 @@ import { executeTool, fetchImageBytes, replyToolDefs } from "./tools.js";
 import type { AttributeProposal, CompanionPersona, CompanionSpec, ContinuityDecision, Decision, DossierSection, ExtractionResult, JournalCandidate, MemoryCandidate, MessageEvent, OnboardingTurnResult, PairContext, ProfileSynthesis, ProfileSynthesisInput, ReplyResult, StoredEvent, VerificationVerdict } from "./types.js";
 import type { ToolCtx } from "./lookup-tools.js";
 import { formatAge, formatPairContext, formatReplyProfile, type ReplyProfile } from "./reply-format.js";
-import { redactSecrets, registerSecret } from "./secrets.js";
+import { registerSecret, warnError } from "./secrets.js";
 import { inc } from "./metrics.js";
 import { BudgetExceeded } from "./budget.js";
 
@@ -1335,7 +1335,7 @@ CONVERSATION CONTROL
         }
         return parseReplyResult(msg?.content, structured);
       } catch (err) {
-        console.warn(`[reply] ${useModel} failed, falling back to ${this.model}:`, redactSecrets((err as Error).message.slice(0, 120)));
+        warnError(`[reply] ${useModel} failed, falling back to ${this.model}:`, err);
       }
     }
 
@@ -1386,7 +1386,7 @@ CONVERSATION CONTROL
         });
         return parseReplyResult(res.choices[0]?.message?.content, true);
       } catch (err) {
-        console.warn(`[reply] tool path failed, falling back to plain reply:`, redactSecrets((err as Error).message.slice(0, 120)));
+        warnError("[reply] tool path failed, falling back to plain reply:", err);
       }
     }
 

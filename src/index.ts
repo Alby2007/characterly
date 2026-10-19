@@ -35,7 +35,8 @@ import { buildPairContext, type ToolCtx } from "./lookup-tools.js";
 import { qualifyingImages, formatImageContext, IMAGE_MAX_PER_MESSAGE, type AttachmentMeta } from "./vision.js";
 import { sleep, withRetry } from "./retry.js";
 import { inc, drainMetrics } from "./metrics.js";
-import { logError, redactSecrets, registerSecret, validateLlmKey } from "./secrets.js";
+import { writeSync } from "node:fs";
+import { errorText, logError, redactSecrets, registerSecret, validateLlmKey } from "./secrets.js";
 import { announceIfNeeded, handleGuildDelete } from "./guild-lifecycle.js";
 import { isSafeUrl } from "./tools.js";
 import { BudgetExceeded, backgroundCapped, meteredClient, runAsBackground } from "./budget.js";
@@ -836,7 +837,10 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isButton()) await handleMemoryButton(interaction, store, brainFor, eventStore, isHostedScope);
   } catch (error) {
     inc("handler.interaction_error");
-    const what = "commandName" in interaction ? `/${interaction.commandName}`
+    const sub = interaction.isChatInputCommand()
+      ? (() => { try { return interaction.options.getSubcommand(false); } catch { return null; } })()
+      : null;
+    const what = "commandName" in interaction ? `/${interaction.commandName}${sub ? ` ${sub}` : ""}`
       : "customId" in interaction ? interaction.customId
       : `type ${(interaction as { type: number }).type}`;
     logError(`Interaction failed [${what} u:${interaction.user?.id} g:${interaction.guildId ?? "dm"}]`, error);
@@ -852,7 +856,7 @@ client.on(Events.InteractionCreate, async interaction => {
 client.on(Events.MessageCreate, message => {
   // Outer catch lives here, not inline: an unhandled rejection in a listener
   // crashes the process, so every failure mode lands in this log instead.
-  handleMessage(message).catch(error => { inc("handler.message_error"); logError(`Message handling failed [${message.guild?.id ?? "dm"} #${message.channelId} u:${message.author?.id} m:${message.id}]`, error); });
+  handleMessage(message).catch(error => { inc("handler.message_error"); logError(`Message handling failed [${message.guildId ?? "dm"} #${message.channelId} u:${message.author?.id} m:${message.id}]`, error); });
 });
 
 // Edits update the archive row; the extraction-time snapshot in memory_evidence
@@ -866,7 +870,7 @@ client.on(Events.MessageUpdate, (_old, message) => {
   const promise = message.guild
     ? store.updateMessageContent(message.guild.id, message.id, message.content)
     : store.updateMessageContentById(message.id, message.content);
-  promise.catch(error => { inc("handler.message_error"); logError(`Message update failed [${message.guild?.id ?? "dm"} m:${message.id}]`, error); });
+  promise.catch(error => { inc("handler.message_error"); logError(`Message update failed [${message.guildId ?? "dm"} m:${message.id}]`, error); });
 });
 
 // Deletes remove the raw row (so the sweep never extracts deleted content)
@@ -878,7 +882,7 @@ client.on(Events.MessageDelete, message => {
   const promise = message.guild
     ? store.deleteMessage(message.guild.id, message.id)
     : store.deleteMessageById(message.id);
-  promise.catch(error => { inc("handler.message_error"); logError(`Message delete failed [${message.guild?.id ?? "dm"} m:${message.id}]`, error); });
+  promise.catch(error => { inc("handler.message_error"); logError(`Message delete failed [${message.guildId ?? "dm"} m:${message.id}]`, error); });
 });
 
 // Alias maps are shared per guild rather than built per message — the same map
@@ -2184,7 +2188,10 @@ process.on("unhandledRejection", reason => {
 });
 process.on("uncaughtException", error => {
   inc("handler.uncaught_exception");
-  logError("Uncaught exception — exiting", error);
+  // stderr is asynchronous on pipes/sockets (e.g. under systemd's journal) —
+  // an immediate exit can drop a console.error still in flight, so the crash
+  // line goes out via a synchronous write instead.
+  try { writeSync(2, `Uncaught exception — exiting: ${errorText(error)}\n`); } catch { /* stderr itself is gone */ }
   process.exit(1);
 });
 

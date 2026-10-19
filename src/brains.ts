@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { Agent, fetch as undiciFetch } from "undici";
 import { Brain, type LlmClient } from "./brain.js";
-import { decryptSecret, errorText } from "./secrets.js";
+import { decryptSecret, warnError } from "./secrets.js";
 import { inc } from "./metrics.js";
 import { isSafeUrl, safeLookup } from "./tools.js";
 
@@ -189,7 +189,7 @@ export function createBrainResolver(opts: {
       return brain;
     } catch (error) {
       inc("brain.decrypt_failed");
-      console.warn(`guild_keys decrypt failed for ${keyScopeId} — scope dormant until /setup re-runs`, errorText(error));
+      warnError(`guild_keys decrypt failed for ${keyScopeId} — scope dormant until /setup re-runs`, error);
       return null;
     }
   }

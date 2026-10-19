@@ -126,7 +126,7 @@ SELECT kind, sum(delta) FROM credit_ledger
 |---------|--------------|-----|
 | Bot offline after deploy | Bad env, failed migration, or bad token | `journalctl -u characterly -n 100` — crash-loop reason is printed at boot |
 | `ECONNRESET` to Supabase | Session-pooler hiccup / idle drop | Usually transient — postgres.js reconnects; if persistent, check Supabase status and pooler mode |
-| Messages not extracted | `jobs` backing up or dead-lettered | `SELECT * FROM jobs WHERE attempts >= 5`, then `npx tsx scripts/requeue-dead-jobs.mjs` (`GUILD_ID` optional) after fixing the cause |
+| Messages not extracted | `jobs` backing up or dead-lettered | `SELECT * FROM jobs WHERE attempts >= 5`, then `npm run ops:requeue-dead-jobs` (`GUILD_ID` optional) after fixing the cause |
 | Companion silent in a guild | LLM budget exhausted | `/status` shows today's usage vs `llm_daily_cap`; BudgetExceeded reschedules jobs to UTC midnight |
 | Guild dormant out of nowhere | `guild_keys` row undecryptable or removed | Log line `guild_keys decrypt failed` — scope goes dormant until a key is re-set |
 | Website OAuth/ magic links fail | Redirect allowlist missing the origin | Add `https://<origin>/**` under Auth → URL Configuration (see [website.md](website.md)) |
@@ -169,7 +169,7 @@ SELECT kind, sum(delta) FROM credit_ledger
 - **Nightly maintenance** — retention purge, memory lifecycle, verification/dedup, event maintenance, profile rebuilds, journal prune, pair-analysis enqueue.
 - **15-min sweep** — missed-signal triage reconciliation (`repairQueuedMarks`), embedding backfill (bounded batch of NULL-embedding memories/journal rows per tick).
 
-Ops utilities (run via `npx tsx scripts/<name>.mjs` with env loaded): `maintain.mjs`, `build-profiles.mjs`, `verify-memories.mjs`, `contest-sweep.mjs`, `backfill-relationships.mjs`, `purge-nonopted.mjs` (**destructive — `PURGE_CONFIRM=1`**), `requeue-dead-jobs.mjs`.
+Ops utilities — npm scripts under the `ops:` namespace (env loaded from `.env`, `GUILD_ID` scopes the per-guild ones): `npm run ops:maintain` (event maintenance for a guild), `ops:build-profiles`, `ops:verify-memories` (LLM re-verification of candidate memories), `ops:contest-sweep` (retroactive denial/correction evidence), `ops:backfill-relationships` (one-off observation backfill), `ops:requeue-dead-jobs` (reset dead-lettered jobs after fixing the cause), `ops:purge-nonopted` (**destructive — `PURGE_CONFIRM=1`**). Raw form: `npx tsx scripts/<name>.mjs`.
 
 ## Companion marketplace (v34)
 

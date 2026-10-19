@@ -16,18 +16,17 @@ export function makeTestSql() {
 
 /** Truncate all data tables while preserving schema and migration tracking. */
 export async function clearData(sql: ReturnType<typeof postgres>) {
-  // Truncate data tables only — schema_migrations is NOT truncated so runMigrations stays idempotent.
-  // Use CASCADE to handle FK constraints; RESTART IDENTITY resets sequences.
-  await sql`TRUNCATE TABLE profile_attributes, profiles, relationships, relationship_observations, members, event_memories, event_messages, event_participants, events, behavioral_patterns, memory_history, memory_evidence, server_settings, memories, messages, guild_keys, unresolved_names, alias_candidates, jobs, guild_usage, webhook_messages, guild_companions, companion_journal, conversation_summaries, chat_imports, app_installs, support_tickets, companions, link_codes, user_bot_settings, companion_listings, companion_persona_versions, companion_adoptions, listing_reports, listing_ratings, comment_reports, consent_events, analytics_events, metrics_daily RESTART IDENTITY CASCADE`;
-  // web_profiles/credit_ledger only exist where the Supabase-accounts schema
-  // was applied (prod) or where a test created the fixture — conditional.
-  const opt = await sql<Array<{ l: string | null; p: string | null }>>`
-    SELECT to_regclass('public.credit_ledger') AS l, to_regclass('public.web_profiles') AS p`;
-  if (opt[0].l && opt[0].p) {
-    await sql`TRUNCATE TABLE credit_ledger, web_profiles RESTART IDENTITY CASCADE`;
-  } else if (opt[0].p) {
-    await sql`TRUNCATE TABLE web_profiles RESTART IDENTITY CASCADE`;
-  }
+  // Every public-schema table except schema_migrations is test data —
+  // including the conditional web_profiles/credit_ledger accounts tables,
+  // which appear only where the Supabase schema was applied. Reading
+  // pg_tables keeps the wipe self-maintaining: a new migration's tables are
+  // covered without anyone remembering to extend a literal list.
+  const tables = await sql<Array<{ tablename: string }>>`
+    SELECT tablename FROM pg_tables
+    WHERE schemaname = 'public' AND tablename <> 'schema_migrations'`;
+  if (!tables.length) return;
+  const list = tables.map(t => `"${t.tablename.replace(/"/g, '""')}"`).join(", ");
+  await sql.unsafe(`TRUNCATE TABLE ${list} RESTART IDENTITY CASCADE`);
 }
 
 /** Create a MemoryStore + EventStore pair backed by the given sql connection and wipe all data. */

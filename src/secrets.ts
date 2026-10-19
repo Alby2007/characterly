@@ -89,6 +89,12 @@ export function logError(prefix: string, err: unknown): void {
   console.error(prefix, errorText(err));
 }
 
+/** console.warn twin of logError — same secret stripping, for degraded-but-
+ * recovered paths (fallbacks, retries) that don't merit error severity. */
+export function warnError(prefix: string, err: unknown): void {
+  console.warn(prefix, errorText(err));
+}
+
 export type KeyValidation =
   | { ok: true }
   | { ok: false; status: number }
