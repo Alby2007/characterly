@@ -511,11 +511,24 @@ export class MemoryStore {
    *  never thrown — analytics must never break a product path. */
   async trackEvent(discordUserId: string | null, event: AnalyticsEvent, scope: string | null = null, meta: Record<string, unknown> = {}): Promise<void> {
     try {
+      if (discordUserId === null) {
+        await this.sql`
+          INSERT INTO analytics_events (discord_user_id, event, scope, meta)
+          SELECT NULL, ${event}, ${scope}, ${JSON.stringify(meta)}::jsonb
+        `;
+        return;
+      }
+      // The advisory lock serializes against setAnalyticsOptOut's tx: this row
+      // either commits before the opt-out's DELETE (and is wiped with the rest)
+      // or waits for the flag commit and the NOT EXISTS gate blocks it — the
+      // flag→delete commit gap can't leak a row. Guild events (null user) skip
+      // the lock; opt-out never targets them.
       await this.sql`
+        WITH l AS (SELECT pg_advisory_xact_lock(hashtextextended(${discordUserId}, 0)))
         INSERT INTO analytics_events (discord_user_id, event, scope, meta)
         SELECT ${discordUserId}, ${event}, ${scope}, ${JSON.stringify(meta)}::jsonb
-        WHERE ${discordUserId}::text IS NULL
-           OR NOT EXISTS (SELECT 1 FROM user_bot_settings WHERE discord_user_id = ${discordUserId} AND analytics_opt_out)
+        FROM l
+        WHERE NOT EXISTS (SELECT 1 FROM user_bot_settings WHERE discord_user_id = ${discordUserId} AND analytics_opt_out)
       `;
     } catch {
       inc("analytics.event_error");
@@ -541,12 +554,19 @@ export class MemoryStore {
    *  user_bot_settings — the only global per-user table; a missing row
    *  means tracking is on. */
   async setAnalyticsOptOut(discordUserId: string, optOut: boolean): Promise<void> {
-    await this.sql`
-      INSERT INTO user_bot_settings (discord_user_id, analytics_opt_out)
-      VALUES (${discordUserId}, ${optOut})
-      ON CONFLICT (discord_user_id) DO UPDATE SET analytics_opt_out = ${optOut}, updated_at = now()
-    `;
-    if (optOut) await this.deleteAnalyticsEventsFor(discordUserId);
+    // One tx holding the same advisory key trackEvent locks on — an insert in
+    // flight either commits before this DELETE (wiped with the rest) or waits
+    // for this tx's commit and is then gated by the flag. Without the lock the
+    // flag→delete gap could admit one post-wipe row.
+    await this.sql.begin(async sql => {
+      await sql`SELECT pg_advisory_xact_lock(hashtextextended(${discordUserId}, 0))`;
+      await sql`
+        INSERT INTO user_bot_settings (discord_user_id, analytics_opt_out)
+        VALUES (${discordUserId}, ${optOut})
+        ON CONFLICT (discord_user_id) DO UPDATE SET analytics_opt_out = ${optOut}, updated_at = now()
+      `;
+      if (optOut) await sql`DELETE FROM analytics_events WHERE discord_user_id = ${discordUserId}`;
+    });
   }
 
   async deleteAnalyticsEventsFor(discordUserId: string): Promise<void> {

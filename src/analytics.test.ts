@@ -32,6 +32,45 @@ test("trackEvent inserts rows; opt-out gates inserts and wipes history; opt-in r
   } finally { await sql.end(); }
 });
 
+test("a trackEvent racing setAnalyticsOptOut cannot leak a post-wipe row", dbTest, async () => {
+  const sql = makeTestSql();
+  const other = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    // A second session holds the user's advisory key so both writers queue
+    // behind it — then whatever acquires it first, the outcome must be 0 rows.
+    let release!: () => void;
+    let acquired!: () => void;
+    const gate = new Promise<void>(r => { release = r; });
+    const lockHeld = new Promise<void>(r => { acquired = r; });
+    const holding = other.begin(async tx => {
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended('u-race', 0))`;
+      acquired();
+      await gate;
+    });
+    await lockHeld;
+    try {
+      const insertP = store.trackEvent("u-race", "awaken");
+      // Prove the insert really waits on the lock — without it the row would
+      // already be visible, and the post-wipe guarantee would be unchecked.
+      await new Promise(r => setTimeout(r, 150));
+      const mid = await sql`SELECT id FROM analytics_events WHERE discord_user_id = 'u-race'`;
+      assert.equal(mid.length, 0, "insert queues behind the held advisory lock");
+      // Now queue the opt-out behind the same lock and release. If the insert
+      // wins its row lands pre-flag and the DELETE must wipe it; if the opt-out
+      // wins, NOT EXISTS blocks the insert. Either way: zero.
+      const optOutP = store.setAnalyticsOptOut("u-race", true);
+      release();
+      await Promise.all([insertP, optOutP]);
+    } finally {
+      release();
+      await holding.catch(() => {});
+    }
+    const rows = await sql`SELECT id FROM analytics_events WHERE discord_user_id = 'u-race'`;
+    assert.equal(rows.length, 0, "no analytics row may survive a completed opt-out");
+  } finally { await sql.end(); await other.end(); }
+});
+
 test("flushMetricDeltas accumulates into the daily rollup", dbTest, async () => {
   const sql = makeTestSql();
   try {
