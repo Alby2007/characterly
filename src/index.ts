@@ -46,7 +46,7 @@ import { runChatImportJob, type ChatImportJobPayload } from "./chat-import-job.j
 import { greetPendingInstalls } from "./install-greet.js";
 import { selectCompanionForTurn } from "./scene-router.js";
 import { sendAsCompanion } from "./webhooks.js";
-import { isSelfHarmSignal, CRISIS_RESPONSE, safetyBrain } from "./safety.js";
+import { isSelfHarmSignal, CRISIS_RESPONSE, meteredSafetyBrain, safetyBrain } from "./safety.js";
 import { TurnLedger, chargeHostedTurn, screenAdoptedReply } from "./turn-billing.js";
 import {
   initOps, automodMessage, isHouse, isMarketplaceThread, isAdopteeThread, opsAlert,
@@ -163,6 +163,10 @@ const { brainFor, brainForUser, invalidate: invalidateBrain, isHostedScope, isHo
     getCap: async () => Math.floor(config.hostedDailyLlmCap * config.hostedBackgroundShare),
   }),
 });
+// Adopted-reply screens on the hosted lane are operator spend like every
+// other hosted call — they charge the fleet breaker (never a scope cap: the
+// replying user's tokens already paid for the turn).
+const hostedSafety = () => meteredSafetyBrain(store, async () => config.hostedDailyLlmCap);
 // Vision can live on a different provider than the main key (e.g. Gemini's
 // free tier, since Groq rotated its vision models off) — a second client is
 // built only when the creds actually differ.
@@ -193,7 +197,7 @@ function linkPromptDue(key: string): boolean {
   linkPromptedAt.set(key, Date.now());
   return true;
 }
-const LINK_PROMPT = `To use Characterly's hosted features, create a free account at ${config.siteUrl} and run \`/link\` here to connect it to your Discord — it takes about a minute.`;
+const LINK_PROMPT = `To use Characterly's hosted features, create a free account at ${config.siteUrl} and run \`/link\` here to connect it to your Discord — it takes about a minute.${config.houseInviteUrl ? ` Then join the community server: ${config.houseInviteUrl}` : ""}`;
 // Discord renders <t:sec:R> as "in 4 hours" in the viewer's timezone — the
 // daily token/cap reset is always the next UTC midnight.
 const dailyResetTag = () => `<t:${Math.floor(new Date().setUTCHours(24, 0, 0, 0) / 1000)}:R>`;
@@ -1248,6 +1252,7 @@ async function handleDmMessage(
         ...replyExtras,
         allowedMentions: { parse: [], repliedUser: false },
       });
+      onboardingLedger.markReplied();
       await store.recordMessage({
         guildId: dmScope,
         channelId: message.channel.id,
@@ -1585,7 +1590,7 @@ async function runCompanionTurn(opts: {
     // Hosted lane screens on the small SAFETY_MODEL (fast, operator spend
     // either way); BYOK keeps screening on the user's own key.
     const dmReplyText = await screenAdoptedReply({
-      companion, text: clean, screener: (hostedDm && safetyBrain()) || brain, ledger, lane: "dm",
+      companion, text: clean, screener: (hostedDm && hostedSafety()) || brain, ledger, lane: "dm",
     });
     if (dmReplyText) {
       const sent = await sendPersona(dmReplyText);
@@ -2076,7 +2081,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     // Same adopted-companion safety screen as the DM path — a flag swaps in
     // the neutral refusal (channel isn't ghosted) and refunds the turn.
     const guildReplyText = await screenAdoptedReply({
-      companion: chosen, text: clean, screener: (hostedGuild && safetyBrain()) || companionBrain, ledger, lane: "guild",
+      companion: chosen, text: clean, screener: (hostedGuild && hostedSafety()) || companionBrain, ledger, lane: "guild",
     });
     if (guildReplyText) {
       const sent = await sendAsCompanion(message, chosen, guildReplyText, client.user!.id);

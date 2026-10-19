@@ -11,6 +11,7 @@ import { inc, metricsSnapshot } from "./metrics.js";
 import type { ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, GuildDeployment, MessageEvent } from "./types.js";
 import { config } from "./config.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
+import { TurnLedger } from "./turn-billing.js";
 import { handleOpsCommand, handleHouseButton, handleTicketButton, isHouse, isMarketplaceThread, getOpsDeps, ensureAdopteeThread, ensureAdopteeThreadsForUser, setAdopteeThreadLocked, adopteeManagePayload, deployedGuildIds, deploymentFor, deployMarketplace, removeDeployment } from "./ops.js";
 import { CURATED_TAGS, PARTNER_TAG_SET, archiveListingPosts, postListingToDeployments, buildListingCard, buildListingComponents } from "./marketplace.js";
 import { parseCardFile, cardToPersona, cardImportMeta, cardFileHash, CARD_MAX_BYTES, type ImportPersona, type CardImportMeta, type ParsedCard } from "./charcard.js";
@@ -187,13 +188,21 @@ export function buildAwakenedCompanionPayload(
   companion: Companion,
   ownerName: string,
   mutualGuilds: Array<{ id: string; name: string }> = [],
+  inviteUrl: string | null = config.houseGuildId ? houseInviteRef() : null,
 ) {
+  // Funnel: a user who shares no guild with the bot (or isn't in the house)
+  // has nowhere to summon — the join-server button is their next step. A
+  // house member already sees "Summon to Characterly", so no invite for them.
+  const inHouse = mutualGuilds.some(g => g.id === config.houseGuildId);
+  const invite = inviteUrl && !inHouse ? inviteUrl : null;
   const embed = new EmbedBuilder()
     .setTitle(`${companion.name} — Awakened & Locked In`)
     .setDescription(
       `**${companion.name}** is now permanently bound to your account! Keep chatting right here in DMs, or summon them into a server.\n\n` +
         (companion.backstory ? `${companion.backstory}\n\n` : "") +
-        `*Use \`/companion summon\` in any server to bring them into the hangout, or \`/companion avatar\` to update their avatar.*`,
+        (mutualGuilds.length || !invite
+          ? `*Use \`/companion summon\` in a server to bring them into the hangout, or \`/companion avatar\` to update their avatar.*`
+          : `*Meet them in the Characterly server — the shelf, announcements and your private companion threads live there.*`),
     )
     .addFields(
       { name: "Voice & Vibe", value: companion.voicePersona || "—", inline: false },
@@ -204,18 +213,24 @@ export function buildAwakenedCompanionPayload(
   if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
 
   const components: ActionRowBuilder<ButtonBuilder>[] = [];
-  if (mutualGuilds.length > 0) {
-    const row = new ActionRowBuilder<ButtonBuilder>();
-    for (const g of mutualGuilds.slice(0, 3)) {
-      row.addComponents(
-        new ButtonBuilder()
-          .setCustomId(`onboard:summon:${g.id}:${companion.ownerUserId}`)
-          .setLabel(`Summon to ${g.name.slice(0, 22)}`)
-          .setStyle(ButtonStyle.Primary),
-      );
-    }
-    components.push(row);
+  const row = new ActionRowBuilder<ButtonBuilder>();
+  for (const g of mutualGuilds.slice(0, 3)) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`onboard:summon:${g.id}:${companion.ownerUserId}`)
+        .setLabel(`Summon to ${g.name.slice(0, 22)}`)
+        .setStyle(ButtonStyle.Primary),
+    );
   }
+  if (invite) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setLabel("Join the Characterly server")
+        .setStyle(ButtonStyle.Link)
+        .setURL(invite),
+    );
+  }
+  if (row.components.length) components.push(row);
   return { embeds: [embed], components };
 }
 
@@ -975,7 +990,17 @@ function adoptPointerCopy(t: { thread?: string; needsInvite?: true; needsVerify?
 
 export async function summonPickedCompanion(interaction: ChatInputCommandInteraction | ButtonInteraction, companion: Companion, store: MemoryStore) {
   if (!interaction.guildId) {
-    return interaction.reply({ content: "That can only be done inside a Discord server.", ephemeral: true });
+    // Warmest funnel moment — they tried to summon and have nowhere. Point at
+    // the house instead of dead-ending on "only in a server".
+    const invite = config.houseGuildId ? houseInviteRef() : null;
+    return interaction.reply({
+      content: `Summoning works inside a Discord server${invite ? ` — join the Characterly server to bring **${companion.name}** there.` : "."}`,
+      components: invite
+        ? [new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder().setLabel("Join the Characterly server").setStyle(ButtonStyle.Link).setURL(invite))]
+        : [],
+      ephemeral: true,
+    });
   }
   // Mocks in tests may not implement isButton — treat absence as a command.
   const isButton = typeof (interaction as ButtonInteraction).isButton === "function" && (interaction as ButtonInteraction).isButton();
@@ -1715,7 +1740,13 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       const split = purchased > 0
         ? ` (${(account.creditBalance - purchased).toLocaleString()} daily + ${purchased.toLocaleString()} from packs — daily spends first, packs never expire)`
         : "";
-      return interaction.reply({ content: `🪙 **${account.creditBalance.toLocaleString()} tokens**${split} — **${account.plan}** plan, daily tokens refill to **${refill}** each UTC day · next refill ${dailyResetTag()}.\n${tail}` + byokNote, ephemeral: true });
+      // A negative allowance is clawback debt (a refunded pack already spent)
+      // — grants pay it down at the daily rate instead of refilling to floor.
+      const allowance = account.creditBalance - Math.max(account.purchasedBalance ?? 0, 0);
+      const refillLine = allowance < 0
+        ? `a pack refund left **${Math.abs(allowance).toLocaleString()} tokens** of allowance debt — refills repay it at **${refill}**/day before your balance climbs again`
+        : `daily tokens refill to **${refill}** each UTC day`;
+      return interaction.reply({ content: `🪙 **${account.creditBalance.toLocaleString()} tokens**${split} — **${account.plan}** plan, ${refillLine} · next refill ${dailyResetTag()}.\n${tail}` + byokNote, ephemeral: true });
     }
     if (action === "status") {
       const dmScope = `dm:${interaction.user.id}`;
@@ -2137,6 +2168,11 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         lines.push(ad?.chatThreadId
           ? `• **${c.name}** — <#${ad.chatThreadId}>`
           : `• **${c.name}** — join the Characterly server to open your thread${houseInviteRef() ? `: ${houseInviteRef()}` : ""}${config.houseMemberRoleId ? ` — then verify in ${verifyRef()} to chat` : ""}`);
+      }
+      // No adoptees yet — the roster is the natural place to upsell the shelf,
+      // which lives in the house.
+      if (!adopted.length && config.houseGuildId && houseInviteRef()) {
+        lines.push(`• The shelf — adopt more companions in the Characterly server: ${houseInviteRef()}`);
       }
       // Adopted-only users can't reach awakening through the DM chat path —
       // surface the affordance here so the permanent bond stays discoverable.
@@ -4239,9 +4275,11 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       }
       const charge = await chargeOnboardingTurn(store, isHostedScope?.(dmScope) ?? false, userId, existing?.onboardingTurns ?? 0);
       if (!charge.ok) return interaction.reply({ content: charge.message, ephemeral: true });
-      let turn: Awaited<ReturnType<Brain["runOnboardingTurn"]>>;
+      // The ledger covers everything after the debit until the draft preview
+      // lands — a failed upsert or a failed update refunds the charged turn.
+      const ledger = new TurnLedger(store, userId, "onboarding_turn_refund", charge.charged, charge.purchased);
       try {
-        turn = await brain.runOnboardingTurn({
+        const turn = await brain.runOnboardingTurn({
           ownerName,
           userMessage: preset.prompt,
           transcript: [],
@@ -4259,23 +4297,25 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
           allowImmediateComplete: preset.allowImmediateComplete,
           model: config.replyModel,
         });
+        // Archetype presets always show the draft preview first so the user can
+        // inspect and confirm before permanently locking their 1-per-account companion.
+        const updatedDraft = await store.upsertCompanionOnboarding(
+          userId,
+          { ...turn.spec, avatarUrl: existing?.avatarUrl ?? null },
+          true,
+        );
+        inc("companion.onboarding_turn");
+        const res = await interaction.update({
+          content: turn.replyText,
+          embeds: [buildOnboardingDraftEmbed(updatedDraft, updatedDraft.onboardingTurns)],
+          components: [buildOnboardingDraftComponents(userId, updatedDraft)],
+        });
+        ledger.markReplied();
+        return res;
       } catch (error) {
-        if (charge.charged) await store.refundCredits(userId, charge.charged, "onboarding_turn_refund", charge.purchased).catch(() => {});
+        ledger.refund();
         throw error;
       }
-      // Archetype presets always show the draft preview first so the user can
-      // inspect and confirm before permanently locking their 1-per-account companion.
-      const updatedDraft = await store.upsertCompanionOnboarding(
-        userId,
-        { ...turn.spec, avatarUrl: existing?.avatarUrl ?? null },
-        true,
-      );
-      inc("companion.onboarding_turn");
-      return interaction.update({
-        content: turn.replyText,
-        embeds: [buildOnboardingDraftEmbed(updatedDraft, updatedDraft.onboardingTurns)],
-        components: [buildOnboardingDraftComponents(userId, updatedDraft)],
-      });
     }
 
     if (sub === "summon") {

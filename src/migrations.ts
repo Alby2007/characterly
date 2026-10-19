@@ -5707,7 +5707,9 @@ export const migrations: Migration[] = [
                 END IF;
                 INSERT INTO public.credit_ledger (account_id, delta, kind, reason, stripe_ref, payment_intent, balance_after)
                 SELECT p_account, p_tokens, p_kind,
-                       CASE WHEN p_kind = 'grant_bonus' THEN 'launch_bonus' ELSE 'pack_' || p_tokens END,
+                       CASE WHEN p_kind = 'grant_bonus'
+                            THEN COALESCE(replace(split_part(p_ref, ':', 1), '-', '_'), 'grant_bonus')
+                            ELSE 'pack_' || p_tokens END,
                        p_ref, p_payment_intent, w.credit_balance + p_tokens
                 FROM public.web_profiles w WHERE w.id = p_account
                 ON CONFLICT (stripe_ref) WHERE stripe_ref IS NOT NULL DO NOTHING;

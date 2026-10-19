@@ -67,7 +67,7 @@ Alongside the bot, `website/` is a Vite multi-page site (landing page, account s
 
 Each Discord user awakens **one permanent personal AI companion per account** in a private 1:1 DM (`dm:<userId>` scope), then summons them into any Characterly-enabled Discord server:
 
-**Entry — install greeting (v47).** Users who add the app *to their account* (User Install) get the first message for free: Discord POSTs a signed `APPLICATION_AUTHORIZED` webhook event to the website worker (`POST /discord/events` — Ed25519 verified via `src/discord-events.ts`, then the service-role-only `record_app_install` RPC writes `app_installs`), and the bot's `greetPendingInstalls` sweep (~20s) DMs a welcome card with the same `onboard:start` button used everywhere — the link/key gate and draft Q&A below run unchanged. `greeted_at` is a permanent dedupe (reinstalls never re-greet), `APPLICATION_DEAUTHORIZED` stamps `deauthorized_at`, users who already onboarded are marked greeted silently, and sends retry ≤5 attempts. Guild installs are ignored by the endpoint — `announceIfNeeded` covers them.
+**Entry — install greeting (v47).** Users who add the app *to their account* (User Install) get the first message for free: Discord POSTs a signed `APPLICATION_AUTHORIZED` webhook event to the website worker (`POST /discord/events` — Ed25519 verified via `src/discord-events.ts`, then the service-role-only `record_app_install` RPC writes `app_installs`), and the bot's `greetPendingInstalls` sweep (~20s) DMs a welcome card with the same `onboard:start` button used everywhere plus a "Join the Characterly server" link button (when the house is configured) — the link/key gate and draft Q&A below run unchanged. `greeted_at` is a permanent dedupe (reinstalls never re-greet), `APPLICATION_DEAUTHORIZED` stamps `deauthorized_at`, users who already onboarded are marked greeted silently, and sends retry ≤5 attempts. Guild installs are ignored by the endpoint — `announceIfNeeded` covers them.
 
 1. **Step 0 — Personal AI Key (`buildApiKeyOnboardingPayload` & `user-key` Modal):**
    - If the user has not yet connected an API key (and no operator fallback key is active), DMing the bot or clicking an onboarding button presents the **Connect Your Personal AI Key** card with a 1-click **Paste API Key** button (`onboard:key:<userId>`).
@@ -131,7 +131,7 @@ Companions keep a private journal of what *they themselves* experienced — mome
 - **Write path:** After a companion replies (DM or server), a deferred `journal-write` job (`src/journal-job.ts`) re-reads the archived trigger + reply rows, asks `Brain.writeJournal` for 0–2 entries, and persists via `store.saveJournalEntries`. Journaling is deferred off the live reply path so a slow LLM call never delays the reply itself. Deleted trigger/reply rows or an inactive companion drop the job (`jobs.dropped_stale`); a dormant scope drops it (`jobs.dropped_dormant`).
 - **Origin-scoped recall:** Every entry is tagged `origin_scope` (`<guildId>` or `dm:<userId>`). `store.journalFor` surfaces entries **only in the scope where they formed** — a companion dismissed from a server keeps its entries dormant until re-summoned, and entries from the owner's DM additionally reach servers through the existing confidential vault subtext (`ownerSubtext`), never as disclosed facts.
 - **Kinds:** `moment`, `opinion`, `inside_joke`, `promise` (anything else normalizes to `moment`). Entries carry `about_subject_ids`, an `importance` score, and optional `source_message_id` provenance.
-- **Consent rules mirror extraction:** entries about a non-consenting human are dropped at write time (`isConsented` gate — `unknown`/`server`/bot/`companion:<id>` subjects exempt); read-time recall filters entries about subjects who have since opted out; `/opt-out` hard-deletes them via `forgetJournalAbout`; `journalAboutSubject` feeds `/memory-export` so the journal is never invisible to the person it describes. Guild purge, member opt-out, and the zombie-guild sweep all cover `companion_journal`.
+- **Consent rules mirror extraction:** entries about a non-consenting human are dropped at write time (`isConsented` gate — `unknown`/`server`/bot/`companion:<id>` subjects exempt); read-time recall filters entries about subjects who have since opted out; `/opt-out` hard-deletes them via `forgetJournalAbout`; `journalAboutSubject` feeds `/memory export` so the journal is never invisible to the person it describes. Guild purge, member opt-out, and the zombie-guild sweep all cover `companion_journal`.
 - **Dedup & bounds:** insert-time trgm near-duplicate suppression (similarity ≥ 0.75 against the companion's live entries in that scope) plus a `UNIQUE(companion_id, origin_scope, source_message_id, kind, content)` key for crash-retry idempotency. Nightly `pruneJournal` caps at 200 active entries per (companion, scope), evicting least-important stale rows first (importance decayed 30-day half-life by last recall).
 
 ## Story continuity — rolling recaps and fiction scoping (v55–v57)
@@ -140,7 +140,7 @@ The live transcript window (`recentContext`, 25 guild / `DM_CONTEXT_MESSAGES` = 
 
 - **Rolling "story so far" (`conversation_summaries`, v55):** every `SUMMARY_REPLY_INTERVAL` companion replies enqueue a `summary-update` job that folds the messages between `covered_until` and the live window's tail into a first-person recap — one row per (companion, scope, channel). The recap rides every reply prompt in that chat, sits under the owner-editable story box (`/companion story`, dashboard), and dies via `/companion reset-story`, `/opt-out`, or companion deletion. Summary calls run on `brainFor` — operator budget on all lanes, never user credits.
 - **Story facts (`memories.companion_id` + `kind='story_fact'`, v56):** the extractor tags roleplay beats `in_fiction`; persistence normalizes them to `story_fact` scoped to the turn's companion (reply target or wake-word — ambient server chatter lands unscoped and inert). Story facts insert `active` (fiction needs no verification), recall only to their own companion, and are excluded from shared surfaces — `searchMemories`, `recentMemories`/digest, dedup pools, and profile attributes. Real facts stay `companion_id NULL` and shared across the subject's companions. `companion_id ON DELETE CASCADE`, with `memory_evidence`/`memory_history`/`event_memories` FKs upgraded to cascade so deletion can't deadlock.
-- **User control (v57):** `pinned` on memories/journal rows always surfaces first and is prune-exempt — `/remember`, `/memory pin`, the "Pin to memory" message context menu, and the dashboard memory panel (`my_memory_overview`, `memory_pin`, `memory_update`, `memory_forget`, `journal_pin`, `journal_forget`, `story_summary_save` — owner-scoped security-definer RPCs, hardened in v58: dead rows refuse edits, pinning promotes gated rows to active, empty summary save = reset). The server→DM digest is restricted by default: `recentMemories(..., { digestFor })` admits only server lore, the recipient's own facts, companion subjects, and members who set `share_facts_with_companion_owners` (`/share-facts`, default off).
+- **User control (v57):** `pinned` on memories/journal rows always surfaces first and is prune-exempt — `/memory remember`, the `/memory list` pin flag, the "Pin to memory" message context menu, and the dashboard memory panel (`my_memory_overview`, `memory_pin`, `memory_update`, `memory_forget`, `journal_pin`, `journal_forget`, `story_summary_save` — owner-scoped security-definer RPCs, hardened in v58: dead rows refuse edits, pinning promotes gated rows to active, empty summary save = reset). The server→DM digest is restricted by default: `recentMemories(..., { digestFor })` admits only server lore, the recipient's own facts, companion subjects, and members who set `share_facts_with_companion_owners` (`/memory share-facts`, default off).
 
 ---
 
@@ -271,13 +271,13 @@ Every durable message used to run 3+ sequential LLM calls inside `handleMessage`
 
 ### Per-guild LLM budget
 
-`brains.ts` wraps every constructed `OpenAI` client in `meteredClient` (`budget.ts`) — the Phase-1 `LlmClient` seam, so BYOK, env-fallback, and guarded-fetch paths all meter identically. Each `responses.create`/`chat.completions.create` first runs `chargeLlmCall` — an atomic `INSERT … ON CONFLICT` on `guild_usage (guild_id, day)` gated by `llm_calls < llm_daily_cap`. At/over cap → `BudgetExceeded`: the worker reschedules the job to next UTC midnight **without** burning an attempt; the reply path posts a one-per-channel-per-day notice instead of going silent. `cap = 0` blocks every call; `/limits` sets the cap; `/status` shows today's usage.
+`brains.ts` wraps every constructed `OpenAI` client in `meteredClient` (`budget.ts`) — the Phase-1 `LlmClient` seam, so BYOK, env-fallback, and guarded-fetch paths all meter identically. Each `responses.create`/`chat.completions.create` first runs `chargeLlmCall` — an atomic `INSERT … ON CONFLICT` on `guild_usage (guild_id, day)` gated by `llm_calls < llm_daily_cap`. At/over cap → `BudgetExceeded`: the worker reschedules the job to next UTC midnight **without** burning an attempt; the reply path posts a one-per-channel-per-day notice instead of going silent. `cap = 0` blocks every call; `/server limits` sets the cap; `/server status` shows today's usage.
 
 ### Ignored and quiet channels
 
-`server_settings.ignored_channels` (`/ignore-channel`, `/unignore-channel`, listed in `/memory-settings`) makes a channel fully invisible: `handleMessage` returns before `recordMessage`/`brainFor`/member writes, and the sweep filters archived rows from ignored channels.
+`server_settings.ignored_channels` (`/server ignore`, `/server unignore`, listed in `/server settings`) makes a channel fully invisible: `handleMessage` returns before `recordMessage`/`brainFor`/member writes, and the sweep filters archived rows from ignored channels.
 
-`server_settings.quiet_channels` (`/quiet-channel`, `/unquiet-channel`, v46) is the softer tier: companions can't reply there (the final reply gate in `handleMessage` checks it) and companion system cards — the "Awaken / Summon" notice and summon/dismiss announcements — are suppressed, but archiving, extraction, and member writes keep running. Both lists match a thread's `parentId`, so a listed channel's threads follow it (and a thread can be listed directly). Combined with `/companions-pause` (guild-wide `reply_enabled=0` while memory runs) and `/memory-pause` (both flags), admins get a graduated dial: quiet per channel → companions-pause server-wide → memory-pause (everything off) → ignored (invisible).
+`server_settings.quiet_channels` (`/server quiet`, `/server unquiet`, v46) is the softer tier: companions can't reply there (the final reply gate in `handleMessage` checks it) and companion system cards — the "Awaken / Summon" notice and summon/dismiss announcements — are suppressed, but archiving, extraction, and member writes keep running. Both lists match a thread's `parentId`, so a listed channel's threads follow it (and a thread can be listed directly). Combined with `/server companions-pause` (guild-wide `reply_enabled=0` while memory runs) and `/server pause` (both flags), admins get a graduated dial: quiet per channel → companions-pause server-wide → pause (everything off) → ignored (invisible).
 
 A second, structural exclusion sits one level up: **marketplace listing threads** (`isMarketplaceThread` — a thread whose parent is `MARKETPLACE_CHANNEL_ID`) return from `handleMessage` *after* house automod but *before* event construction, so comments are moderated but never archived, extracted, answered, or greeted — they're public discourse on the listing card, not memory material. Unlike ignored channels this can't be configured away, and it applies to every guild message in those threads including replies to the card itself.
 
@@ -335,7 +335,7 @@ On `GuildDelete`, `handleGuildDelete` runs `store.purgeGuild` — every guild-sc
 2. **Card (prose)** — `Brain.synthesizeProfile()` renders `bio` + `role_in_server` from the *post-diff* active attribute set plus stats/patterns/edges/events, gated on `attr_hash` (attribute rows + that same context). Unchanged render inputs → no re-render; facets assemble deterministically (`traits`/`interests` from active rows, `notableRelationships` from verified edges).
 3. **Dossier** — unchanged: independently-hashed narrative sections (below).
 
-Only `active` attributes render; `contested` surfaces in `/memory-triage`. `/profile` shows each facet's memory citations, `/memory-export` includes the attribute rows, and members without consent (`opted_in=0` or `opted_out=1`) have their profile *and* attribute rows deleted on the next pass. Profiles surface via `/profile` (self or admin) and are injected into `brain.reply()` for the author, @-mentioned users, and members referenced by name — where each person carries their active attributes with confidence buckets (`formatReplyProfile`), so weak facets render hedged rather than as flat assertions.
+Only `active` attributes render; `contested` surfaces in `/server triage`. `/profile` shows each facet's memory citations, `/memory export` includes the attribute rows, and members without consent (`opted_in=0` or `opted_out=1`) have their profile *and* attribute rows deleted on the next pass. Profiles surface via `/profile` (self or admin) and are injected into `brain.reply()` for the author, @-mentioned users, and members referenced by name — where each person carries their active attributes with confidence buckets (`formatReplyProfile`), so weak facets render hedged rather than as flat assertions.
 
 Members with ≥3 active memories or ≥50 messages additionally get a **dossier** — a set of independently-built sections stored under `facets_json.dossier.sections`, each rebuilt only when its own input hash changes:
 
@@ -380,8 +380,8 @@ Dedup runs at two tiers. The **hot path** uses the pg_trgm fallback in `saveMemo
               ▼
            [ active ]
           /         \
-  contradiction    /correct
-  arrives         command
+  contradiction    /memory correct
+  arrives                command
      │               │
      ▼               ▼
  [ contested ]   [ superseded ]
@@ -393,7 +393,7 @@ Dedup runs at two tiers. The **hot path** uses the pg_trgm fallback in `saveMemo
      ▼
   [ active ]  ←─── (or stays contested)
 
-  Any status → [ forgotten ]  (/forget command)
+  Any status → [ forgotten ]  (/memory forget command)
   Active, low confidence, 90 days old → [ quarantined ]
 ```
 

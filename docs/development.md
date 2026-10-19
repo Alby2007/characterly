@@ -206,12 +206,12 @@ The bot writes no local files — all state lives in Postgres. (`data/` is gitig
 1. Check that `GUILD_ID` is set correctly (or unset for all guilds).
 2. Confirm **Message Content Intent** is enabled in the Discord Developer Portal under Bot → Privileged Gateway Intents.
 3. Verify the bot has **Send Messages** and **Read Message History** permissions in the target channel.
-4. Check `SPEAK_THRESHOLD` — it defaults to 0.70. A direct mention scores 0.90, so it should always exceed the threshold. If it still doesn't reply, check that `reply_enabled` is 1 in `server_settings` (use `/memory-settings`).
+4. Check `SPEAK_THRESHOLD` — it defaults to 0.70. A direct mention scores 0.90, so it should always exceed the threshold. If it still doesn't reply, check that `reply_enabled` is 1 in `server_settings` (use `/server settings`).
 
 ### Memory not being extracted
 
 - The pre-filter in `perception.ts` is intentionally conservative. A message must be 12–2000 characters and match at least one durable-signal pattern. Short or casual messages are skipped.
-- Check the `memory_enabled` setting for the guild (`/memory-settings`).
+- Check the `memory_enabled` setting for the guild (`/server settings`).
 - Set `GUILD_ID` so you can confirm which server's messages are being processed.
 
 ### TypeScript errors

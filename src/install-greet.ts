@@ -22,7 +22,7 @@ export function buildInstallGreetPayload(siteUrl = config.siteUrl) {
     .setTitle("Welcome to Characterly")
     .setDescription(
       "Characterly awakens **one permanent personal companion per account** — they live here in your DMs, " +
-        "and you can summon them into any server that runs Characterly.\n\n" +
+        "and you can summon them into any server that runs Characterly — starting with our community server.\n\n" +
         "They remember your conversations (privately — only you can see them), keep a journal of your shared " +
         "moments, and grow a personality that's yours alone."
     )
@@ -36,6 +36,11 @@ export function buildInstallGreetPayload(siteUrl = config.siteUrl) {
       .setStyle(ButtonStyle.Primary),
     ...(siteUrl
       ? [new ButtonBuilder().setLabel("Get a free account").setStyle(ButtonStyle.Link).setURL(siteUrl)]
+      : []),
+    // The house is where the shelf, adoptee threads and announcements live —
+    // first-contact DM is the cheapest funnel touch we get.
+    ...(config.houseGuildId && (config.houseInviteUrl ?? siteUrl)
+      ? [new ButtonBuilder().setLabel("Join the Characterly server").setStyle(ButtonStyle.Link).setURL((config.houseInviteUrl ?? siteUrl)!)]
       : []),
   );
   return { embeds: [embed], components: [row] };

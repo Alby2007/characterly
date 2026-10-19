@@ -140,7 +140,7 @@ One row per curated fact, preference, episode, or piece of server lore. The core
 | `contested` | Contradicting evidence received; confidence frozen; `net_score` drives resolution. A standoff with no new signal in 30 days settles by its standing sign — support-leaning returns to `candidate`, contradiction-leaning to `quarantined` |
 | `quarantined` | Old candidate (>7 days) or old low-confidence active (>90 days, confidence <0.75) |
 | `superseded` | Replaced by a correction **or** merged as a duplicate; linked to the surviving row via `superseded_by` |
-| `forgotten` | Manually forgotten via `/forget`; never used in replies |
+| `forgotten` | Manually forgotten via `/memory forget`; never used in replies |
 
 ---
 
@@ -203,11 +203,11 @@ One row per guild. Controls pause state and retention.
 | `proactive_enabled` | INTEGER | **Legacy/inert (v13).** The proactive-speaking feature was removed when the bot became pure plumbing; the column remains for schema compatibility but nothing reads it to send a message |
 | `raw_retention_days` | INTEGER | Rolling window for raw message purge |
 | `announced_at` | TIMESTAMPTZ NULL | Set once the join disclosure card posts — the idempotency marker for `announceIfNeeded` |
-| `ignored_channels` | TEXT[] | Channels excluded from archiving, replies, and member writes — managed via `/ignore-channel` / `/unignore-channel` |
-| `quiet_channels` | TEXT[] | Channels where companions stay silent (no replies or system cards) while archiving/extraction continue — managed via `/quiet-channel` / `/unquiet-channel`; threads inherit their parent's listing |
-| `llm_daily_cap` | INTEGER | Per-guild LLM call budget per UTC day (default 1000; 0 = all calls blocked) — set via `/limits` |
+| `ignored_channels` | TEXT[] | Channels excluded from archiving, replies, and member writes — managed via `/server ignore` / `/server unignore` |
+| `quiet_channels` | TEXT[] | Channels where companions stay silent (no replies or system cards) while archiving/extraction continue — managed via `/server quiet` / `/server unquiet`; threads inherit their parent's listing |
+| `llm_daily_cap` | INTEGER | Per-guild LLM call budget per UTC day (default 1000; 0 = all calls blocked) — set via `/server limits` |
 
-Row is created with dormant defaults (`memory_enabled=0`, `reply_enabled=0`) on first sight of a guild — an admin enables observation via `/memory-resume`. Administrators can override via `/memory-pause`, `/memory-resume`, `/companions-pause` (`reply_enabled` only), and the `RAW_MESSAGE_RETENTION_DAYS` env variable.
+Row is created with dormant defaults (`memory_enabled=0`, `reply_enabled=0`) on first sight of a guild — an admin enables observation via `/server resume`. Administrators can override via `/server pause`, `/server resume`, `/server companions-pause` (`reply_enabled` only), and the `RAW_MESSAGE_RETENTION_DAYS` env variable.
 
 ---
 
@@ -438,7 +438,7 @@ Synthesized per-chatter profile cards, rebuilt only when their input fingerprint
 
 ### `profile_attributes`
 
-Structured person facets — the **source of truth** for profile cards; `summary`/`facets_json` are renderings of these rows. Provenance-backed: every facet cites the memories that justify it, so `/forget`/`supersede`/merge cascade immediately.
+Structured person facets — the **source of truth** for profile cards; `summary`/`facets_json` are renderings of these rows. Provenance-backed: every facet cites the memories that justify it, so `/memory forget`/`supersede`/merge cascade immediately.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -456,7 +456,7 @@ Structured person facets — the **source of truth** for profile cards; `summary
 
 `UNIQUE (guild_id, subject_id, field, value_norm)` — case/whitespace variants can't produce sibling rows. Indexes: `(guild_id, subject_id, status)` lookup; GIN trigram on `value_norm` for the polarity-gated near-dup fold (≥0.6 folds, 0.4–0.6 logs `attr_near_miss`).
 
-Extraction: deterministic regexes on `person_fact`/`person_preference` content run inside `buildProfiles` (also the lazy backfill); an LLM pass proposes `trait`/`interest`/`skill` gated on `source_hash`. Only `active` rows render anywhere; `contested` surfaces in `/memory-triage`.
+Extraction: deterministic regexes on `person_fact`/`person_preference` content run inside `buildProfiles` (also the lazy backfill); an LLM pass proposes `trait`/`interest`/`skill` gated on `source_hash`. Only `active` rows render anywhere; `contested` surfaces in `/server triage`.
 
 ---
 

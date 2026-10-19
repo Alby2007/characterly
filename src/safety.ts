@@ -1,5 +1,8 @@
+import OpenAI from "openai";
 import { Brain } from "./brain.js";
+import { meteredClient } from "./budget.js";
 import { config } from "./config.js";
+import type { MemoryStore } from "./database.js";
 
 // Marketplace safety surface. Three mechanisms live here:
 //   1. LISTING_BLOCKLIST — deterministic first line on authored listing text
@@ -130,4 +133,22 @@ export function safetyBrain(): Brain | null {
     _safetyBrain = config.groqKey ? new Brain(config.groqKey, config.safetyModel, config.groqBaseUrl) : null;
   }
   return _safetyBrain;
+}
+
+// The moderation gate (screenListingFields) deliberately stays on the
+// unmetered brain — a spend cap should never refuse a publish-time check.
+// Reply screens are different: they fire once per adopted-companion turn, so
+// they ride the fleet meter like every other hosted call and stay inside
+// the cap that bounds operator spend.
+let _meteredSafetyBrain: Brain | null | undefined;
+export function meteredSafetyBrain(store: MemoryStore, getCap: () => Promise<number>): Brain | null {
+  if (!config.groqKey) return null;
+  if (_meteredSafetyBrain === undefined) {
+    _meteredSafetyBrain = new Brain(
+      config.groqKey, config.safetyModel, config.groqBaseUrl,
+      meteredClient(new OpenAI({ apiKey: config.groqKey, baseURL: config.groqBaseUrl }),
+        { guildId: "hosted:global", store, getCap }),
+    );
+  }
+  return _meteredSafetyBrain;
 }

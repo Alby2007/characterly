@@ -156,6 +156,17 @@ async function handleAvatarGc(request: Request, env: Env): Promise<Response> {
       if (name) referenced.add(name);
     }
   }
+  // Persona-version snapshots embed the same hosted URL inside persona_json —
+  // nothing reads them today, but if a rollback ever restores one its avatar
+  // must not have been collected out from under it.
+  {
+    const res = await fetch(`${base}/rest/v1/companion_persona_versions?select=persona_json&persona_json-%3E%3EavatarUrl=like.*/${AVATAR_BUCKET}/*`, { headers: auth });
+    if (!res.ok) return new Response("reference lookup failed", { status: 502 });
+    for (const row of (await res.json()) as Array<{ persona_json: { avatarUrl?: string | null } | null }>) {
+      const name = row.persona_json?.avatarUrl?.split(`/${AVATAR_BUCKET}/`)[1];
+      if (name) referenced.add(name);
+    }
+  }
 
   const cutoff = Date.now() - AVATAR_GC_MIN_AGE_MS;
   const stale: string[] = [];

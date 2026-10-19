@@ -558,6 +558,16 @@ test("onboarding UX: bare greeting guard, welcome/draft/awakened cards, proactiv
   assert.match(awakenedPayload.embeds[0].data.title ?? "", /Locked In/i);
   assert.equal(awakenedPayload.components[0].components.length, 1, "only Summon to server button (no Edit button once locked)");
 
+  // No mutual guilds → the awakened card becomes the server funnel: join
+  // button + house copy instead of a summon hint that leads nowhere.
+  const noGuildPayload = buildAwakenedCompanionPayload(
+    makeCompanion(7, "u-bob", "Vex"), "Bob", [], "https://discord.gg/test",
+  );
+  assert.match(noGuildPayload.embeds[0].data.description ?? "", /Characterly server/);
+  const funnelBtn = noGuildPayload.components[0].components[0] as { data: { url?: string; label?: string } };
+  assert.equal(funnelBtn.data.url, "https://discord.gg/test");
+  assert.match(funnelBtn.data.label ?? "", /Join the Characterly server/);
+
   // 3. Un-onboarded user running /companion action:summon in a server proactively receives a DM
   //    welcome card + ephemeral reply with inline action buttons.
   const dmsSent: any[] = [];

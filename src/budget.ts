@@ -40,7 +40,7 @@ export function isBudgetExceeded(error: unknown): error is BudgetExceeded {
  * charges the guild's daily counter first. Over cap → BudgetExceeded before
  * the request leaves the process. The cap is re-read per call through
  * getCap() (settings() is cached 60s — acceptable softness for a daily bound,
- * and it means /limits takes effect without a resolver invalidation).
+ * and it means /server limits takes effect without a resolver invalidation).
  */
 export function meteredClient(inner: LlmClient, opts: {
   guildId: string;
