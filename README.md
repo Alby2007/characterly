@@ -4,6 +4,8 @@ A Discord companion & social-memory platform where every person awakens **one pe
 
 In servers, the **Characterly** bot is invisible plumbing and a system announcer — it never speaks in character. Instead, it routes conversations across summoned companions, posts their replies under their own name and avatar via Discord webhooks, bridges private DM subtext with group server activity, and maintains an inspectable, consent-gated memory and relationship graph.
 
+**Coming from somewhere else?** `/companion import` reads standard character cards (`.png`/`.json`) — and a `.jsonl` chat export carries the history over, so a character you already have shows up remembering you. Imports land private on your roster until you choose to publish them.
+
 ---
 
 ## Core Concepts

@@ -128,6 +128,7 @@
         <li><div class="k">Where they live</div><div class="v">One home server, and anywhere you bring them.</div></li>
         <li><div class="k">Awakened</div><div class="v">One per account, shaped by your first chat.</div></li>
         <li><div class="k">Adopted</div><div class="v">Off the shelf, each with its own memory of you.</div></li>
+        <li><div class="k">Arriving from elsewhere</div><div class="v">Standard character cards import as-is — persona and history both.</div></li>
         <li><div class="k">What they remember</div><div class="v">Only people who have said yes.</div></li>
       </ul>
     </div>
@@ -269,6 +270,23 @@
       </ol>
     </section>
 
+    <!-- ── Bring your character ───────────────────────────────────────── -->
+    <section class="section" id="bring">
+      <div class="section-head center">
+        <p class="label bare rv">Moving day</p>
+        <h2 class="rv" style="--d:1">Already have a character? <em>Bring them.</em></h2>
+        <p class="rv" style="--d:2">
+          The card format is the standard one — drop a <code>.png</code> or <code>.json</code>
+          character card on <code>/companion import</code> and they're here, private to you
+          unless you publish them. Attach a <code>.jsonl</code> chat export too and they
+          remember the history you already have — the first hello isn't a first meeting.
+        </p>
+        <div class="rv" style="--d:3; margin-top: 18px">
+          <div class="slash" style="display:inline-flex">/companion <span class="opt">import</span><span class="opt">card_file:&nbsp;wren.png</span><span class="caret"></span></div>
+        </div>
+      </div>
+    </section>
+
     <!-- ── What it's like ─────────────────────────────────────────────── -->
     <section class="section" id="inside">
       <div class="section-head">
@@ -405,6 +423,10 @@
         <details>
           <summary>What's the difference between awakened and adopted?<span class="pm" aria-hidden="true"></span></summary>
           <p>An awakened companion is shaped by your first conversation in DMs — nobody else has one like it. Adopted companions come off the community shelf in <code>#characters</code>: someone designed them, you take home your own version, and it remembers you from the first hello.</p>
+        </details>
+        <details>
+          <summary>Can I bring a character I already have?<span class="pm" aria-hidden="true"></span></summary>
+          <p>Yes — <code>/companion import</code> reads standard character cards (<code>.png</code> or <code>.json</code>), the same format card-sharing tools use. The imported companion is private to your roster unless you publish it, and a <code>.jsonl</code> chat export can carry your history over so they remember you from the first hello.</p>
         </details>
         <details>
           <summary>Can I have more than one companion?<span class="pm" aria-hidden="true"></span></summary>
