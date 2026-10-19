@@ -10,6 +10,7 @@ import { uploadAvatarFile } from "./avatars.js";
 import { SEED_LISTINGS } from "./seed-personas.js";
 import { sendAsCompanionInChannel } from "./webhooks.js";
 import type { MemoryStore, OpsStats } from "./database.js";
+import type { FleetCapBreakdown } from "./fleet-cap.js";
 import type { Companion, CompanionAdoption, CompanionListing, GuildDeployment } from "./types.js";
 
 // ── House ops ────────────────────────────────────────────────────────────────
@@ -259,6 +260,9 @@ export interface OpsDeps {
   /** Mean event-loop lag in ms since the last sample (index.ts owns the histogram). */
   lagMs: () => number;
   gitSha: string | null;
+  /** Live fleet-cap breakdown for /ops stats — undefined where the provider
+   *  isn't wired (tests, a partial deps object). */
+  fleetCap?: () => Promise<FleetCapBreakdown>;
 }
 
 // Module deps for handleOpsCommand (commands.ts can't receive them) — index.ts
@@ -2391,11 +2395,20 @@ function healthEmbed(h: HostHealth): EmbedBuilder {
  *  per step so re-prompts don't inflate), token flow, churn, and the top
  *  durable counters. Parallel branches (summon/adopt/link, house join→verify)
  *  get their own line rather than pretending to be one linear funnel. */
-function statsEmbed(s: OpsStats): EmbedBuilder {
+function statsEmbed(s: OpsStats, fleet?: FleetCapBreakdown): EmbedBuilder {
   const f = (e: string) => s.funnel[e]?.users ?? 0;
   const step = (label: string, n: number, prev?: number) =>
     `${label} ${n}${prev !== undefined && prev > 0 ? ` (${Math.round(100 * n / prev)}%)` : ""}`;
   const counters = s.topCounters.slice(0, 10).map(c => `${c.name} ${c.total}`).join("\n") || "(no counter data yet)";
+  // During a day-ratchet hold the formula equation doesn't sum to the enforced
+  // cap (e.g. a cancellation wave leaves effective above base + today's bonus)
+  // — say so instead of printing an equation that doesn't add up.
+  const fleetValue = fleet && `${fleet.base.toLocaleString("en-US")} base + ${fleet.bonus.toLocaleString("en-US")} bonus` +
+    (fleet.effective === fleet.computed
+      ? ` = **${fleet.effective.toLocaleString("en-US")}**`
+      : ` = ${fleet.computed.toLocaleString("en-US")} today, day-ratchet holds **${fleet.effective.toLocaleString("en-US")}**`) +
+    ` · ${fleet.premiumCount} premium subs · ${fleet.usedToday.toLocaleString("en-US")} used` +
+    (fleet.effective > 0 ? ` (${Math.round(100 * fleet.usedToday / fleet.effective)}%)` : "");
   return new EmbedBuilder()
     .setTitle("Characterly stats — last 7 days")
     .addFields(
@@ -2405,6 +2418,7 @@ function statsEmbed(s: OpsStats): EmbedBuilder {
         `summon ${f("summon")} · adopt ${s.adopted} · linked ${s.linkClaims} · dead-end summons ${f("summon_deadend")}\n` +
         `${step("house join", f("house_join"))} → ${step("verified", f("verified"), f("house_join"))}` },
       ...(s.tokens ? [{ name: "Tokens", value: `${s.tokens.spent} spent by ${s.tokens.spenders} accounts · ${s.tokens.purchased} pack-bought · ${s.tokens.premium} premium` }] : []),
+      ...(fleetValue ? [{ name: "Fleet cap", value: fleetValue }] : []),
       { name: "Churn", value: `${s.deauthorized} uninstalls · ${s.dropped} dropped adoptions · ${f("guild_added")} guilds added / ${f("guild_purged")} purged` },
       { name: "Top counters", value: `\`\`\`\n${counters}\n\`\`\`` },
     );
@@ -2445,7 +2459,8 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
   if (action === "stats") {
     await interaction.deferReply({ ephemeral: true });
     const s = await deps.store.opsStats();
-    return interaction.editReply({ embeds: [statsEmbed(s)] });
+    const fleet = await deps.fleetCap?.().catch(() => null);
+    return interaction.editReply({ embeds: [statsEmbed(s, fleet ?? undefined)] });
   }
 
   if (action === "logs") {

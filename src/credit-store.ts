@@ -230,6 +230,19 @@ export class CreditStore {
     return Number(rows[0]?.llm_calls ?? 0);
   }
 
+  /** Active premium subscriptions — the revenue signal behind the fleet-cap
+   *  bonus (src/fleet-cap.ts). Plan flips are webhook-driven, so this is the
+   *  durable count; pack purchases deliberately don't count (one-off revenue
+   *  isn't runway). 0 without the credits schema — a self-hoster sets their
+   *  own static cap, and the provider falls back to base on a read failure. */
+  async premiumAccountCount(): Promise<number> {
+    if (!this.creditsEnabled) return 0;
+    const rows = await this.sql<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM web_profiles WHERE plan = 'premium'
+    `;
+    return Number(rows[0]?.n ?? 0);
+  }
+
   /** Per-user bot toggles — the site writes via upsert_my_settings; defaults
    * cover users who never open the settings page. */
   private botSettingsCache = new Map<string, { value: { c2cEnabled: boolean; lowCreditAlerts: boolean }; at: number }>();

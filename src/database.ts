@@ -5064,5 +5064,6 @@ export class MemoryStore {
   refundCredits(...a: Parameters<CreditStore["refundCredits"]>) { return this.credits.refundCredits(...a); }
   purchaseCredits(...a: Parameters<CreditStore["purchaseCredits"]>) { return this.credits.purchaseCredits(...a); }
   hostedUsageToday() { return this.credits.hostedUsageToday(); }
+  premiumAccountCount() { return this.credits.premiumAccountCount(); }
   userBotSettings(...a: Parameters<CreditStore["userBotSettings"]>) { return this.credits.userBotSettings(...a); }
 }

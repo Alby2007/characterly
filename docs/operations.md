@@ -131,10 +131,10 @@ SELECT kind, sum(delta) FROM credit_ledger
 | Guild dormant out of nowhere | `guild_keys` row undecryptable or removed | Log line `guild_keys decrypt failed` — scope goes dormant until a key is re-set |
 | Website OAuth/ magic links fail | Redirect allowlist missing the origin | Add `https://<origin>/**` under Auth → URL Configuration (see [website.md](website.md)) |
 | "Link Discord" button errors | Manual linking disabled | Auth → Sign In/Providers → allow manual linking |
-| Users get "out of tokens" / capacity notice | Credits spent or `hosted:global` breaker tripped | Balance: `credit_ledger` query above; breaker: `guild_usage` row `hosted:global` vs `HOSTED_DAILY_LLM_CAP` — raise the env var or wait for UTC midnight |
+| Users get "out of tokens" / capacity notice | Credits spent or `hosted:global` breaker tripped | Balance: `credit_ledger` query above; breaker: `guild_usage` row `hosted:global` vs the **effective** cap (`/ops stats` → Fleet cap) — raise `HOSTED_DAILY_LLM_CAP`/`FLEET_CAP_*` or wait for UTC midnight |
 | Companion ignores other companions | `c2c_enabled` off for the replying companion's owner | `SELECT * FROM user_bot_settings WHERE discord_user_id = '<owner snowflake>'` — owner toggles on the dashboard |
 | Paid, no tokens/plan | `stripe-webhook` edge fn missing `STRIPE_WEBHOOK_SECRET`, or `grant_pack` rejected | Check Stripe → Developers → Webhooks `we_…` delivery log for the session id; replay the event there. Pack grants dedupe on `credit_ledger.stripe_ref`, so replays are safe. |
-| Free users blocked while premium works | `hosted:global` past ~90% of `HOSTED_DAILY_LLM_CAP` | Intended shedding — free lane pauses under fleet pressure. Raise the cap or wait for UTC midnight. |
+| Free users blocked while premium works | `hosted:global` past ~90% of the effective cap | Intended shedding — free lane pauses under fleet pressure. Check `/ops stats` → Fleet cap: if premium growth isn't lifting the bonus, the cap envs or the premium-count query are the suspects. |
 
 ## Billing (Stripe)
 
@@ -147,6 +147,23 @@ SELECT kind, sum(delta) FROM credit_ledger
 - **Pack map** is hardcoded twice, keyed differently per function: `create-checkout` maps product name → catalog `price_…`, `stripe-webhook` maps `metadata.checkout_kind` (`PACK_META`) → tokens, with the legacy `PACK_LINKS` payment-link map kept so sessions minted before the switch still classify. Retired `PACK_META` keys stay mapped too — a session minted just before a resize fulfils at the amount it was sold at. New packs need all three + a dashboard button.
 - **Error contract**: PostgREST/RPC errors throw → 500 → Stripe retries; only unresolvable or duplicate events ack quietly (and log). supabase-js never throws on DB errors itself — every call goes through `must()`.
 - **Plan transitions**: `active`/`trialing` → premium; `canceled`/`unpaid`/`paused`/`incomplete_expired`/deleted → free; `past_due`/`incomplete` keep perks during Stripe's retry window. Deactivation matches only the stored `stripe_subscription_id` — a stale/duplicate sub ending can't strip a plan another sub pays for. Subscription events are verified by price id — `PREMIUM_PRICE_IDS` covers every recurring price on the premium product (monthly + yearly), so a future interval just needs its id added there.
+
+## Fleet capacity (revenue-aware)
+
+`HOSTED_DAILY_LLM_CAP` is the **base** cap — a floor, not the whole budget. `src/fleet-cap.ts` adds a premium-funded bonus on top so a viral spike that converts grows the free lane instead of shedding it:
+
+```
+effective = HOSTED_DAILY_LLM_CAP + min(bonus, FLEET_CAP_MAX_BONUS)
+bonus   = floor(premiumSubs * FLEET_PREMIUM_DAILY_REVENUE_USD / FLEET_COST_PER_HOSTED_CALL_USD * FLEET_CAP_SAFETY_FACTOR)
+```
+
+- **Only revenue raises the cap** — raw usage, pack purchases, and one-off payments never do. `premiumSubs` is `count(*) FROM web_profiles WHERE plan='premium'`, so cancellations/refunds self-correct within the 60s recompute TTL.
+- **Every consumer reads the same number** — the `hosted:global` hard cap (`chargeLlmCall`), the 90% free-lane shed point (`chargeHostedTurn`), the hosted safety screen, and the `hosted:background` share all pull `fleetCap.getEffective()`. `HOSTED_BACKGROUND_SHARE` applies to the *effective* cap, so background cognition scales with the fleet without starving live chat.
+- **Defaults**: revenue $0.22/sub/day (yearly-normalized — `web_profiles` has no interval column, so the conservative end is the default), cost $0.0005/call, safety 0.5, bonus ceiling 60k. 50 subs ≈ +11k calls/day.
+- **Setting `FLEET_COST_PER_HOSTED_CALL_USD`**: take your real blended $/call across the hosted models (reply + ingest + verify + vision + safety), round *up*, and re-check when models or providers change. Mispricing eats margin inside the safety factor; it can't overspend the ceiling.
+- **Intraday ratchet**: the cap may grow mid-day as subs land but never shrinks before UTC midnight (the `guild_usage` day boundary) — a cancellation wave can't drop the cap under spend already committed. `HOSTED_DAILY_LLM_CAP=0` is a deliberate freeze and stays frozen.
+- **Failure mode is "off," never "unguarded"** — a `web_profiles` read failure yields bonus 0 → base cap, and `fleet.cap_recompute_error` increments. Watch `fleet.cap_adjusted` (fires on every effective-cap change) and the `/ops stats` **Fleet cap** field: `base + bonus = effective · premium subs · used today (%)`.
+- **Multi-instance caveat**: the day-ratchet is in-process memory (single bot process today). If the bot ever shards, each shard ratchets independently for a few minutes — enforcement lives in the shared `chargeLlmCall` row lock, so caps can never overspend, only shed slightly differently.
 
 ## Secrets & rotation
 

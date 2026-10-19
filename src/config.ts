@@ -79,6 +79,20 @@ const env = z.object({
   // extraction, journals, recaps, triage, nightly maintenance) may use — the
   // rest is reserved so live chat never sheds because jobs ate the budget.
   HOSTED_BACKGROUND_SHARE: z.coerce.number().min(0).max(1).default(0.4),
+  // Revenue-aware fleet bonus (src/fleet-cap.ts): active premium subs fund
+  // extra hosted calls on top of HOSTED_DAILY_LLM_CAP so a converting viral
+  // spike grows the free lane instead of shedding it. Usage alone never
+  // raises the cap. Blended daily revenue per sub defaults to the yearly
+  // rate ($79.99/365 ≈ $0.22) — web_profiles has no plan interval, so the
+  // conservative end is the honest default.
+  FLEET_PREMIUM_DAILY_REVENUE_USD: z.coerce.number().min(0).default(0.22),
+  // Operator estimate of blended cost per hosted LLM call — bias high and
+  // revisit; the safety factor + MAX_BONUS ceiling keep a bad guess bounded.
+  FLEET_COST_PER_HOSTED_CALL_USD: z.coerce.number().min(0).default(0.0005),
+  FLEET_CAP_SAFETY_FACTOR: z.coerce.number().min(0).max(1).default(0.5),
+  // Absolute ceiling on the bonus — effective cap can never exceed
+  // HOSTED_DAILY_LLM_CAP + this, whatever the formula says.
+  FLEET_CAP_MAX_BONUS: z.coerce.number().int().min(0).default(60_000),
   // DM the user when a post-spend balance drops to this or below (once/day).
   LOW_CREDIT_ALERT: z.coerce.number().int().min(0).default(5),
   // Hosted onboarding turns that are free before each further draft turn
@@ -227,6 +241,10 @@ export const config = {
   premiumDailyCredits: env.PREMIUM_DAILY_CREDITS,
   hostedDailyLlmCap: env.HOSTED_DAILY_LLM_CAP,
   hostedBackgroundShare: env.HOSTED_BACKGROUND_SHARE,
+  fleetPremiumDailyRevenueUsd: env.FLEET_PREMIUM_DAILY_REVENUE_USD,
+  fleetCostPerHostedCallUsd: env.FLEET_COST_PER_HOSTED_CALL_USD,
+  fleetCapSafetyFactor: env.FLEET_CAP_SAFETY_FACTOR,
+  fleetCapMaxBonus: env.FLEET_CAP_MAX_BONUS,
   lowCreditAlert: env.LOW_CREDIT_ALERT,
   linkPromptCooldownMs: env.LINK_PROMPT_COOLDOWN_MS,
   onboardingFreeTurns: env.ONBOARDING_FREE_TURNS,

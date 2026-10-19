@@ -40,6 +40,7 @@ import { errorText, logError, redactSecrets, registerSecret, validateLlmKey } fr
 import { announceIfNeeded, handleGuildDelete } from "./guild-lifecycle.js";
 import { isSafeUrl } from "./tools.js";
 import { BudgetExceeded, backgroundCapped, meteredClient, runAsBackground } from "./budget.js";
+import { createFleetCap } from "./fleet-cap.js";
 import { runExtractJob, type ExtractJobPayload } from "./extract-job.js";
 import { runJournalJob, type JournalJobPayload } from "./journal-job.js";
 import { runSummaryJob, SUMMARY_REPLY_INTERVAL, type SummaryJobPayload } from "./summary-job.js";
@@ -158,16 +159,33 @@ const { brainFor, brainForUser, invalidate: invalidateBrain, isHostedScope, isHo
       : (await store.settings(scopeId, config.rawMessageRetentionDays)).llmDailyCap,
   }), {
     guildId: "hosted:global", store,
-    getCap: async () => config.hostedDailyLlmCap,
+    getCap: () => fleetCap.getEffective(),
   }), {
     store,
-    getCap: async () => Math.floor(config.hostedDailyLlmCap * config.hostedBackgroundShare),
+    getCap: async () => Math.floor(await fleetCap.getEffective() * config.hostedBackgroundShare),
   }),
+});
+// Revenue-aware fleet cap (src/fleet-cap.ts): active premium subscriptions
+// fund an additive bonus on the static base so a converting viral spike grows
+// the free lane instead of shedding it. `store` resolves lazily like the deps
+// above — assigned in init(), long before any cap read can run.
+const fleetCap = createFleetCap({
+  store: {
+    premiumAccountCount: () => store.premiumAccountCount(),
+    hostedUsageToday: () => store.hostedUsageToday(),
+  },
+  cfg: {
+    baseDailyCap: config.hostedDailyLlmCap,
+    premiumDailyRevenueUsd: config.fleetPremiumDailyRevenueUsd,
+    costPerHostedCallUsd: config.fleetCostPerHostedCallUsd,
+    safetyFactor: config.fleetCapSafetyFactor,
+    maxBonusCalls: config.fleetCapMaxBonus,
+  },
 });
 // Adopted-reply screens on the hosted lane are operator spend like every
 // other hosted call — they charge the fleet breaker (never a scope cap: the
 // replying user's tokens already paid for the turn).
-const hostedSafety = () => meteredSafetyBrain(store, async () => config.hostedDailyLlmCap);
+const hostedSafety = () => meteredSafetyBrain(store, () => fleetCap.getEffective());
 // Vision can live on a different provider than the main key (e.g. Gemini's
 // free tier, since Groq rotated its vision models off) — a second client is
 // built only when the creds actually differ.
@@ -956,7 +974,7 @@ const extractDeps = {
   get contestModel() { return config.contestModel; },
   get imageMaxBytes() { return config.imageMaxBytes; },
   get dmLlmDailyCap() { return config.dmLlmDailyCap; },
-  get hostedDailyCap() { return config.hostedDailyLlmCap; },
+  get hostedDailyCap() { return fleetCap.current(); },
   getAliases: (guildId: string) => guildLookups(guildId).then(e => e.map),
   invalidateLookups: (guildId: string) => { lookupCache.delete(guildId); },
 };
@@ -1035,6 +1053,7 @@ const opsDeps: OpsDeps = {
   dbPing: async () => { const t = Date.now(); await sql`SELECT 1`; return Date.now() - t; },
   lagMs: () => { const ms = lagHistogram.mean / 1e6; lagHistogram.reset(); return ms; },
   gitSha: null,
+  fleetCap: () => fleetCap.describe(),
 };
 
 /** Prompt memory recall: the static spine (relevantMemories — top-N by
@@ -1502,7 +1521,7 @@ async function runCompanionTurn(opts: {
   if (hostedDm) {
     const charge = await chargeHostedTurn(store, {
       payerId: userId, cost: 2, reason: "dm_turn", refundReason: "dm_turn_refund",
-      premium: account?.plan === "premium", hostedDailyLlmCap: config.hostedDailyLlmCap,
+      premium: account?.plan === "premium", hostedDailyLlmCap: await fleetCap.getEffective(),
     });
     if (!charge.ok) {
       replyThrottle.refund(scope, userId);
@@ -1575,7 +1594,7 @@ async function runCompanionTurn(opts: {
     // too) — so it counts against the hosted:global breaker, not just the
     // scope cap.
     const meteredVision = visionClient
-      ? meteredClient(meteredClient(visionClient, { guildId: scope, store, getCap: async () => config.dmLlmDailyCap }), { guildId: "hosted:global", store, getCap: async () => config.hostedDailyLlmCap })
+      ? meteredClient(meteredClient(visionClient, { guildId: scope, store, getCap: async () => config.dmLlmDailyCap }), { guildId: "hosted:global", store, getCap: () => fleetCap.getEffective() })
       : undefined;
     // Vision descriptions cache on the archive row — whichever pass (extract
     // job or reply) describes the attachments first is reused by every other.
@@ -1838,7 +1857,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   // client is operator spend but still counts against this guild's daily cap —
   // metered here (undefined → describeImage uses the brain's metered client).
   const meteredVision = visionClient
-    ? meteredClient(meteredClient(visionClient, { guildId: event.guildId, store, getCap: async () => (await store.settings(event.guildId, config.rawMessageRetentionDays)).llmDailyCap }), { guildId: "hosted:global", store, getCap: async () => config.hostedDailyLlmCap })
+    ? meteredClient(meteredClient(visionClient, { guildId: event.guildId, store, getCap: async () => (await store.settings(event.guildId, config.rawMessageRetentionDays)).llmDailyCap }), { guildId: "hosted:global", store, getCap: () => fleetCap.getEffective() })
     : undefined;
   const describeImages = (list: Array<AttachmentMeta & { contentType: string }>, activeBrain: Brain) =>
     Promise.all(list.map(async a => {
@@ -1978,7 +1997,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     payerPremium = payerAccount.plan === "premium";
     const charge = await chargeHostedTurn(store, {
       payerId, cost: senderCompanion ? 1 : 2, reason: senderCompanion ? "c2c" : "guild_turn",
-      refundReason: "guild_turn_refund", premium: payerPremium, hostedDailyLlmCap: config.hostedDailyLlmCap,
+      refundReason: "guild_turn_refund", premium: payerPremium, hostedDailyLlmCap: await fleetCap.getEffective(),
     });
     if (!charge.ok) {
       replyThrottle.refund(event.guildId, throttleActor);
