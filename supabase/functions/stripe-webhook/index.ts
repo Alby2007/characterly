@@ -17,6 +17,7 @@
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 import {
+  clawbackArgs,
   classifyCheckout,
   classifySubscription,
   isUuid,
@@ -130,16 +131,17 @@ Deno.serve(async (request) => {
           if (!updated?.length) console.error(`checkout ${s.id}: no web_profiles row for ${accountId}`);
           if (action.bonusTokens) {
             // Per-account ref: redelivery dedupes AND cancel→resubscribe can't
-            // re-farm the bonus inside the window.
+            // re-farm the bonus inside the window. Its own ledger kind: never
+            // mistaken for a pack by a refund clawback.
             const res = await must(
-              sb.rpc("grant_pack", { p_account: accountId, p_tokens: action.bonusTokens, p_ref: `launch-bonus:${accountId}` }),
+              sb.rpc("grant_pack", { p_account: accountId, p_tokens: action.bonusTokens, p_ref: `launch-bonus:${accountId}`, p_kind: "grant_bonus" }),
               "launch bonus",
             );
             if (!res?.ok) console.error(`launch bonus rejected for ${accountId}: ${JSON.stringify(res)}`);
           }
         } else {
           const res = await must(
-            sb.rpc("grant_pack", { p_account: accountId, p_tokens: action.tokens, p_ref: action.ref }),
+            sb.rpc("grant_pack", { p_account: accountId, p_tokens: action.tokens, p_ref: action.ref, p_payment_intent: action.paymentIntent }),
             "grant_pack",
           );
           if (!res?.ok) console.error(`grant_pack rejected ${action.ref}: ${JSON.stringify(res)}`);
@@ -190,11 +192,12 @@ Deno.serve(async (request) => {
       }
 
       case "charge.refunded": {
-        // clawback_pack debits the account's newest unrefunded pack and writes
-        // the refund ledger row under the account lock — tokens a buyer
-        // already spent drive the balance negative so the next grants repay
-        // the debt. With no purchase left to claw it still writes the
-        // zero-delta audit row (e.g. subscription charge refunds).
+        // clawback_pack debits exactly the pack this charge paid for (matched
+        // on payment_intent; pre-v60 packs by grant time), prorated by
+        // amount_refunded, under the account lock — tokens a buyer already
+        // spent become allowance debt the next daily grants pay down. With no
+        // matching pack it still writes the zero-delta audit row (e.g.
+        // subscription charge refunds).
         const ch = event.data.object;
         const acct = ch.customer
           ? await must(
@@ -207,7 +210,7 @@ Deno.serve(async (request) => {
           break;
         }
         const res = await must(
-          sb.rpc("clawback_pack", { p_account: acct.id, p_charge: ch.id }),
+          sb.rpc("clawback_pack", clawbackArgs(acct.id, ch as never)),
           "clawback_pack",
         );
         if (!res?.ok) console.error(`clawback_pack rejected ${ch.id}: ${JSON.stringify(res)}`);

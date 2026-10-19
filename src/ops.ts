@@ -2127,14 +2127,14 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
           ? `The full policy is at [${config.siteUrl.replace(/\/+$/, "").replace(/^https?:\/\//, "")}/privacy](${PRIVACY_URL}). `
           : "") +
         "The day-to-day version:\n\n" +
-        "• **Servers see nothing until enabled** — no messages are archived until a server admin runs `/memory-resume`\n" +
+        "• **Servers see nothing until enabled** — no messages are archived until a server admin runs `/server resume`\n" +
         "• **Personal memory is opt-in** — derived facts, profile attributes, and relationship notes only exist for members who run `/profile-build` or `/opt-in`\n" +
         "• **Retention is bounded** — raw messages are held 30 days, then permanently deleted\n" +
         "• **Companion memory is yours** — your bond memories stay private to you and never leak into servers or other users' companions\n" +
         "• **Story stays with the story** — companions keep a running recap of your chat plus *story facts* scoped to themselves; roleplay never becomes a real fact about you and never reaches your other companions\n" +
-        "• **Your facts don't travel unless you say so** — a companion's private DM digest to its owner carries server lore and the owner's own data only; facts about you cross only if you enable `/share-facts`\n" +
+        "• **Your facts don't travel unless you say so** — a companion's private DM digest to its owner carries server lore and the owner's own data only; facts about you cross only if you enable `/memory share-facts`\n" +
         "• **Adoptee chats are private, not staff-blind** — companions you adopt chat in private `#adoptees` threads; unlike DMs, Discord private threads are also visible to server admins (safety + support only, no automod inside — mods can't see them)\n" +
-        "• **You hold the delete key** — `/opt-out` wipes derived data, `/forget` removes one memory, `/remember` pins one, `/companion story` edits the recap, `/memory-export` shows everything held — and the dashboard's memory panel does the same on the web\n" +
+        "• **You hold the delete key** — `/opt-out` wipes derived data, `/memory forget` removes one memory, `/memory remember` pins one, `/companion story` edits the recap, `/memory export` shows everything held — and the dashboard's memory panel does the same on the web\n" +
         "• **Removing the bot wipes the server** — every row it stored there goes with it",
       )],
   },
@@ -2199,7 +2199,7 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
           "**How do I edit a listing?**\n" +
           "Right on its card — the buttons let you rewrite the persona, swap the cover art (that's the pretty picture in gallery view), and tag up to 3 genres so browsers can find it.\n\n" +
           "**Why is a companion ignoring me?**\n" +
-          "A few possibilities: an admin may have quieted the channel (`/quiet-channel` silences them but they still observe), paused companions server-wide, or ignored the channel entirely — or you're out of tokens. The dashboard shows your balance.\n\n" +
+          "A few possibilities: an admin may have quieted the channel (`/server quiet` silences them but they still observe), paused companions server-wide, or ignored the channel entirely — or you're out of tokens. The dashboard shows your balance.\n\n" +
           "**What do the stars and comments do?**\n" +
           "They keep the shelf honest — rate the ones you've adopted, comment on the listing thread, and the good ones bubble up as **Top Rated**. Report anything off and staff takes a look.\n\n" +
           "**What happens if I drop one?**\n" +
@@ -2209,11 +2209,11 @@ export const RESOURCE_POSTS: Array<{ channel: string; version: number; embeds():
         .setTitle("Privacy & your account")
         .setDescription(
           "**Can it read my messages?**\n" +
-          "Only where admins allow it. Servers see nothing until someone runs `/memory-resume`, facts about *you* only form after you opt in (`/profile-build` or `/opt-in`), and raw messages are deleted after 30 days anyway.\n\n" +
+          "Only where admins allow it. Servers see nothing until someone runs `/server resume`, facts about *you* only form after you opt in (`/profile-build` or `/opt-in`), and raw messages are deleted after 30 days anyway.\n\n" +
           "**Who sees my companion's memories?**\n" +
           "Just you. Whatever your companion learns in your DMs or your private **#adoptees** thread stays scoped to that conversation — it never leaks into servers or to other people's versions of the same character.\n\n" +
           "**How do I delete my data?**\n" +
-          "`/opt-out` wipes everything derived about you, `/forget` removes one specific memory, and the dashboard's Delete section closes the whole account if you want a clean break.\n\n" +
+          "`/opt-out` wipes everything derived about you, `/memory forget` removes one specific memory, and the dashboard's Delete section closes the whole account if you want a clean break.\n\n" +
           "**Something broken?**\n" +
           "**#support-ticket** gets a human. Got an idea instead? **#suggest-a-feature** — we actually read it.",
         ),

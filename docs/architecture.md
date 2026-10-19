@@ -287,7 +287,7 @@ A second, structural exclusion sits one level up: **marketplace listing threads*
 
 ## No proactive speaking
 
-The Characterly bot is pure plumbing — it **never speaks unprompted** and only summoned companions reply, always triggered by a human message. An earlier proactive-answers feature was removed: any surviving `proactive-fire` job rows are a no-op in the worker, and the `PROACTIVE*` env vars plus `server_settings.proactive_enabled` (v13) are inert leftovers kept for schema/env compatibility — nothing reads them to send a message.
+The Characterly bot is pure plumbing — it **never speaks unprompted** and only summoned companions reply, always triggered by a human message. An earlier proactive-answers feature was removed: any surviving `proactive-fire` job rows are drained as a no-op by the worker, the `PROACTIVE*` env vars are no longer parsed, and `server_settings.proactive_enabled` (v13) is an inert column nothing reads.
 
 ---
 

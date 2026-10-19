@@ -1,8 +1,8 @@
 // Memory editor — the per-companion "what they remember" panel. Lists the
 // caller's DM-lane data through security-definer RPCs: real memories, the
 // companion's story facts, its journal, and the editable "story so far"
-// recap. Pin/edit/forget mirror the Discord commands (/remember, /memory pin,
-// /forget, /companion story) so either surface reaches the same rows.
+// recap. Pin/edit/forget mirror the Discord commands (/memory remember,
+// /memory list pin:, /memory forget, /companion story) so either surface reaches the same rows.
 import {
   myCompanions, myMemoryOverview, pinMemory, updateMemory,
   forgetMemory, pinJournalEntry, forgetJournalEntry, saveStorySummary, withTimeout,
@@ -208,7 +208,7 @@ export function initMemories({ linked }) {
       ...memories.map(memoryRow),
       ...(memories.length ? [] : [Object.assign(document.createElement("li"), {
         className: "mem-empty",
-        textContent: "Nothing remembered yet — tell them something worth keeping, or /remember it in Discord.",
+        textContent: "Nothing remembered yet — tell them something worth keeping, or /memory remember it in Discord.",
       })]),
     );
     journalEl.replaceChildren(

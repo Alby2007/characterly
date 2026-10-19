@@ -241,8 +241,8 @@ if (new URLSearchParams(location.search).get("checkout")) {
 // Tokens are the user-facing name for hosted-lane credits. Balance/plan live
 // on the profile row; settings + BYOK state come from rpcs that stamp the
 // caller's own discord_user_id server-side.
-const LEDGER_LABELS = { grant_daily: "Daily refill", grant_weekly: "Weekly refill", purchase: "Token pack", refund: "Refund", adjust: "Adjustment" };
-const REASON_LABELS = { dm_turn: "DM chat", guild_turn: "Server chat", c2c: "Companion chat", dm_turn_refund: "Chat refund", guild_turn_refund: "Chat refund" };
+const LEDGER_LABELS = { grant_daily: "Daily refill", grant_weekly: "Weekly refill", grant_bonus: "Launch bonus", purchase: "Token pack", refund: "Refund", adjust: "Adjustment" };
+const REASON_LABELS = { dm_turn: "DM chat", guild_turn: "Server chat", c2c: "Companion chat", onboarding_turn: "Companion draft", chat_import: "Chat import", dm_turn_refund: "Chat refund", guild_turn_refund: "Chat refund" };
 
 // Checkout sessions are minted by the create-checkout edge function — it
 // checks plan server-side and forces client_reference_id to the caller's own
@@ -322,7 +322,13 @@ async function renderTokens() {
   const premium = profile.plan === "premium";
   $("#tokens-plan").textContent = premium ? "Premium" : "Free";
   $("#tokens-plan").className = premium ? "badge badge-ok" : "badge badge-soon";
-  $("#tokens-balance").textContent = Number(profile.credit_balance ?? 0).toLocaleString();
+  const total = Number(profile.credit_balance ?? 0);
+  const purchased = Math.min(Math.max(Number(profile.purchased_balance ?? 0), 0), Math.max(total, 0));
+  $("#tokens-balance").textContent = total.toLocaleString();
+  // Packs/bonuses persist on top of the daily allowance — show the split so
+  // a buyer can see the refill still lands.
+  $("#tokens-split").hidden = purchased <= 0;
+  $("#tokens-split").textContent = `${(total - purchased).toLocaleString()} daily · ${purchased.toLocaleString()} from packs & bonuses (never expire — daily tokens are spent first)`;
   renderGrantLine();
   if (!grantTimer) grantTimer = setInterval(renderGrantLine, 30_000);
   const ul = $("#tokens-ledger");

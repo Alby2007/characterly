@@ -81,6 +81,7 @@ test("syncDiscordIdentity fills the snapshot; missing-scan only lists the gaps",
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `;
+  await sql`ALTER TABLE web_profiles ADD COLUMN IF NOT EXISTS purchased_balance INT NOT NULL DEFAULT 0`;
   const { store } = await makeStore(sql);
   assert.equal(await store.initCreditsSupport(), true);
   try {

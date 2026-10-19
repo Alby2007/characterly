@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ChannelType } from "discord.js";
 import type { ButtonInteraction, ChatInputCommandInteraction, MessageContextMenuCommandInteraction, ModalSubmitInteraction, StringSelectMenuInteraction } from "discord.js";
-import { handleMemoryButton, handleMemoryCommand, handleMarketplaceContext, handleMarketSelect, handleSetupModal, handleCompanionModal, buildCoverModal, buildPublishModal } from "./commands.js";
+import { handleMemoryButton, handleMemoryCommand, handleMarketplaceContext, handleMarketSelect, handleSetupModal, handleCompanionModal, buildCoverModal, buildPublishModal, chargeOnboardingTurn, effectiveCommandName } from "./commands.js";
 import { ProfileStore } from "./profiles.js";
 import type { MemoryStore } from "./database.js";
 import { makeTestSql, makeStore } from "./test-helpers.js";
@@ -211,6 +211,31 @@ test("/memory-pause flips both settings flags for admins only", async () => {
     const settings = await store.settings("g1");
     assert.equal(settings.memoryEnabled, 0);
     assert.equal(settings.replyEnabled, 0);
+  } finally { await sql.end(); }
+});
+
+test("grouped /server and /memory subcommands route to the same handlers", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const pause = stubCommand({ commandName: "server", subcommand: "pause", userId: "u-admin", admin: true });
+    await handleMemoryCommand(pause.interaction, store, brainFor);
+    const settings = await store.settings("g1");
+    assert.equal(settings.memoryEnabled, 0);
+    assert.equal(settings.replyEnabled, 0);
+
+    const purge = stubCommand({ commandName: "server", subcommand: "purge", userId: "u-admin", admin: true, options: { older_than_days: 0 } });
+    await handleMemoryCommand(purge.interaction, store, brainFor);
+    assert.match(purge.replies[0].content ?? "", /at least one day/i);
+
+    const dm = stubCommand({ commandName: "server", subcommand: "status" });
+    (dm.interaction as unknown as { guildId: string | null }).guildId = null;
+    await handleMemoryCommand(dm.interaction, store, brainFor);
+    assert.match(dm.replies[0].content ?? "", /only be used inside a Discord server/);
+
+    assert.equal(effectiveCommandName({ commandName: "memory", options: { getSubcommand: () => "confirm" } } as never), "memory-confirm");
+    assert.equal(effectiveCommandName({ commandName: "memory", options: { getSubcommand: () => "list" } } as never), "memory");
+    assert.equal(effectiveCommandName({ commandName: "memory-export", options: {} } as never), "memory-export", "stale flat names pass through");
   } finally { await sql.end(); }
 });
 
@@ -890,6 +915,7 @@ async function webProfilesFixture(sql: ReturnType<typeof makeTestSql>) {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `;
+  await sql`ALTER TABLE web_profiles ADD COLUMN IF NOT EXISTS purchased_balance INT NOT NULL DEFAULT 0`;
 }
 
 test("market:add refuses unlinked users ephemerally — verify pointer, no adoption", async () => {
@@ -1409,7 +1435,8 @@ test("/companion tokens — balance, refill amount, relative reset timestamp", a
   await handleMemoryCommand(cmd.interaction, store, brainFor);
   const reply = cmd.replies[0]?.content ?? "";
   assert.match(reply, /\*\*28 tokens\*\*/, "balance shows");
-  assert.match(reply, /refills to \*\*30\*\*/, "free-plan refill amount");
+  assert.match(reply, /refill to \*\*30\*\*/, "free-plan refill amount");
+  assert.doesNotMatch(reply, /from packs/, "no split line without pack tokens");
   assert.match(reply, /<t:\d+:R>/, "relative reset timestamp renders");
   assert.equal(cmd.replies[0]?.ephemeral, true, "token counts stay private");
 
@@ -1422,11 +1449,12 @@ test("/companion tokens — balance, refill amount, relative reset timestamp", a
   await handleMemoryCommand(cmd2.interaction, byokStore, brainFor);
   assert.match(cmd2.replies[0]?.content ?? "", /chats don't spend tokens/);
 
-  // Premium shows the 150 refill.
-  const premStore = { ...store, accountForDiscordUser: async () => ({ creditBalance: 150, plan: "premium" }) } as unknown as MemoryStore;
+  // Premium shows the 150 refill, plus the daily/pack split when packs exist.
+  const premStore = { ...store, accountForDiscordUser: async () => ({ creditBalance: 900, purchasedBalance: 750, plan: "premium" }) } as unknown as MemoryStore;
   const cmd3 = stubCommand({ commandName: "companion", subcommand: "tokens" });
   await handleMemoryCommand(cmd3.interaction, premStore, brainFor);
-  assert.match(cmd3.replies[0]?.content ?? "", /refills to \*\*150\*\*/);
+  assert.match(cmd3.replies[0]?.content ?? "", /refill to \*\*150\*\*/);
+  assert.match(cmd3.replies[0]?.content ?? "", /150 daily \+ 750 from packs/);
 
   // Unlinked — signup pointer, no balance claim.
   const unlinked = { ...store, accountForDiscordUser: async () => null } as unknown as MemoryStore;
@@ -1523,4 +1551,20 @@ test("publishToAllMirrors: house failure tears down partner mirrors it already p
     config.marketplaceChannelId = saved.m;
     await refreshDeploymentCache({ deployments: async () => [] } as unknown as MemoryStore);
   }
+});
+
+test("chargeOnboardingTurn: free under the cap and on BYOK, 2 tokens past it, refusal points at the free lock-in", async () => {
+  const spends: number[] = [];
+  let funded = true;
+  const store = { spendCredits: async (_u: string, n: number) => { spends.push(n); return { ok: funded, balance: 0, purchased: funded ? 1 : 0 }; } };
+  const cap = config.onboardingFreeTurns;
+  assert.deepEqual(await chargeOnboardingTurn(store, true, "u", cap - 1), { ok: true, charged: 0, purchased: 0 });
+  assert.deepEqual(await chargeOnboardingTurn(store, false, "u", cap + 5), { ok: true, charged: 0, purchased: 0 }, "BYOK never pays");
+  assert.deepEqual(spends, []);
+  assert.deepEqual(await chargeOnboardingTurn(store, true, "u", cap), { ok: true, charged: 2, purchased: 1 });
+  funded = false;
+  const refused = await chargeOnboardingTurn(store, true, "u", cap + 1);
+  assert.equal(refused.ok, false);
+  assert.match(!refused.ok ? refused.message : "", /Awaken & Lock In/);
+  assert.deepEqual(spends, [2, 2]);
 });

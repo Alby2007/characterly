@@ -44,11 +44,6 @@ const env = z.object({
   WAKE_WORD: z.string().optional(),
   ENGAGEMENT: z.string().optional(),
   ENGAGEMENT_TTL_MS: z.coerce.number().int().min(10_000).max(3_600_000).default(120_000),
-  PROACTIVE: z.string().optional(),
-  PROACTIVE_DELAY_MS: z.coerce.number().int().min(15_000).max(600_000).default(75_000),
-  PROACTIVE_DAILY_CAP: z.coerce.number().int().min(1).max(20).default(3),
-  PROACTIVE_RESPONSE_WINDOW_MS: z.coerce.number().int().min(60_000).max(3_600_000).default(600_000),
-  PROACTIVE_BACKOFF_MS: z.coerce.number().int().min(300_000).max(172_800_000).default(21_600_000),
   VISION_BASE_URL: z.string().optional(),
   IMAGE_MAX_BYTES: z.coerce.number().int().min(1).default(4_000_000),
   // BYOK: master passphrase for encrypting per-guild LLM keys at rest. Optional —
@@ -80,8 +75,16 @@ const env = z.object({
   // Circuit breaker: total hosted-lane LLM calls per UTC day, fleet-wide —
   // bounds operator spend independent of per-user credits.
   HOSTED_DAILY_LLM_CAP: z.coerce.number().int().min(0).default(20_000),
+  // Share of HOSTED_DAILY_LLM_CAP that background cognition (memory
+  // extraction, journals, recaps, triage, nightly maintenance) may use — the
+  // rest is reserved so live chat never sheds because jobs ate the budget.
+  HOSTED_BACKGROUND_SHARE: z.coerce.number().min(0).max(1).default(0.4),
   // DM the user when a post-spend balance drops to this or below (once/day).
   LOW_CREDIT_ALERT: z.coerce.number().int().min(0).default(5),
+  // Hosted onboarding turns that are free before each further draft turn
+  // costs a normal 2-token turn — the interview is otherwise unlimited free
+  // chat on the reply model. BYOK onboarding never pays.
+  ONBOARDING_FREE_TURNS: z.coerce.number().int().min(0).default(8),
   // Cooldown between "link your account" prompts per unlinked user.
   LINK_PROMPT_COOLDOWN_MS: z.coerce.number().int().min(60_000).default(14_400_000),
   // Companion marketplace (hub forum): publish target + report ping channel.
@@ -206,14 +209,6 @@ export const config = {
   // window size are separate knobs — engagement is what makes the bot chattier.
   engagement: env.ENGAGEMENT !== "0",
   engagementTtlMs: env.ENGAGEMENT_TTL_MS,
-  // Proactive speaking is OPT-IN at both levels: env must say 1 AND the
-  // server's proactive_enabled flag must be set — stricter than WAKE_WORD/
-  // ENGAGEMENT because unprompted speech is a different risk profile.
-  proactiveEnabled: env.PROACTIVE === "1",
-  proactiveDelayMs: env.PROACTIVE_DELAY_MS,
-  proactiveDailyCap: env.PROACTIVE_DAILY_CAP,
-  proactiveResponseWindowMs: env.PROACTIVE_RESPONSE_WINDOW_MS,
-  proactiveBackoffMs: env.PROACTIVE_BACKOFF_MS,
   replyBurst: env.REPLY_BURST,
   replyRefillMs: env.REPLY_REFILL_MS,
   // BYOK: AES-256-GCM master passphrase (SHA-256-derived in secrets.ts) and the
@@ -231,8 +226,10 @@ export const config = {
   freeDailyCredits: env.FREE_DAILY_CREDITS,
   premiumDailyCredits: env.PREMIUM_DAILY_CREDITS,
   hostedDailyLlmCap: env.HOSTED_DAILY_LLM_CAP,
+  hostedBackgroundShare: env.HOSTED_BACKGROUND_SHARE,
   lowCreditAlert: env.LOW_CREDIT_ALERT,
   linkPromptCooldownMs: env.LINK_PROMPT_COOLDOWN_MS,
+  onboardingFreeTurns: env.ONBOARDING_FREE_TURNS,
   marketplaceChannelId: env.MARKETPLACE_CHANNEL_ID,
   marketplaceModChannelId: env.MARKETPLACE_MOD_CHANNEL_ID,
   adoptionCooldownMs: env.ADOPTION_COOLDOWN_MS,
@@ -255,7 +252,11 @@ export const config = {
   characterImportCap: env.CHARACTER_IMPORT_CAP,
   chatImportCap: env.CHAT_IMPORT_CAP,
   chatImportMaxWindows: env.CHAT_IMPORT_MAX_WINDOWS,
-  safetyModel: env.SAFETY_MODEL ?? env.GROQ_MODEL,
+  // The verdict schema is tiny — a small fast model is plenty and keeps the
+  // per-reply screen on adopted companions off the latency path. On Groq the
+  // default is gpt-oss-20b; any other provider falls back to GROQ_MODEL.
+  safetyModel: env.SAFETY_MODEL
+    ?? (env.GROQ_BASE_URL.replace(/\/+$/, "") === "https://api.groq.com/openai/v1" ? "openai/gpt-oss-20b" : env.GROQ_MODEL),
   // House ops — see ops.ts. houseGuildId unset disables the whole layer
   // (intents, listeners, watchdog never activate).
   houseGuildId: env.HOUSE_GUILD_ID,

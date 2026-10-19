@@ -13,7 +13,7 @@ In servers, the **Characterly** bot is invisible plumbing and a system announcer
 The marketplace is a Character.AI-style storefront living in a forum channel on the Characterly hub server, layered on top of (never replacing) the permanent awakened bond. Full reference: **[docs/marketplace.md](docs/marketplace.md)**.
 
 - **Bot-minted listings.** The bot itself creates the forum thread and posts the card — name, cover art, tagline, vibe, traits, star rating, add-count — with **Add** / **Rate** / **Report** buttons, so listings can't be faked by users posting links. Republish posts a fresh thread rather than editing in place.
-- **Three ways to publish:** `/companion action:publish` lists your awakened companion (persona cloned, edits propagate to adopters as versions); `/companion action:create` authors freehand characters that don't consume your awakened slot; `/companion action:import` (or the dashboard) brings in standard character-card `.json`/`.png` files — imports stay private-unlisted until published.
+- **Three ways to publish:** `/companion publish` lists your awakened companion (persona cloned, edits propagate to adopters as versions); `/companion create` authors freehand characters that don't consume your awakened slot; `/companion import` (or the dashboard) brings in standard character-card `.json`/`.png` files — imports stay private-unlisted until published.
 - **Adopt, don't awaken.** Clicking **Add** clones the listing into a `kind='adopted'` companion owned by the adopter — their own memories, journal, relationships, and billing. The character opens a private `#adoptees` thread in the hub server with the creator-written greeting, then can be summoned into other servers. Re-adopting after a drop resumes the *same* clone *and thread*, so the relationship and chat history continue.
 - **Gates & slots.** Free accounts hold 1 active adoption and 2 live listings; Premium is uncapped on both. A dropped companion locks re-adoption for 12 hours. Hosted-lane adopters need a linked Characterly account (or a BYOK key) — **Add** fails early for unlinked users with an ephemeral pointer at the verify channel, instead of handing them a companion they can't talk to.
 - **Discovery surface.** Listing threads double as comment sections — readable by everyone, writable by verified Members. An ephemeral ★1–5 picker (one vote per user, re-rating upserts) refreshes the card's average live. Creators tag listings (≤3 from the forum taxonomy: Romance, Anime, Games, Fandom, Fantasy, …); the bot manages curated badges — `New`, `Top Rated`, `Trending`, `Staff Pick` — recomputed by a sweep against live stats. Gallery View covers come from the card's image or attached art.
@@ -26,7 +26,7 @@ The marketplace is a Character.AI-style storefront living in a forum channel on 
 - **Permanent Lock:** Once a user clicks **Awaken & Lock In**, their companion's identity is **permanently bound to their account** (`1 companion per account` — adoptions live alongside it, never replacing it).
 
 ### 3. User-First Personal AI Keys (Auto-Detected Providers)
-- Each user connects their own API key (`dm:<userId>`) via the onboarding **Paste API Key** button or `/companion action:key`.
+- Each user connects their own API key (`dm:<userId>`) via the onboarding **Paste API Key** button or `/companion key`.
 - Users only paste their API key and **leave the Base URL field blank** — Characterly automatically detects the provider and default model from the key prefix:
   - `gsk_...` → **Groq** (`openai/gpt-oss-120b`)
   - `sk-or-...` → **OpenRouter** (`openai/gpt-oss-120b`)
@@ -36,8 +36,8 @@ The marketplace is a Character.AI-style storefront living in a forum channel on 
 
 ### 4. Characterly as Server Plumbing (1-Click Server Setup)
 - When added to a Discord server, Characterly posts a welcome card and starts **dormant**.
-- A server admin clicks **Enable Characterly (Admins)** on the card (or runs `/memory-resume`) — **no server API key is required**.
-- Members summon their companions with `/companion action:summon` (or 1-click **Summon to `<Server>`** buttons in DMs). Characterly announces **`System · <Name> joined the chat`** when a companion arrives and **`System · <Name> left the chat`** when dismissed.
+- A server admin clicks **Enable Characterly (Admins)** on the card (or runs `/server resume`) — **no server API key is required**.
+- Members summon their companions with `/companion summon` (or 1-click **Summon to `<Server>`** buttons in DMs). Characterly announces **`System · <Name> joined the chat`** when a companion arrives and **`System · <Name> left the chat`** when dismissed.
 
 ### 5. Multi-Companion Scene Routing & Webhook Identity
 - **Webhook Disguise (`src/webhooks.ts`):** Summoned companions speak through a cached channel webhook (`Characterly Companions`) disguised with their own name and avatar (including inside threads). If `Manage Webhooks` permission is missing, Characterly posts a system permission notice rather than roleplaying as the companion.
@@ -59,7 +59,7 @@ The marketplace is a Character.AI-style storefront living in a forum channel on 
 
 ### 8. First-Person Companion Journal
 - After each reply, a deferred `journal-write` job lets the companion write 0–2 **first-person** entries ("Alice and I roasted her tea take") into `companion_journal` — its own episodic memory, origin-tagged to the scope where it happened.
-- Entries recall only in their origin scope (guild entries in that server, DM entries in the DM) and via the Vault subtext lane; consent-gated like extraction, covered by `/opt-out` and `/memory-export`, and dormant-but-retained when a companion is dismissed.
+- Entries recall only in their origin scope (guild entries in that server, DM entries in the DM) and via the Vault subtext lane; consent-gated like extraction, covered by `/opt-out` and `/memory export`, and dormant-but-retained when a companion is dismissed.
 
 ### 9. Web Accounts, Website & Discord Linking
 - A Vite site (`website/`) hosts the landing page plus **Characterly accounts** (Supabase Auth: email/password, magic link, Discord OAuth) and an account dashboard — deployed as Cloudflare Workers Static Assets.
@@ -71,10 +71,11 @@ The marketplace is a Character.AI-style storefront living in a forum channel on 
 ### 10. Hosted Lane & Tokens (Credits)
 
 - **Two lanes:** BYOK stays the power-user lane — a personal key means unlimited chat, no account needed. Without a key, companions run on the **hosted lane** (the operator's env model) which requires a **linked Characterly account** (`/link`) and spends **tokens**.
-- **Payer-per-turn:** a human's turn costs 2 tokens (their message + the companion reply — 1 refunded if no reply lands); companion↔companion hops bill the replying companion's owner 1, gated by their c2c dashboard toggle. Nobody can burn someone else's tokens.
-- **Lazy refills:** free accounts refill to 30 tokens each UTC day; premium to 150/day — applied atomically inside the spend transaction (`credit_ledger` audits every change, including Stripe pack purchases). No scheduler.
-- **Premium ($7.99/mo) & token packs** are sold through Stripe Checkout sessions minted by the `create-checkout` edge function and fulfilled by the `stripe-webhook` edge function (idempotent on session id). Premium uncaps marketplace slots and raises the daily token floor.
-- **Fleet breaker:** `HOSTED_DAILY_LLM_CAP` bounds total hosted calls/day independent of credits; BYOK calls never count.
+- **Payer-per-turn:** a human's turn costs 2 tokens (their message + the companion reply — both refunded if no reply lands, or if an adopted companion's reply is swapped for the safety refusal); companion↔companion hops bill the replying companion's owner 1, gated by their c2c dashboard toggle. Nobody can burn someone else's tokens.
+- **Two buckets, lazy refills:** the balance is a daily allowance plus a persistent pack slice (`web_profiles.purchased_balance`, v60). The allowance refills to 30 (free) / 150 (premium) each UTC day regardless of pack tokens, and is always spent first; packs and the launch bonus never expire and never suppress the refill. Applied atomically inside the spend transaction (`credit_ledger` audits every change). No scheduler.
+- **Onboarding:** the first `ONBOARDING_FREE_TURNS` (default 8) hosted draft turns are free; after that each draft turn costs a normal 2-token turn. Locking in and **Edit Draft** stay free. BYOK never pays.
+- **Premium ($7.99/mo) & token packs** are sold through Stripe Checkout sessions minted by the `create-checkout` edge function and fulfilled by the `stripe-webhook` edge function (idempotent on session id). Refunds claw back exactly the pack the charge paid for (matched on `payment_intent`, prorated for partial refunds) — subscription refunds never touch pack tokens. Premium uncaps marketplace slots and raises the daily token floor.
+- **Fleet breaker:** `HOSTED_DAILY_LLM_CAP` bounds total hosted calls/day independent of credits; BYOK calls never count. Background cognition (extraction, journals, recaps, triage, maintenance) may use at most `HOSTED_BACKGROUND_SHARE` (default 40%) of it, so jobs can't starve live chat.
 - **Free-tier throttle:** extraction + journaling for free hosted users coalesce into hourly batches (freshness, not quality); premium and BYOK run live.
 
 ### 11. The Hub Server — welcome, verify, Member gate
@@ -98,38 +99,44 @@ All command replies are ephemeral (private to the invoker) unless noted; compani
 
 | Command | What it does |
 |---------|--------------|
-| `/companion action:card` | View your (or another member's) awakened companion card and relationships |
-| `/companion action:list` | See all companions currently active in this server and how to address them |
-| `/companion action:summon` | Summon your personal companion into this Discord server |
-| `/companion action:dismiss` | Dismiss your companion from this server |
-| `/companion action:key` | Connect or rotate your personal AI API key (leave Base URL blank for auto-detection) |
-| `/companion action:status` | Check your personal API key status, active servers, and today's DM usage |
-| `/companion action:avatar` | Update your companion's avatar image URL |
-| `/memory` | List your active memories (8/page; `page:`, `search:`, `memory_id:` to inspect provenance, `candidates:true` for unconfirmed, `server:true` for lore) |
-| `/memory-confirm` | Promote one of your own candidate memories to active |
-| `/memory-export` | Download every memory + evidence held about you |
-| `/forget` | Forget one of your memories (confirmation button required) |
-| `/correct` | Replace a memory — supersedes genuinely contradictory active ones |
+| `/companion card` | View your (or another member's) awakened companion card and relationships |
+| `/companion list` | See all companions currently active in this server and how to address them |
+| `/companion summon` | Summon your personal companion into this Discord server |
+| `/companion dismiss` | Dismiss your companion from this server |
+| `/companion key` | Connect or rotate your personal AI API key (leave Base URL blank for auto-detection) |
+| `/companion status` | Check your personal API key status, active servers, and today's DM usage |
+| `/companion avatar` | Update your companion's avatar (URL or upload) |
+| `/companion tokens` | Hosted-token balance (daily vs pack split) and when the daily refill lands |
+| `/companion story` / `reset-story` | View/edit your companion's running "story so far" recap, or start a fresh chapter |
+| `/companion imports` | View or undo your chat-history imports |
+| `/companion edit` / `reset` | Edit or restart your companion's persona before awakening |
+| `/memory list` | List your active memories (8/page; `page:`, `search:`, `memory_id:` to inspect provenance, `pin:` to pin/unpin, `candidates:true` for unconfirmed, `server:true` for lore) |
+| `/memory remember` | Pin a fact you state yourself — always in context |
+| `/memory confirm` | Promote one of your own candidate memories to active |
+| `/memory export` | Download every memory + evidence held about you |
+| `/memory forget` | Forget one of your memories (confirmation button required) |
+| `/memory correct` | Replace a memory — supersedes genuinely contradictory active ones |
+| `/memory event` | Inspect the server event a memory is attached to |
+| `/memory share-facts` | (Server) let companions carry facts about you into their owners' DM digests — off by default |
 | `/privacy` | See what Characterly stores in this server, the retention window, and your consent state |
 | `/opt-out` | Forget everything about you, delete your profile, revoke consent |
 | `/opt-in` | Consent to memories + a profile about you (live activity only) |
 | `/profile-build` | Opt in **and** scan your archive history to build your structured profile now (once per 24h) |
 | `/profile` | View your profile card (another member's: admins only) |
 | `/dossier` | Deep dossier — voice, life situation, temperament, beliefs, relationship map, reputation, timeline |
-| `/event` | Inspect the server event a memory is attached to |
 | `/link` | Get a one-time code to link this Discord account to your Characterly web account |
 
 ### Marketplace
 
 | Command | What it does |
 |---------|--------------|
-| `/companion action:publish` | List your awakened companion in the hub server's marketplace forum (requires a linked account) |
-| `/companion action:create` | Author a freehand marketplace character (not tied to your awakened companion) |
-| `/companion action:import` | Bring in a character card (`.png`/`.json`) from another platform — private until published |
-| `/companion action:unpublish` | Remove your companion's marketplace listing |
-| `/companion action:relist` | Bring back an unpublished marketplace listing |
-| `/companion action:switch` | Where each of your companions lives — awakened in DMs, adoptees in their `#adoptees` threads |
-| `/companion action:drop` | Drop an adopted companion (12h re-adopt cooldown) |
+| `/companion publish` | List your awakened companion in the hub server's marketplace forum (requires a linked account) |
+| `/companion create` | Author a freehand marketplace character (not tied to your awakened companion) |
+| `/companion import` | Bring in a character card (`.png`/`.json`) from another platform — private until published |
+| `/companion unpublish` | Remove your companion's marketplace listing |
+| `/companion relist` | Bring back an unpublished marketplace listing |
+| `/companion homes` | Where each of your companions lives — awakened in DMs, adoptees in their `#adoptees` threads |
+| `/companion drop` | Drop an adopted companion (12h re-adopt cooldown) |
 
 On the forum card itself: **Add** adopts, **Rate** opens the star picker, **Tags** / **Cover image** / **Edit persona** are creator tools, **Report** files a categorized report; right-click → **Apps → Report message** flags a comment; **Staff pick** toggles the editorial badge (mods).
 
@@ -137,18 +144,19 @@ On the forum card itself: **Add** adopts, **Rate** opens the star picker, **Tags
 
 | Command | What it does |
 |---------|--------------|
-| `/companion action:kick user:@member` | Remove a member's companion from this server |
-| `/quiet-channel` / `/unquiet-channel` | Silence companions in a channel (defaults to the current one; threads inherit their parent) — Characterly still observes and remembers |
-| `/companions-pause` / `/companions-resume` | Silence companions server-wide — memory collection keeps running |
-| `/memory-pause` / `/memory-resume` | Pause or enable Characterly in this server — archiving included |
-| `/ignore-channel` / `/unignore-channel` | Make a channel invisible to Characterly — no archiving, no replies, no member writes |
-| `/memory-settings` | Show effective server settings (including ignored and quiet channels and daily LLM cap) |
-| `/limits` | Set this server's daily LLM-call cap (0 = block all calls; usage resets each UTC day) |
-| `/status` | Uptime, operational counters, active summoned companions, queue health, today's LLM usage vs cap |
-| `/memory about:@member` | Inspect another member's memories |
-| `/memory stats:true` | Server memory counts |
-| `/memory-triage` | Newest memories across all members + contested attributes |
-| `/memory-purge` | Purge raw archived messages older than N days |
+| `/companion kick user:@member` | Remove a member's companion from this server |
+| `/server quiet` / `/server unquiet` | Silence companions in a channel (defaults to the current one; threads inherit their parent) — Characterly still observes and remembers |
+| `/server companions-pause` / `companions-resume` | Silence companions server-wide — memory collection keeps running |
+| `/server pause` / `/server resume` | Pause or enable Characterly in this server — archiving included |
+| `/server ignore` / `/server unignore` | Make a channel invisible to Characterly — no archiving, no replies, no member writes |
+| `/server settings` | Show effective server settings (including ignored and quiet channels and daily LLM cap) |
+| `/server limits` | Set this server's daily LLM-call cap (0 = block all calls; usage resets each UTC day) |
+| `/server status` | Uptime, operational counters, active summoned companions, queue health, today's LLM usage vs cap |
+| `/server triage` | Newest memories across all members + contested attributes |
+| `/server purge` | Purge raw archived messages older than N days |
+| `/memory list about:@member` | Inspect another member's memories |
+| `/memory list stats:true` | Server memory counts |
+| `/setup` | Connect a server-wide API key (optional — members' own keys work without it) |
 
 A private `/ops` console (`/ops action:status|logs|restart|deploy|announce|layout|seedmarket`) controls the host and house layout — allowlisted via `OPS_USER_IDS`, documented in [docs/operations.md](docs/operations.md).
 
@@ -156,7 +164,7 @@ A private `/ops` console (`/ops action:status|logs|restart|deploy|announce|layou
 
 ## Privacy & Security Model
 
-- **Dormant by default in servers.** New servers observe nothing until an admin clicks **Enable Characterly** or runs `/memory-resume`. Removing Characterly from a server deletes every row it stored there. Admins then get a tiered dial per scope: **quiet** a channel (companions silent, still observed) → **pause companions** (silent server-wide) → **pause memory** (all off) → **ignore** a channel (fully invisible, no archive either).
+- **Dormant by default in servers.** New servers observe nothing until an admin clicks **Enable Characterly** or runs `/server resume`. Removing Characterly from a server deletes every row it stored there. Admins then get a tiered dial per scope: **quiet** a channel (companions silent, still observed) → **pause companions** (silent server-wide) → **pause memory** (all off) → **ignore** a channel (fully invisible, no archive either).
 - **Derived data is opt-in.** Person memories, relationship observations, attributes, profiles, and dossiers form only for members who consent (`/opt-in`, `/profile-build`, or summoning a companion).
 - **The Vault Rule (DM → Server isolation).** Private 1:1 DM memories are never exposed to other server members or lookup tools; they inform only the companion's internal subtext with its owner.
 - **Encrypted keys & SSRF guards.** Personal API keys are encrypted at rest with AES-256-GCM (`src/secrets.ts`), scrubbed from logs, and custom endpoints are protected against DNS-rebinding SSRF at socket connect time (`src/brains.ts`, `src/tools.ts`).
@@ -179,7 +187,7 @@ cp .env.example .env   # fill in DISCORD_TOKEN, KEY_ENCRYPTION_SECRET, DATABASE_
 npm run dev            # or: npm start
 ```
 
-Migrations (`v1`–`v42`) apply automatically on first boot — no manual SQL.
+Migrations (`v1`–`v61`) apply automatically on first boot — no manual SQL.
 
 ### Key Configuration
 

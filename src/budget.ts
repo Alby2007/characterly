@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { LlmClient } from "./brain.js";
 import type { MemoryStore } from "./database.js";
 
@@ -54,5 +55,35 @@ export function meteredClient(inner: LlmClient, opts: {
   return {
     responses: { create: (params: unknown) => charge().then(() => inner.responses.create(params)) },
     chat: { completions: { create: (params: unknown) => charge().then(() => inner.chat.completions.create(params)) } },
+  };
+}
+
+// ── Background vs live hosted spend ───────────────────────────────────────────
+// Deferred cognition (extract/journal/summary jobs, the triage sweep, nightly
+// maintenance) and live replies share one Brain per scope — and the hosted
+// lane's fleet breaker. Without a split, a heavy background day pushes
+// hosted:global past the free-lane shed point and live chat goes dark first.
+// Background work runs inside runAsBackground(); hosted clients wrapped with
+// backgroundCapped() additionally charge `hosted:background`, whose cap is a
+// fraction of the fleet cap — the remainder is reserved for live turns.
+const backgroundCtx = new AsyncLocalStorage<true>();
+
+export function runAsBackground<T>(fn: () => Promise<T>): Promise<T> {
+  return backgroundCtx.run(true, fn);
+}
+
+export function inBackground(): boolean {
+  return backgroundCtx.getStore() === true;
+}
+
+export function backgroundCapped(inner: LlmClient, opts: {
+  store: MemoryStore;
+  getCap: () => Promise<number>;
+}): LlmClient {
+  const capped = meteredClient(inner, { guildId: "hosted:background", store: opts.store, getCap: opts.getCap });
+  const pick = () => (inBackground() ? capped : inner);
+  return {
+    responses: { create: (params: unknown) => pick().responses.create(params) },
+    chat: { completions: { create: (params: unknown) => pick().chat.completions.create(params) } },
   };
 }

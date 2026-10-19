@@ -45,6 +45,24 @@ export async function rehostAvatar(sourceUrl: string): Promise<string | null> {
   }
 }
 
+/** Asks the worker to delete hosted objects no companions/listings row still
+ *  references — replaced avatars used to accumulate forever. Runs from the
+ *  daily maintenance; failure is logged, never fatal. */
+export async function gcRehostedAvatars(): Promise<void> {
+  if (!config.avatarUploadSecret) return;
+  try {
+    const res = await fetch(`${config.siteUrl.replace(/\/+$/, "")}/avatar/gc`, {
+      method: "POST",
+      headers: { "x-characterly-secret": config.avatarUploadSecret },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) inc("avatar.gc_error");
+  } catch (e) {
+    inc("avatar.gc_error");
+    logError("avatar gc failed", e);
+  }
+}
+
 /** Local asset → same lane (seed cover files under assets/marketplace/). */
 export async function uploadAvatarFile(path: string): Promise<string | null> {
   const ext = path.toLowerCase().split(".").pop() ?? "";

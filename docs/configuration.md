@@ -21,12 +21,14 @@ Characterly is configured through environment variables validated at startup by 
 | `GROQ_MODEL` | `openai/gpt-oss-120b` | Default model name passed to Groq (or custom provider). |
 | `GROQ_BASE_URL` | `https://api.groq.com/openai/v1` | Default OpenAI-compatible base URL when not auto-detected from a user's key prefix. |
 | `KEY_ENCRYPTION_SECRET` | unset | Master passphrase encrypting user API keys at rest (AES-256-GCM, SHA-256-derived). Required for `/companion key`, `/setup`, and the onboarding **Paste API Key** modal. When users leave Base URL blank, Characterly auto-detects Groq (`gsk_...`), OpenRouter (`sk-or-...`), OpenAI (`sk-...`), or xAI (`xai-...`). Any string; rotating it orphans existing `guild_keys` rows (recovery = re-run `/companion key` or `/setup`). |
-| `REQUIRE_GUILD_KEYS` | `0` | Hosted BYOK mode: `1` disables the operator `GROQ_API_KEY` fallback so companions and servers run strictly on user-supplied personal keys (`dm:<userId>`) — a keyless guild goes fully dormant (no archive, no replies, no LLM spend). Self-hosters leave this off. Note this is a *key* gate, orthogonal to the consent posture: every guild also starts dormant (`memory_enabled=0`) until an admin runs `/memory-resume`. |
+| `REQUIRE_GUILD_KEYS` | `0` | Hosted BYOK mode: `1` disables the operator `GROQ_API_KEY` fallback so companions and servers run strictly on user-supplied personal keys (`dm:<userId>`) — a keyless guild goes fully dormant (no archive, no replies, no LLM spend). Self-hosters leave this off. Note this is a *key* gate, orthogonal to the consent posture: every guild also starts dormant (`memory_enabled=0`) until an admin runs `/server resume`. |
 | `DM_LLM_DAILY_CAP` | `250` | Per-user daily LLM call cap for 1:1 DMs (`dm:<userId>` scope, resets at UTC midnight). |
 | `DM_CONTEXT_MESSAGES` | `40` | Live transcript window for DM replies — wider than the shared-guild default of 25 since a 1:1 chat has no other voices (range 10–100). The rolling story recap folds everything older; keep the two in step if you change it. |
-| `FREE_DAILY_CREDITS` | `30` | Free-plan hosted accounts refill to this balance each UTC day (hosted lane only). Applied lazily inside `spendCredits` — no scheduler. A refill tops up to the floor; a balance already above it keeps its headroom (grants don't stack). |
+| `FREE_DAILY_CREDITS` | `30` | Free-plan hosted accounts' daily allowance refills to this each UTC day (hosted lane only). Applied lazily inside `spendCredits` — no scheduler. Only the allowance (`credit_balance − purchased_balance`) refills; pack/bonus tokens sit on top and never suppress it. The allowance is spent first; a negative allowance (clawed-back pack already spent) is paid down by grants rather than erased. |
 | `PREMIUM_DAILY_CREDITS` | `150` | Daily refill floor for premium accounts — high enough to feel unlimited (≈75 turns/day) while remaining metered so an abusive account stays bounded. |
 | `HOSTED_DAILY_LLM_CAP` | `20000` | Fleet-wide circuit breaker: max hosted (env-key) LLM calls per UTC day across all users. BYOK calls never count. When tripped, hosted chats get the capacity notice until UTC midnight. |
+| `HOSTED_BACKGROUND_SHARE` | `0.4` | Fraction (0–1) of `HOSTED_DAILY_LLM_CAP` that background cognition may use — worker jobs (extract, journal, summary, chat-import) and the periodic sweeps/maintenance run in a background budget context and also charge `hosted:background`. The rest is reserved so live chat never sheds because jobs ate the budget; jobs past the share park until UTC midnight. |
+| `ONBOARDING_FREE_TURNS` | `8` | Hosted companion-draft (onboarding) turns that are free; each turn after that — typed or a preset button — costs a normal 2-token turn. Locking in and Edit Draft stay free; BYOK never pays. |
 | `LOW_CREDIT_ALERT` | `5` | Balance threshold for the once-per-day low-token DM (skippable via the dashboard Companion settings toggle). |
 | `LINK_PROMPT_COOLDOWN_MS` | `14400000` | Minimum interval between "link your account" prompts to the same unlinked user (default 4h). |
 | `MAX_COMPANION_CHAIN_DEPTH` | `2` | Maximum consecutive companion-to-companion replies per human message in a server channel (0–5). Hard-stops runaway bot loops. |
@@ -34,7 +36,7 @@ Characterly is configured through environment variables validated at startup by 
 | `REPLY_REFILL_MS` | `30000` | Milliseconds to refill 1 token in the per-user reply throttle bucket. |
 | `GUILD_ID` | (empty) | If set, restricts the bot to a single Discord server. **Recommended during development** to avoid accidental activity in other servers. Leave empty to enable all servers the bot has joined. |
 | `SITE_URL` | `https://characterly.app` | Public URL of the Characterly website — `/link` replies point users at `${SITE_URL}/dashboard` to claim their link code. |
-| `AVATAR_UPLOAD_SECRET` | (off) | Shared secret for the website worker's `PUT /avatar` lane — every `avatar_url` set-point re-hosts the source image into a public Supabase Storage bucket (`companion-avatars`, lazily created) so avatars outlive Discord CDN signatures and link rot. Must match the `AVATAR_UPLOAD_SECRET` secret on the website worker. Unset disables the lane — set-points keep the source URL. |
+| `AVATAR_UPLOAD_SECRET` | (off) | Shared secret for the website worker's `PUT /avatar` lane — every `avatar_url` set-point re-hosts the source image into a public Supabase Storage bucket (`companion-avatars`, ensured once per worker isolate) so avatars outlive Discord CDN signatures and link rot. Must match the `AVATAR_UPLOAD_SECRET` secret on the website worker — it's compared in constant time there, and also gates `POST /avatar/gc`, which the bot's daily maintenance calls to delete unreferenced objects older than 24h. Unset disables the lane — set-points keep the source URL. |
 | `SPEAK_THRESHOLD` | `0.70` | Minimum `selectCompanionForTurn()` / `brain.decide()` score required to send a reply. Range 0–1. |
 | `RAW_MESSAGE_RETENTION_DAYS` | `30` | How many days of raw Discord messages to keep in the `messages` table. Messages older than this are deleted by the daily maintenance job. Evidence quotes in `memory_evidence` are **not** affected by this purge. Range 1–365. |
 | `CANDIDATE_CONFIDENCE_THRESHOLD` | `0.70` | Minimum confidence required to auto-promote a candidate memory to active status (subject to evidence type gates). Range 0–1. |
@@ -54,7 +56,7 @@ Characterly is configured through environment variables validated at startup by 
 | `ENGAGEMENT` | `1` | Conversational engagement: once someone addresses the bot (mention, reply-to-bot, or wake word), a per-channel conversation opens and their follow-up messages get a mid-tier reply score (+0.70) for `ENGAGEMENT_TTL_MS` without re-mentioning — the bot stays in the thread. Participants leave three ways: TTL expiry (refreshes only on addressed messages, so drift decays out), explicit dismissals ("shut up &lt;name&gt;", "we're done" — deterministic override), or the reply model's `end_conversation` signal. `0` reverts to address-only replies. |
 | `REPLY_EXIT` | `1` | Honor the reply model's `end_conversation` flag — when the model reads a wrap-up ("ok cool thanks that's all") the human leaves the conversation, so wrap-ups the dismissal regex can't parse don't keep the +0.70 bonus alive for the full TTL. `0` ignores the flag; regex dismissal keeps working regardless. |
 | `ENGAGEMENT_TTL_MS` | `120000` | How long a participant stays "in conversation" after their last addressed message. Range 10s–1h. Longer = chattier mid-flow but slower to drop out. |
-| `PROACTIVE`, `PROACTIVE_DELAY_MS`, `PROACTIVE_DAILY_CAP`, `PROACTIVE_RESPONSE_WINDOW_MS`, `PROACTIVE_BACKOFF_MS` | — | **Legacy no-ops.** The proactive-speaking feature was removed (the bot is pure plumbing and never speaks unprompted). These variables are still parsed so old `.env` files don't fail validation, but nothing reads them — setting any of them has no effect. Same for `server_settings.proactive_enabled`. |
+| `PROACTIVE`, `PROACTIVE_DELAY_MS`, `PROACTIVE_DAILY_CAP`, `PROACTIVE_RESPONSE_WINDOW_MS`, `PROACTIVE_BACKOFF_MS` | — | **Removed.** The proactive-speaking feature is gone (the bot is pure plumbing and never speaks unprompted) and these are no longer parsed — leftover lines in an old `.env` are ignored, so they're safe to delete. `server_settings.proactive_enabled` (v13) is an inert column nothing reads. |
 
 ### Companion marketplace
 
@@ -81,7 +83,7 @@ The marketplace lives in a forum channel on the hub server. **`MARKETPLACE_CHANN
 | `CHARACTER_IMPORT_CAP` | `25` | Private unlisted character-card imports a user may hold (`import_companion_card` RPC mirrors this — keep in sync). |
 | `CHAT_IMPORT_CAP` | `3` | Chat-history imports a user may have queued/distilling at once (`import_chat_history` RPC mirrors this — keep in sync). |
 | `CHAT_IMPORT_MAX_WINDOWS` | `50` | ~30-turn distillation windows per chat import — bounds hosted spend per transcript. |
-| `SAFETY_MODEL` | `GROQ_MODEL` | Classifier model for listing publish/edit screens and adopted-companion reply screens. |
+| `SAFETY_MODEL` | `openai/gpt-oss-20b` on Groq, else `GROQ_MODEL` | Classifier model for listing publish/edit screens and hosted-lane adopted-companion reply screens (BYOK reply screens run on the user's own key/model). The verdict schema is tiny, so a small fast model keeps the per-reply screen off the latency path. |
 
 ### Semantic recall (embeddings)
 
@@ -132,7 +134,7 @@ Entirely opt-in: **`HOUSE_GUILD_ID` unset disables everything** below — no ext
    - Send Messages in Threads
    - Read Message History
    - **Manage Webhooks** *(used by `sendAsCompanion` to post server replies with each summoned companion's custom name and avatar)*
-4. Use the generated URL to invite Characterly to your server. Once joined, click **Enable Characterly (Admins)** on the welcome card (or run `/memory-resume`) — no server API key is required.
+4. Use the generated URL to invite Characterly to your server. Once joined, click **Enable Characterly (Admins)** on the welcome card (or run `/server resume`) — no server API key is required.
 
 ---
 
@@ -142,19 +144,19 @@ Administrators can adjust per-server behaviour at runtime without restarting the
 
 | Command | Effect |
 |---------|--------|
-| `/memory-pause` | Sets `memory_enabled=0` and `reply_enabled=0`. The bot stops observing and replying immediately. |
-| `/memory-resume` | Sets both back to 1. |
-| `/companions-pause` | Sets only `reply_enabled=0` — companions go silent server-wide while archiving and memory extraction keep running. |
-| `/companions-resume` | Sets `reply_enabled=1` without touching `memory_enabled`. |
-| `/memory-settings` | Shows current values of `memory_enabled`, `reply_enabled`, `raw_retention_days`, `llm_daily_cap`, and the `ignored_channels`/`quiet_channels` lists. |
-| `/limits daily_cap:N` | Sets `llm_daily_cap` — the per-guild LLM-call budget per UTC day (default 1000, range 0–100000). `0` blocks every LLM call for the guild; usage resets at UTC midnight. Deferrable work (extract jobs) reschedules to the next day rather than failing; a reply-path call at cap posts a one-per-channel-per-day notice. |
-| `/ignore-channel channel:#c` | Adds a channel to `ignored_channels` — fully invisible to the bot: no archiving, no replies, no member writes. |
-| `/unignore-channel channel:#c` | Removes a channel from `ignored_channels`. |
-| `/quiet-channel [channel:#c]` | Adds a channel to `quiet_channels` (defaults to the current channel) — companions can't reply or post system cards there, but archiving and memory extraction continue. Threads inherit their parent channel's listing and can also be listed directly. |
-| `/unquiet-channel [channel:#c]` | Removes a channel from `quiet_channels`. |
-| `/memory-purge older_than_days:N` | Manually deletes raw messages older than N days for this server (regardless of the global retention setting). |
-| `/status` | Shows bot uptime, in-process operational counters, and today's LLM usage vs the guild's cap. |
-| `/memory-triage` | Shows the 15 most recently stored memories across all members, with status, kind, and subject. |
+| `/server pause` | Sets `memory_enabled=0` and `reply_enabled=0`. The bot stops observing and replying immediately. |
+| `/server resume` | Sets both back to 1. |
+| `/server companions-pause` | Sets only `reply_enabled=0` — companions go silent server-wide while archiving and memory extraction keep running. |
+| `/server companions-resume` | Sets `reply_enabled=1` without touching `memory_enabled`. |
+| `/server settings` | Shows current values of `memory_enabled`, `reply_enabled`, `raw_retention_days`, `llm_daily_cap`, and the `ignored_channels`/`quiet_channels` lists. |
+| `/server limits daily_cap:N` | Sets `llm_daily_cap` — the per-guild LLM-call budget per UTC day (default 1000, range 0–100000). `0` blocks every LLM call for the guild; usage resets at UTC midnight. Deferrable work (extract jobs) reschedules to the next day rather than failing; a reply-path call at cap posts a one-per-channel-per-day notice. |
+| `/server ignore channel:#c` | Adds a channel to `ignored_channels` — fully invisible to the bot: no archiving, no replies, no member writes. |
+| `/server unignore channel:#c` | Removes a channel from `ignored_channels`. |
+| `/server quiet [channel:#c]` | Adds a channel to `quiet_channels` (defaults to the current channel) — companions can't reply or post system cards there, but archiving and memory extraction continue. Threads inherit their parent channel's listing and can also be listed directly. |
+| `/server unquiet [channel:#c]` | Removes a channel from `quiet_channels`. |
+| `/server purge older_than_days:N` | Manually deletes raw messages older than N days for this server (regardless of the global retention setting). |
+| `/server status` | Shows bot uptime, in-process operational counters, and today's LLM usage vs the guild's cap. |
+| `/server triage` | Shows the 15 most recently stored memories across all members, with status, kind, and subject. |
 
 ### How runtime settings interact with env variables
 

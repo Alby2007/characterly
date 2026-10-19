@@ -33,7 +33,7 @@ async function addColumn(sql: Sql, table: string, definition: string): Promise<v
   }
 }
 
-const migrations: Migration[] = [
+export const migrations: Migration[] = [
   {
     version: 1,
     name: "phase_1a_add_evidence_tracking",
@@ -5636,6 +5636,246 @@ const migrations: Migration[] = [
       await sql`ALTER TABLE companion_listings DROP COLUMN IF EXISTS creator_tags`;
       await sql`ALTER TABLE companion_adoptions DROP COLUMN IF EXISTS chat_guild_id`;
       await sql`ALTER TABLE companion_adoptions DROP COLUMN IF EXISTS chat_channel_id`;
+    },
+  },
+  // ── v60: two-bucket tokens + exact refund clawback ─────────────────────────
+  //  • web_profiles.purchased_balance — the persistent slice of credit_balance
+  //    (packs, bonuses). The daily refill now tops up only the allowance
+  //    (credit_balance − purchased_balance), so buying a pack no longer
+  //    suppresses the free refill. Backfill treats the current balance as
+  //    purchased first, capped at net unrefunded purchases (user-favorable).
+  //  • credit_ledger.payment_intent — recorded at grant time so a refund
+  //    matches the exact pack it reverses (was: newest pack, any charge).
+  //  • 'grant_bonus' ledger kind — the launch bonus is no longer a 'purchase'
+  //    (never clawed back as if it were a pack, labeled honestly).
+  //  • clawback_pack prorates partial refunds by amount_refunded/amount and
+  //    is cumulative per purchase, so successive partial refunds add up.
+  {
+    version: 60,
+    name: "v60_token_buckets_exact_clawback",
+    up: async (sql) => {
+      await sql`
+        DO $mig$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'credit_ledger') THEN
+            EXECUTE 'ALTER TABLE public.web_profiles
+              ADD COLUMN IF NOT EXISTS purchased_balance INT NOT NULL DEFAULT 0';
+            EXECUTE 'ALTER TABLE public.credit_ledger ADD COLUMN IF NOT EXISTS payment_intent TEXT';
+            EXECUTE 'CREATE INDEX IF NOT EXISTS credit_ledger_payment_intent
+              ON public.credit_ledger (payment_intent) WHERE payment_intent IS NOT NULL';
+            EXECUTE 'ALTER TABLE public.credit_ledger DROP CONSTRAINT IF EXISTS credit_ledger_kind_check';
+            EXECUTE 'ALTER TABLE public.credit_ledger
+              ADD CONSTRAINT credit_ledger_kind_check
+              CHECK (kind IN (''grant_daily'',''grant_weekly'',''grant_bonus'',''spend'',''refund'',''adjust'',''purchase''))';
+            EXECUTE $q$
+              UPDATE public.credit_ledger SET kind = 'grant_bonus', reason = 'launch_bonus'
+              WHERE kind = 'purchase' AND stripe_ref LIKE 'launch-bonus:%'
+            $q$;
+            EXECUTE $q$
+              UPDATE public.web_profiles w SET purchased_balance = LEAST(GREATEST(w.credit_balance, 0), p.net)
+              FROM (
+                SELECT account_id, GREATEST(SUM(delta), 0)::int AS net FROM public.credit_ledger
+                WHERE kind IN ('purchase', 'grant_bonus') OR (kind = 'refund' AND refunded_of IS NOT NULL)
+                GROUP BY account_id
+              ) p
+              WHERE p.account_id = w.id
+            $q$;
+
+            EXECUTE 'DROP FUNCTION IF EXISTS public.grant_pack(uuid, int, text)';
+            EXECUTE $rpc$
+              CREATE OR REPLACE FUNCTION public.grant_pack(
+                p_account uuid, p_tokens int, p_ref text,
+                p_payment_intent text DEFAULT NULL, p_kind text DEFAULT 'purchase'
+              ) RETURNS jsonb
+              LANGUAGE plpgsql SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                bal integer;
+                dup boolean := false;
+              BEGIN
+                IF p_tokens IS NULL OR p_tokens <= 0 THEN
+                  RAISE EXCEPTION 'invalid_token_amount';
+                END IF;
+                IF p_kind NOT IN ('purchase', 'grant_bonus') THEN
+                  RAISE EXCEPTION 'invalid_grant_kind';
+                END IF;
+                PERFORM 1 FROM public.web_profiles WHERE id = p_account FOR UPDATE;
+                IF NOT FOUND THEN
+                  RETURN jsonb_build_object('ok', false, 'reason', 'no_account');
+                END IF;
+                INSERT INTO public.credit_ledger (account_id, delta, kind, reason, stripe_ref, payment_intent, balance_after)
+                SELECT p_account, p_tokens, p_kind,
+                       CASE WHEN p_kind = 'grant_bonus' THEN 'launch_bonus' ELSE 'pack_' || p_tokens END,
+                       p_ref, p_payment_intent, w.credit_balance + p_tokens
+                FROM public.web_profiles w WHERE w.id = p_account
+                ON CONFLICT (stripe_ref) WHERE stripe_ref IS NOT NULL DO NOTHING;
+                IF NOT FOUND THEN
+                  dup := true;
+                ELSE
+                  UPDATE public.web_profiles
+                  SET credit_balance = credit_balance + p_tokens,
+                      purchased_balance = purchased_balance + p_tokens,
+                      updated_at = now()
+                  WHERE id = p_account;
+                END IF;
+                SELECT credit_balance INTO bal FROM public.web_profiles WHERE id = p_account;
+                RETURN jsonb_build_object('ok', true, 'duplicate', dup, 'balance', bal);
+              END
+              $body$
+            $rpc$;
+
+            EXECUTE 'DROP FUNCTION IF EXISTS public.clawback_pack(uuid, text)';
+            EXECUTE $rpc$
+              CREATE OR REPLACE FUNCTION public.clawback_pack(
+                p_account uuid, p_charge text,
+                p_payment_intent text DEFAULT NULL,
+                p_amount int DEFAULT NULL,
+                p_amount_refunded int DEFAULT NULL,
+                p_charged_at timestamptz DEFAULT NULL
+              ) RETURNS jsonb
+              LANGUAGE plpgsql SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                v_purchase record;
+                v_target integer;
+                v_already integer;
+                v_claw integer;
+                v_bal integer;
+                v_ref text;
+              BEGIN
+                PERFORM 1 FROM public.web_profiles WHERE id = p_account FOR UPDATE;
+                IF NOT FOUND THEN
+                  RETURN jsonb_build_object('ok', false, 'reason', 'no_account');
+                END IF;
+                IF p_charge IS NULL OR p_charge = '' THEN
+                  RETURN jsonb_build_object('ok', false, 'reason', 'no_charge');
+                END IF;
+                v_ref := 'refund:' || p_charge || ':' || COALESCE(p_amount_refunded::text, 'full');
+                IF EXISTS (SELECT 1 FROM public.credit_ledger WHERE stripe_ref = v_ref) THEN
+                  SELECT credit_balance INTO v_bal FROM public.web_profiles WHERE id = p_account;
+                  RETURN jsonb_build_object('ok', true, 'duplicate', true, 'balance', v_bal);
+                END IF;
+                -- Exact match: the pack this charge paid for.
+                IF p_payment_intent IS NOT NULL THEN
+                  SELECT l.id, l.delta INTO v_purchase FROM public.credit_ledger l
+                  WHERE l.account_id = p_account AND l.kind = 'purchase' AND l.payment_intent = p_payment_intent
+                  LIMIT 1;
+                END IF;
+                -- Pre-v60 packs carry no payment_intent: match the one granted
+                -- right after this charge (checkout completes seconds later).
+                -- The webhook omits p_charged_at for invoice (subscription)
+                -- charges, so those never fall through to a pack.
+                IF v_purchase.id IS NULL AND p_charged_at IS NOT NULL THEN
+                  SELECT l.id, l.delta INTO v_purchase FROM public.credit_ledger l
+                  WHERE l.account_id = p_account AND l.kind = 'purchase' AND l.payment_intent IS NULL
+                    AND l.created_at BETWEEN p_charged_at - interval '5 minutes' AND p_charged_at + interval '1 hour'
+                  ORDER BY abs(extract(epoch FROM l.created_at - p_charged_at))
+                  LIMIT 1;
+                END IF;
+                IF v_purchase.id IS NULL THEN
+                  -- Nothing to claw (subscription charge, unmatched) — keep
+                  -- the audit row so the refund is visible in the ledger.
+                  INSERT INTO public.credit_ledger (account_id, delta, kind, reason, stripe_ref, balance_after)
+                  SELECT p_account, 0, 'adjust', 'stripe_refund:' || p_charge, v_ref, w.credit_balance
+                  FROM public.web_profiles w WHERE w.id = p_account
+                  ON CONFLICT (stripe_ref) WHERE stripe_ref IS NOT NULL DO NOTHING;
+                  SELECT credit_balance INTO v_bal FROM public.web_profiles WHERE id = p_account;
+                  RETURN jsonb_build_object('ok', true, 'clawed', 0, 'balance', v_bal);
+                END IF;
+                -- Prorate partial refunds; amount_refunded is cumulative on the
+                -- charge, so claw only what earlier refunds haven't.
+                v_target := CASE
+                  WHEN p_amount IS NOT NULL AND p_amount > 0 AND p_amount_refunded IS NOT NULL
+                    THEN LEAST(v_purchase.delta, round(v_purchase.delta::numeric * p_amount_refunded / p_amount)::int)
+                  ELSE v_purchase.delta END;
+                SELECT COALESCE(-SUM(delta), 0) INTO v_already FROM public.credit_ledger WHERE refunded_of = v_purchase.id;
+                v_claw := v_target - v_already;
+                IF v_claw <= 0 THEN
+                  SELECT credit_balance INTO v_bal FROM public.web_profiles WHERE id = p_account;
+                  RETURN jsonb_build_object('ok', true, 'duplicate', true, 'clawed', 0, 'balance', v_bal);
+                END IF;
+                -- Debit the pack slice first; anything already spent becomes
+                -- allowance debt that the next daily grants pay down.
+                UPDATE public.web_profiles
+                  SET credit_balance = credit_balance - v_claw,
+                      purchased_balance = GREATEST(purchased_balance - v_claw, 0),
+                      updated_at = now()
+                  WHERE id = p_account
+                  RETURNING credit_balance INTO v_bal;
+                INSERT INTO public.credit_ledger
+                  (account_id, delta, kind, reason, stripe_ref, balance_after, refunded_of)
+                VALUES (p_account, -v_claw, 'refund', 'stripe_refund:' || p_charge, v_ref, v_bal, v_purchase.id);
+                RETURN jsonb_build_object('ok', true, 'duplicate', false, 'clawed', v_claw, 'balance', v_bal);
+              END
+              $body$
+            $rpc$;
+
+            EXECUTE 'REVOKE ALL ON FUNCTION public.grant_pack(uuid, int, text, text, text) FROM PUBLIC';
+            EXECUTE 'REVOKE ALL ON FUNCTION public.clawback_pack(uuid, text, text, int, int, timestamptz) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.grant_pack(uuid, int, text, text, text) FROM anon';
+              EXECUTE 'REVOKE ALL ON FUNCTION public.clawback_pack(uuid, text, text, int, int, timestamptz) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.grant_pack(uuid, int, text, text, text) FROM authenticated';
+              EXECUTE 'REVOKE ALL ON FUNCTION public.clawback_pack(uuid, text, text, int, int, timestamptz) FROM authenticated';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.grant_pack(uuid, int, text, text, text) TO service_role';
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.clawback_pack(uuid, text, text, int, int, timestamptz) TO service_role';
+            END IF;
+          END IF;
+        END $mig$
+      `;
+    },
+    down: async (sql) => {
+      // Reverts to single-bucket semantics: the new RPC signatures go, the
+      // v32/v50 ones come back via a re-run of those bodies' shape (3-/2-arg),
+      // and the bonus rows fold back into 'purchase'.
+      await sql`
+        DO $undo$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'credit_ledger') THEN
+            EXECUTE 'DROP FUNCTION IF EXISTS public.grant_pack(uuid, int, text, text, text)';
+            EXECUTE 'DROP FUNCTION IF EXISTS public.clawback_pack(uuid, text, text, int, int, timestamptz)';
+            EXECUTE $q$UPDATE public.credit_ledger SET kind = 'purchase' WHERE kind = 'grant_bonus'$q$;
+            EXECUTE 'ALTER TABLE public.credit_ledger DROP CONSTRAINT IF EXISTS credit_ledger_kind_check';
+            EXECUTE 'ALTER TABLE public.credit_ledger
+              ADD CONSTRAINT credit_ledger_kind_check
+              CHECK (kind IN (''grant_daily'',''grant_weekly'',''spend'',''refund'',''adjust'',''purchase''))';
+            EXECUTE 'DROP INDEX IF EXISTS public.credit_ledger_payment_intent';
+            EXECUTE 'ALTER TABLE public.credit_ledger DROP COLUMN IF EXISTS payment_intent';
+            EXECUTE 'ALTER TABLE public.web_profiles DROP COLUMN IF EXISTS purchased_balance';
+          END IF;
+        END $undo$
+      `;
+      // Re-create the prior RPCs by re-running their migrations' up bodies —
+      // v31 first: it carries grant_pack's REVOKE/GRANT (a fresh function
+      // would otherwise default to PUBLIC execute); v32 swaps in its body.
+      await migrations.find(m => m.version === 31)!.up(sql);
+      await migrations.find(m => m.version === 32)!.up(sql);
+      await migrations.find(m => m.version === 50)!.up(sql);
+    },
+  },
+  // ── v61: missed-signal sweep indexes ───────────────────────────────────────
+  // The 15-minute sweep used to walk every dm: scope ever seen (a DISTINCT over
+  // all of messages, then several queries per scope). It now asks for just the
+  // scopes with work — these partial indexes keep both legs of that query off
+  // a full scan: unclassified rows by age, and pending extraction marks.
+  {
+    version: 61,
+    name: "v61_sweep_indexes",
+    up: async (sql) => {
+      await sql`CREATE INDEX IF NOT EXISTS messages_untriaged ON messages(created_at) WHERE triage_result IS NULL`;
+      await sql`CREATE INDEX IF NOT EXISTS messages_pending_extract ON messages(guild_id) WHERE triage_result IN ('durable', 'regex', 'queued')`;
+    },
+    down: async (sql) => {
+      await sql`DROP INDEX IF EXISTS messages_untriaged`;
+      await sql`DROP INDEX IF EXISTS messages_pending_extract`;
     },
   },
 ];

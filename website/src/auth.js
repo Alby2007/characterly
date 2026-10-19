@@ -123,7 +123,7 @@ export async function getProfile(userId) {
   // client never needs stripe_customer_id or grant timestamps.
   const { data, error } = await supabase
     .from("web_profiles")
-    .select("id, display_name, discord_user_id, discord_username, discord_avatar_url, plan, credit_balance")
+    .select("id, display_name, discord_user_id, discord_username, discord_avatar_url, plan, credit_balance, purchased_balance")
     .eq("id", userId).maybeSingle();
   if (error) throw error;
   return data;

@@ -188,31 +188,6 @@ test("analyzePairWindow unconfident or malformed output stays unconfident", asyn
   assert.equal(out2.confident, false);
 });
 
-// ── proposeGroundedAnswer ─────────────────────────────────────────────────────
-
-test("proposeGroundedAnswer returns an answer when context answers and clears the floor", async () => {
-  const { client } = stubClient({ outputText: JSON.stringify({ answers: true, appropriate: true, answer: "thursday at 9", confidence: 0.9 }) });
-  const b = new Brain("k", "m", undefined, client);
-  const r = await b.proposeGroundedAnswer("when are we meeting?", ["lore: the trip is thursday 9pm"], 0.6);
-  assert.deepEqual(r, { answer: "thursday at 9", confidence: 0.9 });
-});
-
-test("proposeGroundedAnswer returns null when context doesn't answer or it's inappropriate", async () => {
-  const { client } = stubClient({ outputText: JSON.stringify({ answers: false, appropriate: true, answer: "", confidence: 0.9 }) });
-  const b = new Brain("k", "m", undefined, client);
-  assert.equal(await b.proposeGroundedAnswer("when?", ["unrelated lore"], 0.6), null);
-  const { client: c2 } = stubClient({ outputText: JSON.stringify({ answers: true, appropriate: false, answer: "x", confidence: 0.9 }) });
-  const b2 = new Brain("k", "m", undefined, c2);
-  assert.equal(await b2.proposeGroundedAnswer("when?", ["answers but shouldn't volunteer"], 0.6), null);
-});
-
-test("proposeGroundedAnswer enforces the caller's confidence floor (backoff)", async () => {
-  const { client } = stubClient({ outputText: JSON.stringify({ answers: true, appropriate: true, answer: "thursday", confidence: 0.7 }) });
-  const b = new Brain("k", "m", undefined, client);
-  assert.ok(await b.proposeGroundedAnswer("when?", ["lore"], 0.6));   // baseline floor passes
-  assert.equal(await b.proposeGroundedAnswer("when?", ["lore"], 0.85), null); // elevated floor blocks
-});
-
 // ── reply contract: { text, end_conversation } ────────────────────────────────
 
 test("reply: parses {text, end_conversation} via strict json_schema on the plain path", async () => {

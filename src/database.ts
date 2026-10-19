@@ -2,6 +2,7 @@ import { randomInt } from "node:crypto";
 import type { AppInstall, AttributeStatus, ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, ConversationSummary, EvidenceEffect, EvidenceType, GuildCompanion, GuildDeployment, JournalCandidate, JournalEntry, ListingPost, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, SupportTicket, VerificationVerdict, WebhookMessageRecord } from "./types.js";
 import { sql as defaultSql, type Sql } from "./db.js";
 import { runMigrations } from "./migrations.js";
+import { CreditStore } from "./credit-store.js";
 import { findMentionedUsers } from "./entity-resolution.js";
 import { calculateInitialConfidence, updateConfidence, calculateDefaultImportance, calculateDefaultExplicitness } from "./confidence.js";
 import { contentPolarity, listAttributes, listAttributesForSubjects, listContestedAttributes, recomputeForMemories, transferProvenance } from "./attributes.js";
@@ -81,10 +82,10 @@ type MessageRow = {
   author_name: string; content: string; created_at: Date | string;
 };
 
-type SettingsRow = { guild_id: string; memory_enabled: number; reply_enabled: number; proactive_enabled: number; raw_retention_days: number; announced_at: Date | string | null; ignored_channels: string[] | null; quiet_channels: string[] | null; llm_daily_cap: number };
+type SettingsRow = { guild_id: string; memory_enabled: number; reply_enabled: number; raw_retention_days: number; announced_at: Date | string | null; ignored_channels: string[] | null; quiet_channels: string[] | null; llm_daily_cap: number };
 
 /** Public settings shape — server_settings projected to camelCase. */
-export type Settings = { guildId: string; memoryEnabled: number; replyEnabled: number; proactiveEnabled: number; rawRetentionDays: number; announcedAt: string | null; ignoredChannels: string[]; quietChannels: string[]; llmDailyCap: number };
+export type Settings = { guildId: string; memoryEnabled: number; replyEnabled: number; rawRetentionDays: number; announcedAt: string | null; ignoredChannels: string[]; quietChannels: string[]; llmDailyCap: number };
 
 type MemberRow = {
   guild_id: string; user_id: string; known_names: string[];
@@ -168,7 +169,11 @@ const TRIGRAM_NEAR_MISS_THRESHOLD = 0.4;
 const PROMOTABLE_EVIDENCE_TYPES: EvidenceType[] = ["explicit_fact", "clear_preference", "correction"];
 
 export class MemoryStore {
-  private constructor(private sql: Sql) {}
+  /** Credits/accounts/bot-settings slice (credit-store.ts). */
+  readonly credits: CreditStore;
+  private constructor(private sql: Sql) {
+    this.credits = new CreditStore(sql);
+  }
 
   static async create(sql: Sql = defaultSql): Promise<MemoryStore> {
     await runMigrations(sql);
@@ -196,13 +201,26 @@ export class MemoryStore {
   // only writer and invalidates. The TTL bounds staleness from out-of-band edits.
   private settingsCache = new Map<string, { value: Settings; at: number }>();
 
+  // listGuildCompanions() runs on every guild message too. Same pattern:
+  // writers invalidate (scoped when the change names a guild, full clear when
+  // companion rows or the banned-listing filter moved), TTL bounds the rest.
+  private guildCompanionCache = new Map<string, { value: GuildCompanion[]; at: number }>();
+
+  /** Drop cached guild rosters — pass a guildId for a scoped change
+   *  (summon/dismiss/purge), nothing when companion fields or listing status
+   *  changed (can't be attributed to one guild). */
+  invalidateGuildCompanions(guildId?: string): void {
+    if (guildId) this.guildCompanionCache.delete(guildId);
+    else this.guildCompanionCache.clear();
+  }
+
   async settings(guildId: string, defaultRetentionDays = 30): Promise<Settings> {
     const cached = this.settingsCache.get(guildId);
     if (cached && Date.now() - cached.at < 60_000) return cached.value;
     await this.ensureSettings(guildId, defaultRetentionDays);
-    const rows = await this.sql<SettingsRow[]>`SELECT guild_id, memory_enabled, reply_enabled, proactive_enabled, raw_retention_days, announced_at, ignored_channels, quiet_channels, llm_daily_cap FROM server_settings WHERE guild_id = ${guildId}`;
+    const rows = await this.sql<SettingsRow[]>`SELECT guild_id, memory_enabled, reply_enabled, raw_retention_days, announced_at, ignored_channels, quiet_channels, llm_daily_cap FROM server_settings WHERE guild_id = ${guildId}`;
     const r = rows[0];
-    const value = { guildId: r.guild_id, memoryEnabled: Number(r.memory_enabled), replyEnabled: Number(r.reply_enabled), proactiveEnabled: Number(r.proactive_enabled), rawRetentionDays: Number(r.raw_retention_days), announcedAt: r.announced_at ? ts(r.announced_at) : null, ignoredChannels: r.ignored_channels ?? [], quietChannels: r.quiet_channels ?? [], llmDailyCap: Number(r.llm_daily_cap) };
+    const value = { guildId: r.guild_id, memoryEnabled: Number(r.memory_enabled), replyEnabled: Number(r.reply_enabled), rawRetentionDays: Number(r.raw_retention_days), announcedAt: r.announced_at ? ts(r.announced_at) : null, ignoredChannels: r.ignored_channels ?? [], quietChannels: r.quiet_channels ?? [], llmDailyCap: Number(r.llm_daily_cap) };
     this.settingsCache.set(guildId, { value, at: Date.now() });
     return value;
   }
@@ -432,6 +450,7 @@ export class MemoryStore {
       await tx`DELETE FROM guild_deployments WHERE guild_id = ${guildId}`;
       await tx`UPDATE companion_adoptions SET chat_guild_id = NULL, chat_channel_id = NULL, chat_thread_id = NULL WHERE chat_guild_id = ${guildId}`;
     });
+    this.invalidateGuildCompanions(guildId);
     this.settingsCache.delete(guildId);
   }
 
@@ -2244,9 +2263,8 @@ export class MemoryStore {
 
   /** Guild-wide active-memory text search — the search_memories lookup tool.
    * Importance-weighted, bounded; only 'active' rows ever surface.
-   * `kinds` restricts at query level — proactive grounding passes
-   * ['server_lore'] so person facts/preferences can never slip through a
-   * post-fetch filter bug into an unprompted public answer. */
+   * `kinds` restricts at query level — e.g. ['server_lore'] guarantees person
+   * facts/preferences can never slip through a post-fetch filter bug. */
   async searchMemories(guildId: string, query: string, limit = 5, kinds?: string[]): Promise<Array<{ subjectId: string; content: string; confidence: number }>> {
     // Person-scoped rows surface only for opted-in subjects — server lore and
     // episodes attached to 'server' are consent-exempt shared context.
@@ -2572,6 +2590,7 @@ export class MemoryStore {
       `;
       await this.recomputeEdges(dmScope);
     }
+    this.invalidateGuildCompanions();
     return companion;
   }
 
@@ -2581,6 +2600,7 @@ export class MemoryStore {
       WHERE owner_user_id = ${ownerUserId} AND kind = 'awakened'
       RETURNING *
     `;
+    if (rows[0]) this.invalidateGuildCompanions();
     return rows[0] ? this.rowToCompanion(rows[0]) : null;
   }
 
@@ -2620,6 +2640,7 @@ export class MemoryStore {
         ON CONFLICT (subject_id, other_id, message_id) DO NOTHING
       `;
     }
+    this.invalidateGuildCompanions(guildId);
   }
 
   async dismissCompanion(guildId: string, companionId: number): Promise<boolean> {
@@ -2627,10 +2648,13 @@ export class MemoryStore {
       UPDATE guild_companions SET active = 0
       WHERE guild_id = ${guildId} AND companion_id = ${companionId} AND active = 1
     `;
+    if (result.count > 0) this.invalidateGuildCompanions(guildId);
     return result.count > 0;
   }
 
   async listGuildCompanions(guildId: string): Promise<GuildCompanion[]> {
+    const cached = this.guildCompanionCache.get(guildId);
+    if (cached && Date.now() - cached.at < 60_000) return cached.value;
     const rows = await this.sql<Array<any>>`
       SELECT c.*, gc.guild_id, gc.summoned_by, gc.active, gc.summoned_at
       FROM guild_companions gc
@@ -2643,13 +2667,16 @@ export class MemoryStore {
         ))
       ORDER BY gc.summoned_at ASC
     `;
-    return rows.map(r => ({
+    if (this.guildCompanionCache.size > 500) this.guildCompanionCache.clear();
+    const value = rows.map(r => ({
       ...this.rowToCompanion(r),
       guildId: r.guild_id,
       summonedBy: r.summoned_by,
       active: Number(r.active) === 1,
       summonedAt: ts(r.summoned_at),
     }));
+    this.guildCompanionCache.set(guildId, { value, at: Date.now() });
+    return value;
   }
 
   async listCompanionGuilds(companionId: number): Promise<string[]> {
@@ -2663,6 +2690,34 @@ export class MemoryStore {
    *  A user who starts awakening and abandons it still has archived messages
    *  (and possibly evidence verbatim) under dm:<uid>; scoping the sweep to
    *  'active' companions retained those rows forever. */
+  /** DM scopes with missed-signal sweep work: unclassified messages inside
+   *  the window, or extraction marks at any age ('durable'/'regex' =
+   *  requested, 'queued' = in flight or orphaned — repairQueuedMarks
+   *  reconciles). The 15-minute sweep walks only these instead of every dm:
+   *  scope that ever existed; both legs ride partial indexes (v61). */
+  async dmScopesNeedingSweep(since: Date): Promise<string[]> {
+    const rows = await this.sql<Array<{ guild_id: string }>>`
+      SELECT guild_id FROM messages
+      WHERE triage_result IS NULL AND created_at > ${since.toISOString()} AND guild_id LIKE 'dm:%'
+      UNION
+      SELECT guild_id FROM messages
+      WHERE triage_result IN ('durable', 'regex', 'queued') AND guild_id LIKE 'dm:%'
+    `;
+    return rows.map(r => r.guild_id);
+  }
+
+  /** DM scopes that made an LLM call since `sinceDay` (UTC date) — the daily
+   *  maintenance's cognition passes (events, verify, dedup, profiles) only
+   *  have new input where something happened. guild_usage is one row per
+   *  scope per day, so this stays cheap as the user base grows. */
+  async dmScopesActiveSince(sinceDay: Date): Promise<string[]> {
+    const rows = await this.sql<Array<{ guild_id: string }>>`
+      SELECT DISTINCT guild_id FROM guild_usage
+      WHERE guild_id LIKE 'dm:%' AND day >= ${sinceDay.toISOString().slice(0, 10)}::date AND llm_calls > 0
+    `;
+    return rows.map(r => r.guild_id);
+  }
+
   async listDmScopes(): Promise<string[]> {
     const rows = await this.sql<Array<{ guild_id: string }>>`
       SELECT guild_id FROM (
@@ -3023,6 +3078,7 @@ export class MemoryStore {
         updated_at       = NOW()
       WHERE adopted_from_listing_id = ${listingId} AND kind = 'adopted'
     `;
+    if (result.count > 0) this.invalidateGuildCompanions();
     return result.count;
   }
 
@@ -3338,6 +3394,9 @@ export class MemoryStore {
         INSERT INTO moderation_events (listing_id, actor_user_id, action, note)
         VALUES (${listingId}, ${actorUserId}, ${action}, ${note})
       `;
+      // Ban/unban flips the banned-listing join filter for every guild the
+      // clone sits in — scoped invalidation isn't possible here.
+      this.invalidateGuildCompanions();
       return this.rowToListing(rows[0]);
     }) as Promise<CompanionListing | null>;
   }
@@ -3363,6 +3422,7 @@ export class MemoryStore {
           VALUES (${l.id}, ${actorUserId}, 'ban_creator', ${reason})
         `;
       }
+      if (listings.length) this.invalidateGuildCompanions();
       return listings.map(l => this.rowToListing(l));
     }) as Promise<CompanionListing[]>;
   }
@@ -3980,6 +4040,8 @@ export class MemoryStore {
         WHERE id = ${rows[0].id}
       `;
       await sql`UPDATE guild_companions SET active = 0 WHERE companion_id = ${companionId}`;
+      // Deactivates across every guild the clone was summoned into.
+      this.invalidateGuildCompanions();
       await sql`
         UPDATE user_bot_settings SET active_dm_companion_id = NULL, updated_at = NOW()
         WHERE discord_user_id = ${userId} AND active_dm_companion_id = ${companionId}
@@ -4780,224 +4842,18 @@ export class MemoryStore {
     return code;
   }
 
-  // ── Credits & per-user bot settings ──────────────────────────────────────────
-  // Credits live on web_profiles (auth-gated table — absent on plain Postgres,
-  // where creditsSupported stays false and the whole feature no-ops). Spends
-  // are single-tx: apply due lazy grants under FOR UPDATE, then debit — the
-  // row lock makes concurrent turns serialize and the ledger a true running
-  // balance. Grants are configured at init from env so tests control them.
-
-  private creditsEnabled = false;
-  private creditGrants = { freeDaily: 30, premiumDaily: 150 };
-
-  /** Detect whether the web-accounts schema exists (v26+). Called once at
-   * init; tests re-call after creating the fixture tables. */
-  async initCreditsSupport(grants?: { freeDaily: number; premiumDaily: number }): Promise<boolean> {
-    if (grants) this.creditGrants = grants;
-    const rows = await this.sql<Array<{ r: string | null }>>`SELECT to_regclass('public.web_profiles') AS r`;
-    this.creditsEnabled = Boolean(rows[0]?.r);
-    return this.creditsEnabled;
-  }
-  get creditsSupported(): boolean { return this.creditsEnabled; }
-
-  /** Cached discord→account resolution shared by the link gate, payer lookup,
-   * and plan checks. Only positive hits are cached — a negative entry would
-   * mask a fresh /link claim for up to a minute, and a miss is one indexed
-   * lookup anyway. */
-  private accountCache = new Map<string, { account: { id: string; plan: "free" | "premium"; creditBalance: number }; at: number }>();
-  private static readonly ACCOUNT_CACHE_MS = 60_000;
-  private static readonly RESOLUTION_CACHE_MAX = 10_000;
-
-  async accountForDiscordUser(discordUserId: string): Promise<{ id: string; plan: "free" | "premium"; creditBalance: number } | null> {
-    if (!this.creditsEnabled) return { id: "selfhosted", plan: "premium", creditBalance: Infinity };
-    const hit = this.accountCache.get(discordUserId);
-    if (hit && Date.now() - hit.at < MemoryStore.ACCOUNT_CACHE_MS) return hit.account;
-    const rows = await this.sql<Array<{ id: string; plan: string; credit_balance: number }>>`
-      SELECT id, plan, credit_balance FROM web_profiles WHERE discord_user_id = ${discordUserId}
-    `;
-    if (!rows[0]) return null;
-    const account = { id: rows[0].id, plan: rows[0].plan as "free" | "premium", creditBalance: Number(rows[0].credit_balance) };
-    if (this.accountCache.size >= MemoryStore.RESOLUTION_CACHE_MAX) this.accountCache.clear();
-    this.accountCache.set(discordUserId, { account, at: Date.now() });
-    return account;
-  }
-
-  /** Latest recorded Terms/Privacy acceptance for a Discord user — null when
-   *  they've never accepted. Matches on discord_user_id OR the linked
-   *  account_id when supplied, so a web-signup acceptance counts at the
-   *  Discord gate. Append-only rows; the highest version wins.
-   *  Uncached: a stale cache would let a just-bumped policy slip through. */
-  async tosAcceptance(discordUserId: string, accountId?: string | null): Promise<{ version: number; acceptedAt: string } | null> {
-    const rows = await this.sql<Array<{ version: number; accepted_at: string }>>`
-      SELECT version, accepted_at FROM consent_events
-      WHERE document = 'terms'
-        AND (discord_user_id = ${discordUserId}
-          OR (${accountId ?? null}::text IS NOT NULL AND account_id = ${accountId ?? null}))
-      ORDER BY version DESC, accepted_at DESC LIMIT 1
-    `;
-    return rows[0] ? { version: Number(rows[0].version), acceptedAt: rows[0].accepted_at } : null;
-  }
-
-  /** Append a clickwrap acceptance. account_id is the web_profiles.id when the
-   *  user has a linked account (or 'selfhosted'); document/version/source let
-   *  one table serve every consent surface — 'terms'/'discord_verify' today,
-   *  'web_signup' when the site adds a signup checkbox. */
-  async recordTosAcceptance(discordUserId: string, accountId: string | null, version: number, source: string): Promise<void> {
-    await this.sql`
-      INSERT INTO consent_events (discord_user_id, account_id, document, version, source)
-      VALUES (${discordUserId}, ${accountId}, 'terms', ${version}, ${source})
-    `;
-  }
-
-  /** Linked accounts still missing the Discord display snapshot — code-links
-   *  claimed before v38 only stamped discord_user_id. The boot backfill walks
-   *  these and re-fetches each profile from Discord. */
-  async linkedProfilesMissingDiscordIdentity(): Promise<string[]> {
-    if (!this.creditsEnabled) return [];
-    const rows = await this.sql<Array<{ discord_user_id: string }>>`
-      SELECT discord_user_id FROM web_profiles
-      WHERE discord_user_id IS NOT NULL AND (discord_username IS NULL OR discord_username = '')
-    `;
-    return rows.map(r => r.discord_user_id);
-  }
-
-  /** Stamp the Discord display fields on a linked web account. Bot-only —
-   *  postgres bypasses the column-level grants that keep authenticated
-   *  clients from writing these (same guarantee as discord_user_id). */
-  async syncDiscordIdentity(discordUserId: string, username: string, avatarUrl: string): Promise<void> {
-    if (!this.creditsEnabled) return;
-    await this.sql`
-      UPDATE web_profiles
-      SET discord_username = ${username}, discord_avatar_url = ${avatarUrl}, updated_at = NOW()
-      WHERE discord_user_id = ${discordUserId}
-    `;
-  }
-
-  private async writeLedger(tx: Sql, accountId: string, delta: number, kind: string, reason: string | null): Promise<number> {
-    const rows = await tx<Array<{ credit_balance: number }>>`
-      UPDATE public.web_profiles SET credit_balance = credit_balance + ${delta}, updated_at = now()
-      WHERE id = ${accountId} RETURNING credit_balance
-    `;
-    const balance = Number(rows[0].credit_balance);
-    await tx`
-      INSERT INTO public.credit_ledger (account_id, delta, kind, reason, balance_after)
-      VALUES (${accountId}, ${delta}, ${kind}, ${reason}, ${balance})
-    `;
-    return balance;
-  }
-
-  /** Debit n credits from the account linked to discordUserId. Applies any due
-   * lazy grants first (daily for all plans — premium's floor is just higher)
-   * lock — no scheduler, downtime-safe. ok:false when unlinked or broke. */
-  async spendCredits(
-    discordUserId: string,
-    n: number,
-    reason: string,
-  ): Promise<{ ok: boolean; balance: number }> {
-    if (!this.creditsEnabled) return { ok: true, balance: 0 };
-    return this.sql.begin(async tx => {
-      const rows = await tx<Array<{
-        id: string; plan: string; credit_balance: number;
-        last_daily_grant_on: string | Date | null;
-        today: string;
-      }>>`
-        SELECT id, plan, credit_balance, last_daily_grant_on,
-               (now() AT TIME ZONE 'UTC')::date AS today
-        FROM public.web_profiles WHERE discord_user_id = ${discordUserId}
-        FOR UPDATE
-      `;
-      const acct = rows[0];
-      // Live miss evicts any cached positive — a just-unlinked user must fail
-      // the gate on their next turn, not ride the stale entry.
-      if (!acct) { this.accountCache.delete(discordUserId); return { ok: false, balance: 0 }; }
-      // postgres.js returns computed ::date columns as strings but stored date
-      // columns as Date objects — normalize both to YYYY-MM-DD before comparing.
-      const isoDay = (v: string | Date | null): string | null =>
-        v == null ? null : v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10);
-      const day = isoDay(acct.today)!;
-      const lastDaily = isoDay(acct.last_daily_grant_on);
-      let balance = Number(acct.credit_balance);
-      // Grants REFILL to the grant amount rather than accruing — the user-facing
-      // copy ("refreshes daily") is the contract, and a floor bounds how much an
-      // idle account can bank toward a burst. Delta is what it took to reach the
-      // floor; nothing is written when the balance already exceeds it.
-      if (lastDaily !== day) {
-        const g = acct.plan === "premium" ? this.creditGrants.premiumDaily : this.creditGrants.freeDaily;
-        const delta = Math.max(0, g - balance);
-        if (delta > 0) balance = await this.writeLedger(tx, acct.id, delta, "grant_daily", null);
-        await tx`UPDATE public.web_profiles SET last_daily_grant_on = ${day} WHERE id = ${acct.id}`;
-      }
-      if (balance < n) return { ok: false, balance };
-      balance = await this.writeLedger(tx, acct.id, -n, "spend", reason);
-      this.accountCache.delete(discordUserId);
-      return { ok: true, balance };
-    });
-  }
-
-  /** Credit n back — a companion message that never sent didn't happen. */
-  async refundCredits(discordUserId: string, n: number, reason: string): Promise<{ ok: boolean; balance: number }> {
-    if (!this.creditsEnabled) return { ok: true, balance: 0 };
-    return this.sql.begin(async tx => {
-      const rows = await tx<Array<{ id: string }>>`SELECT id FROM public.web_profiles WHERE discord_user_id = ${discordUserId} FOR UPDATE`;
-      if (!rows[0]) return { ok: false, balance: 0 };
-      const balance = await this.writeLedger(tx, rows[0].id, n, "refund", reason);
-      this.accountCache.delete(discordUserId);
-      return { ok: true, balance };
-    });
-  }
-
-  /** Pack purchase — credits an account by UUID (Stripe webhook path, keyed by
-   * web_profiles.id rather than a Discord snowflake). stripeRef makes retries
-   * idempotent: the ledger's unique stripe_ref index absorbs replays. */
-  async purchaseCredits(accountId: string, n: number, reason: string, stripeRef: string): Promise<{ ok: boolean; duplicate: boolean; balance: number }> {
-    if (!this.creditsEnabled) return { ok: true, duplicate: false, balance: 0 };
-    return this.sql.begin(async tx => {
-      const rows = await tx<Array<{ credit_balance: number }>>`
-        SELECT credit_balance FROM public.web_profiles WHERE id = ${accountId} FOR UPDATE
-      `;
-      if (!rows[0]) return { ok: false, duplicate: false, balance: 0 };
-      const inserted = await tx`
-        INSERT INTO public.credit_ledger (account_id, delta, kind, reason, stripe_ref, balance_after)
-        VALUES (${accountId}, ${n}, 'purchase', ${reason}, ${stripeRef}, ${Number(rows[0].credit_balance) + n})
-        ON CONFLICT (stripe_ref) WHERE stripe_ref IS NOT NULL DO NOTHING
-        RETURNING id
-      `;
-      if (!inserted[0]) return { ok: true, duplicate: true, balance: Number(rows[0].credit_balance) };
-      const updated = await tx<Array<{ credit_balance: number }>>`
-        UPDATE public.web_profiles SET credit_balance = credit_balance + ${n}, updated_at = now()
-        WHERE id = ${accountId} RETURNING credit_balance
-      `;
-      this.accountCache.clear(); // accountId is a uuid — evict broadly, cheap at pack volume
-      return { ok: true, duplicate: false, balance: Number(updated[0].credit_balance) };
-    });
-  }
-
-  /** Today's hosted:global LLM-call count — the fleet breaker's current spend.
-   * Used to shed the free lane before the hard cap trips. */
-  async hostedUsageToday(): Promise<number> {
-    const rows = await this.sql<Array<{ llm_calls: number | string | null }>>`
-      SELECT llm_calls FROM guild_usage
-      WHERE guild_id = 'hosted:global' AND day = (now() AT TIME ZONE 'UTC')::date
-    `;
-    return Number(rows[0]?.llm_calls ?? 0);
-  }
-
-  /** Per-user bot toggles — the site writes via upsert_my_settings; defaults
-   * cover users who never open the settings page. */
-  private botSettingsCache = new Map<string, { value: { c2cEnabled: boolean; lowCreditAlerts: boolean }; at: number }>();
-
-  async userBotSettings(discordUserId: string): Promise<{ c2cEnabled: boolean; lowCreditAlerts: boolean }> {
-    if (!this.creditsEnabled) return { c2cEnabled: true, lowCreditAlerts: true };
-    const hit = this.botSettingsCache.get(discordUserId);
-    if (hit && Date.now() - hit.at < MemoryStore.ACCOUNT_CACHE_MS) return hit.value;
-    const rows = await this.sql<Array<{ c2c_enabled: boolean; low_credit_alerts: boolean }>>`
-      SELECT c2c_enabled, low_credit_alerts FROM user_bot_settings WHERE discord_user_id = ${discordUserId}
-    `;
-    const value = rows[0]
-      ? { c2cEnabled: Boolean(rows[0].c2c_enabled), lowCreditAlerts: Boolean(rows[0].low_credit_alerts) }
-      : { c2cEnabled: true, lowCreditAlerts: true };
-    if (this.botSettingsCache.size >= MemoryStore.RESOLUTION_CACHE_MAX) this.botSettingsCache.clear();
-    this.botSettingsCache.set(discordUserId, { value, at: Date.now() });
-    return value;
-  }
+  // ── Credits, account links & bot settings — implemented in credit-store.ts.
+  // Thin delegates keep the MemoryStore surface unchanged for every caller.
+  initCreditsSupport(...a: Parameters<CreditStore["initCreditsSupport"]>) { return this.credits.initCreditsSupport(...a); }
+  get creditsSupported(): boolean { return this.credits.creditsSupported; }
+  accountForDiscordUser(...a: Parameters<CreditStore["accountForDiscordUser"]>) { return this.credits.accountForDiscordUser(...a); }
+  tosAcceptance(...a: Parameters<CreditStore["tosAcceptance"]>) { return this.credits.tosAcceptance(...a); }
+  recordTosAcceptance(...a: Parameters<CreditStore["recordTosAcceptance"]>) { return this.credits.recordTosAcceptance(...a); }
+  linkedProfilesMissingDiscordIdentity() { return this.credits.linkedProfilesMissingDiscordIdentity(); }
+  syncDiscordIdentity(...a: Parameters<CreditStore["syncDiscordIdentity"]>) { return this.credits.syncDiscordIdentity(...a); }
+  spendCredits(...a: Parameters<CreditStore["spendCredits"]>) { return this.credits.spendCredits(...a); }
+  refundCredits(...a: Parameters<CreditStore["refundCredits"]>) { return this.credits.refundCredits(...a); }
+  purchaseCredits(...a: Parameters<CreditStore["purchaseCredits"]>) { return this.credits.purchaseCredits(...a); }
+  hostedUsageToday() { return this.credits.hostedUsageToday(); }
+  userBotSettings(...a: Parameters<CreditStore["userBotSettings"]>) { return this.credits.userBotSettings(...a); }
 }

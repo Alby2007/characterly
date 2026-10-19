@@ -16,6 +16,7 @@
 ## Billing
 
 - Edge functions live under `supabase/functions/` and deploy via `npx supabase functions deploy <name> --project-ref tfukkoektmsrolykliop` — or, when the CLI isn't authed, the Supabase MCP `deploy_edge_function` tool (pass file contents; keep `verify_jwt`: `stripe-webhook`→false, `create-checkout`→true).
+- Tokens are two buckets (v60): `credit_balance` is the total, `purchased_balance` the persistent pack/bonus slice; only the allowance (`total − purchased`) refills daily. `grant_pack`/`clawback_pack` take extra args (`p_payment_intent`, `p_kind`, refund amounts) — **deploy order: bot first (applies v60), then `stripe-webhook`, then the website** (the dashboard selects `purchased_balance`).
 - Stripe catalog lives on the `stripe` MCP (account `acct_1UQa85GAOUmNDfnh`, live). Prices/products are managed there; the ids are mirrored in `create-checkout`/`stripe-webhook` constants and `docs/operations.md` → Billing.
 
 ## Partner deployments (multi-server marketplace, v59)

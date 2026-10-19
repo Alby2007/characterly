@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import test from "node:test";
 import {
+  clawbackArgs,
   classifyCheckout,
   classifySubscription,
   isUuid,
@@ -60,7 +61,7 @@ test("classifyCheckout: paid pack session grants tokens idempotently on session 
     { id: "cs_1", payment_status: "paid", payment_link: "plink_pack500", client_reference_id: "u" },
     { packLinks: PACK_LINKS, premiumLink: PREMIUM_LINK },
   );
-  assert.deepEqual(a, { kind: "pack", tokens: 500, ref: "cs_1", customer: null });
+  assert.deepEqual(a, { kind: "pack", tokens: 500, ref: "cs_1", customer: null, paymentIntent: null });
 });
 
 test("classifyCheckout: unpaid pack sessions wait for async_payment_succeeded", () => {
@@ -129,12 +130,27 @@ test("classifyCheckout: a foreign subscription checkout does not grant premium",
 const PACK_META = { pack_500: 500, pack_1500: 1500 };
 const OPTS = { packLinks: PACK_LINKS, premiumLink: PREMIUM_LINK, packMeta: PACK_META };
 
+test("clawbackArgs: exact PI + proration; subscription charges never get the time-window fallback", () => {
+  const pack = clawbackArgs("acc", { id: "ch_1", payment_intent: "pi_1", amount: 499, amount_refunded: 250, created: 1_700_000_000 });
+  assert.deepEqual(pack, {
+    p_account: "acc", p_charge: "ch_1", p_payment_intent: "pi_1",
+    p_amount: 499, p_amount_refunded: 250, p_charged_at: new Date(1_700_000_000_000).toISOString(),
+  });
+  assert.equal(clawbackArgs("acc", { id: "ch_2", invoice: "in_1", created: 1_700_000_000 }).p_charged_at, null);
+  assert.equal(clawbackArgs("acc", { id: "ch_3", description: "Subscription update", created: 1_700_000_000 }).p_charged_at, null);
+});
+
 test("classifyCheckout: metadata-minted pack sessions grant like payment-link ones", () => {
   const a = classifyCheckout(
     { id: "cs_m1", payment_status: "paid", payment_link: null, metadata: { checkout_kind: "pack_500" } },
     OPTS,
   );
-  assert.deepEqual(a, { kind: "pack", tokens: 500, ref: "cs_m1", customer: null });
+  assert.deepEqual(a, { kind: "pack", tokens: 500, ref: "cs_m1", customer: null, paymentIntent: null });
+  const withPi = classifyCheckout(
+    { id: "cs_m3", payment_status: "paid", payment_link: null, payment_intent: "pi_123", metadata: { checkout_kind: "pack_500" } },
+    OPTS,
+  );
+  assert.equal(withPi.kind === "pack" && withPi.paymentIntent, "pi_123", "the PI rides to the ledger for exact refund matching");
   const unpaid = classifyCheckout(
     { id: "cs_m2", payment_status: "unpaid", payment_link: null, metadata: { checkout_kind: "pack_1500" } },
     OPTS,

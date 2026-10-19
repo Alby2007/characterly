@@ -90,6 +90,7 @@ export async function runChatImportJob(
       // per import) keeps resume honest: processed windows were paid for,
       // unprocessed ones weren't. A failed window refunds like an unsent turn.
       let chargedWindow = false;
+      let chargedPurchased = 0;
       if (hosted) {
         // Unlinked mid-import can't park-and-resume forever — that's a
         // permanent state, not an empty balance. Fail the row outright.
@@ -104,6 +105,7 @@ export async function runChatImportJob(
           throw new CreditsExhausted(dmScope, spent.balance);
         }
         chargedWindow = true;
+        chargedPurchased = spent.purchased ?? 0;
       }
       try {
         const window = turns.slice(i, i + windowSize);
@@ -131,7 +133,7 @@ export async function runChatImportJob(
         await store.updateChatImportProgress(imp.id, i + window.length, saved.length, summary);
       } catch (error) {
         if (chargedWindow) {
-          await store.refundCredits(imp.ownerUserId, CHAT_IMPORT_CREDITS_PER_WINDOW, "chat_import_refund")
+          await store.refundCredits(imp.ownerUserId, CHAT_IMPORT_CREDITS_PER_WINDOW, "chat_import_refund", chargedPurchased)
             .catch(e => logError("chat-import credit refund failed", e));
         }
         throw error;

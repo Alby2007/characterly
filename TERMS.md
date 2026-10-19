@@ -29,7 +29,7 @@ The operator may remove the bot from any server, or block any user, for any reas
 
 ## Data
 
-Data practices are described in the [Privacy Policy](PRIVACY.md). The operator is not liable for data loss; exports are available via `/memory-export` but are provided best-effort.
+Data practices are described in the [Privacy Policy](PRIVACY.md). The operator is not liable for data loss; exports are available via `/memory export` but are provided best-effort.
 
 ## Liability
 

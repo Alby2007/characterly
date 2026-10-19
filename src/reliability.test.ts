@@ -391,3 +391,44 @@ test("an unchanged contested re-scan does not spam memory_history", async () => 
     assert.equal(unresolved.length, 1, "only the first inconclusive pass logs — unchanged repeats are silent");
   } finally { await sql.end(); }
 });
+
+test("sweep scope queries: only DM scopes with pending work / recent LLM use", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const msg = (id: string, scope: string, ageMin: number, triage: string | null) => sql`
+      INSERT INTO messages (id, guild_id, channel_id, author_id, author_name, content, created_at, triage_result)
+      VALUES (${id}, ${scope}, 'c', 'u', 'U', 'hi there', now() - (${ageMin} || ' minutes')::interval, ${triage})`;
+    await msg("m1", "dm:fresh", 5, null);          // unclassified, inside window
+    await msg("m2", "dm:stale", 600, null);        // unclassified, outside window
+    await msg("m3", "dm:orphan", 6000, "durable"); // stranded mark, any age
+    await msg("m4", "dm:done", 5, "noise");        // already classified
+    await msg("m5", "guild-1", 5, null);           // guilds walk the client cache
+    const scopes = await store.dmScopesNeedingSweep(new Date(Date.now() - 2 * 60 * 60_000));
+    assert.deepEqual(scopes.sort(), ["dm:fresh", "dm:orphan"]);
+
+    await sql`INSERT INTO guild_usage (guild_id, day, llm_calls) VALUES
+      ('dm:today', (now() AT TIME ZONE 'UTC')::date, 3),
+      ('dm:old', (now() AT TIME ZONE 'UTC')::date - 5, 9),
+      ('dm:zero', (now() AT TIME ZONE 'UTC')::date, 0),
+      ('guild-1', (now() AT TIME ZONE 'UTC')::date, 4)`;
+    assert.deepEqual(await store.dmScopesActiveSince(new Date(Date.now() - 86_400_000)), ["dm:today"]);
+  } finally { await sql.end(); }
+});
+
+test("backgroundCapped: only background-context calls charge hosted:background, and its cap throws BudgetExceeded", async () => {
+  const { backgroundCapped, runAsBackground, BudgetExceeded } = await import("./budget.js");
+  const charged: string[] = [];
+  let used = 0;
+  const store = { chargeLlmCall: async (scope: string, cap: number) => { charged.push(scope); used++; return { ok: used <= cap, cap }; } };
+  let calls = 0;
+  const inner = { responses: { create: async () => { calls++; return {}; } }, chat: { completions: { create: async () => { calls++; return {}; } } } };
+  const client = backgroundCapped(inner as never, { store: store as never, getCap: async () => 1 });
+  await client.chat.completions.create({});
+  assert.deepEqual(charged, [], "live calls never touch the background meter");
+  await runAsBackground(() => client.chat.completions.create({}));
+  assert.deepEqual(charged, ["hosted:background"]);
+  await assert.rejects(runAsBackground(() => client.chat.completions.create({})), (e: unknown) => e instanceof BudgetExceeded && e.guildId === "hosted:background");
+  await client.chat.completions.create({});
+  assert.equal(calls, 3, "live chat keeps flowing after the background share is spent");
+});

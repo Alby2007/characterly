@@ -12,6 +12,7 @@ import {
   buildOnboardingDraftComponents,
   buildOnboardingDraftEmbed,
   buildOnboardingWelcomePayload,
+  chargeOnboardingTurn,
   commandDefinitions,
   isAwakenedCompanionActive,
   findMutualGuilds,
@@ -37,7 +38,7 @@ import { inc } from "./metrics.js";
 import { logError, redactSecrets, registerSecret, validateLlmKey } from "./secrets.js";
 import { announceIfNeeded, handleGuildDelete } from "./guild-lifecycle.js";
 import { isSafeUrl } from "./tools.js";
-import { BudgetExceeded, meteredClient } from "./budget.js";
+import { BudgetExceeded, backgroundCapped, meteredClient, runAsBackground } from "./budget.js";
 import { runExtractJob, type ExtractJobPayload } from "./extract-job.js";
 import { runJournalJob, type JournalJobPayload } from "./journal-job.js";
 import { runSummaryJob, SUMMARY_REPLY_INTERVAL, type SummaryJobPayload } from "./summary-job.js";
@@ -45,7 +46,8 @@ import { runChatImportJob, type ChatImportJobPayload } from "./chat-import-job.j
 import { greetPendingInstalls } from "./install-greet.js";
 import { selectCompanionForTurn } from "./scene-router.js";
 import { sendAsCompanion } from "./webhooks.js";
-import { isSelfHarmSignal, CRISIS_RESPONSE, SAFE_REFUSAL } from "./safety.js";
+import { isSelfHarmSignal, CRISIS_RESPONSE, safetyBrain } from "./safety.js";
+import { TurnLedger, chargeHostedTurn, screenAdoptedReply } from "./turn-billing.js";
 import {
   initOps, automodMessage, isHouse, isMarketplaceThread, isAdopteeThread, opsAlert,
   handleHouseMemberAdd, handleHouseMemberUpdate, handleHouseMemberRemove,
@@ -59,7 +61,7 @@ import { exec as cpExec } from "node:child_process";
 import { promisify } from "node:util";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { gatherOwnerSubtextForServer, gatherServerDigestForDm } from "./cross-context.js";
-import { rehostAvatar } from "./avatars.js";
+import { rehostAvatar, gcRehostedAvatars } from "./avatars.js";
 import { defaultEmbedder, vectorLiteral } from "./embeddings.js";
 import type { Companion, CompanionAdoption, CompanionPersona, JournalEntry, MessageEvent, PairContext } from "./types.js";
 
@@ -146,7 +148,9 @@ const { brainFor, brainForUser, invalidate: invalidateBrain, isHostedScope, isHo
   }),
   // Hosted lane (env key) additionally charges the fleet-wide circuit breaker —
   // a second metered wrap on scope 'hosted:global' so BYOK calls never count.
-  meterHosted: (scopeId, c) => meteredClient(meteredClient(c, {
+  // Outermost: background calls also charge 'hosted:background', capped at a
+  // share of the fleet cap so jobs can't starve live chat.
+  meterHosted: (scopeId, c) => backgroundCapped(meteredClient(meteredClient(c, {
     guildId: scopeId, store,
     getCap: async () => scopeId.startsWith("dm:")
       ? config.dmLlmDailyCap
@@ -154,6 +158,9 @@ const { brainFor, brainForUser, invalidate: invalidateBrain, isHostedScope, isHo
   }), {
     guildId: "hosted:global", store,
     getCap: async () => config.hostedDailyLlmCap,
+  }), {
+    store,
+    getCap: async () => Math.floor(config.hostedDailyLlmCap * config.hostedBackgroundShare),
   }),
 });
 // Vision can live on a different provider than the main key (e.g. Gemini's
@@ -227,13 +234,9 @@ function nextHourBoundary(): Date {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCHours() + 1));
 }
 
-// Refunds are fire-and-forget on the reply path but never silent — a failed
-// refund is real money to the user, so a drop gets logged + counted.
-const refundTurn = (payerId: string, n: number, reason: string) =>
-  store.refundCredits(payerId, n, reason).catch(e => {
-    inc("credits.refund_error");
-    logError(`credit refund failed for ${payerId} (${reason})`, e);
-  });
+/** User-facing notice for a refused hosted charge (see turn-billing.ts). */
+const chargeRefusalNotice = (reason: "pressure" | "insufficient" | "unlinked") =>
+  reason === "pressure" ? HOSTED_CAPACITY() : reason === "insufficient" ? TOKEN_EMPTY() : LINK_PROMPT;
 
 // MemoryStore.create() runs migrations; EventStore shares the same sql connection.
 let store: MemoryStore;
@@ -257,7 +260,9 @@ async function init() {
   // global cap 8. LISTEN 'jobs' for wake hints, 3s poll as the baseline.
   worker = startWorker({
     sql,
-    handle: job => {
+    // Every job is background cognition — hosted calls inside it draw on the
+    // capped hosted:background share, never live chat's reserve.
+    handle: job => runAsBackground(() => {
       if (job.type === "proactive-fire") {
         // Legacy proactive-fire jobs are a no-op: the Characterly bot is pure
         // server plumbing and never speaks on its own.
@@ -288,7 +293,7 @@ async function init() {
         return Promise.reject(new FatalJobError(`unknown job type: ${job.type}`));
       }
       return runExtractJob(job.payload as ExtractJobPayload, extractDeps);
-    },
+    }),
     onError: (m, e) => logError(m, e),
   });
 }
@@ -431,7 +436,22 @@ client.on(Events.GuildMemberRemove, member => {
   }
 });
 
-async function applyRetention() {
+/** Periodic loops must never overlap: a sweep that outlasts its interval
+ *  would otherwise start a second pass over the same rows (double triage,
+ *  double LLM spend). An overlapping tick is skipped and counted. Runs the
+ *  loop in the background budget context (see budget.ts). */
+function singleFlight<A extends unknown[]>(name: string, fn: (...args: A) => Promise<void>): (...args: A) => Promise<void> {
+  let running = false;
+  return async (...args: A) => {
+    if (running) { inc(`${name}.overlap_skipped`); return; }
+    running = true;
+    // Periodic loops are background cognition for budget purposes too.
+    try { await runAsBackground(() => fn(...args)); } finally { running = false; }
+  };
+}
+
+const applyRetention = singleFlight("maintenance", applyRetentionOnce);
+async function applyRetentionOnce() {
   // Zombie sweep first: an in-flight write can race a kick-purge and re-insert
   // a server_settings/members row after it commits. Cache is authoritative —
   // discord.js keeps unavailable (outage) guilds cached, so they're never
@@ -451,7 +471,14 @@ async function applyRetention() {
     const pruned = await store.pruneJournal();
     if (pruned) console.log(`Pruned ${pruned} stale companion journal entries`);
   } catch (error) { inc("maintenance.journal_error"); logError("Journal prune failed", error); }
+  // Same shape as the journal prune: one global pass per run collects
+  // re-hosted avatar objects no row references anymore (replaced avatars).
+  await gcRehostedAvatars();
+  // Retention/pruning covers every scope holding data; the LLM cognition
+  // passes below only run for DM scopes active since yesterday (UTC) — an
+  // idle DM has no new input to verify, dedup, or profile.
   const dmScopes = await store.listDmScopes().catch(() => [] as string[]);
+  const activeDm = new Set(await store.dmScopesActiveSince(new Date(Date.now() - 86_400_000)).catch(() => dmScopes));
   const scopes: Array<{ id: string; name: string }> = [
     ...[...client.guilds.cache.values()].map(g => ({ id: g.id, name: g.name })),
     ...dmScopes.map(id => ({ id, name: id })),
@@ -476,6 +503,7 @@ async function applyRetention() {
     // Hoisted so the relationship rebuild and the pair-analysis enqueue share
     // one archive scan — interactionPairs reads every 90d message.
     let guildInteractions: Array<{ aId: string; bId: string; count: number; firstAt: string; lastAt: string }> = [];
+    if (guild.id.startsWith("dm:") && !activeDm.has(guild.id)) continue;
     // Dormant guilds (no key) skip every LLM pass — retention/pruning above
     // still ran; they're lifecycle ops, not cognition.
     const brain = await brainFor(guild.id);
@@ -622,10 +650,10 @@ const SWEEP_INTERVAL_MS = 15 * 60_000;
 const SWEEP_WINDOW_MS = 2 * 60 * 60_000;
 const SWEEP_TRIAGE_BATCH = 10;
 
-setInterval(() => sweepMissedSignals(SWEEP_WINDOW_MS), SWEEP_INTERVAL_MS).unref();
+setInterval(() => sweepMissedSignals(SWEEP_WINDOW_MS).catch(error => { inc("sweep.error"); logError("Missed-signal sweep failed", error); }), SWEEP_INTERVAL_MS).unref();
 // Embedding backfill — bounded batch of NULL-embedding rows per tick, so the
 // pre-v40 corpus and any inline-embed failures converge without a one-shot job.
-setInterval(() => embedBackfill().catch(e => { inc("embed.backfill_error"); logError("embed backfill failed", e); }), SWEEP_INTERVAL_MS).unref();
+setInterval(() => embedBackfillOnce().catch(e => { inc("embed.backfill_error"); logError("embed backfill failed", e); }), SWEEP_INTERVAL_MS).unref();
 
 // Install greeting — app_installs rows land via the Discord webhook-events
 // endpoint; this sweep sends the welcome DM to each ungreeted install.
@@ -650,6 +678,7 @@ setInterval(() => {
 /** Backfill embeddings for rows saved before v40 or during embed outages.
  * Bounded batch per sweep tick — large corpora converge over several ticks.
  * No-op when the embedder is disabled. */
+const embedBackfillOnce = singleFlight("embed.backfill", embedBackfill);
 async function embedBackfill(batchSize = 150): Promise<void> {
   const emb = defaultEmbedder();
   if (!emb.enabled) return;
@@ -673,8 +702,11 @@ async function embedBackfill(batchSize = 150): Promise<void> {
 // verdicts enqueue 'extract' jobs and flip to 'queued' (a failed enqueue keeps
 // the mark so the next pass retries — crash-safe), and 'extracted' marks the
 // terminal state so empty results don't re-extract forever.
-async function sweepMissedSignals(windowMs: number) {
-  const dmScopes = await store.listDmScopes().catch(() => [] as string[]);
+const sweepMissedSignals = singleFlight("sweep", sweepMissedSignalsOnce);
+async function sweepMissedSignalsOnce(windowMs: number) {
+  // Only DM scopes with actual sweep work — walking every dm: scope that ever
+  // existed made each tick O(all users) with several queries apiece.
+  const dmScopes = await store.dmScopesNeedingSweep(new Date(Date.now() - windowMs)).catch(() => [] as string[]);
   const scopes: Array<{ id: string; name: string }> = [
     ...[...client.guilds.cache.values()].map(g => ({ id: g.id, name: g.name })),
     ...dmScopes.map(id => ({ id, name: id })),
@@ -772,7 +804,7 @@ client.on(Events.InteractionCreate, async interaction => {
       await handleCompanionModal(interaction, store, scopeId => lookupCache.delete(scopeId));
       await handleTicketModal(interaction);
     }
-    if (interaction.isButton()) await handleMemoryButton(interaction, store, brainFor, eventStore);
+    if (interaction.isButton()) await handleMemoryButton(interaction, store, brainFor, eventStore, isHostedScope);
   } catch (error) {
     inc("handler.interaction_error");
     logError("Interaction handling failed", error);
@@ -1122,6 +1154,17 @@ async function handleDmMessage(
       }
     }
     if (!replyThrottle.consume(dmScope, userId)) { inc("reply.cooldown"); return; }
+    // Past the free interview turns, hosted draft turns cost like chat. The
+    // throttle token stays spent on a refusal — it bounds the notice too.
+    const charge = await chargeOnboardingTurn(store, isHostedScope(dmScope), userId, existing?.onboardingTurns ?? 0);
+    if (!charge.ok) {
+      inc("credits.onboarding_insufficient");
+      await message.reply({ content: charge.message, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+      return;
+    }
+    if (charge.charged) inc("credits.onboarding_charged");
+    const onboardingLedger = new TurnLedger(store, userId, "onboarding_turn_refund", charge.charged, charge.purchased);
+    const refundOnboarding = () => onboardingLedger.refund();
     const stopTyping = startTyping(message.channel);
     try {
       const recent = await store.recentContext(dmScope, message.channel.id, 12);
@@ -1220,6 +1263,7 @@ async function handleDmMessage(
       if (error instanceof BudgetExceeded) {
         inc("budget.reply_blocked");
         replyThrottle.refund(dmScope, userId);
+        refundOnboarding();
         if (budgetNoticeOnce(message.channel.id)) {
           await message.reply({ content: `We've hit today's DM message limit — it resets ${dailyResetTag()}.`, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
         }
@@ -1228,6 +1272,7 @@ async function handleDmMessage(
       inc("llm.reply_error");
       logError("DM onboarding turn failed", error);
       replyThrottle.refund(dmScope, userId);
+      refundOnboarding();
     } finally {
       stopTyping();
     }
@@ -1410,73 +1455,67 @@ async function runCompanionTurn(opts: {
   }
 
   // Hosted lane bills the turn upfront: the human pays for their message +
-  // the companion's reply (2 credits); a reply that never sends refunds 1.
+  // the companion's reply (2 tokens); a reply that never lands refunds them.
   const hostedDm = isHostedScope(scope);
-  let chargedDm = 0;
-  let dmBalance = 0;
-  let dmReplied = false;
+  let ledger = TurnLedger.free(userId);
   if (hostedDm) {
-    // Premium priority under fleet pressure: past ~90% of the hosted:global
-    // cap the free lane sheds first — premium keeps spending until the hard
-    // cap trips inside the metered wrap.
-    if (account?.plan !== "premium" && (await store.hostedUsageToday()) >= config.hostedDailyLlmCap * 0.9) {
-      inc("gate.hosted_pressure");
+    const charge = await chargeHostedTurn(store, {
+      payerId: userId, cost: 2, reason: "dm_turn", refundReason: "dm_turn_refund",
+      premium: account?.plan === "premium", hostedDailyLlmCap: config.hostedDailyLlmCap,
+    });
+    if (!charge.ok) {
       replyThrottle.refund(scope, userId);
-      if (budgetNoticeOnce(channel.id)) {
-        await sendSystem({ content: HOSTED_CAPACITY() });
-      }
+      if (budgetNoticeOnce(channel.id)) await sendSystem({ content: chargeRefusalNotice(charge.reason) });
       return;
     }
-    const spend = await store.spendCredits(userId, 2, "dm_turn");
-    if (!spend.ok) {
-      inc("credits.insufficient");
-      replyThrottle.refund(scope, userId);
-      if (budgetNoticeOnce(channel.id)) {
-        // A cached account can outlive a dashboard unlink by a minute — the
-        // live miss above evicted it, so a re-check says which notice fits.
-        const stillLinked = await store.accountForDiscordUser(userId).catch(() => null);
-        await sendSystem({ content: stillLinked ? TOKEN_EMPTY() : LINK_PROMPT });
-      }
-      return;
-    }
-    chargedDm = 2;
-    dmBalance = spend.balance;
+    ledger = charge.ledger;
   }
 
   const stopTyping = startTyping(channel);
   try {
-    const lookups = await guildLookups(scope);
-    const peopleIds = [userId, compSubj];
-    const profileRows = await profileStore.getProfiles(scope, peopleIds);
-    const attrMap = await store.attributesForSubjects(scope, profileRows.map(p => p.subjectId), { status: "active" });
-    const profiles = profileRows.map(p => ({
+    // Every context read below is independent — fetch them concurrently so
+    // the reply waits on one round of DB latency, not ~15 sequential ones.
+    // The embed call gates only the two semantic recall legs.
+    const recallText = `${event.content} ${replyToContent ?? ""}`;
+    const vecP = defaultEmbedder().embed(recallText).catch(() => null);
+    const [
+      lookups, profileBundle, pair, rawContext, freshOwnerName, serverDigest,
+      journal, storyRow, dmMemories, dmSelfMems, cachedImageContext,
+    ] = await Promise.all([
+      guildLookups(scope),
+      profileStore.getProfiles(scope, [userId, compSubj]).then(async rows => ({
+        rows, attrMap: await store.attributesForSubjects(scope, rows.map(p => p.subjectId), { status: "active" }),
+      })),
+      buildPairContext(store, eventStore, scope, userId, compSubj),
+      // DM window is wider than the guild default (config.dmContextMessages,
+      // 40) — a 1:1 chat has no other voices competing for the transcript, and
+      // anything older than STORY_KEEP_RECENT is folded into the recap anyway.
+      store.recentContext(scope, channel.id, config.dmContextMessages),
+      store.displayNameFor(scope, userId),
+      gatherServerDigestForDm(store, eventStore, userId, companion, gId => client.guilds.cache.get(gId)?.name),
+      vecP.then(v => promptJournal(companion.id, scope, [userId], v)),
+      store.getStorySummary(companion.id, scope, channel.id).catch(() => null),
+      // The companion's own memories (subject companion:<id>) — things it
+      // learned about itself, e.g. corrections to its persona — merge with the
+      // speaker's below.
+      vecP.then(v => promptMemories(scope, userId, recallText, v, companion.id)),
+      store.relevantMemories(scope, compSubj, 3, companion.id).catch(() => [] as Memory[]),
+      images.length && config.visionModel
+        ? store.getMessage(scope, event.messageId).then(m => m?.imageContext ?? undefined)
+        : Promise.resolve(undefined),
+    ]);
+    const profiles = profileBundle.rows.map(p => ({
       name: p.displayName,
       summary: p.summary,
       traits: p.facets.traits,
-      attributes: (attrMap.get(p.subjectId) ?? []).map(a => ({ field: a.field, value: a.value, confidence: a.confidence })),
+      attributes: (profileBundle.attrMap.get(p.subjectId) ?? []).map(a => ({ field: a.field, value: a.value, confidence: a.confidence })),
     }));
-    const pair = await buildPairContext(store, eventStore, scope, userId, compSubj);
     const relationships = pair ? [pair] : [];
-    // DM window is wider than the guild default (config.dmContextMessages,
-    // 40) — a 1:1 chat has no other voices competing for the transcript, and
-    // anything older than STORY_KEEP_RECENT is folded into the recap anyway.
-    const context = (await store.recentContext(scope, channel.id, config.dmContextMessages))
-      .map(x => ({
-        ...x,
-        content: demangleMentions(x.content, lookups.names),
-        replyToSnippet: x.replyToSnippet ? demangleMentions(x.replyToSnippet, lookups.names) : undefined,
-      }));
-    const freshOwnerName = await store.displayNameFor(scope, userId);
-    const serverDigest = await gatherServerDigestForDm(
-      store,
-      eventStore,
-      userId,
-      companion,
-      gId => client.guilds.cache.get(gId)?.name,
-    );
-    // One embed call feeds both semantic legs — the query text is the same.
-    const queryVec = await defaultEmbedder().embed(`${event.content} ${replyToContent ?? ""}`).catch(() => null);
-    const journal = await promptJournal(companion.id, scope, [userId], queryVec);
+    const context = rawContext.map(x => ({
+      ...x,
+      content: demangleMentions(x.content, lookups.names),
+      replyToSnippet: x.replyToSnippet ? demangleMentions(x.replyToSnippet, lookups.names) : undefined,
+    }));
     const persona: CompanionPersona = {
       companionId: companion.id,
       name: companion.name,
@@ -1488,7 +1527,7 @@ async function runCompanionTurn(opts: {
       backstory: companion.backstory,
       serverDigest,
       journal,
-      storySummary: (await store.getStorySummary(companion.id, scope, channel.id).catch(() => null))?.summary || undefined,
+      storySummary: storyRow?.summary || undefined,
     };
 
     // visionClient is always operator-key spend (BYOK users' images run on it
@@ -1499,9 +1538,7 @@ async function runCompanionTurn(opts: {
       : undefined;
     // Vision descriptions cache on the archive row — whichever pass (extract
     // job or reply) describes the attachments first is reused by every other.
-    let imageContext = images.length && config.visionModel
-      ? (await store.getMessage(scope, event.messageId))?.imageContext ?? undefined
-      : undefined;
+    let imageContext = cachedImageContext;
     if (!imageContext && images.length && config.visionModel) {
       const imgDescs = (await Promise.all(images.map(async a => {
         try {
@@ -1525,10 +1562,6 @@ async function runCompanionTurn(opts: {
     // per-call tool billing can run ~5x a plain reply. BYOK lanes keep tools.
     const toolsWanted = config.replyTools && toolCues(event.content);
     const toolsOn = toolsWanted && (!hostedDm || account?.plan === "premium");
-    // The companion's own memories (subject companion:<id>) — things it learned
-    // about itself, e.g. corrections to its persona — merge with the speaker's.
-    const dmMemories = await promptMemories(scope, userId, `${event.content} ${replyToContent ?? ""}`, queryVec, companion.id);
-    const dmSelfMems = await store.relevantMemories(scope, compSubj, 3, companion.id).catch(() => [] as Memory[]);
     const dmSeen = new Set(dmMemories.map(m => m.id));
     const { text } = await brain.reply(
       { ...event, authorName: freshOwnerName },
@@ -1546,42 +1579,23 @@ async function runCompanionTurn(opts: {
     const clean = text ? scrubMentions(text, lookups.names) : "";
     if (clean && looksLikeSchemaLeak(clean)) {
       inc("reply.schema_leak"); replyThrottle.refund(scope, userId);
-      if (chargedDm) refundTurn(userId, chargedDm, "dm_turn_refund");
+      ledger.refund();
       return;
     }
-    // Adopted companions are third-party authored personas riding our
-    // pipeline — their replies get a safety screen on BOTH lanes (BYOK and
-    // hosted). Fail-open on screen error: a provider hiccup sends the reply
-    // and logs the gap; a flag swaps in a neutral refusal and refunds the
-    // reply leg — the bad persona is the marketplace's problem, not the
-    // adopter's charge.
-    let dmReplyText = clean;
-    if (dmReplyText && companion.kind === "adopted" && brain) {
-      try {
-        const verdict = await brain.safetyVerdict({
-          kind: "reply",
-          subject: `${companion.name} — ${companion.voicePersona}${companion.backstory ? ` (${companion.backstory.slice(0, 300)})` : ""}`,
-          replyText: dmReplyText,
-        });
-        if (verdict.verdict === "flag") {
-          inc("safety.reply_flagged");
-          dmReplyText = SAFE_REFUSAL;
-          if (chargedDm) { refundTurn(userId, chargedDm, "dm_turn_refund"); chargedDm = 0; }
-        }
-      } catch (error) {
-        inc("safety.screen_error");
-        logError("adopted reply safety screen failed", error);
-      }
-    }
+    // Hosted lane screens on the small SAFETY_MODEL (fast, operator spend
+    // either way); BYOK keeps screening on the user's own key.
+    const dmReplyText = await screenAdoptedReply({
+      companion, text: clean, screener: (hostedDm && safetyBrain()) || brain, ledger, lane: "dm",
+    });
     if (dmReplyText) {
       const sent = await sendPersona(dmReplyText);
       if (!sent) {
         inc("reply.send_failed");
         replyThrottle.refund(scope, userId);
-        if (chargedDm) refundTurn(userId, chargedDm, "dm_turn_refund");
+        ledger.refund();
         return;
       }
-      dmReplied = true;
+      ledger.markReplied();
       inc("reply.sent");
       await store.recordMessage({
         guildId: scope,
@@ -1603,7 +1617,7 @@ async function runCompanionTurn(opts: {
         replyMessageId: sent.id, channelId: channel.id,
       }, journalDelay).catch(() => inc("jobs.enqueue_error"));
       void maybeEnqueueSummary(companion.id, scope, channel.id);
-      if (chargedDm) void maybeAlertLowCredit(userId, dmBalance);
+      if (ledger.charged) void maybeAlertLowCredit(userId, ledger.balance);
       // Free+hosted users never see tools — a once-a-day hint that Premium
       // unlocks them is the only way they'd learn the feature exists.
       if (toolsWanted && !toolsOn && account && account.plan !== "premium" && toolsNudgeDue(userId)) {
@@ -1613,15 +1627,15 @@ async function runCompanionTurn(opts: {
     } else {
       inc("reply.empty");
       replyThrottle.refund(scope, userId);
-      if (chargedDm) refundTurn(userId, chargedDm, "dm_turn_refund");
+      ledger.refund();
     }
   } catch (error) {
     if (error instanceof BudgetExceeded) {
       inc("budget.reply_blocked");
       replyThrottle.refund(scope, userId);
-      // Only refund the reply-leg if no reply actually landed — a bookkeeping
+      // The ledger refuses to refund once a reply landed — a bookkeeping
       // throw after send shouldn't claw back a delivered turn.
-      if (chargedDm && !dmReplied) refundTurn(userId, chargedDm, "dm_turn_refund");
+      ledger.refund();
       if (budgetNoticeOnce(channel.id)) {
         const hostedOut = error.guildId === "hosted:global";
         await sendSystem({ content: hostedOut ? HOSTED_CAPACITY() : `We've hit today's DM message limit — it resets ${dailyResetTag()}.` });
@@ -1631,7 +1645,7 @@ async function runCompanionTurn(opts: {
     inc("llm.reply_error");
     logError("DM reply generation failed", error);
     replyThrottle.refund(scope, userId);
-    if (chargedDm && !dmReplied) refundTurn(userId, chargedDm, "dm_turn_refund");
+    ledger.refund();
   } finally {
     stopTyping();
   }
@@ -1906,9 +1920,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   }
   const throttleActor = senderCompanion ? compSubj : event.authorId;
   if (!replyThrottle.consume(event.guildId, throttleActor)) { inc("reply.cooldown"); return; }
-  let chargedGuild = 0;
-  let guildBalance = 0;
-  let guildReplied = false;
+  let ledger = TurnLedger.free(payerId);
   let payerPremium = false;
   if (hostedGuild) {
     // Resolve the payer's plan once — drives the pressure shed below and the
@@ -1923,73 +1935,83 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       return;
     }
     payerPremium = payerAccount.plan === "premium";
-    // Free lane sheds first when the fleet breaker is nearly tripped.
-    if (!payerPremium && (await store.hostedUsageToday()) >= config.hostedDailyLlmCap * 0.9) {
-      inc("gate.hosted_pressure");
+    const charge = await chargeHostedTurn(store, {
+      payerId, cost: senderCompanion ? 1 : 2, reason: senderCompanion ? "c2c" : "guild_turn",
+      refundReason: "guild_turn_refund", premium: payerPremium, hostedDailyLlmCap: config.hostedDailyLlmCap,
+    });
+    if (!charge.ok) {
       replyThrottle.refund(event.guildId, throttleActor);
+      // c2c owners get silence — their DM gate already explains tokens/linking.
       if (!senderCompanion && budgetNoticeOnce(event.channelId)) {
-        await message.reply({ content: HOSTED_CAPACITY(), allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+        await message.reply({ content: chargeRefusalNotice(charge.reason), allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
       }
       return;
     }
-    const cost = senderCompanion ? 1 : 2;
-    const spend = await store.spendCredits(payerId, cost, senderCompanion ? "c2c" : "guild_turn");
-    if (!spend.ok) {
-      inc("credits.insufficient");
-      replyThrottle.refund(event.guildId, throttleActor);
-      // A cached account can outlive a dashboard unlink — re-check which
-      // notice fits (c2c owners get silence either way).
-      if (!senderCompanion && budgetNoticeOnce(event.channelId)) {
-        const stillLinked = await store.accountForDiscordUser(payerId).catch(() => null);
-        await message.reply({ content: stillLinked ? TOKEN_EMPTY() : LINK_PROMPT, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
-      }
-      return;
-    }
-    chargedGuild = cost;
-    guildBalance = spend.balance;
+    ledger = charge.ledger;
   }
 
   const stopTyping = startTyping(message.channel);
   try {
-    const lookups = await guildLookups(event.guildId);
-    const peopleIds = new Set<string>([
-      event.authorId,
-      chosen.ownerUserId,
-      compSubj,
-      ...message.mentions.users.keys(),
-      ...findMentionedUsers(event.content, lookups.map).slice(0, 3),
+    // Independent context reads run concurrently — one round of DB latency
+    // instead of ~15. Only the people set depends on the alias map, so the
+    // profile/relationship chain hangs off guildLookups; the embed call gates
+    // just the semantic recall legs.
+    const guildId = event.guildId;
+    const guildOwnerId = message.guild.ownerId;
+    const recallText = `${event.content} ${replyToContent ?? ""}`;
+    const vecP = defaultEmbedder().embed(recallText).catch(() => null);
+    const lookupsP = guildLookups(guildId);
+    const peopleP = lookupsP.then(async lookups => {
+      const peopleIds = new Set<string>([
+        event.authorId,
+        chosen.ownerUserId,
+        compSubj,
+        ...message.mentions.users.keys(),
+        ...findMentionedUsers(event.content, lookups.map).slice(0, 3),
+      ]);
+      const pairIds = [...peopleIds].filter(id => id !== client.user!.id);
+      const pairList: Array<[string, string]> = [];
+      for (let i = 0; i < pairIds.length; i++)
+        for (let j = i + 1; j < pairIds.length; j++) pairList.push([pairIds[i], pairIds[j]]);
+      pairList.sort((x, y) =>
+        Number(y.includes(compSubj) || y.includes(event.authorId)) -
+        Number(x.includes(compSubj) || x.includes(event.authorId)),
+      );
+      const [profileRows, relationships] = await Promise.all([
+        profileStore.getProfiles(guildId, [...peopleIds]),
+        Promise.all(pairList.slice(0, 6).map(([aId, bId]) => buildPairContext(store, eventStore, guildId, aId, bId)))
+          .then(list => list.filter((x): x is PairContext => !!x)),
+      ]);
+      const attrMap = await store.attributesForSubjects(guildId, profileRows.map(p => p.subjectId), { status: "active" });
+      return { profileRows, attrMap, relationships };
+    });
+    const [
+      lookups, people, rawContext, authorName, ownerName, companionOwnerName, ownerSubtext,
+      journal, storyRow, authorMemories, selfMems,
+    ] = await Promise.all([
+      lookupsP,
+      peopleP,
+      store.recentContext(guildId, event.channelId),
+      senderCompanion ? Promise.resolve(senderCompanion.name) : store.displayNameFor(guildId, event.authorId),
+      guildOwnerId ? store.displayNameFor(guildId, guildOwnerId) : Promise.resolve(undefined),
+      store.displayNameFor(guildId, chosen.ownerUserId),
+      gatherOwnerSubtextForServer(store, chosen.ownerUserId, chosen.id),
+      // Origin-scoped journal: only entries formed in THIS guild — a dismissed
+      // companion's dormant entries never surface elsewhere.
+      vecP.then(v => promptJournal(chosen.id, guildId, [event.authorId, chosen.ownerUserId], v)),
+      store.getStorySummary(chosen.id, guildId, event.channelId).catch(() => null),
+      // The companion's own memories (subject companion:<id>) merge with the
+      // speaker's — corrections to its persona, things it learned about itself.
+      vecP.then(v => promptMemories(guildId, event.authorId, recallText, v, chosen.id)),
+      store.relevantMemories(guildId, compSubj, 3, chosen.id).catch(() => [] as Memory[]),
     ]);
-    const profileRows = await profileStore.getProfiles(event.guildId, [...peopleIds]);
-    const attrMap = await store.attributesForSubjects(event.guildId, profileRows.map(p => p.subjectId), { status: "active" });
-    const profiles = profileRows.map(p => ({
+    const profiles = people.profileRows.map(p => ({
       name: p.displayName, summary: p.summary, traits: p.facets.traits,
-      attributes: (attrMap.get(p.subjectId) ?? []).map(a => ({ field: a.field, value: a.value, confidence: a.confidence })),
+      attributes: (people.attrMap.get(p.subjectId) ?? []).map(a => ({ field: a.field, value: a.value, confidence: a.confidence })),
     }));
-
-    const pairIds = [...peopleIds].filter(id => id !== client.user!.id);
-    const pairList: Array<[string, string]> = [];
-    for (let i = 0; i < pairIds.length; i++)
-      for (let j = i + 1; j < pairIds.length; j++) pairList.push([pairIds[i], pairIds[j]]);
-    pairList.sort((x, y) =>
-      Number(y.includes(compSubj) || y.includes(event.authorId)) -
-      Number(x.includes(compSubj) || x.includes(event.authorId)),
-    );
-    const relationships = (await Promise.all(pairList.slice(0, 6).map(([aId, bId]) =>
-      buildPairContext(store, eventStore, event.guildId, aId, bId)
-    ))).filter((x): x is PairContext => !!x);
-
-    const context = (await store.recentContext(event.guildId, event.channelId))
+    const relationships = people.relationships;
+    const context = rawContext
       .map(x => ({ ...x, content: demangleMentions(x.content, lookups.names), replyToSnippet: x.replyToSnippet ? demangleMentions(x.replyToSnippet, lookups.names) : undefined }));
-    const authorName = senderCompanion
-      ? senderCompanion.name
-      : await store.displayNameFor(event.guildId, event.authorId);
-    const ownerName = message.guild.ownerId ? await store.displayNameFor(event.guildId, message.guild.ownerId) : undefined;
-    const companionOwnerName = await store.displayNameFor(event.guildId, chosen.ownerUserId);
-    const ownerSubtext = await gatherOwnerSubtextForServer(store, chosen.ownerUserId, chosen.id);
-    // Origin-scoped journal: only entries formed in THIS guild — a dismissed
-    // companion's dormant entries never surface elsewhere.
-    const queryVec = await defaultEmbedder().embed(`${event.content} ${replyToContent ?? ""}`).catch(() => null);
-    const journal = await promptJournal(chosen.id, event.guildId, [event.authorId, chosen.ownerUserId], queryVec);
 
     const persona: CompanionPersona = {
       companionId: chosen.id,
@@ -2002,17 +2024,22 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       backstory: chosen.backstory,
       ownerSubtext,
       journal,
-      storySummary: (await store.getStorySummary(chosen.id, event.guildId, event.channelId).catch(() => null))?.summary || undefined,
+      storySummary: storyRow?.summary || undefined,
     };
 
-    const imgParts: string[] = [];
-    if (images.length) imgParts.push(await imageContextFor(images, authorName, companionBrain, event.messageId));
-    if (replyToId) {
-      const refMsg = await message.channel.messages.fetch(replyToId).catch(() => undefined);
-      const refImages = refMsg ? qualifyingImages(refMsg.attachments.values(), config.imageMaxBytes, IMAGE_MAX_PER_MESSAGE) : [];
-      if (refImages.length && refMsg)
-        imgParts.push(await imageContextFor(refImages, refMsg.member?.displayName ?? refMsg.author.username, companionBrain, replyToId));
-    }
+    // The message's own images and the replied-to message's images describe
+    // independently — run both at once.
+    const imgParts = await Promise.all([
+      images.length ? imageContextFor(images, authorName, companionBrain, event.messageId) : Promise.resolve(""),
+      replyToId
+        ? message.channel.messages.fetch(replyToId).catch(() => undefined).then(refMsg => {
+          const refImages = refMsg ? qualifyingImages(refMsg.attachments.values(), config.imageMaxBytes, IMAGE_MAX_PER_MESSAGE) : [];
+          return refImages.length && refMsg
+            ? imageContextFor(refImages, refMsg.member?.displayName ?? refMsg.author.username, companionBrain, replyToId)
+            : "";
+        })
+        : Promise.resolve(""),
+    ]);
     const imageContext = imgParts.filter(Boolean).join("\n") || undefined;
 
     const toolCtx: ToolCtx = {
@@ -2021,10 +2048,6 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     };
     // Same premium gate as DMs — hosted free lanes get plain replies.
     const toolsOn = config.replyTools && (toolCues(event.content) || selection.isAddressed || engaged) && (!hostedGuild || payerPremium);
-    // The companion's own memories (subject companion:<id>) merge with the
-    // speaker's — corrections to its persona, things it learned about itself.
-    const authorMemories = await promptMemories(event.guildId, event.authorId, `${event.content} ${replyToContent ?? ""}`, queryVec, chosen.id);
-    const selfMems = await store.relevantMemories(event.guildId, compSubj, 3, chosen.id).catch(() => [] as Memory[]);
     const memSeen = new Set(authorMemories.map(m => m.id));
     const { text, endConversation } = await companionBrain.reply(
       { ...event, authorName },
@@ -2047,38 +2070,22 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       : clean && containsPrivateSubtext(clean, ownerSubtext) ? "reply.vault_leak" : null;
     if (leak) {
       inc(leak); replyThrottle.refund(event.guildId, throttleActor);
-      if (chargedGuild) refundTurn(payerId, chargedGuild, "guild_turn_refund");
+      ledger.refund();
       return;
     }
-    // Same adopted-companion safety screen as the DM path — flag swaps in a
-    // neutral refusal (channel isn't ghosted) + refunds the reply leg; a
-    // screen error fails open with a metric, not a dead turn.
-    let guildReplyText = clean;
-    if (guildReplyText && chosen.kind === "adopted" && companionBrain) {
-      try {
-        const verdict = await companionBrain.safetyVerdict({
-          kind: "reply",
-          subject: `${chosen.name} — ${chosen.voicePersona}${chosen.backstory ? ` (${chosen.backstory.slice(0, 300)})` : ""}`,
-          replyText: guildReplyText,
-        });
-        if (verdict.verdict === "flag") {
-          inc("safety.reply_flagged");
-          guildReplyText = SAFE_REFUSAL;
-          if (chargedGuild) { refundTurn(payerId, chargedGuild, "guild_turn_refund"); chargedGuild = 0; }
-        }
-      } catch (error) {
-        inc("safety.screen_error");
-        logError("guild adopted reply safety screen failed", error);
-      }
-    }
+    // Same adopted-companion safety screen as the DM path — a flag swaps in
+    // the neutral refusal (channel isn't ghosted) and refunds the turn.
+    const guildReplyText = await screenAdoptedReply({
+      companion: chosen, text: clean, screener: (hostedGuild && safetyBrain()) || companionBrain, ledger, lane: "guild",
+    });
     if (guildReplyText) {
       const sent = await sendAsCompanion(message, chosen, guildReplyText, client.user!.id);
       if (!sent) {
         replyThrottle.refund(event.guildId, throttleActor);
-        if (chargedGuild) refundTurn(payerId, chargedGuild, "guild_turn_refund");
+        ledger.refund();
         return;
       }
-      guildReplied = true;
+      ledger.markReplied();
       convo.noteReply(selection.convoKey);
       convo.noteReply(selection.floorKey);
       inc("reply.sent");
@@ -2092,7 +2099,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       await store.setTriageResults([{ id: sent.id, result: "noise" }]);
       // Same deferred journaling as the DM path — hourly cadence for
       // free+hosted owners, live for premium/BYOK.
-      const ownerAccount = chargedGuild ? await store.accountForDiscordUser(chosen.ownerUserId).catch(() => null) : null;
+      const ownerAccount = hostedGuild ? await store.accountForDiscordUser(chosen.ownerUserId).catch(() => null) : null;
       const journalDelay = ownerAccount?.plan === "free" ? nextHourBoundary() : undefined;
       enqueue(sql, event.guildId, "journal-write", {
         companionId: chosen.id, triggerMessageId: event.messageId,
@@ -2101,10 +2108,10 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       void maybeEnqueueSummary(chosen.id, event.guildId, event.channelId);
       // c2c hops spend the owner's tokens too — the alert is their spend
       // control, not just the human-payer path's.
-      if (chargedGuild) void maybeAlertLowCredit(payerId, guildBalance);
+      if (ledger.charged) void maybeAlertLowCredit(payerId, ledger.balance);
     } else {
       inc("reply.empty"); replyThrottle.refund(event.guildId, throttleActor);
-      if (chargedGuild) refundTurn(payerId, chargedGuild, "guild_turn_refund");
+      ledger.refund();
     }
     if (config.replyExit && endConversation && convo.leave(selection.convoKey, event.authorId)) {
       inc("convo.leave.model");
@@ -2113,29 +2120,37 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     if (error instanceof BudgetExceeded) {
       inc("budget.reply_blocked");
       replyThrottle.refund(event.guildId, throttleActor);
-      // Only refund the reply-leg when no reply landed — a bookkeeping throw
-      // after send shouldn't claw back a delivered turn.
-      if (chargedGuild && !guildReplied) refundTurn(payerId, chargedGuild, "guild_turn_refund");
+      // The ledger refuses to refund once a reply landed.
+      ledger.refund();
       if (budgetNoticeOnce(event.channelId)) {
         const hostedOut = error.guildId === "hosted:global";
-        await message.reply({ content: hostedOut ? HOSTED_CAPACITY() : `I've hit this server's daily LLM limit, so I can't respond right now — it resets ${dailyResetTag()}. An admin can raise it with \`/limits\`.`, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+        await message.reply({ content: hostedOut ? HOSTED_CAPACITY() : `I've hit this server's daily LLM limit, so I can't respond right now — it resets ${dailyResetTag()}. An admin can raise it with \`/server limits\`.`, allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
       }
       return;
     }
     inc("llm.reply_error"); logError("Reply generation failed", error);
     replyThrottle.refund(event.guildId, throttleActor);
-    if (chargedGuild && !guildReplied) refundTurn(payerId, chargedGuild, "guild_turn_refund");
+    ledger.refund();
   } finally {
     stopTyping();
   }
 }
 
 // Graceful shutdown — close the Discord socket and the pg pool cleanly so
-// container/systemd restarts don't sever in-flight work.
+// container/systemd restarts don't sever in-flight work. worker.stop() waits
+// for in-flight jobs; it's raced against a timeout so a stuck job can't pin
+// the process forever — socket and pool still close either way.
+const SHUTDOWN_JOB_DRAIN_MS = 30_000;
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, async () => {
     console.log(`Received ${sig}, shutting down`);
-    await worker?.stop(); // finish in-flight jobs, claim nothing new
+    await Promise.race([
+      worker?.stop(), // finish in-flight jobs, claim nothing new
+      new Promise<void>(resolve => setTimeout(() => {
+        console.log(`Job drain exceeded ${SHUTDOWN_JOB_DRAIN_MS}ms — forcing shutdown`);
+        resolve();
+      }, SHUTDOWN_JOB_DRAIN_MS)),
+    ]);
     client.destroy();
     await sql.end();
     process.exit(0);

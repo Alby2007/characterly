@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { makeStore, makeTestSql } from "./test-helpers.js";
 import { MemoryStore } from "./database.js";
+import { migrations } from "./migrations.js";
 
 // Hosted credits live on web_profiles — a table the auth-gated migrations only
 // create on Supabase. On plain test Postgres we stand the same columns up as a
@@ -44,9 +45,11 @@ async function fixture(sql: ReturnType<typeof makeTestSql>) {
       reason        TEXT,
       stripe_ref    TEXT,
       balance_after INT NOT NULL,
+      refunded_of   BIGINT,
       created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `;
+  await sql`ALTER TABLE web_profiles ADD COLUMN IF NOT EXISTS purchased_balance INT NOT NULL DEFAULT 0`;
   const { store } = await makeStore(sql);
   assert.equal(await store.initCreditsSupport(GRANTS), true);
   return store;
@@ -70,7 +73,7 @@ test("creditsSupported is false without web_profiles and degrades gracefully", a
   // Self-host lane: everyone reads as premium, spends always succeed.
   const acct = await store.accountForDiscordUser("u-nobody");
   assert.equal(acct?.plan, "premium");
-  assert.deepEqual(await store.spendCredits("u-nobody", 5, "x"), { ok: true, balance: 0 });
+  assert.deepEqual(await store.spendCredits("u-nobody", 5, "x"), { ok: true, balance: 0, purchased: 0 });
   assert.deepEqual(await store.userBotSettings("u-nobody"), { c2cEnabled: true, lowCreditAlerts: true });
   await sql.end();
 });
@@ -257,7 +260,7 @@ test("insufficient balance fails but keeps the grant it applied", async () => {
 test("spend on an unlinked user fails closed", async () => {
   const sql = makeTestSql();
   const store = await fixture(sql);
-  assert.deepEqual(await store.spendCredits("u-ghost", 2, "dm_turn"), { ok: false, balance: 0 });
+  assert.deepEqual(await store.spendCredits("u-ghost", 2, "dm_turn"), { ok: false, balance: 0, purchased: 0 });
   await sql.end();
 });
 
@@ -274,6 +277,98 @@ test("refundCredits credits back and writes a refund ledger row", async () => {
   assert.equal(last[0].delta, 1);
   assert.equal(last[0].reason, "dm_turn_refund");
   await sql.end();
+});
+
+async function setBuckets(sql: ReturnType<typeof makeTestSql>, discordUserId: string, total: number, purchased: number) {
+  await sql`UPDATE web_profiles SET credit_balance = ${total}, purchased_balance = ${purchased} WHERE discord_user_id = ${discordUserId}`;
+}
+async function buckets(sql: ReturnType<typeof makeTestSql>, discordUserId: string) {
+  const [r] = await sql`SELECT credit_balance, purchased_balance FROM web_profiles WHERE discord_user_id = ${discordUserId}`;
+  return { total: Number(r.credit_balance), purchased: Number(r.purchased_balance) };
+}
+
+test("a pack never suppresses the daily refill — allowance tops up beside it", async () => {
+  const sql = makeTestSql();
+  const store = await fixture(sql);
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS credit_ledger_stripe_ref ON credit_ledger (stripe_ref) WHERE stripe_ref IS NOT NULL`;
+  const id = await addAccount(sql, "u-vip", "premium", 0);
+  await store.purchaseCredits(id, 750, "pack_750", "cs_bucket_1");
+  assert.deepEqual(await buckets(sql, "u-vip"), { total: 750, purchased: 750 });
+  // First spend of the day: the full 150 allowance lands on top of the pack.
+  const r = await store.spendCredits("u-vip", 2, "dm_turn");
+  assert.equal(r.ok, true);
+  assert.equal(r.purchased, 0, "allowance is spent before the pack");
+  assert.deepEqual(await buckets(sql, "u-vip"), { total: 750 + GRANTS.premiumDaily - 2, purchased: 750 });
+  await sql.end();
+});
+
+test("spend drains the allowance first, then the pack; refund returns to the bucket it left", async () => {
+  const sql = makeTestSql();
+  const store = await fixture(sql);
+  await addAccount(sql, "u-alice", "free", 0);
+  await sql`UPDATE web_profiles SET last_daily_grant_on = (now() AT TIME ZONE 'UTC')::date WHERE discord_user_id = 'u-alice'`;
+  await setBuckets(sql, "u-alice", 101, 100); // 1 allowance + 100 pack
+  const r = await store.spendCredits("u-alice", 2, "dm_turn");
+  assert.deepEqual(r, { ok: true, balance: 99, purchased: 1 });
+  assert.deepEqual(await buckets(sql, "u-alice"), { total: 99, purchased: 99 });
+  await store.refundCredits("u-alice", 2, "dm_turn_refund", r.purchased);
+  assert.deepEqual(await buckets(sql, "u-alice"), { total: 101, purchased: 100 });
+  await sql.end();
+});
+
+test("allowance debt is paid down by the grant, not erased", async () => {
+  const sql = makeTestSql();
+  const store = await fixture(sql);
+  await addAccount(sql, "u-debtor", "free", 0);
+  await setBuckets(sql, "u-debtor", -50, 0); // clawed pack already spent
+  const r = await store.spendCredits("u-debtor", 2, "dm_turn");
+  assert.equal(r.ok, false, "a 30 grant against −50 debt still leaves nothing to spend");
+  assert.deepEqual(await buckets(sql, "u-debtor"), { total: -50 + GRANTS.freeDaily, purchased: 0 });
+  await sql.end();
+});
+
+// The RPCs live behind the auth-schema gate — stand up a throwaway `auth`
+// schema so the real v60 SQL runs, then tear it down so no later test file
+// sees an auth-gated database.
+test("v60 grant_pack / clawback_pack: exact payment_intent match, proration, bonus never clawed", async () => {
+  const sql = makeTestSql();
+  await fixture(sql);
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS credit_ledger_stripe_ref ON credit_ledger (stripe_ref) WHERE stripe_ref IS NOT NULL`;
+  await sql`CREATE SCHEMA IF NOT EXISTS auth`;
+  try {
+    await migrations.find(m => m.version === 60)!.up(sql as never);
+    const id = await addAccount(sql, "u-buyer", "premium", 0);
+    const grant = (args: Record<string, unknown>) => sql`SELECT public.grant_pack(${id}::uuid, ${args.tokens as number}, ${args.ref as string}, ${(args.pi as string) ?? null}, ${(args.kind as string) ?? "purchase"}) AS r`.then(r => r[0].r);
+    const claw = (charge: string, pi: string | null, amount: number | null, refunded: number | null, at: string | null = null) =>
+      sql`SELECT public.clawback_pack(${id}::uuid, ${charge}, ${pi}, ${amount}, ${refunded}, ${at}::timestamptz) AS r`.then(r => r[0].r);
+
+    await grant({ tokens: 7500, ref: "cs_big", pi: "pi_big" });
+    await grant({ tokens: 750, ref: "cs_small", pi: "pi_small" });
+    await grant({ tokens: 500, ref: "launch-bonus:x", kind: "grant_bonus" });
+    assert.deepEqual(await buckets(sql, "u-buyer"), { total: 8750, purchased: 8750 });
+
+    // Subscription refund (no matching PI, no charged_at) claws nothing.
+    assert.equal((await claw("ch_sub", "pi_sub", 799, 799)).clawed, 0);
+    assert.equal((await buckets(sql, "u-buyer")).total, 8750);
+
+    // Refunding the BIG pack hits the big pack, not the newest one; half refund ⇒ half claw.
+    assert.equal((await claw("ch_big", "pi_big", 2499, 1250)).clawed, 3752);
+    // Redelivery of the same partial refund is a no-op.
+    assert.equal((await claw("ch_big", "pi_big", 2499, 1250)).duplicate, true);
+    // The rest of the refund claws only the remainder.
+    assert.equal((await claw("ch_big", "pi_big", 2499, 2499)).clawed, 7500 - 3752);
+    assert.deepEqual(await buckets(sql, "u-buyer"), { total: 1250, purchased: 1250 });
+
+    const bonus = await sql`SELECT kind, reason FROM credit_ledger WHERE stripe_ref = 'launch-bonus:x'`;
+    assert.deepEqual({ ...bonus[0] }, { kind: "grant_bonus", reason: "launch_bonus" });
+    const pi = await sql`SELECT payment_intent FROM credit_ledger WHERE stripe_ref = 'cs_small'`;
+    assert.equal(pi[0].payment_intent, "pi_small");
+  } finally {
+    await sql`DROP FUNCTION IF EXISTS public.grant_pack(uuid, int, text, text, text)`;
+    await sql`DROP FUNCTION IF EXISTS public.clawback_pack(uuid, text, text, int, int, timestamptz)`;
+    await sql`DROP SCHEMA IF EXISTS auth CASCADE`;
+    await sql.end();
+  }
 });
 
 test("userBotSettings defaults then persists toggles", async () => {

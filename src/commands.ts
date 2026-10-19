@@ -899,6 +899,27 @@ function dailyResetTag(): string {
   return `<t:${Math.floor(new Date().setUTCHours(24, 0, 0, 0) / 1000)}:R>`;
 }
 
+/** Hosted onboarding is free for the first ONBOARDING_FREE_TURNS draft turns;
+ *  past that each turn (typed or a preset button) costs a normal 2-token
+ *  hosted turn — otherwise the interview is unlimited free chat on the reply
+ *  model. BYOK never pays. Locking in / Edit Draft stay free, so the refusal
+ *  points there. `charged`/`purchased` feed refundCredits if the turn fails. */
+export async function chargeOnboardingTurn(
+  store: Pick<MemoryStore, "spendCredits">,
+  hosted: boolean,
+  userId: string,
+  turnCount: number,
+): Promise<{ ok: true; charged: number; purchased: number } | { ok: false; message: string }> {
+  if (!hosted || turnCount < config.onboardingFreeTurns) return { ok: true, charged: 0, purchased: 0 };
+  const spend = await store.spendCredits(userId, 2, "onboarding_turn");
+  if (spend.ok) return { ok: true, charged: 2, purchased: spend.purchased };
+  return {
+    ok: false,
+    message: `Your companion draft has used its ${config.onboardingFreeTurns} free turns and you're out of tokens — next refill ${dailyResetTag()}. ` +
+      "Press **Awaken & Lock In** on your draft (or **Edit Draft** to finish it by hand) — both are free.",
+  };
+}
+
 /** Verified in-house: Member role or Administrator (the owner never holds
  *  Member). memberPermissions is authoritative on real interactions — the raw
  *  API member carries no .permissions; the m.permissions branch covers stubs. */
@@ -1074,33 +1095,51 @@ async function promptUnawakenedCompanion(
 }
 
 export const commandDefinitions = [
-  { name: "memory", description: "View remembered information", options: [
-    { name: "about", description: "Member to inspect", type: 6, required: false }, { name: "search", description: "Search your memories", type: 3, required: false },
-    { name: "page", description: "Page number", type: 4, required: false }, { name: "server", description: "Show server lore", type: 5, required: false },
-    { name: "stats", description: "Show server memory statistics", type: 5, required: false }, { name: "memory_id", description: "Show provenance for a memory", type: 4, required: false },
-    { name: "candidates", description: "Show unconfirmed candidate memories", type: 5, required: false },
-    { name: "pin", description: "Pin (always recall) or unpin a memory — use with memory_id", type: 5, required: false }
+  // Grouped subcommands keep the picker short: everything about memories
+  // under /memory, every admin knob under /server. handleMemoryCommand maps
+  // (command, subcommand) back to the internal names (see GROUPED_COMMANDS).
+  { name: "memory", description: "Your memories — list, pin, forget, correct, export", options: [
+    { name: "list", type: 1, description: "List remembered information (pin:, search:, memory_id: for provenance)", options: [
+      { name: "about", description: "Member to inspect (admins)", type: 6, required: false }, { name: "search", description: "Search your memories", type: 3, required: false },
+      { name: "page", description: "Page number", type: 4, required: false }, { name: "server", description: "Show server lore", type: 5, required: false },
+      { name: "stats", description: "Show server memory statistics (admins)", type: 5, required: false }, { name: "memory_id", description: "Show provenance for a memory", type: 4, required: false },
+      { name: "candidates", description: "Show unconfirmed candidate memories", type: 5, required: false },
+      { name: "pin", description: "Pin (always recall) or unpin a memory — use with memory_id", type: 5, required: false },
+    ] },
+    { name: "remember", type: 1, description: "Tell Characterly a fact to never forget — pinned instantly", options: [
+      { name: "text", description: "What to remember (e.g. \"my dog is called Biscuit\")", type: 3, required: true }] },
+    { name: "forget", type: 1, description: "Delete one of your memories", options: [
+      { name: "memory_id", description: "The memory number", type: 4, required: true }] },
+    { name: "correct", type: 1, description: "Correct or update something remembered about you", options: [
+      { name: "statement", description: "For example: I don't support Arsenal anymore", type: 3, required: true }] },
+    { name: "confirm", type: 1, description: "Confirm one of your candidate memories", options: [
+      { name: "memory_id", description: "The candidate memory number", type: 4, required: true }] },
+    { name: "export", type: 1, description: "Download all memory stored about you" },
+    { name: "event", type: 1, description: "Inspect the event linked to one of your memories", options: [
+      { name: "memory_id", description: "A memory number from /memory list", type: 4, required: true }] },
+    { name: "share-facts", type: 1, description: "Server: let companions carry facts about you into owners' DM digests", options: [
+      { name: "enabled", description: "true = companions may relay your facts to owners' DMs; omit to see your setting", type: 5, required: false }] },
   ] },
-  { name: "remember", description: "Tell Characterly a fact to never forget — pinned into memory instantly", options: [
-    { name: "text", description: "What to remember (e.g. \"my dog is called Biscuit\")", type: 3, required: true }
-  ] },
-  { name: "share-facts", description: "Let companions carry facts about you into their owners' private DM digests", options: [
-    { name: "enabled", description: "true = companions may relay your facts to owners' DMs; omit to see your setting", type: 5, required: false }
-  ] },
-  { name: "forget", description: "Request deletion of one of your memories", options: [{ name: "memory_id", description: "The memory number", type: 4, required: true }] },
-  { name: "correct", description: "Correct or update something remembered about you", options: [{ name: "statement", description: "For example: I don't support Arsenal anymore", type: 3, required: true }] },
-  { name: "memory-confirm", description: "Confirm one of your candidate memories", options: [{ name: "memory_id", description: "The candidate memory number", type: 4, required: true }] },
-  { name: "memory-export", description: "Download all memory stored about you" },
-  { name: "memory-purge", description: "Admin: delete old raw messages for this server", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [{ name: "older_than_days", description: "Delete messages older than this many days", type: 4, required: true }] },
-  { name: "memory-pause", description: "Admin: immediately pause Characterly in this server", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
-  { name: "memory-resume", description: "Admin: enable or resume Characterly in this server", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
-  { name: "companions-pause", description: "Admin: silence companions server-wide — Characterly still observes and remembers", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
-  { name: "companions-resume", description: "Admin: let companions speak in this server again", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
-  { name: "memory-settings", description: "Admin: view server memory and retention settings", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
-  { name: "status", description: "Admin: server status, active companions, and operational counters", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
-  { name: "memory-triage", description: "Admin: the most recent memories stored for any member", default_member_permissions: PermissionFlagsBits.ManageGuild.toString() },
-  { name: "event", description: "Inspect the event linked to one of your memories", options: [
-    { name: "memory_id", description: "A memory number returned by /memory", type: 4, required: true }
+  { name: "server", description: "Admin: Characterly settings for this server", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
+    { name: "status", type: 1, description: "Server status, active companions, queue health, today's LLM usage" },
+    { name: "settings", type: 1, description: "Effective settings — retention, ignored/quiet channels, daily cap" },
+    { name: "resume", type: 1, description: "Enable or resume Characterly in this server" },
+    { name: "pause", type: 1, description: "Pause Characterly here immediately — archiving included" },
+    { name: "companions-pause", type: 1, description: "Silence companions server-wide — Characterly still observes" },
+    { name: "companions-resume", type: 1, description: "Let companions speak in this server again" },
+    { name: "quiet", type: 1, description: "Silence companions in a channel — still observed", options: [
+      { name: "channel", description: "Channel to quiet (default: this one — threads inherit their parent)", type: 7, required: false, channel_types: [0, 5, 10, 11, 12, 15, 16] }] },
+    { name: "unquiet", type: 1, description: "Let companions speak in a channel again", options: [
+      { name: "channel", description: "Channel to unquiet (default: this one)", type: 7, required: false, channel_types: [0, 5, 10, 11, 12, 15, 16] }] },
+    { name: "ignore", type: 1, description: "Make a channel fully invisible — no archive, no replies", options: [
+      { name: "channel", description: "Channel to ignore", type: 7, required: true, channel_types: [0, 5, 10, 11, 12, 15, 16] }] },
+    { name: "unignore", type: 1, description: "Restore a channel Characterly was ignoring", options: [
+      { name: "channel", description: "Channel to restore", type: 7, required: true, channel_types: [0, 5, 10, 11, 12, 15, 16] }] },
+    { name: "limits", type: 1, description: "Set this server's daily LLM-call cap", options: [
+      { name: "daily_cap", description: "Max LLM calls per day, 0–100000 — 0 blocks all calls (resets at midnight UTC)", type: 4, required: true }] },
+    { name: "triage", type: 1, description: "Newest memories across all members + contested attributes" },
+    { name: "purge", type: 1, description: "Delete old raw messages for this server", options: [
+      { name: "older_than_days", description: "Delete messages older than this many days", type: 4, required: true }] },
   ] },
   { name: "profile", description: "View a member's synthesized profile card", options: [
     { name: "user", description: "Member to inspect (admins can view anyone)", type: 6, required: false }
@@ -1112,21 +1151,6 @@ export const commandDefinitions = [
   { name: "opt-out", description: "Stop Characterly forming memories or a profile about you, and forget what it already holds" },
   { name: "opt-in", description: "Consent to memories and a profile about you — then run /profile-build to scan your history" },
   { name: "profile-build", description: "Opt in and build your profile: scans the archive for your messages and references to you" },
-  { name: "limits", description: "Admin: set this server's daily LLM-call cap", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
-    { name: "daily_cap", description: "Max LLM calls per day, 0–100000 — 0 blocks all calls (resets at midnight UTC)", type: 4, required: true }
-  ] },
-  { name: "ignore-channel", description: "Admin: make Characterly fully ignore a channel — no archive, no replies", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
-    { name: "channel", description: "Channel to ignore", type: 7, required: true, channel_types: [0, 5, 10, 11, 12, 15, 16] }
-  ] },
-  { name: "unignore-channel", description: "Admin: restore a channel Characterly was ignoring", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
-    { name: "channel", description: "Channel to restore", type: 7, required: true, channel_types: [0, 5, 10, 11, 12, 15, 16] }
-  ] },
-  { name: "quiet-channel", description: "Admin: silence companions in a channel — Characterly still observes and remembers", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
-    { name: "channel", description: "Channel to quiet (default: this one — threads inherit their parent)", type: 7, required: false, channel_types: [0, 5, 10, 11, 12, 15, 16] }
-  ] },
-  { name: "unquiet-channel", description: "Admin: let companions speak in a channel again", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
-    { name: "channel", description: "Channel to unquiet (default: this one)", type: 7, required: false, channel_types: [0, 5, 10, 11, 12, 15, 16] }
-  ] },
   // Real subcommands — Discord renders each with its own description and
   // scoped options, so the picker teaches the surface itself. The handler
   // still accepts the legacy action: string enum for stale clients.
@@ -1254,8 +1278,33 @@ export const SERVER_ONLY_COMMANDS = new Set([
   "companions-pause", "companions-resume",
   "status", "memory-triage",
   "limits", "ignore-channel", "unignore-channel", "quiet-channel", "unquiet-channel",
-  "share-facts", "marketplace",
+  "share-facts", "marketplace", "server",
 ]);
+
+/** Registered (command → subcommand) → the internal command name every
+ *  handler branch keys on. The grouped surface is what users see; internal
+ *  names stay stable so handlers (and tests) don't churn. */
+const GROUPED_COMMANDS: Record<string, Record<string, string>> = {
+  memory: {
+    list: "memory", remember: "remember", forget: "forget", correct: "correct",
+    confirm: "memory-confirm", export: "memory-export", event: "event", "share-facts": "share-facts",
+  },
+  server: {
+    status: "status", settings: "memory-settings", resume: "memory-resume", pause: "memory-pause",
+    "companions-pause": "companions-pause", "companions-resume": "companions-resume",
+    quiet: "quiet-channel", unquiet: "unquiet-channel", ignore: "ignore-channel", unignore: "unignore-channel",
+    limits: "limits", triage: "memory-triage", purge: "memory-purge",
+  },
+};
+
+/** The internal command name for an interaction — resolves grouped
+ *  subcommands; flat names (and stale pre-grouping clients) pass through. */
+export function effectiveCommandName(interaction: Pick<ChatInputCommandInteraction, "commandName" | "options">): string {
+  const group = GROUPED_COMMANDS[interaction.commandName];
+  if (!group) return interaction.commandName;
+  const sub = (() => { try { return interaction.options.getSubcommand(false); } catch { return null; } })();
+  return (sub && group[sub]) || interaction.commandName;
+}
 
 /** Command definitions with Discord install contexts applied — the app
  *  supports guild + user installs (dev portal), so DM-safe commands are
@@ -1326,16 +1375,17 @@ export function scopedCommandDefinitions<T extends { name: string }>(defs: reado
 export async function handleMemoryCommand(interaction: ChatInputCommandInteraction, store: MemoryStore, brainFor: BrainFor, evStore?: EventStore, profileStore: ProfileStore = new ProfileStore()) {
   // /ops self-gates on OPS_USER_IDS and house-guild context — dispatch before
   // the server-only/link gates so an allowlisted operator can use it in DMs.
-  if (interaction.commandName === "ops") return handleOpsCommand(interaction);
+  const cmd = effectiveCommandName(interaction);
+  if (cmd === "ops") return handleOpsCommand(interaction);
   // /marketplace is guild-scoped to granted deployments — registered only
   // there, but the handler still re-checks (a forged/stale command id on an
   // ungranted guild gets refused, not an error).
-  if (interaction.commandName === "marketplace") return handleMarketplaceCommand(interaction, store);
-  if (!interaction.guildId && SERVER_ONLY_COMMANDS.has(interaction.commandName)) {
+  if (cmd === "marketplace") return handleMarketplaceCommand(interaction, store);
+  if (!interaction.guildId && SERVER_ONLY_COMMANDS.has(cmd)) {
     return interaction.reply({ content: "That command can only be used inside a Discord server.", ephemeral: true });
   }
   const guildId = interaction.guildId ?? `dm:${interaction.user.id}`;
-  if (interaction.commandName === "link") {
+  if (cmd === "link") {
     // The bot already knows the Discord profile — snapshot it onto the code so
     // claim_link_code can stamp web_profiles.discord_username/avatar_url and a
     // code-linked account renders identically to an OAuth one.
@@ -1355,8 +1405,8 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
   // reply path; profile-build runs a hosted LLM scan) need a linked account.
   // Everything else — reads, privacy/data, admin, key entry — stays open.
   const gatedAction =
-    interaction.commandName === "profile-build" ||
-    (interaction.commandName === "companion" &&
+    cmd === "profile-build" ||
+    (cmd === "companion" &&
       (companionAction(interaction) === "summon" ||
         companionAction(interaction) === "import"));
   if (gatedAction && store.creditsSupported) {
@@ -1374,7 +1424,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       });
     }
   }
-  if (interaction.commandName === "companion") {
+  if (cmd === "companion") {
     const action = companionAction(interaction);
     if (action === "summon") {
       if (!interaction.guildId) {
@@ -1661,7 +1711,11 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       const tail = account.plan === "premium"
         ? `Manage billing & packs: ${config.siteUrl}/dashboard`
         : `Premium: ${config.premiumDailyCredits}/day + live memory, web lookups, first in line — ${config.siteUrl}/dashboard#billing`;
-      return interaction.reply({ content: `🪙 **${account.creditBalance.toLocaleString()} tokens** — **${account.plan}** plan, refills to **${refill}** each UTC day · next refill ${dailyResetTag()}.\n${tail}` + byokNote, ephemeral: true });
+      const purchased = Math.min(Math.max(account.purchasedBalance ?? 0, 0), Math.max(account.creditBalance, 0));
+      const split = purchased > 0
+        ? ` (${(account.creditBalance - purchased).toLocaleString()} daily + ${purchased.toLocaleString()} from packs — daily spends first, packs never expire)`
+        : "";
+      return interaction.reply({ content: `🪙 **${account.creditBalance.toLocaleString()} tokens**${split} — **${account.plan}** plan, daily tokens refill to **${refill}** each UTC day · next refill ${dailyResetTag()}.\n${tail}` + byokNote, ephemeral: true });
     }
     if (action === "status") {
       const dmScope = `dm:${interaction.user.id}`;
@@ -2129,7 +2183,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       });
     }
   }
-  if (interaction.commandName === "privacy") {
+  if (cmd === "privacy") {
     // Public + always ephemeral: the static explainer, plus the dynamic bits
     // the caller is entitled to — this guild's retention, whether it's
     // observing right now, and the caller's own consent state. No admin data.
@@ -2137,7 +2191,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     const member = await store.getMember(guildId, interaction.user.id);
     const brain = await brainFor(guildId);
     const status = !s.memoryEnabled
-      ? "**Dormant** — Characterly is not recording messages here (an admin can enable it with `/memory-resume`)."
+      ? "**Dormant** — Characterly is not recording messages here (an admin can enable it with `/server resume`)."
       : brain
         ? "**Observing** — messages in this server are being archived and analyzed."
         : "**Enabled but no active companion key** — nothing is being recorded until a companion with a connected personal AI key is summoned.";
@@ -2152,10 +2206,10 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         { name: "Derived data", value: "Memories, profiles, and relationship notes **about you** form only if you opt in — never automatically. Companions also keep a per-chat *story recap* and *story facts* scoped to themselves — roleplay stays fiction and never becomes fact about you." },
         { name: "Your consent", value: consent },
         { name: "Processing", value: "Messages are sent to an OpenAI-compatible LLM provider for analysis using each companion owner's personal API key (`/companion key`) or the operator's default." },
-        { name: "Controls & guarantees", value: "`/remember` pins a fact · `/memory` lists them (`pin:` toggles) · `/forget` removes one · `/companion story` edits the recap · `/share-facts` decides whether your facts may cross into owners' DM digests (off by default) · `/opt-out` forgets memories and deletes your profile, attributes, relationships, quotes, journal entries, and recaps · `/memory-export` downloads everything · **removing Characterly from this server deletes every row it holds here**." },
+        { name: "Controls & guarantees", value: "`/memory remember` pins a fact · `/memory list` lists them (`pin:` toggles) · `/memory forget` removes one · `/companion story` edits the recap · `/memory share-facts` decides whether your facts may cross into owners' DM digests (off by default) · `/opt-out` forgets memories and deletes your profile, attributes, relationships, quotes, journal entries, and recaps · `/memory export` downloads everything · **removing Characterly from this server deletes every row it holds here**." },
       )] });
   }
-  if (interaction.commandName === "memory") {
+  if (cmd === "memory") {
     const server = interaction.options.getBoolean("server") ?? false;
     const stats = interaction.options.getBoolean("stats") ?? false;
     if (stats) {
@@ -2165,7 +2219,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     const detailId = interaction.options.getInteger("memory_id");
     const pinFlag = interaction.options.getBoolean("pin");
     if (pinFlag != null && !detailId) {
-      return interaction.reply({ content: "Tell me which memory — `/memory memory_id:<number> pin:true`.", ephemeral: true });
+      return interaction.reply({ content: "Tell me which memory — `/memory list memory_id:<number> pin:true`.", ephemeral: true });
     }
     if (detailId && pinFlag != null) {
       // Pin control: the subject can pin their own rows; a companion owner
@@ -2210,7 +2264,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     const description = result.memories.length ? result.memories.map(display).join("\n\n") : "Nothing active yet.";
     return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle(`🧠 ${title}`).setDescription(description).setFooter({ text: `Page ${result.page} · ${result.total} ${candidates ? "candidate" : "active"} memories` })] });
   }
-  if (interaction.commandName === "remember") {
+  if (cmd === "remember") {
     // Same consent gate as /correct — user-asserted facts are still derived
     // person data, so the caller must be opted in here (awakened DM owners
     // already are).
@@ -2230,11 +2284,11 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       return interaction.reply({ content: "That matches a memory that's already been replaced — reword it slightly to pin it fresh.", ephemeral: true });
     }
     return interaction.reply({
-      content: `Pinned **#${saved.id}**: "${saved.content}" — it will always be in context here. Manage it with \`/memory\` or on your account page.`,
+      content: `Pinned **#${saved.id}**: "${saved.content}" — it will always be in context here. Manage it with \`/memory list\` or on your account page.`,
       ephemeral: true,
     });
   }
-  if (interaction.commandName === "share-facts") {
+  if (cmd === "share-facts") {
     const enabled = interaction.options.getBoolean("enabled");
     const member = await store.getMember(guildId, interaction.user.id);
     if (enabled == null) {
@@ -2253,7 +2307,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
         : "Sharing **off** — facts about you stay in this server's memory and out of private DM digests.",
     });
   }
-  if (interaction.commandName === "forget") {
+  if (cmd === "forget") {
     const id = interaction.options.getInteger("memory_id", true), memory = await store.getMemory(guildId, id);
     if (!memory || memory.subjectId !== interaction.user.id) return interaction.reply({ content: "I couldn't find one of your memories with that ID.", ephemeral: true });
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -2262,7 +2316,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     );
     return interaction.reply({ content: `Forget **#${id}**: "${memory.content}"? This removes the curated memory, but not its raw source message.`, components: [row], ephemeral: true });
   }
-  if (interaction.commandName === "correct") {
+  if (cmd === "correct") {
     // /correct writes a memory about the caller directly — same consent gate
     // as every other derived-data path.
     const caller = await store.getMember(guildId, interaction.user.id);
@@ -2282,38 +2336,38 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       return interaction.editReply(`Updated memory **#${saved.id}**: "${saved.content}"${correction.supersedes.length ? `. Superseded: ${correction.supersedes.map(id => `#${id}`).join(", ")}.` : "."}`);
     } catch { return interaction.editReply("I couldn't process that correction right now. Nothing was changed."); }
   }
-  if (interaction.commandName === "memory-confirm") {
+  if (cmd === "memory-confirm") {
     const memory = await store.getMemory(guildId, interaction.options.getInteger("memory_id", true));
     if (!memory || memory.subjectId !== interaction.user.id || memory.status !== "candidate") return interaction.reply({ content: "I couldn't find one of your candidate memories with that ID.", ephemeral: true });
     await store.confirm(guildId, memory.id);
     return interaction.reply({ content: `Confirmed memory **#${memory.id}**. It is now active.`, ephemeral: true });
   }
-  if (interaction.commandName === "memory-export") {
+  if (cmd === "memory-export") {
     const data = JSON.stringify(await store.exportSubject(guildId, interaction.user.id), null, 2);
     return interaction.reply({ content: "Here is the memory data I hold about you.", files: [new AttachmentBuilder(Buffer.from(data), { name: "my-characterly-memory.json" })], ephemeral: true });
   }
-  if (interaction.commandName === "memory-purge") {
+  if (cmd === "memory-purge") {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can purge raw messages.", ephemeral: true });
     const days = interaction.options.getInteger("older_than_days", true);
     if (days < 1) return interaction.reply({ content: "Retention must be at least one day.", ephemeral: true });
     const deleted = await store.deleteRawMessagesOlderThan(guildId, days);
     return interaction.reply({ content: `Deleted ${deleted.toLocaleString()} raw messages older than ${days} days. Curated memories were retained.`, ephemeral: true });
   }
-  if (interaction.commandName === "memory-pause" || interaction.commandName === "memory-resume") {
+  if (cmd === "memory-pause" || cmd === "memory-resume") {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can change memory collection.", ephemeral: true });
-    const paused = interaction.commandName === "memory-pause";
+    const paused = cmd === "memory-pause";
     await store.setPaused(guildId, paused);
     return interaction.reply({ content: paused ? "Memory collection and bot replies are now paused for this server." : "Memory collection and bot replies are now enabled for this server.", ephemeral: true });
   }
-  if (interaction.commandName === "companions-pause" || interaction.commandName === "companions-resume") {
+  if (cmd === "companions-pause" || cmd === "companions-resume") {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can pause companions.", ephemeral: true });
-    const paused = interaction.commandName === "companions-pause";
+    const paused = cmd === "companions-pause";
     await store.setReplyPaused(guildId, paused);
     return interaction.reply({ content: paused
-      ? "Companions are silent in this server — Characterly still observes and remembers. (`/memory-pause` pauses everything.)"
+      ? "Companions are silent in this server — Characterly still observes and remembers. (`/server pause` pauses everything.)"
       : "Companions can speak in this server again.", ephemeral: true });
   }
-  if (interaction.commandName === "status") {
+  if (cmd === "status") {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can view bot status.", ephemeral: true });
     const { uptimeSec, counts } = metricsSnapshot();
     const value = await store.stats(guildId);
@@ -2329,7 +2383,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     const flagsLine = `**Flags:** memory ${settings.memoryEnabled ? "on" : "paused"} · companion replies ${settings.replyEnabled ? "on" : "paused"} · ignored channels ${settings.ignoredChannels.length} · quiet channels ${settings.quietChannels.length}`;
     return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle("Characterly server status").setDescription(`**Uptime:** ${uptime}\n\n${counterLines}\n\n${companionsLine}\n${flagsLine}\n${budgetLine}\n\n*${value.messages.toLocaleString()} raw messages · ${value.memories.toLocaleString()} active memories · ${value.lore.toLocaleString()} lore*`)] });
   }
-  if (interaction.commandName === "memory-triage") {
+  if (cmd === "memory-triage") {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can triage memories.", ephemeral: true });
     const recent = await store.recentMemories(guildId, 15);
     const lines = recent.map(m => `**#${m.id}** \`${m.status}/${m.kind}\` **${m.subjectLabel}** — ${m.content.slice(0, 120)}`);
@@ -2343,7 +2397,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     }
     return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle("Recent memories (all members)").setDescription(lines.join("\n") || "Nothing stored yet.")] });
   }
-  if (interaction.commandName === "memory-settings") {
+  if (cmd === "memory-settings") {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can view settings.", ephemeral: true });
     const settings = await store.settings(guildId);
     const ignored = settings.ignoredChannels.length
@@ -2354,7 +2408,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       : "none";
     return interaction.reply({ content: `Memory collection: **${settings.memoryEnabled ? "on" : "paused"}**\nCompanion replies: **${settings.replyEnabled ? "on" : "paused"}**\nRaw-message retention: **${settings.rawRetentionDays} days**\nIgnored channels: ${ignored}\nQuiet channels (companions silent, still observing): ${quiet}\nDaily LLM cap: **${settings.llmDailyCap.toLocaleString()} calls**`, ephemeral: true });
   }
-  if (interaction.commandName === "limits") {
+  if (cmd === "limits") {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can change the LLM budget.", ephemeral: true });
     const cap = interaction.options.getInteger("daily_cap", true);
     if (cap < 0 || cap > 100000) return interaction.reply({ content: "The daily cap must be between **0** and **100,000** calls (0 blocks all LLM calls).", ephemeral: true });
@@ -2363,40 +2417,40 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       ? "Daily LLM cap set to **0** — all LLM calls for this server are now blocked until the cap is raised (usage resets at midnight UTC)."
       : `Daily LLM cap set to **${cap.toLocaleString()} calls** for this server (resets at midnight UTC).`, ephemeral: true });
   }
-  if (interaction.commandName === "ignore-channel" || interaction.commandName === "unignore-channel") {
+  if (cmd === "ignore-channel" || cmd === "unignore-channel") {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can change ignored channels.", ephemeral: true });
     const channel = interaction.options.getChannel("channel", true);
     const settings = await store.settings(guildId);
     const ignored = new Set(settings.ignoredChannels);
-    if (interaction.commandName === "ignore-channel") {
+    if (cmd === "ignore-channel") {
       if (ignored.has(channel.id)) return interaction.reply({ content: `<#${channel.id}> is already ignored.`, ephemeral: true });
       ignored.add(channel.id);
       await store.setIgnoredChannels(guildId, [...ignored]);
-      return interaction.reply({ content: `<#${channel.id}> is now invisible to Characterly — nothing there is archived or answered. (To silence just companions instead, use \`/quiet-channel\`.) Restore it with \`/unignore-channel\`.`, ephemeral: true });
+      return interaction.reply({ content: `<#${channel.id}> is now invisible to Characterly — nothing there is archived or answered. (To silence just companions instead, use \`/server quiet\`.) Restore it with \`/server unignore\`.`, ephemeral: true });
     }
     if (!ignored.has(channel.id)) return interaction.reply({ content: `<#${channel.id}> isn't ignored.`, ephemeral: true });
     ignored.delete(channel.id);
     await store.setIgnoredChannels(guildId, [...ignored]);
     return interaction.reply({ content: `<#${channel.id}> is visible to Characterly again — messages there are archived and answered normally.`, ephemeral: true });
   }
-  if (interaction.commandName === "quiet-channel" || interaction.commandName === "unquiet-channel") {
+  if (cmd === "quiet-channel" || cmd === "unquiet-channel") {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: "Only server administrators can change quiet channels.", ephemeral: true });
     const channel = interaction.options.getChannel("channel") ?? interaction.channel;
     if (!channel) return interaction.reply({ content: "I couldn't determine which channel you mean — pass one with the `channel` option.", ephemeral: true });
     const settings = await store.settings(guildId);
     const quiet = new Set(settings.quietChannels);
-    if (interaction.commandName === "quiet-channel") {
+    if (cmd === "quiet-channel") {
       if (quiet.has(channel.id)) return interaction.reply({ content: `<#${channel.id}> is already quiet.`, ephemeral: true });
       quiet.add(channel.id);
       await store.setQuietChannels(guildId, [...quiet]);
-      return interaction.reply({ content: `Companions won't speak in <#${channel.id}> anymore — Characterly still observes and remembers there. (Threads under it stay quiet too. For a full blackout use \`/ignore-channel\`.) Restore with \`/unquiet-channel\`.`, ephemeral: true });
+      return interaction.reply({ content: `Companions won't speak in <#${channel.id}> anymore — Characterly still observes and remembers there. (Threads under it stay quiet too. For a full blackout use \`/server ignore\`.) Restore with \`/server unquiet\`.`, ephemeral: true });
     }
     if (!quiet.has(channel.id)) return interaction.reply({ content: `<#${channel.id}> isn't quiet.`, ephemeral: true });
     quiet.delete(channel.id);
     await store.setQuietChannels(guildId, [...quiet]);
     return interaction.reply({ content: `Companions can speak in <#${channel.id}> again.`, ephemeral: true });
   }
-  if (interaction.commandName === "event") {
+  if (cmd === "event") {
     if (!evStore) return interaction.reply({ content: "Event inspection is not available right now.", ephemeral: true });
     const memId = interaction.options.getInteger("memory_id", true);
     const memory = await store.getMemory(guildId, memId);
@@ -2419,7 +2473,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       );
     return interaction.reply({ ephemeral: true, embeds: [embed] });
   }
-  if (interaction.commandName === "profile") {
+  if (cmd === "profile") {
     const member = interaction.options.getUser("user");
     if (member && member.id !== interaction.user.id && !interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
       return interaction.reply({ content: "You can only view your own profile.", ephemeral: true });
@@ -2486,7 +2540,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     });
     return interaction.reply({ ephemeral: true, embeds: [embed] });
   }
-  if (interaction.commandName === "dossier") {
+  if (cmd === "dossier") {
     const member = interaction.options.getUser("user");
     if (member && member.id !== interaction.user.id && !interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
       return interaction.reply({ content: "You can only view your own dossier.", ephemeral: true });
@@ -2510,7 +2564,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     const head = new EmbedBuilder()
       .setTitle(`Dossier — ${profile.displayName || member?.username || interaction.user.username}`)
       .setDescription(profile.summary || "*No bio yet.*")
-      .setFooter({ text: "Unconfirmed items are marked as such. #n references resolve via /memory memory_id." });
+      .setFooter({ text: "Unconfirmed items are marked as such. #n references resolve via /memory list memory_id." });
     embeds.push(head);
 
     const v = dossier.voice?.data as { prose?: string; quirks?: string[]; stats?: { avgLength: number; capsRatio: number; emojiRatio: number; questionRatio: number; sampleSize: number } } | undefined;
@@ -2533,7 +2587,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
 
     return interaction.reply({ ephemeral: true, embeds: embeds.slice(0, 10) });
   }
-  if (interaction.commandName === "opt-out") {
+  if (cmd === "opt-out") {
     const userId = interaction.user.id;
     await store.setMemberOptOut(guildId, userId, true);
     const forgotten = await store.forgetAllFor(guildId, userId);
@@ -2559,12 +2613,12 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
     await profileStore.deleteProfile(guildId, userId);
     return interaction.reply({ content: `Opted out. ${forgotten} memor${forgotten === 1 ? "y" : "ies"} and ${relForgotten} relationship record${relForgotten === 1 ? "" : "s"} about you were forgotten; your profile, attributes, stored quotes, companion journal entries about you, and story recaps were deleted — no new memories, relationships, or profile data will be formed about you while you're opted out. Your messages still appear in the raw archive until the server's retention window removes them. Use /opt-in and /profile-build to start again.`, ephemeral: true });
   }
-  if (interaction.commandName === "opt-in") {
+  if (cmd === "opt-in") {
     await store.setMemberOptIn(guildId, interaction.user.id, true);
     await store.setMemberOptOut(guildId, interaction.user.id, false);
     return interaction.reply({ content: "Opted in — new memories about you can form from live activity. Run /profile-build to also scan your message history and build your profile now.", ephemeral: true });
   }
-  if (interaction.commandName === "profile-build") {
+  if (cmd === "profile-build") {
     const userId = interaction.user.id;
     // Cooldown — a full archive scan is a real LLM spend; one build per day.
     const existing = await profileStore.getProfile(guildId, userId);
@@ -2591,7 +2645,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       profileBuildsRunning.delete(pbKey);
     }
   }
-  if (interaction.commandName === "setup") {
+  if (cmd === "setup") {
     if (interaction.guildId && !interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
       return interaction.reply({ content: "Only server administrators can configure the LLM key. Use `/companion key` to connect your personal API key.", ephemeral: true });
     }
@@ -3107,7 +3161,7 @@ export async function handleCompanionModal(
   });
 }
 
-export async function handleMemoryButton(interaction: ButtonInteraction, store: MemoryStore, brainFor?: BrainFor, evStore?: EventStore) {
+export async function handleMemoryButton(interaction: ButtonInteraction, store: MemoryStore, brainFor?: BrainFor, evStore?: EventStore, isHostedScope?: (scopeId: string) => boolean) {
   if (interaction.customId === "forget:cancel") return interaction.update({ content: "No memory was deleted.", components: [] });
   const parts = interaction.customId.split(":");
 
@@ -4183,24 +4237,32 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
           ephemeral: true,
         });
       }
-      const turn = await brain.runOnboardingTurn({
-        ownerName,
-        userMessage: preset.prompt,
-        transcript: [],
-        currentDraft: existing
-          ? {
-              name: existing.name,
-              voicePersona: existing.voicePersona,
-              coreTraits: existing.coreTraits,
-              ownerDynamic: existing.ownerDynamic,
-              backstory: existing.backstory,
-              avatarUrl: existing.avatarUrl,
-            }
-          : undefined,
-        turnCount: existing?.onboardingTurns ?? 0,
-        allowImmediateComplete: preset.allowImmediateComplete,
-        model: config.replyModel,
-      });
+      const charge = await chargeOnboardingTurn(store, isHostedScope?.(dmScope) ?? false, userId, existing?.onboardingTurns ?? 0);
+      if (!charge.ok) return interaction.reply({ content: charge.message, ephemeral: true });
+      let turn: Awaited<ReturnType<Brain["runOnboardingTurn"]>>;
+      try {
+        turn = await brain.runOnboardingTurn({
+          ownerName,
+          userMessage: preset.prompt,
+          transcript: [],
+          currentDraft: existing
+            ? {
+                name: existing.name,
+                voicePersona: existing.voicePersona,
+                coreTraits: existing.coreTraits,
+                ownerDynamic: existing.ownerDynamic,
+                backstory: existing.backstory,
+                avatarUrl: existing.avatarUrl,
+              }
+            : undefined,
+          turnCount: existing?.onboardingTurns ?? 0,
+          allowImmediateComplete: preset.allowImmediateComplete,
+          model: config.replyModel,
+        });
+      } catch (error) {
+        if (charge.charged) await store.refundCredits(userId, charge.charged, "onboarding_turn_refund", charge.purchased).catch(() => {});
+        throw error;
+      }
       // Archetype presets always show the draft preview first so the user can
       // inspect and confirm before permanently locking their 1-per-account companion.
       const updatedDraft = await store.upsertCompanionOnboarding(
@@ -4514,7 +4576,7 @@ async function handlePinToMemory(interaction: MessageContextMenuCommandInteracti
     return interaction.reply({ content: "That matches a memory that's already been replaced — reword it slightly to pin it fresh.", ephemeral: true });
   }
   return interaction.reply({
-    content: `Pinned **#${saved.id}** — "${saved.content.slice(0, 120)}" will always be in ${label}'s context here. Manage with \`/memory\`.`,
+    content: `Pinned **#${saved.id}** — "${saved.content.slice(0, 120)}" will always be in ${label}'s context here. Manage with \`/memory list\`.`,
     ephemeral: true,
   });
 }

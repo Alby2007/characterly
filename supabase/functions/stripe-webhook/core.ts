@@ -52,6 +52,7 @@ export interface CheckoutSessionLike {
   payment_link?: string | null;
   customer?: string | null;
   subscription?: string | null;
+  payment_intent?: string | null;
   client_reference_id?: string | null;
   customer_details?: { email?: string | null } | null;
   metadata?: Record<string, string> | null;
@@ -68,8 +69,9 @@ export type CheckoutAction =
   // plan only once money settled. "no_payment_required" covers trials/100%-off.
   | { kind: "premium"; grantPlan: boolean; customer: string | null; subscriptionId: string | null; bonusTokens?: number }
   // A token pack: paid only. ref is the session id — the ledger's unique
-  // stripe_ref absorbs redelivery.
-  | { kind: "pack"; tokens: number; ref: string; customer: string | null }
+  // stripe_ref absorbs redelivery. paymentIntent rides onto the ledger row so
+  // a later charge.refunded claws back exactly this pack.
+  | { kind: "pack"; tokens: number; ref: string; customer: string | null; paymentIntent: string | null }
   | { kind: "ignore"; why: string };
 
 export function classifyCheckout(
@@ -93,7 +95,7 @@ export function classifyCheckout(
   const metaTokens = opts.packMeta?.[meta ?? ""];
   if (metaTokens !== undefined) {
     if (!paid) return { kind: "ignore", why: `checkout ${s.id} not yet paid` };
-    return { kind: "pack", tokens: metaTokens, ref: s.id, customer: s.customer ?? null };
+    return { kind: "pack", tokens: metaTokens, ref: s.id, customer: s.customer ?? null, paymentIntent: s.payment_intent ?? null };
   }
   // Legacy public payment links — kept so deliveries created before the links
   // were deactivated still classify. Keyed on payment_link only — never mode
@@ -104,7 +106,36 @@ export function classifyCheckout(
   const tokens = opts.packLinks[s.payment_link ?? ""];
   if (tokens === undefined) return { kind: "ignore", why: `unrelated checkout ${s.id}` };
   if (!paid) return { kind: "ignore", why: `checkout ${s.id} not yet paid` };
-  return { kind: "pack", tokens, ref: s.id, customer: s.customer ?? null };
+  return { kind: "pack", tokens, ref: s.id, customer: s.customer ?? null, paymentIntent: s.payment_intent ?? null };
+}
+
+export interface ChargeLike {
+  id: string;
+  customer?: string | null;
+  payment_intent?: string | null;
+  invoice?: string | null;
+  description?: string | null;
+  amount?: number | null;
+  amount_refunded?: number | null;
+  created?: number | null;
+}
+
+/** clawback_pack arguments for a charge.refunded event. Matching is exact on
+ *  payment_intent; p_charged_at enables the pre-v60 time-window fallback and
+ *  is withheld for invoice (subscription) charges so a subscription refund
+ *  can never claw a pack. Newer API versions drop charge.invoice, so the
+ *  "Subscription creation/update" description is checked too.
+ *  amount/amount_refunded drive proration. */
+export function clawbackArgs(accountId: string, ch: ChargeLike) {
+  const subscriptionCharge = Boolean(ch.invoice) || /^subscription/i.test(ch.description ?? "");
+  return {
+    p_account: accountId,
+    p_charge: ch.id,
+    p_payment_intent: ch.payment_intent ?? null,
+    p_amount: ch.amount ?? null,
+    p_amount_refunded: ch.amount_refunded ?? null,
+    p_charged_at: !subscriptionCharge && ch.created ? new Date(ch.created * 1000).toISOString() : null,
+  };
 }
 
 export interface SubscriptionLike {

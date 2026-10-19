@@ -661,7 +661,7 @@ Audit trail for hosted-lane credits (user-facing name: "tokens") — v29. Every 
 
 **Index:** `credit_ledger_account (account_id, id DESC)`. **RLS:** enabled; `credit_ledger_select_own` lets authenticated users read their own rows (the dashboard ledger).
 
-`web_profiles` also gains (same migration): `plan` (`'free'|'premium'`, default `free`), `credit_balance`, `last_daily_grant_on`, `last_weekly_grant_on` (dormant since v31 — premium is a single 150/day floor now). Grants are **lazy refills**: `spendCredits` tops the balance up to the plan's daily floor under the row lock before debiting — no scheduler, downtime-safe, and a refill can't bank beyond the floor. v31 also adds `stripe_customer_id` / `stripe_subscription_id` for the billing webhook's customer→account mapping.
+`web_profiles` also gains (same migration): `plan` (`'free'|'premium'`, default `free`), `credit_balance`, `last_daily_grant_on`, `last_weekly_grant_on` (dormant since v31 — premium is a single 150/day floor now). Grants are **lazy refills**: `spendCredits` tops the daily allowance (`credit_balance − purchased_balance`, v60) up to the plan's floor under the row lock before debiting — no scheduler, downtime-safe, and a refill can't bank beyond the floor. Pack/bonus tokens (`purchased_balance`) persist on top, are spent only after the allowance, and never suppress the refill. v31 also adds `stripe_customer_id` / `stripe_subscription_id` for the billing webhook's customer→account mapping.
 
 ---
 
@@ -889,3 +889,5 @@ Version tracking for the migration system.
 | 47 | `v47_app_installs` | `app_installs` (install ledger for the welcome-DM sweep) + `record_app_install` security-definer RPC (service-role only — the website worker's webhook sink); rollback refuses while installs exist |
 | 48 | `v48_support_tickets` | `support_tickets` + partial unique index `one_open_per_user` — the house ticket system's ledger; rollback refuses while tickets exist |
 | 54 | `v54_adoptee_threads` | `companion_adoptions.chat_thread_id` + partial index `adoptions_thread` — adoptee private-thread registry; drop→re-adopt reuses the same thread so history continues |
+| 60 | `v60_token_buckets_exact_clawback` | `web_profiles.purchased_balance` (persistent pack/bonus slice of `credit_balance`; backfilled from net unrefunded purchases), `credit_ledger.payment_intent` + index, `grant_bonus` ledger kind (launch-bonus rows reclassified), `grant_pack(…, p_payment_intent, p_kind)` and `clawback_pack(…, p_payment_intent, p_amount, p_amount_refunded, p_charged_at)` — exact-PI match (pre-v60 packs by grant time), prorated + cumulative partial refunds, subscription refunds never claw packs |
+| 61 | `v61_sweep_indexes` | partial indexes `messages_untriaged (created_at) WHERE triage_result IS NULL` and `messages_pending_extract (guild_id) WHERE triage_result IN ('durable','regex','queued')` — back `dmScopesNeedingSweep` so the 15-min sweep visits only DM scopes with work |

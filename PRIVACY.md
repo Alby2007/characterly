@@ -6,7 +6,7 @@ Characterly ("the bot") is a Discord bot that hosts personal AI companions. This
 
 ## What the bot stores
 
-**Dormant until enabled.** When the bot joins a server it posts a disclosure card and records **nothing** — observation starts only after a server admin runs `/memory-resume`. Everything below applies once enabled.
+**Dormant until enabled.** When the bot joins a server it posts a disclosure card and records **nothing** — observation starts only after a server admin runs `/server resume`. Everything below applies once enabled.
 
 **Raw message archive.** Messages in channels the bot can read are archived to a PostgreSQL database so the bot can reply with context, extract knowledge, and audit where a memory came from. Raw messages are retained for **30 days** by default (the operator may configure 1–365 days) and then permanently deleted — including the verbatim quote/snapshot columns inside memory evidence (audit metadata like evidence type and reason is kept, the quoted words are not).
 
@@ -16,13 +16,13 @@ Characterly ("the bot") is a Discord bot that hosts personal AI companions. This
 
 **Derived personal data — opt-in only.** Memories about a person, structured profile attributes (pronouns, interests, timezone, etc.), generated profile cards and dossiers, and relationship observations/edges are created **only for members who explicitly opt in** via `/profile-build` or `/opt-in`. Members who never opt in get no derived data.
 
-**Companion journal.** When a companion speaks it may privately journal — short first-person notes about what it experienced (a shared moment, a joke, a promise). Entries are paraphrased, never verbatim quotes; an entry that involves you is only written if you are opted in, and it stays scoped to where it formed. Entries about you are deleted on `/opt-out`, shown in `/memory-export`, and a server's entries are wiped if the bot is removed.
+**Companion journal.** When a companion speaks it may privately journal — short first-person notes about what it experienced (a shared moment, a joke, a promise). Entries are paraphrased, never verbatim quotes; an entry that involves you is only written if you are opted in, and it stays scoped to where it formed. Entries about you are deleted on `/opt-out`, shown in `/memory export`, and a server's entries are wiped if the bot is removed.
 
 **Story recaps.** Each companion keeps a rolling first-person "story so far" summary per conversation, so it remembers what happened beyond the live message window. Recaps are scoped to that companion and that chat, update as you talk, and are yours to edit (`/companion story` or the account page), reset (`/companion reset-story`), or delete via `/opt-out`.
 
 **Story facts vs real facts.** Things that happen in roleplay are stored as *story facts* scoped to the companion they happened with — they never become facts about the real you, never show up for your other companions, and never leave that character's context. Facts about real life are shared across your own companions, so you only tell them something once.
 
-**Crossing the DM boundary — your call.** By default, facts about you stay inside the server where they formed. A companion debriefing its owner in DMs may carry **server lore** and the **owner's own** facts — never yours — unless you explicitly enable `/share-facts` in that server. Turn it off at any time and your facts stop crossing.
+**Crossing the DM boundary — your call.** By default, facts about you stay inside the server where they formed. A companion debriefing its owner in DMs may carry **server lore** and the **owner's own** facts — never yours — unless you explicitly enable `/memory share-facts` in that server. Turn it off at any time and your facts stop crossing.
 
 **Adopted-companion threads.** Chats with companions you adopt from the marketplace live in private threads under `#adoptees` in the Characterly community server. Messages there are archived and processed exactly like DM conversations (same retention, extraction, and deletion controls) — but unlike DMs, Discord private threads are also visible to members with thread-moderation permissions, which on `#adoptees` is restricted to server **Admins** only — Moderator-role holders cannot see them. Admins only open these threads for safety and support purposes; automated community moderation never runs inside them.
 
@@ -39,13 +39,13 @@ Characterly ("the bot") is a Discord bot that hosts personal AI companions. This
 - **Deleting a Discord message** removes its archived copy and scrubs the verbatim text from any evidence it produced (audit metadata like evidence type is kept).
 - **Editing a message** updates the archived copy. Evidence snapshots deliberately keep the original text, as the record of what a memory was derived from.
 - **`/opt-out`** removes all your derived data and prevents any new derived data about you: relationships, profile, and attributes are deleted outright; memories are marked forgotten (invisible to every read path — the row's audit metadata is kept, while its verbatim quotes are scrubbed immediately); companion journal entries involving you are deleted, and story recaps in your DM lane are removed. Your raw messages remain in the archive until retention expires.
-- **`/forget`** removes a single memory.
-- **`/remember`** pins a fact you state yourself so it's always in context; `/memory` with `pin:` un-pins it, and right-clicking any message offers **Pin to memory**.
+- **`/memory forget`** removes a single memory.
+- **`/memory remember`** pins a fact you state yourself so it's always in context; `/memory list` with `pin:` un-pins it, and right-clicking any message offers **Pin to memory**.
 - **`/companion story` / `reset-story`** let you read, rewrite, or clear the running story recap for the current chat.
-- **`/share-facts`** controls whether facts about you may ride a companion's private debrief to its owner — off by default.
+- **`/memory share-facts`** controls whether facts about you may ride a companion's private debrief to its owner — off by default.
 - **The account page (`/dashboard`)** shows everything your companion remembers in your DM lane — memories, journal, and the story recap — with pin, edit, and forget controls.
-- **`/memory-export`** lets you download everything the bot holds about you.
-- Server admins can set a shorter retention window via `/memory-purge` or disable memory/reply features entirely via `/memory-pause`.
+- **`/memory export`** lets you download everything the bot holds about you.
+- Server admins can set a shorter retention window via `/server purge` or disable memory/reply features entirely via `/server pause`.
 - **`/privacy`** shows any member exactly what is stored, the retention window, and their own consent state.
 - **Removing the bot from a server deletes every row it stored there** — raw messages, memories, profiles, keys, and settings — immediately and permanently.
 

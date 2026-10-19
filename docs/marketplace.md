@@ -261,10 +261,14 @@ All URL inputs run `isSafeUrl` + `resolvesToPrivateAddress` — public
 
 **Durable avatars.** Every `avatar_url` set-point (DM attachment, avatar
 command, cover modal, seed covers) first pipes the source image through the
-website worker's `PUT /avatar` — shared-secret auth (`AVATAR_UPLOAD_SECRET`)
-→ a public `companion-avatars` Supabase Storage bucket — so avatars outlive
-Discord CDN signatures and hotlink rot (`src/avatars.ts`). The lane is
-best-effort: secret unset or any failure keeps the source URL.
+website worker's `PUT /avatar` — shared-secret auth (`AVATAR_UPLOAD_SECRET`,
+constant-time compared) → a public `companion-avatars` Supabase Storage
+bucket (ensured once per worker isolate) — so avatars outlive Discord CDN
+signatures and hotlink rot (`src/avatars.ts`). The lane is best-effort:
+secret unset or any failure keeps the source URL. The bot's daily
+maintenance calls the worker's `POST /avatar/gc` (same secret), which
+deletes bucket objects older than 24h that no `companions`/`companion_listings`
+row references — replaced avatars don't accumulate.
 
 **Cover → clone propagation.** The adoptee-thread queries select
 `coalesce(c.avatar_url, l.avatar_url)`: a clone's own avatar wins when set,
