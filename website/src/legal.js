@@ -5,16 +5,18 @@ import "./base.js";
 import termsMd from "../../TERMS.md?raw";
 import privacyMd from "../../PRIVACY.md?raw";
 import securityMd from "../../SECURITY.md?raw";
+import safetyMd from "../../SAFETY.md?raw";
 
 const DOCS = {
   terms: { md: termsMd, route: "/terms" },
   privacy: { md: privacyMd, route: "/privacy" },
   security: { md: securityMd, route: "/security" },
+  safety: { md: safetyMd, route: "/safety" },
 };
 
 // Repo-relative doc links get remapped to their site routes; everything else
 // stays a normal link (external opens in a new tab).
-const MD_ROUTE = { "TERMS.md": "/terms", "PRIVACY.md": "/privacy", "SECURITY.md": "/security" };
+const MD_ROUTE = { "TERMS.md": "/terms", "PRIVACY.md": "/privacy", "SECURITY.md": "/security", "SAFETY.md": "/safety" };
 
 const esc = s =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");

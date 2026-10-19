@@ -19,6 +19,7 @@ export default defineConfig({
             terms: fileURLToPath(new URL("./terms.html", import.meta.url)),
             privacy: fileURLToPath(new URL("./privacy.html", import.meta.url)),
             security: fileURLToPath(new URL("./security.html", import.meta.url)),
+            safety: fileURLToPath(new URL("./safety.html", import.meta.url)),
             notFound: fileURLToPath(new URL("./404.html", import.meta.url)),
           },
         },

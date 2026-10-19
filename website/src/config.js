@@ -10,6 +10,7 @@ export const LINKS = {
   privacy: "/privacy",
   terms: "/terms",
   security: "/security",
+  safety: "/safety",
 };
 
 // Current Terms/Privacy version for clickwrap consent — keep in sync with
