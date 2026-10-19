@@ -76,9 +76,10 @@ export default {
     }
     const res = await env.ASSETS.fetch(request);
     // Page views: navigation loads only (a path with no file extension, or
-    // .html) — not every css/js/font fetch. Path + referer HOST + status is
-    // all we keep: no IPs, no query strings, no cookies.
-    if (request.method === "GET" && !/\.[a-z0-9]+$/i.test(url.pathname.replace(/\.html$/i, ""))) {
+    // .html) — not every css/js/font fetch, and not stray GETs on the POST-only
+    // API paths (they 404 through the asset layer). Path + referer HOST +
+    // status is all we keep: no IPs, no query strings, no cookies.
+    if (request.method === "GET" && url.pathname !== TRACK_PATH && url.pathname !== AVATAR_PATH && url.pathname !== AVATAR_GC_PATH && !/\.[a-z0-9]+$/i.test(url.pathname.replace(/\.html$/i, ""))) {
       let refHost = "";
       try { refHost = new URL(request.headers.get("referer") ?? "").hostname; } catch { /* none */ }
       trackAe(env, "page_view", [url.pathname, refHost], [res.status]);

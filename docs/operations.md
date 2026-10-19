@@ -68,7 +68,7 @@ First-party only — no third-party trackers, and **never** message content, pro
 
 - **`metrics_daily`** — durable rollup of the ~290 in-process `inc()` counters. `drainMetrics()` deltas flush every 5 min (`METRICS_FLUSH_INTERVAL_MS`) plus a best-effort drain on shutdown; a restart loses at most one unflushed interval.
 - **`analytics_events`** — pseudonymous funnel rows: `install_greeted`, `onboard_start`, `awaken`, `summon`, `summon_deadend`, `adopt`, `house_join`, `verified`, `guild_added`, `guild_purged`. The name is a closed union; `trackEvent` swallows its own errors (`analytics.event_error` counter) so analytics can't break a product path. `/opt-out` sets `user_bot_settings.analytics_opt_out` (the INSERT guards on it) and deletes the user's rows; `/opt-in` re-enables. Daily maintenance prunes rows past 400 days.
-- **`/ops stats`** reads the funnel — `count(DISTINCT discord_user_id)` per step so re-prompts don't inflate conversion; steps already durable elsewhere (link claims, first spend, replies) are read from their own tables, not re-recorded.
+- **`/ops stats`** reads the funnel — `count(DISTINCT COALESCE(discord_user_id, scope))` per step so re-prompts don't inflate conversion and guild-level events (NULL user id) still count; steps already durable elsewhere (link claims, first spend, replies) are read from their own tables, not re-recorded.
 - **Website** — the worker writes Workers Analytics Engine datapoints (dataset `characterly_site`, binding `ANALYTICS`, auto-created on deploy): `page_view` (path + referer *host* + status only — no IPs/query strings/cookies), `discord_event`, `avatar_upload`, `avatar_gc`, and `web_event` from the fail-silent `POST /track` endpoint (allowlisted names — `signup_start`, `signup_done`, `checkout_click`, `link_attempt` — beaconed from the account/dashboard pages). No cookies anywhere.
 
 **Querying AE:** Cloudflare dashboard → Workers → `characterly-website` → Analytics Engine, or the GraphQL API (`analyticsEngineAdaptiveGroups` on the `characterly_site` dataset) — needs an API token with Account Analytics (read) + the account tag. Example:
@@ -83,7 +83,7 @@ First-party only — no third-party trackers, and **never** message content, pro
 }
 ```
 
-Blob layout: `blob1` = event name (`page_view`/`web_event`/…), then event-specific — `page_view`: `blob2` path, `blob3` referer host, `double1` status; `web_event`: `blob2` sub-event (`signup_start` etc.), `blob3` path; `discord_event`: `blob2` = `authorized`/`deauthorized`; `avatar_upload`: `double1` bytes; `avatar_gc`: `double1` deleted.
+Blob layout: `blob1` = event name (`page_view`/`web_event`/…), then event-specific — `page_view`: `blob2` path, `blob3` referer host, `double1` status; `web_event`: `blob2` sub-event (`signup_start` etc.), `blob3` payload (`p` — e.g. the product on `checkout_click`); `discord_event`: `blob2` = `authorized`/`deauthorized`; `avatar_upload`: `double1` bytes; `avatar_gc`: `double1` deleted.
 
 **Automod rules** (house guild only, deterministic, exempts `Manage Messages` holders + bots; runs before archiving so deleted spam never enters the memory pipeline): invite links → delete + alert · scam classes (nitro/crypto/steam/earn-money) → delete + 10m timeout + alert · mass mention (>8 user+role, or `@everyone` without permission) → delete + alert · burst spam (>6/8s) → delete + 5m timeout + alert · new account (<7d) + link → delete + alert. A 60s per-author action cooldown keeps repeat offenses deleting silently instead of re-alerting.
 

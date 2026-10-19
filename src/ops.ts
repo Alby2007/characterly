@@ -2405,7 +2405,7 @@ function statsEmbed(s: OpsStats): EmbedBuilder {
         `summon ${f("summon")} · adopt ${s.adopted} · linked ${s.linkClaims} · dead-end summons ${f("summon_deadend")}\n` +
         `${step("house join", f("house_join"))} → ${step("verified", f("verified"), f("house_join"))}` },
       ...(s.tokens ? [{ name: "Tokens", value: `${s.tokens.spent} spent by ${s.tokens.spenders} accounts · ${s.tokens.purchased} pack-bought · ${s.tokens.premium} premium` }] : []),
-      { name: "Churn", value: `${s.deauthorized} uninstalls · ${s.dropped} dropped adoptions · ${f("guild_purged")} guilds purged` },
+      { name: "Churn", value: `${s.deauthorized} uninstalls · ${s.dropped} dropped adoptions · ${f("guild_added")} guilds added / ${f("guild_purged")} purged` },
       { name: "Top counters", value: `\`\`\`\n${counters}\n\`\`\`` },
     );
 }

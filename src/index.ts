@@ -689,9 +689,10 @@ setInterval(() => {
 // restart can lose; a final drain runs in the shutdown path.
 const METRICS_FLUSH_INTERVAL_MS = 5 * 60_000;
 async function flushMetricsOnce() {
-  const deltas = drainMetrics();
-  if (!Object.keys(deltas).length || !store) return;
-  await store.flushMetricDeltas(deltas);
+  if (!store) return;
+  // drainMetrics commits the flush baseline only after the write resolves —
+  // a failed flush leaves the deltas pending so the next interval retries.
+  await drainMetrics(deltas => store.flushMetricDeltas(deltas));
 }
 setInterval(() => flushMetricsOnce().catch(e => { inc("metrics.flush_error"); logError("metrics flush failed", e); }), METRICS_FLUSH_INTERVAL_MS).unref();
 
@@ -1207,6 +1208,10 @@ async function handleDmMessage(
       await store.setTriageResults([{ id: event.messageId, result: "noise" }]);
 
       const avatarUrl = rawAvatarAttachment?.url ? ((await rehostAvatar(rawAvatarAttachment.url)) ?? rawAvatarAttachment.url) : existing?.avatarUrl ?? null;
+      // Funnel: the slash path logs onboard_start when the prompt shows; this
+      // is the typed-DM entry — first turn only, so a restart re-fires but a
+      // mid-flow turn doesn't.
+      if ((existing?.onboardingTurns ?? 0) === 0) void store.trackEvent(userId, "onboard_start");
       const turn = await brain.runOnboardingTurn({
         ownerName: authorName,
         userMessage: message.content || "(sent an avatar image)",

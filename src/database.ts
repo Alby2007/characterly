@@ -568,8 +568,11 @@ export class MemoryStore {
       FROM guild_usage
       WHERE day >= (now() AT TIME ZONE 'UTC')::date - 6
     `;
+    // Distinct actors: user id when present, else the scope — guild-level
+    // events (guild_added/guild_purged) carry a NULL user id, so a plain
+    // DISTINCT discord_user_id would count them as 0 forever.
     const funnel = await this.sql<Array<{ event: string; events: number; users: number }>>`
-      SELECT event, count(*)::int AS events, count(DISTINCT discord_user_id)::int AS users
+      SELECT event, count(*)::int AS events, count(DISTINCT COALESCE(discord_user_id, scope))::int AS users
       FROM analytics_events
       WHERE created_at > now() - interval '7 days'
       GROUP BY event
@@ -599,10 +602,15 @@ export class MemoryStore {
     `;
     let tokens: OpsStats["tokens"] = null;
     if (this.creditsSupported) {
+      // Net figures: 'refund' rows with delta>0 return spent tokens (take them
+      // out of spent); clawback refunds carry delta<0 (take them out of
+      // purchased). gross spend - returns, gross packs - clawed packs.
       const [row] = await this.sql<Array<{ spent: number; purchased: number; spenders: number; premium: number }>>`
         SELECT
-          COALESCE(-sum(delta) FILTER (WHERE kind = 'spend'), 0)::int AS spent,
-          COALESCE(sum(delta) FILTER (WHERE kind = 'purchase'), 0)::int AS purchased,
+          COALESCE(-sum(delta) FILTER (WHERE kind = 'spend'), 0)
+            - COALESCE(sum(delta) FILTER (WHERE kind = 'refund' AND delta > 0), 0)::int AS spent,
+          COALESCE(sum(delta) FILTER (WHERE kind = 'purchase'), 0)
+            + COALESCE(sum(delta) FILTER (WHERE kind = 'refund' AND delta < 0), 0)::int AS purchased,
           count(DISTINCT account_id) FILTER (WHERE kind = 'spend')::int AS spenders,
           (SELECT count(*) FROM web_profiles WHERE plan = 'premium')::int AS premium
         FROM credit_ledger

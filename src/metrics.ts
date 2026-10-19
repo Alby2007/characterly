@@ -18,17 +18,20 @@ export function metricsSnapshot(): { uptimeSec: number; counts: Record<string, n
   };
 }
 
-/** Per-name increments since the last drain — the writer upserts these into
- *  metrics_daily. Counters stay cumulative for /status; the flushed baseline
- *  tracks what already hit the rollup. */
-export function drainMetrics(): Record<string, number> {
+/** Per-name increments since the last successful drain, written via `write`
+ *  (which upserts them into metrics_daily). The flushed baseline advances by
+ *  exactly what was written AFTER the write resolves — a failed write leaves
+ *  the deltas intact so the next drain retries them instead of dropping them.
+ *  Increments landing between drain and commit ride the next flush. */
+export async function drainMetrics(write: (deltas: Record<string, number>) => Promise<void>): Promise<void> {
   const deltas: Record<string, number> = {};
   for (const [name, count] of counters) {
     const delta = count - (flushed.get(name) ?? 0);
-    if (delta > 0) {
-      deltas[name] = delta;
-      flushed.set(name, count);
-    }
+    if (delta > 0) deltas[name] = delta;
   }
-  return deltas;
+  if (!Object.keys(deltas).length) return;
+  await write(deltas);
+  for (const [name, delta] of Object.entries(deltas)) {
+    flushed.set(name, (flushed.get(name) ?? 0) + delta);
+  }
 }
