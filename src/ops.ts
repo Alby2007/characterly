@@ -1739,7 +1739,7 @@ export const WANTED_LAYOUT: Array<{
     ],
   },
   {
-    category: "CHARACTER MARKETPLACE",
+    category: "characterly marketplace",
     channels: [
       { name: "characters", type: ChannelType.GuildForum },
       // Adopted companions' private chat threads — gated until verify

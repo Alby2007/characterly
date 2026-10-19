@@ -763,7 +763,7 @@ test("ensureHouseLayout copies the category's overwrites to created channels", a
   const existing: any[] = [
     { id: "cat-services", name: "SERVICES", type: 4, permissionOverwrites: { cache: catOverwrites } },
     { id: "cat-system", name: "SYSTEM", type: 4 },
-    { id: "cat-market", name: "CHARACTER MARKETPLACE", type: 4 },
+    { id: "cat-market", name: "[characterly marketplace]", type: 4 },
     { id: "cat-resources", name: "RESOURCES", type: 4 },
     { id: "cat-help", name: "HELP", type: 4 },
   ];
@@ -805,12 +805,12 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
   const mkCh = (name: string, parentId: string, synced: boolean, type = 0) =>
     ({ id: `c-${name}`, name, type, parentId, permissionsLocked: synced, permissionOverwrites: mkOw(name) });
   const existing = [
-    mkCat("SYSTEM"), mkCat("CHARACTER MARKETPLACE"), mkCat("RESOURCES"), mkCat("HELP"), mkCat("SERVICES"),
+    mkCat("SYSTEM"), mkCat("[characterly marketplace]"), mkCat("RESOURCES"), mkCat("HELP"), mkCat("SERVICES"),
     mkCh("welcome", "cat-system", true),
     mkCh("announcements", "cat-system", false), mkCh("events", "cat-system", false), mkCh("updates", "cat-system", false),
     mkCh("rules", "cat-system", true), mkCh("log-in", "cat-system", true), mkCh("characterly-web", "cat-system", true),
-    mkCh("characters", "cat-character marketplace", true, 15),
-    mkCh("adoptees", "cat-character marketplace", true),
+    mkCh("characters", "cat-[characterly marketplace]", true, 15),
+    mkCh("adoptees", "cat-[characterly marketplace]", true),
     ...["what-is-characterly", "what-is-companionly", "get-companionly", "privacy-policy", "how-to-publish-bots"]
       .map(n => mkCh(n, "cat-resources", true)),
     mkCh("faqs", "cat-help", true), mkCh("support-ticket", "cat-help", true), mkCh("suggest-a-feature", "cat-help", true, 15),
@@ -967,7 +967,7 @@ test("staffModerate grant list: stale Mod thread perms on #adoptees get revoked"
     id: HOUSE,
     channels: {
       cache: { find: (fn: (c: any) => boolean) =>
-        [adoptees, { id: "cat-market", name: "CHARACTER MARKETPLACE", type: 4 }].find(fn) },
+        [adoptees, { id: "cat-market", name: "[characterly marketplace]", type: 4 }].find(fn) },
       create: async (o: any) => ({ id: `n-${o.name}`, ...o }),
     },
     roles: { cache: { find: (fn: (r: any) => boolean) => [{ id: "r-mod", name: "Mod" }, { id: "r-admin", name: "Admin" }].find(fn) } },
