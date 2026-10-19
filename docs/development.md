@@ -94,6 +94,21 @@ Tests live alongside source files as `*.test.ts`. Run them all with `npm test`.
 | `link-code.test.ts` | `/link` code minting: `XXXX-XXXX` unambiguous alphabet, re-issue replaces, expiry sweeps, per-user uniqueness |
 | `secrets.test.ts` | AES-256-GCM roundtrip, random IV uniqueness, wrong-key and tamper rejection |
 | `vision.test.ts` | `qualifyingImages` type/byte/count gates; `formatImageContext` framing; `describeImage` data-URI + strict json_schema |
+| `memory-scope.test.ts` | Companion-scoped memory: `story_fact` stays with its companion while real facts share; unscoped fiction is inert; digest honors `share_facts_with_companion_owners`; pins lead recall; summary counter claim atomicity; companion-delete cascade |
+| `ops.test.ts` | House ops + partner deployments: automod verdicts, member add/update/remove, layout/watchdog/verify-gate/tickets, `/ops` command surface, deployment grants and adoptee-thread routing |
+| `marketplace.test.ts` | Listing card rendering (avatar → embed cover), `marketplaceAssetPath` traversal refusal, curated tag sync |
+| `market.test.ts` | Adoption slots and cooldowns, listing lifecycle state, mirror-post fan-out |
+| `seed-personas.test.ts` | Seed roster invariants: unique names, creator-tag taxonomy membership, blocklist-clean personas |
+| `safety.test.ts` | Listing blocklist category/field reporting; reply-screen classification |
+| `charcard.test.ts` | Character-card parsing: PNG `tEXt` chunk extraction, JSON cards, `cardToPersona`, `cardFileHash`, `cardImportMeta` |
+| `chathist.test.ts` | Chat-history parsers: tavern jsonl metadata skip, turns/speakers/timestamps |
+| `chatimport.test.ts` | `runChatImportJob`: distillation windows fold into the pinned bond-summary journal entry |
+| `credits.test.ts` | `spendCredits`/`refundCredits`/`userBotSettings` against real SQL — lazy daily grants, ledger rows |
+| `discord-events.test.ts` | Ed25519 signature + envelope parsing for `/discord/events` (the same code the website worker runs) |
+| `embeddings.test.ts` | Embedder disabled without `EMBED_BASE_URL` → lexical legs only; vector/model/input forwarding |
+| `install-greet.test.ts` | `greetPendingInstalls` sweep: install-greeting payload and narrow store surface |
+| `avatars.test.ts` | `rehostAvatar` never throws — secret unset, fetch failure, and bad payloads all resolve to `null` so callers keep the source URL |
+| `stripe-webhook.test.ts` | Webhook signature verification and `classifySubscription` — every premium price id, dunning statuses keep perks, foreign products never touch plan |
 
 ### Adding a test
 

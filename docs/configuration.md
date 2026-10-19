@@ -23,6 +23,7 @@ Characterly is configured through environment variables validated at startup by 
 | `KEY_ENCRYPTION_SECRET` | unset | Master passphrase encrypting user API keys at rest (AES-256-GCM, SHA-256-derived). Required for `/companion key`, `/setup`, and the onboarding **Paste API Key** modal. When users leave Base URL blank, Characterly auto-detects Groq (`gsk_...`), OpenRouter (`sk-or-...`), OpenAI (`sk-...`), or xAI (`xai-...`). Any string; rotating it orphans existing `guild_keys` rows (recovery = re-run `/companion key` or `/setup`). |
 | `REQUIRE_GUILD_KEYS` | `0` | Hosted BYOK mode: `1` disables the operator `GROQ_API_KEY` fallback so companions and servers run strictly on user-supplied personal keys (`dm:<userId>`) — a keyless guild goes fully dormant (no archive, no replies, no LLM spend). Self-hosters leave this off. Note this is a *key* gate, orthogonal to the consent posture: every guild also starts dormant (`memory_enabled=0`) until an admin runs `/memory-resume`. |
 | `DM_LLM_DAILY_CAP` | `250` | Per-user daily LLM call cap for 1:1 DMs (`dm:<userId>` scope, resets at UTC midnight). |
+| `DM_CONTEXT_MESSAGES` | `40` | Live transcript window for DM replies — wider than the shared-guild default of 25 since a 1:1 chat has no other voices (range 10–100). The rolling story recap folds everything older; keep the two in step if you change it. |
 | `FREE_DAILY_CREDITS` | `30` | Free-plan hosted accounts refill to this balance each UTC day (hosted lane only). Applied lazily inside `spendCredits` — no scheduler. A refill tops up to the floor; a balance already above it keeps its headroom (grants don't stack). |
 | `PREMIUM_DAILY_CREDITS` | `150` | Daily refill floor for premium accounts — high enough to feel unlimited (≈75 turns/day) while remaining metered so an abusive account stays bounded. |
 | `HOSTED_DAILY_LLM_CAP` | `20000` | Fleet-wide circuit breaker: max hosted (env-key) LLM calls per UTC day across all users. BYOK calls never count. When tripped, hosted chats get the capacity notice until UTC midnight. |
@@ -76,7 +77,10 @@ The marketplace lives in a forum channel on the hub server. **`MARKETPLACE_CHANN
 | `MARKET_TOP_RATING_MIN` | `5` | Minimum rating count for `Top Rated`. |
 | `MARKET_TRENDING_COUNT` | `5` | Adoptions inside the window that earn `Trending`. |
 | `MARKET_TRENDING_WINDOW_H` | `72` | `Trending` window in hours. |
-| `MARKET_DEPLOY_ENABLED` | (off) | Master switch for partner-server deployments — `/marketplace` command registration, `/ops deploygrant`, deploy, and the sync sweep all refuse when unset. The house server never needs it. |
+| `MARKET_DEPLOY_ENABLED` | (off) | Master switch for partner-server deployments — `/marketplace` command registration, `/ops deploygrant`, deploy, and the sync sweep all refuse when unset. The house server never needs it. Setting it requests the privileged **Server Members Intent** (thread re-attach on join, lock on leave) — toggle it in the dev portal before deploy or login fails. |
+| `CHARACTER_IMPORT_CAP` | `25` | Private unlisted character-card imports a user may hold (`import_companion_card` RPC mirrors this — keep in sync). |
+| `CHAT_IMPORT_CAP` | `3` | Chat-history imports a user may have queued/distilling at once (`import_chat_history` RPC mirrors this — keep in sync). |
+| `CHAT_IMPORT_MAX_WINDOWS` | `50` | ~30-turn distillation windows per chat import — bounds hosted spend per transcript. |
 | `SAFETY_MODEL` | `GROQ_MODEL` | Classifier model for listing publish/edit screens and adopted-companion reply screens. |
 
 ### Semantic recall (embeddings)
@@ -161,7 +165,7 @@ Administrators can adjust per-server behaviour at runtime without restarting the
 
 ### Job queue (fixed parameters)
 
-Deferrable cognition (`extract`, `journal-write`, and `pair-analysis` jobs — memory extraction, contest checks, event-pipeline processing, companion journaling, relationship reads) runs on a Postgres-backed queue rather than inside the live message handler. The constants are compile-time in `src/jobs.ts`, not env-configurable: global in-flight cap **8**, per-guild concurrency **1** (preserves event ordering), 3-second poll with `LISTEN`/`NOTIFY` wake hints, 10-minute claim lease, exponential backoff, dead-letter at **5** attempts. Jobs that hit `BudgetExceeded` reschedule to the next UTC midnight without consuming an attempt.
+Deferrable cognition (`extract`, `journal-write`, `pair-analysis`, and `summary-update` jobs — memory extraction, contest checks, event-pipeline processing, companion journaling, relationship reads, rolling story recaps) runs on a Postgres-backed queue rather than inside the live message handler. The constants are compile-time in `src/jobs.ts`, not env-configurable: global in-flight cap **8**, per-guild concurrency **1** (preserves event ordering), 3-second poll with `LISTEN`/`NOTIFY` wake hints, 10-minute claim lease, exponential backoff, dead-letter at **5** attempts. Jobs that hit `BudgetExceeded` reschedule to the next UTC midnight without consuming an attempt.
 
 ---
 

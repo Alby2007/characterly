@@ -470,6 +470,10 @@ adoption locations homed there — orphaned adoptions relocate lazily.
 **Hidden rollout.** `MARKET_DEPLOY_ENABLED` gates grant/deploy/sync; the
 command is only registered per-granted-guild; the handler re-checks the
 grant row anyway. Nothing about this is visible until we choose to announce.
+Setting it requests the privileged **Server Members Intent** — member-add
+re-attaches hosted adoptee threads, member-remove locks them — so toggle it
+in the dev portal *before* enabling or login fails (same caveat as
+`HOUSE_GUILD_ID`).
 
 ## Config reference
 
