@@ -316,8 +316,9 @@ export function notFoundPage(): string {
 
 /** /guides/import-character-cards — the migration-intent page. "Import a
  *  character card into Discord" is the strongest unclaimed query the product
- *  honestly answers; static copy rendered through the same shell so it ships
- *  with the shelf's styling and security headers. */
+ *  honestly answers. Every limit and format named here is pulled from the
+ *  real importers — charcard.ts, chathist.ts, chat-import-job.ts — so keep
+ *  the copy honest when those constants move. */
 export function importGuidePage(): string {
   return shell({
     title: "Import a character card into Discord · Characterly",
@@ -330,10 +331,34 @@ export function importGuidePage(): string {
       <p class="lede">Characterly imports standard character cards — the <code>.png</code> and <code>.json</code> files the whole community already uses — as private AI companions that live in your Discord DMs. If you have a <code>.jsonl</code> chat export, your history comes too, so they remember you from the first hello.</p>
       <section><h2>How it works</h2>
         <p>Join <a href="${DISCORD_INVITE}" target="_blank" rel="noopener noreferrer">the Characterly server</a>, link a free account, and run <code>/companion import</code> with your card file attached. The card's persona, greeting, and example dialogue come across; the import is safety-screened, and the companion lands <strong>private to your roster</strong> — nothing is published unless you choose to put it on <a href="/characters">the shelf</a>.</p>
-        <p>To carry a conversation history over, attach a <code>.jsonl</code> chat export to the same import. The turns distill into the companion's journal rather than a raw transcript, so the memory is real — yours to inspect, pin, edit, or forget.</p>
+        <p>To carry a conversation history over, attach a <code>.jsonl</code> or <code>.json</code> chat export to the same import. The turns distill into the companion's journal rather than a raw transcript — so the memory is real, inspectable, and yours to edit or forget.</p>
+      </section>
+      <section><h2>Cards we accept</h2>
+        <dl class="facts">
+          <dt>Formats</dt><dd><code>chara_card_v2</code>, <code>ccv3</code>, and flat v1 cards (including CAI Tools aliases)</dd>
+          <dt>PNG cards</dt><dd>The embedded <code>chara</code> or <code>ccv3</code> chunk — a corrupt chunk won't hide a valid one</dd>
+          <dt>Size limits</dt><dd>8&nbsp;MB for a <code>.png</code> card, 256&nbsp;KB for a <code>.json</code> card</dd>
+        </dl>
+        <p class="dim">If your card exporter produces something else, it almost always emits one of these under the hood — try it; a rejected file gets a plain-language reason, never a silent drop.</p>
+      </section>
+      <section><h2>Chat exports we accept</h2>
+        <dl class="facts">
+          <dt>Formats</dt><dd>Tavern-style <code>.jsonl</code> (what CAI Tools' "Download as Tavern chat" produces), oobabooga <code>.json</code>, generic message arrays, and flagless exports</dd>
+          <dt>Size limits</dt><dd>8&nbsp;MB, 4,000 turns, 1,500 characters per turn — a longer history imports its first 4,000 turns, the foundation of the relationship</dd>
+          <dt>Multi-character chats</dt><dd>The dominant non-you speaker wins — two personas never blend into one companion</dd>
+        </dl>
+        <p class="dim">To get a <code>.jsonl</code> export from a chat you still have elsewhere: most community tools (CAI Tools and similar) offer "Download as Tavern chat" or a raw <code>.json</code> export — either works.</p>
+      </section>
+      <section><h2>If something goes wrong</h2>
+        <dl class="facts">
+          <dt>Import interrupted</dt><dd>It resumes where it left off — processed windows are kept, unprocessed ones were never billed</dd>
+          <dt>Out of tokens mid-import</dt><dd>The import parks and resumes when your tokens refill; nothing is lost</dd>
+          <dt>Hard failure</dt><dd>Partial journal entries roll back with it — a failed import never leaves a half-remembered history</dd>
+          <dt>Changed your mind</dt><dd><code>/companion imports</code> lists every import and undoes any of them, journal entries and all</dd>
+        </dl>
       </section>
       <section><h2>What a card becomes</h2>
-        <p>An imported companion isn't a re-skin. It gets the same memory model as a native one — facts about you that it keeps only with your consent, a private thread in your DMs, and the ability to follow you into servers you own. Cards stay private by default; publishing to the community shelf is a separate, moderated step.</p>
+        <p>An imported companion isn't a re-skin. It gets the same memory model as a native one — facts about you that it keeps only with your consent, a private thread in your DMs, and the ability to follow you into servers you own. Cards stay private by default; publishing to <a href="/characters">the community shelf</a> is a separate, moderated step.</p>
       </section>
       <section><h2>Start here</h2>
         <p><a class="btn" href="${DISCORD_INVITE}" target="_blank" rel="noopener noreferrer">Join the server and import your card</a></p>
