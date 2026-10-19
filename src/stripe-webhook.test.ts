@@ -101,6 +101,21 @@ test("classifyCheckout: premium link records mapping always, plan only once paid
   assert.equal((trial as { grantPlan: boolean }).grantPlan, true, "trial/100%-off grants premium");
 });
 
+test("classifyCheckout: launch bonus applies to paid premium inside the window only", () => {
+  const session = { id: "cs_b", payment_status: "paid", customer: "cus_1", subscription: "sub_1", metadata: { checkout_kind: "premium" } };
+  const inWindow = classifyCheckout(session, { packLinks: PACK_LINKS, premiumLink: PREMIUM_LINK, bonusEnd: 2000, now: 1000 });
+  if (inWindow.kind !== "premium") throw new Error("expected premium");
+  assert.equal(inWindow.bonusTokens, 500);
+  // Window closed or unset → no bonus field at all.
+  const after = classifyCheckout(session, { packLinks: PACK_LINKS, premiumLink: PREMIUM_LINK, bonusEnd: 1000, now: 2000 });
+  assert.equal((after as { bonusTokens?: number }).bonusTokens, undefined);
+  const unset = classifyCheckout(session, { packLinks: PACK_LINKS, premiumLink: PREMIUM_LINK, now: 1000 });
+  assert.equal((unset as { bonusTokens?: number }).bonusTokens, undefined);
+  // Unpaid checkouts never bonus even inside the window.
+  const unpaid = classifyCheckout({ ...session, payment_status: "unpaid" }, { packLinks: PACK_LINKS, premiumLink: PREMIUM_LINK, bonusEnd: 2000, now: 1000 });
+  assert.equal((unpaid as { bonusTokens?: number }).bonusTokens, undefined);
+});
+
 test("classifyCheckout: a foreign subscription checkout does not grant premium", () => {
   const a = classifyCheckout(
     { id: "cs_7", payment_status: "paid", payment_link: "plink_other_sub", mode: "subscription" },

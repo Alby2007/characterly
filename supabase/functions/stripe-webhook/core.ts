@@ -57,11 +57,16 @@ export interface CheckoutSessionLike {
   metadata?: Record<string, string> | null;
 }
 
+/** Launch-event bonus granted once per account on premium checkout while the
+ *  window is open (LAUNCH_BONUS_END env). The ledger ref is per-account, so
+ *  cancel→resubscribe inside the window can't farm it. */
+export const LAUNCH_BONUS_TOKENS = 500;
+
 export type CheckoutAction =
   // The premium link: always record customer/subscription ids (even unpaid —
   // async_payment_failed + a later retry needs the mapping to exist), flip
   // plan only once money settled. "no_payment_required" covers trials/100%-off.
-  | { kind: "premium"; grantPlan: boolean; customer: string | null; subscriptionId: string | null }
+  | { kind: "premium"; grantPlan: boolean; customer: string | null; subscriptionId: string | null; bonusTokens?: number }
   // A token pack: paid only. ref is the session id — the ledger's unique
   // stripe_ref absorbs redelivery.
   | { kind: "pack"; tokens: number; ref: string; customer: string | null }
@@ -69,15 +74,21 @@ export type CheckoutAction =
 
 export function classifyCheckout(
   s: CheckoutSessionLike,
-  opts: { packLinks: Record<string, number>; premiumLink: string; packMeta?: Record<string, number> },
+  opts: { packLinks: Record<string, number>; premiumLink: string; packMeta?: Record<string, number>; bonusEnd?: number; now?: number },
 ): CheckoutAction {
   const paid = s.payment_status === "paid" || s.payment_status === "no_payment_required";
+  const premium = (grantPlan: boolean): CheckoutAction => ({
+    kind: "premium", grantPlan, customer: s.customer ?? null, subscriptionId: s.subscription ?? null,
+    ...(grantPlan && opts.bonusEnd !== undefined && (opts.now ?? Date.now()) < opts.bonusEnd
+      ? { bonusTokens: LAUNCH_BONUS_TOKENS }
+      : {}),
+  });
   // Sessions minted by the create-checkout function carry their product in
   // metadata set server-side inside a JWT-authenticated function — it can't
   // be smuggled in by a forwarded link, and payment_link is null on these.
   const meta = s.metadata?.checkout_kind;
   if (meta === "premium") {
-    return { kind: "premium", grantPlan: paid, customer: s.customer ?? null, subscriptionId: s.subscription ?? null };
+    return premium(paid);
   }
   const metaTokens = opts.packMeta?.[meta ?? ""];
   if (metaTokens !== undefined) {
@@ -88,7 +99,7 @@ export function classifyCheckout(
   // were deactivated still classify. Keyed on payment_link only — never mode
   // alone. A future subscription product in the account must not leak premium.
   if (s.payment_link === opts.premiumLink) {
-    return { kind: "premium", grantPlan: paid, customer: s.customer ?? null, subscriptionId: s.subscription ?? null };
+    return premium(paid);
   }
   const tokens = opts.packLinks[s.payment_link ?? ""];
   if (tokens === undefined) return { kind: "ignore", why: `unrelated checkout ${s.id}` };

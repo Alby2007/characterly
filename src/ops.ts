@@ -2461,15 +2461,16 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
   if (action === "announce") {
     const text = interaction.options.getString("text")?.trim();
     if (!text) return interaction.reply({ content: "Give me the announcement text.", ephemeral: true });
-    if (!config.houseAnnounceChannelId) return interaction.reply({ content: "HOUSE_ANNOUNCE_CHANNEL_ID isn't set.", ephemeral: true });
-    const ch = await deps.fetchChannel(config.houseAnnounceChannelId).catch(() => null);
-    if (!ch) return interaction.reply({ content: "Can't reach the announcements channel — check my permissions.", ephemeral: true });
+    const chId = interaction.options.getChannel?.("channel")?.id ?? config.houseAnnounceChannelId;
+    if (!chId) return interaction.reply({ content: "HOUSE_ANNOUNCE_CHANNEL_ID isn't set.", ephemeral: true });
+    const ch = await deps.fetchChannel(chId).catch(() => null);
+    if (!ch) return interaction.reply({ content: "Can't reach that channel — check my permissions.", ephemeral: true });
     const sent = await ch.send({ content: text.slice(0, 1900), allowedMentions: { parse: [] } }).then(() => true).catch(e => {
       logError("ops announce failed", e);
       return false;
     });
     if (!sent) return interaction.reply({ content: "Send failed — check my channel permissions.", ephemeral: true });
-    return interaction.reply({ content: `Posted in <#${config.houseAnnounceChannelId}>.`, ephemeral: true });
+    return interaction.reply({ content: `Posted in <#${chId}>.`, ephemeral: true });
   }
 
   if (action === "layout") {

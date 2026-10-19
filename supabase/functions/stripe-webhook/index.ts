@@ -46,6 +46,13 @@ const PREMIUM_PRICE_IDS: ReadonlySet<string> = new Set([
   "price_1UQoE5GAOUmNDfnhulTyoL1o", // monthly $7.99
   "price_1URprSGAOUmNDfnhEoiONeTP", // yearly $79.99
 ]);
+// Launch event: premium checkouts before this instant also grant a one-time
+// token bonus (see core.ts LAUNCH_BONUS_TOKENS). Unset = no bonus.
+const LAUNCH_BONUS_END = (() => {
+  const v = Deno.env.get("LAUNCH_BONUS_END");
+  const t = v ? Date.parse(v) : NaN;
+  return Number.isFinite(t) ? t : undefined;
+})();
 
 // supabase-js resolves { data, error } instead of throwing on PostgREST/RPC
 // failures — an unchecked result returns 200 to Stripe and drops the event
@@ -96,7 +103,7 @@ Deno.serve(async (request) => {
       case "checkout.session.completed":
       case "checkout.session.async_payment_succeeded": {
         const s = event.data.object;
-        const action = classifyCheckout(s as never, { packLinks: PACK_LINKS, premiumLink: PREMIUM_LINK, packMeta: PACK_META });
+        const action = classifyCheckout(s as never, { packLinks: PACK_LINKS, premiumLink: PREMIUM_LINK, packMeta: PACK_META, bonusEnd: LAUNCH_BONUS_END });
         if (action.kind === "ignore") break;
         const accountId = await accountForSession(s, action.kind === "pack");
         if (!accountId) {
@@ -121,6 +128,15 @@ Deno.serve(async (request) => {
             "premium checkout",
           );
           if (!updated?.length) console.error(`checkout ${s.id}: no web_profiles row for ${accountId}`);
+          if (action.bonusTokens) {
+            // Per-account ref: redelivery dedupes AND cancel→resubscribe can't
+            // re-farm the bonus inside the window.
+            const res = await must(
+              sb.rpc("grant_pack", { p_account: accountId, p_tokens: action.bonusTokens, p_ref: `launch-bonus:${accountId}` }),
+              "launch bonus",
+            );
+            if (!res?.ok) console.error(`launch bonus rejected for ${accountId}: ${JSON.stringify(res)}`);
+          }
         } else {
           const res = await must(
             sb.rpc("grant_pack", { p_account: accountId, p_tokens: action.tokens, p_ref: action.ref }),
