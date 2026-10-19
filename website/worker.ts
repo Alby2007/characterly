@@ -89,7 +89,7 @@ export default {
     // The public shelf + sitemap are the only worker-rendered pages — the
     // marketplace lives in Postgres, so these stream live rows rather than a
     // vite bundle. Everything else falls through to static assets.
-    const res = request.method === "GET" && isShelfPath(url.pathname)
+    const res = (request.method === "GET" || request.method === "HEAD") && isShelfPath(url.pathname)
       ? await handleShelf(url.pathname, env)
       : await env.ASSETS.fetch(request);
     // Page views: navigation loads only (a path with no file extension, or
