@@ -90,6 +90,9 @@ main { min-height: 60vh; }
 .lede a { color: var(--gold-hi); }
 
 .grid { margin-top: 44px; display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+.grid-tight { margin-top: 18px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.grid-tight .card { padding: 14px; }
+.grid-tight .card-av { width: 48px; height: 48px; font-size: 20px; }
 .card {
   display: flex; gap: 16px; align-items: flex-start;
   padding: 20px; background: var(--bg-2); border: 1px solid var(--hair);

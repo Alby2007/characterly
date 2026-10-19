@@ -12,6 +12,7 @@ import { verifyDiscordSignature, parseDiscordEvent } from "../src/discord-events
 import {
   fetchActiveListings, fetchListing, fetchListingRating, fetchRatingStats,
   listingIndexPage, listingPage, notFoundPage, sitemapXml,
+  relatedListings, importGuidePage,
 } from "../src/site-shelf.ts";
 
 interface Env {
@@ -108,8 +109,9 @@ export default {
 };
 
 const SHELF_LISTING_RE = /^\/characters\/(\d+)\/?$/;
+const GUIDE_PATH = "/guides/import-character-cards";
 const isShelfPath = (p: string): boolean =>
-  p === "/sitemap.xml" || p === "/characters" || p === "/characters/" || SHELF_LISTING_RE.test(p);
+  p === "/sitemap.xml" || p === "/characters" || p === "/characters/" || p === GUIDE_PATH || SHELF_LISTING_RE.test(p);
 
 // ~5min edge cache: fresh enough that a delist surfaces quickly, lazy enough
 // that a crawl doesn't hammer PostgREST.
@@ -123,14 +125,19 @@ async function handleShelf(pathname: string, env: Env): Promise<Response> {
       headers: { "content-type": "application/xml; charset=utf-8", "cache-control": SHELF_CACHE },
     });
   }
+  if (pathname === GUIDE_PATH) {
+    return new Response(importGuidePage(), { headers: html });
+  }
   const m = SHELF_LISTING_RE.exec(pathname);
   if (m) {
     const id = Number(m[1]);
-    const [listing, rating] = await Promise.all([fetchListing(env, id), fetchListingRating(env, id)]);
+    const [listing, rating, all] = await Promise.all([
+      fetchListing(env, id), fetchListingRating(env, id), fetchActiveListings(env),
+    ]);
     // Delisted/unknown ids get a real 404 — they drop out of the index and
     // the sitemap instead of lingering as a soft-404.
     if (!listing) return new Response(notFoundPage(), { status: 404, headers: html });
-    return new Response(listingPage(listing, rating), { headers: html });
+    return new Response(listingPage(listing, rating, relatedListings(listing, all)), { headers: html });
   }
   const [listings, ratings] = await Promise.all([fetchActiveListings(env), fetchRatingStats(env)]);
   return new Response(listingIndexPage(listings, ratings), { headers: html });

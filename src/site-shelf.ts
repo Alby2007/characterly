@@ -157,6 +157,9 @@ function shell(opts: {
   <meta property="og:url" content="${escAttr(opts.canonical)}" />
   <meta property="og:image" content="${escAttr(ogImage)}" />
   <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="${escAttr(opts.title)}" />
+  <meta name="twitter:description" content="${escAttr(opts.description)}" />
+  <meta name="twitter:image" content="${escAttr(ogImage)}" />
   <link rel="canonical" href="${escAttr(opts.canonical)}" />
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="stylesheet" href="/shelf.css" />
@@ -198,7 +201,8 @@ function listingCard(l: ShelfListing, rating: ShelfRating | undefined): string {
 }
 
 /** /characters — the public shelf index. ItemList schema gives Google the
- *  whole catalog in one page. */
+ *  whole catalog in one page. The visible h1 keeps the site's voice; the
+ *  <title> and copy carry the keywords a searcher's query actually uses. */
 export function listingIndexPage(listings: ShelfListing[], ratings: Map<number, ShelfRating>): string {
   const cards = listings.map(l => listingCard(l, ratings.get(l.id))).join("\n");
   const itemList = {
@@ -208,33 +212,55 @@ export function listingIndexPage(listings: ShelfListing[], ratings: Map<number, 
     })),
   };
   return shell({
-    title: "The shelf · Characterly",
-    description: "Community-published AI companions — browse the shelf, then meet yours inside the Characterly Discord server.",
+    title: "The shelf — AI companions for Discord · Characterly",
+    description: "Browse community-published AI companions for Discord — adopt one into a private thread, and it remembers you and follows you into your servers.",
     canonical: `${SITE_ORIGIN}/characters`,
     jsonLd: [itemList],
     body: `    <section class="shelf">
       <p class="label">The marketplace</p>
       <h1>The shelf.</h1>
-      <p class="lede">Community-published companions — each one keeps a private memory of you, lives in your DMs, and follows you into your servers. Pick one up inside <a href="${DISCORD_INVITE}" target="_blank" rel="noopener noreferrer">the Characterly server</a>.</p>
+      <p class="lede">Every companion here is a character someone in the community designed and published — an AI companion you can adopt into a private Discord thread. Each one keeps its own inspectable memory of you, lives in your DMs, and can follow you into your own servers.</p>
+      <p class="lede">Adoption happens inside <a href="${DISCORD_INVITE}" target="_blank" rel="noopener noreferrer">the Characterly server</a>: pick a character, start a thread, and it remembers you from the first hello. Want to publish your own? <a href="/guides/import-character-cards">Import a character card</a> and it's on the shelf in minutes.</p>
       ${listings.length ? `<div class="grid">\n${cards}\n      </div>` : `<p class="lede dim">Nothing on the shelf yet — be the first to publish.</p>`}
     </section>`,
   });
 }
 
-/** /characters/<id> — one indexable page per published listing. CreativeWork
- *  schema (characters are authored works) + BreadcrumbList; aggregateRating is
- *  emitted only with a real rating count — Google penalizes empty ones. */
-export function listingPage(l: ShelfListing, rating: ShelfRating): string {
+/** Other listings most like this one — shared creator tags weigh twice
+ *  (creators tag deliberately), shared core traits once, adoption count as
+ *  the tiebreak. Feeds the "More like this" block: internal links are how
+ *  crawlers map the catalog and how visitors keep browsing. */
+export function relatedListings(l: ShelfListing, all: ShelfListing[], n = 4): ShelfListing[] {
+  return all
+    .filter(o => o.id !== l.id)
+    .map(o => ({
+      o,
+      score: o.creatorTags.filter(t => l.creatorTags.includes(t)).length * 2
+        + o.coreTraits.filter(t => l.coreTraits.includes(t)).length,
+    }))
+    .filter(x => x.score > 0)
+    .sort((a, b) => b.score - a.score || b.o.addCount - a.o.addCount)
+    .slice(0, n)
+    .map(x => x.o);
+}
+
+/** /characters/<id> — one indexable page per published listing. Product
+ *  schema (a listing is an adoptable item with a $0 offer — the documented
+ *  path for review snippets; CreativeWork doesn't earn them) plus
+ *  BreadcrumbList. aggregateRating only with a real rating count. */
+export function listingPage(l: ShelfListing, rating: ShelfRating, related: ShelfListing[] = []): string {
   const canonical = `${SITE_ORIGIN}/characters/${l.id}`;
-  const title = `${l.name} · Characterly`;
-  const description = l.tagline || `${l.name} — a community companion on the Characterly shelf.`;
+  const title = `${l.name}, an AI companion for Discord · Characterly`;
+  const traitLine = l.coreTraits.length ? ` Traits: ${l.coreTraits.slice(0, 5).join(", ")}.` : "";
+  const description = `${l.tagline ? `${l.tagline}.` : `${l.name} is a community AI companion on the Characterly shelf.`}${traitLine} Adopt ${l.name} into a private Discord thread — it remembers you from the first hello.`;
   const traits = l.coreTraits.slice(0, 6).map(t => `<span class="tag">${esc(t)}</span>`).join("");
   const tags = l.creatorTags.slice(0, 4).map(t => `<span class="tag tag-dim">${esc(t)}</span>`).join("");
-  const creativeWork: Record<string, unknown> = {
-    "@context": "https://schema.org", "@type": "CreativeWork",
+  const product: Record<string, unknown> = {
+    "@context": "https://schema.org", "@type": "Product",
     name: l.name, description, url: canonical,
     ...(l.avatarUrl ? { image: l.avatarUrl } : {}),
-    author: { "@type": "Organization", name: "Characterly community" },
+    brand: { "@type": "Organization", name: "Characterly community" },
+    offers: { "@type": "Offer", price: "0", priceCurrency: "USD", availability: "https://schema.org/InStock", url: canonical },
     ...(rating.count > 0 ? {
       aggregateRating: { "@type": "AggregateRating", ratingValue: rating.avg.toFixed(1), ratingCount: rating.count },
     } : {}),
@@ -250,8 +276,7 @@ export function listingPage(l: ShelfListing, rating: ShelfRating): string {
   return shell({
     title, description, canonical,
     ogImage: l.avatarUrl,
-    ogType: "profile",
-    jsonLd: [creativeWork, crumbs],
+    jsonLd: [product, crumbs],
     body: `    <article class="listing">
       <nav class="crumbs"><a href="/">Home</a> / <a href="/characters">The shelf</a> / ${esc(l.name)}</nav>
       <div class="listing-head">
@@ -268,6 +293,7 @@ export function listingPage(l: ShelfListing, rating: ShelfRating): string {
       ${l.voicePersona ? `<section><h2>Who they are</h2><p>${nl2br(l.voicePersona)}</p></section>` : ""}
       ${l.backstory ? `<section><h2>Backstory</h2><p>${nl2br(l.backstory)}</p></section>` : ""}
       ${l.greeting ? `<section><h2>The first hello</h2><blockquote class="greet">${nl2br(l.greeting)}</blockquote></section>` : ""}
+      ${related.length ? `<section><h2>More like this</h2><div class="grid grid-tight">\n${related.map(o => listingCard(o, undefined)).join("\n")}\n      </div></section>` : ""}
       <p class="cta-back"><a href="/characters">← Back to the shelf</a></p>
     </article>`,
   });
@@ -288,9 +314,38 @@ export function notFoundPage(): string {
   });
 }
 
+/** /guides/import-character-cards — the migration-intent page. "Import a
+ *  character card into Discord" is the strongest unclaimed query the product
+ *  honestly answers; static copy rendered through the same shell so it ships
+ *  with the shelf's styling and security headers. */
+export function importGuidePage(): string {
+  return shell({
+    title: "Import a character card into Discord · Characterly",
+    description: "Bring an existing character to Discord — standard .png/.json character cards import as private companions on Characterly, and a .jsonl chat export carries your history over.",
+    canonical: `${SITE_ORIGIN}/guides/import-character-cards`,
+    body: `    <article class="listing">
+      <nav class="crumbs"><a href="/">Home</a> / Guides / Import a character card</nav>
+      <p class="label">The guide</p>
+      <h1>Bring your character <em>with you</em>.</h1>
+      <p class="lede">Characterly imports standard character cards — the <code>.png</code> and <code>.json</code> files the whole community already uses — as private AI companions that live in your Discord DMs. If you have a <code>.jsonl</code> chat export, your history comes too, so they remember you from the first hello.</p>
+      <section><h2>How it works</h2>
+        <p>Join <a href="${DISCORD_INVITE}" target="_blank" rel="noopener noreferrer">the Characterly server</a>, link a free account, and run <code>/companion import</code> with your card file attached. The card's persona, greeting, and example dialogue come across; the import is safety-screened, and the companion lands <strong>private to your roster</strong> — nothing is published unless you choose to put it on <a href="/characters">the shelf</a>.</p>
+        <p>To carry a conversation history over, attach a <code>.jsonl</code> chat export to the same import. The turns distill into the companion's journal rather than a raw transcript, so the memory is real — yours to inspect, pin, edit, or forget.</p>
+      </section>
+      <section><h2>What a card becomes</h2>
+        <p>An imported companion isn't a re-skin. It gets the same memory model as a native one — facts about you that it keeps only with your consent, a private thread in your DMs, and the ability to follow you into servers you own. Cards stay private by default; publishing to the community shelf is a separate, moderated step.</p>
+      </section>
+      <section><h2>Start here</h2>
+        <p><a class="btn" href="${DISCORD_INVITE}" target="_blank" rel="noopener noreferrer">Join the server and import your card</a></p>
+        <p class="cta-back"><a href="/characters">Browse the shelf</a> · <a href="/#bring">More about bringing a character</a></p>
+      </section>
+    </article>`,
+  });
+}
+
 // ── Sitemap ──────────────────────────────────────────────────────────────────
 
-export const SITEMAP_STATIC_PATHS = ["/", "/characters", "/safety", "/privacy", "/terms", "/security"];
+export const SITEMAP_STATIC_PATHS = ["/", "/characters", "/guides/import-character-cards", "/safety", "/privacy", "/terms", "/security"];
 
 export function sitemapXml(rows: Array<{ id: number; updatedAt: string }>, origin = SITE_ORIGIN): string {
   const urls = SITEMAP_STATIC_PATHS.map(p => `  <url><loc>${origin}${p}</loc></url>`);

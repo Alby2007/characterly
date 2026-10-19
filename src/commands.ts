@@ -430,7 +430,7 @@ export function buildCompanionEditModal(existing: Companion | null): ModalBuilde
     .setStyle(TextInputStyle.Paragraph)
     .setRequired(false)
     .setMaxLength(600)
-    .setPlaceholder("Any background details or shared lore");
+    .setPlaceholder("Shown on the listing's public page — a few lines of lore go a long way");
   if (existing?.backstory) backstoryInput.setValue(existing.backstory.slice(0, 600));
 
   modal.addComponents(
@@ -629,13 +629,13 @@ export function buildCreateModal(): ModalBuilder {
     .setRequired(true).setMaxLength(120).setPlaceholder("e.g. A vampire who remembers every reader");
   const greetingInput = new TextInputBuilder()
     .setCustomId("listing-greeting").setLabel("Greeting — first DM they send").setStyle(TextInputStyle.Paragraph)
-    .setRequired(true).setMaxLength(1000).setPlaceholder("The character opens the conversation, in their voice");
+    .setRequired(true).setMaxLength(1000).setPlaceholder("The character opens the conversation, in their voice — also shown on their public page");
   const vibeInput = new TextInputBuilder()
     .setCustomId("listing-voice").setLabel("Voice & Vibe").setStyle(TextInputStyle.Paragraph)
     .setRequired(true).setMaxLength(500).setPlaceholder("e.g. Archaic, theatrical, quietly menacing but oddly polite");
   const backstoryInput = new TextInputBuilder()
     .setCustomId("listing-backstory").setLabel("Backstory / Lore (optional)").setStyle(TextInputStyle.Paragraph)
-    .setRequired(false).setMaxLength(600).setPlaceholder("Any background or lore");
+    .setRequired(false).setMaxLength(600).setPlaceholder("Shown on the listing's public page — a few lines go a long way");
   modal.addComponents(
     new ActionRowBuilder<TextInputBuilder>().addComponents(nameInput),
     new ActionRowBuilder<TextInputBuilder>().addComponents(taglineInput),

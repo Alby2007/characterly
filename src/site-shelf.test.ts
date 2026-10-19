@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   esc, sitemapXml, listingIndexPage, listingPage, notFoundPage,
   fetchActiveListings, fetchListing, fetchListingRating, fetchRatingStats,
+  relatedListings, importGuidePage,
   SITE_ORIGIN, type ShelfListing,
 } from "./site-shelf.js";
 
@@ -78,11 +79,22 @@ test("listing page escapes name, backstory and greeting", () => {
 
 test("listing page emits aggregateRating only when the count is real", () => {
   const withRating = listingPage(listing(), { avg: 4.5, count: 3 });
+  assert.ok(withRating.includes('"@type":"Product"'), "Product — the review-snippet eligible type");
   assert.ok(withRating.includes('"@type":"AggregateRating"'));
   assert.ok(withRating.includes('"ratingValue":"4.5"'));
   assert.ok(withRating.includes('"ratingCount":3'));
+  assert.ok(withRating.includes('"@type":"Offer"'), "a $0 offer keeps the Product honest");
   const noRating = listingPage(listing(), { avg: 0, count: 0 });
   assert.ok(!noRating.includes("aggregateRating"));
+});
+
+test("listing page title and description carry the searchable phrase", () => {
+  const html = listingPage(listing({ name: "Wren", coreTraits: ["patient", "wry"] }), { avg: 0, count: 0 });
+  assert.ok(html.includes("<title>Wren, an AI companion for Discord · Characterly</title>"));
+  const desc = html.match(/<meta name="description" content="([^"]*)"/)?.[1] ?? "";
+  assert.ok(desc.includes("quiet archivist"), "tagline leads");
+  assert.ok(desc.includes("patient"), "traits follow");
+  assert.ok(desc.includes("Discord"), "platform named");
 });
 
 test("listing page carries breadcrumbs, canonical and no creator identity", () => {
@@ -91,6 +103,28 @@ test("listing page carries breadcrumbs, canonical and no creator identity", () =
   assert.ok(html.includes(`<link rel="canonical" href="${SITE_ORIGIN}/characters/9"`));
   assert.ok(html.includes("a community creator")); // attribution, never a snowflake
   assert.ok(!html.includes("creatorUserId"));
+  assert.ok(html.includes('name="twitter:title"'), "twitter card fields present");
+});
+
+test("relatedListings ranks shared tags above traits, adoptions as tiebreak", () => {
+  const self = listing({ id: 1, creatorTags: ["mystery"], coreTraits: ["deadpan"] });
+  const tagMatch = listing({ id: 2, name: "B", creatorTags: ["mystery"], coreTraits: [] });
+  const traitMatch = listing({ id: 3, name: "C", creatorTags: [], coreTraits: ["deadpan"] });
+  const bothMatch = listing({ id: 4, name: "D", creatorTags: ["mystery"], coreTraits: ["deadpan"] });
+  const unrelated = listing({ id: 5, name: "E", creatorTags: ["romance"], coreTraits: ["warm"] });
+  const rel = relatedListings(self, [self, traitMatch, tagMatch, bothMatch, unrelated]);
+  assert.deepEqual(rel.map(r => r.id), [4, 2, 3]);
+  assert.ok(!rel.includes(self), "never relates to itself");
+  assert.ok(!rel.includes(unrelated), "score-0 listings excluded");
+});
+
+test("listing page renders More like this links to related listings", () => {
+  const related = [listing({ id: 22, name: "Iris" })];
+  const html = listingPage(listing({ id: 9 }), { avg: 0, count: 0 }, related);
+  assert.ok(html.includes("More like this"));
+  assert.ok(html.includes('href="/characters/22"'));
+  const none = listingPage(listing({ id: 9 }), { avg: 0, count: 0 }, []);
+  assert.ok(!none.includes("More like this"), "section hidden with no related");
 });
 
 test("json-ld blocks cannot be broken out of with </script>", () => {
@@ -111,6 +145,14 @@ test("notFoundPage is a real shelf-shaped 404", () => {
 
 // ── Sitemap ──────────────────────────────────────────────────────────────────
 
+test("import guide renders the migration-intent page", () => {
+  const html = importGuidePage();
+  assert.ok(html.includes("Import a character card into Discord"));
+  assert.ok(html.includes("/companion import"));
+  assert.ok(html.includes("discord.gg"), "join CTA present");
+  assert.ok(html.includes('href="/characters"'), "links back to the shelf");
+});
+
 test("sitemap lists static pages plus live listing urls with lastmod", () => {
   const xml = sitemapXml([
     { id: 3, updatedAt: "2026-04-02T10:00:00+00:00" },
@@ -118,6 +160,7 @@ test("sitemap lists static pages plus live listing urls with lastmod", () => {
   ]);
   assert.ok(xml.includes(`<loc>${SITE_ORIGIN}/</loc>`));
   assert.ok(xml.includes(`<loc>${SITE_ORIGIN}/characters</loc>`));
+  assert.ok(xml.includes(`<loc>${SITE_ORIGIN}/guides/import-character-cards</loc>`));
   assert.ok(xml.includes(`<loc>${SITE_ORIGIN}/safety</loc>`));
   assert.ok(xml.includes(`<loc>${SITE_ORIGIN}/characters/3</loc>`));
   assert.ok(xml.includes("<lastmod>2026-04-02</lastmod>"));
