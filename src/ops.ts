@@ -5,12 +5,12 @@ import { config } from "./config.js";
 import { inc } from "./metrics.js";
 import { logError, redactSecrets } from "./secrets.js";
 import { checkListingFields, checkMessageContent } from "./safety.js";
-import { CURATED_TAGS, marketplaceAssetPath, postListingThread } from "./marketplace.js";
+import { CURATED_TAGS, PARTNER_TAG_SET, archiveListingPosts, marketplaceAssetPath, postActiveListingsToDeployments, postListingToDeployments } from "./marketplace.js";
 import { uploadAvatarFile } from "./avatars.js";
 import { SEED_LISTINGS } from "./seed-personas.js";
 import { sendAsCompanionInChannel } from "./webhooks.js";
 import type { MemoryStore } from "./database.js";
-import type { Companion, CompanionAdoption } from "./types.js";
+import type { Companion, CompanionAdoption, CompanionListing, GuildDeployment } from "./types.js";
 
 // ── House ops ────────────────────────────────────────────────────────────────
 // The bot is also the private operator of OUR community server and its own
@@ -23,21 +23,96 @@ import type { Companion, CompanionAdoption } from "./types.js";
 export const isHouse = (guildId: string | null | undefined): boolean =>
   !!config.houseGuildId && guildId === config.houseGuildId;
 
-/** True when the channel is a thread inside the marketplace forum — the
- *  listing comment surface. Used to keep comments out of the memory/reply
- *  pipeline (index.ts) and to scope the "Report message" context command. */
+/** True when the channel is a thread inside ANY deployed marketplace forum —
+ *  the listing comment surface. Used to keep comments out of the memory/reply
+ *  pipeline (index.ts) and to scope the "Report message" context command.
+ *  The env forum short-circuits so tests and pre-cache boots still match. */
 export const isMarketplaceThread = (channel: { isThread?(): boolean; parentId?: string | null } | null | undefined): boolean =>
-  !!channel?.isThread?.() && channel.parentId === config.marketplaceChannelId;
+  !!channel?.isThread?.() && !!channel.parentId && marketplaceForumIds().has(channel.parentId);
 
-/** True when the channel is a thread under the house's #adoptees channel —
- *  an adopted companion's private chat surface (v54). Env id wins; the name
- *  match covers deployments that created the channel before the env existed
- *  (the layout reconciles it under the marketplace category either way). */
-export const isAdopteeThread = (channel: { isThread?(): boolean; parentId?: string | null; parent?: { name?: string | null } | null } | null | undefined): boolean => {
+/** True when the channel is a thread under a deployed #adoptees channel —
+ *  an adopted companion's private chat surface (v54/v59). Channel-id match
+ *  covers every deployment; the name fallback is house-only — a foreign
+ *  guild's "adoptees" channel is just a channel, not our surface. */
+export const isAdopteeThread = (channel: { isThread?(): boolean; parentId?: string | null; guildId?: string | null; guild?: { id?: string | null } | null; parent?: { name?: string | null; guildId?: string | null } | null } | null | undefined): boolean => {
   if (!channel?.isThread?.()) return false;
-  if (config.houseAdopteesChannelId) return channel.parentId === config.houseAdopteesChannelId;
-  return normName(channel.parent?.name ?? "") === "adoptees";
+  if (channel.parentId && adopteesChannelIds().has(channel.parentId)) return true;
+  if (config.houseAdopteesChannelId && channel.parentId === config.houseAdopteesChannelId) return true;
+  const guildId = channel.guildId ?? channel.parent?.guildId ?? channel.guild?.id ?? null;
+  return guildId === config.houseGuildId && normName(channel.parent?.name ?? "") === "adoptees";
 };
+
+// ── Deployment registry (v59) ────────────────────────────────────────────────
+// guild_deployments rows cached in-process: which servers run Characterly
+// surfaces (house included — seeded from env at boot). Refreshed by initOps,
+// deploy/remove paths, and the sync sweep. Reads are pure-Map; the store is
+// only hit on mutation or refresh.
+
+const deploymentCache = new Map<string, GuildDeployment>();
+
+/** House row synthesized from env — present even before the DB seed lands. */
+function houseDeployment(): GuildDeployment | null {
+  if (!config.houseGuildId) return null;
+  return {
+    guildId: config.houseGuildId,
+    status: "active",
+    marketplaceChannelId: config.marketplaceChannelId ?? null,
+    adopteesChannelId: config.houseAdopteesChannelId ?? null,
+    categoryId: null, deployedBy: null, deployedAt: null, lastError: null,
+  };
+}
+
+/** Rebuild the cache from the DB (house row synthesized/seeded on top). */
+export async function refreshDeploymentCache(store: MemoryStore): Promise<void> {
+  const rows = await store.deployments().catch(() => null);
+  if (!rows) return;
+  deploymentCache.clear();
+  for (const d of rows) deploymentCache.set(d.guildId, d);
+  const house = houseDeployment();
+  if (house && !deploymentCache.has(house.guildId)) deploymentCache.set(house.guildId, house);
+}
+
+/** Drop a guild from the in-process map — GuildDelete purges the row; the
+ *  cache must forget it in the same beat or a kicked server keeps surfaces. */
+export function untrackDeployment(guildId: string): void { deploymentCache.delete(guildId); }
+
+/** The cached deployment row for a guild (house synthesizes one from env). */
+export function deploymentFor(guildId: string | null | undefined): GuildDeployment | null {
+  if (!guildId) return null;
+  const hit = deploymentCache.get(guildId);
+  if (hit) return hit;
+  return guildId === config.houseGuildId ? houseDeployment() : null;
+}
+
+/** Guilds whose Characterly surfaces should be live (granted-but-undeployed
+ *  rows don't count — nothing exists there yet). */
+export function deployedGuildIds(): Set<string> {
+  const out = new Set<string>();
+  for (const d of deploymentCache.values()) if (d.status === "active") out.add(d.guildId);
+  const house = houseDeployment();
+  if (house) out.add(house.guildId);
+  return out;
+}
+
+/** Every forum channel id hosting mirrored listings (env + deployments). */
+export function marketplaceForumIds(): Set<string> {
+  const out = new Set<string>();
+  if (config.marketplaceChannelId) out.add(config.marketplaceChannelId);
+  for (const d of deploymentCache.values()) {
+    if (d.status === "active" && d.marketplaceChannelId) out.add(d.marketplaceChannelId);
+  }
+  return out;
+}
+
+/** Every adoptees channel id across deployments (env + deployments). */
+export function adopteesChannelIds(): Set<string> {
+  const out = new Set<string>();
+  if (config.houseAdopteesChannelId) out.add(config.houseAdopteesChannelId);
+  for (const d of deploymentCache.values()) {
+    if (d.status === "active" && d.adopteesChannelId) out.add(d.adopteesChannelId);
+  }
+  return out;
+}
 
 // Narrow structural shapes — tests hand fakes, index.ts casts the real objects.
 interface ForumTagLike {
@@ -69,6 +144,8 @@ interface TicketThreadLike {
 }
 
 interface SendableChannel {
+  /** Absent on minimal fakes — adoption stamping tolerates the loss. */
+  id?: string;
   send(payload: unknown): Promise<unknown>;
   /** Present on real text channels — the verify-gate idempotency probe.
    *  discord.js Collections yield [snowflake, message] pairs; plain iterables
@@ -96,6 +173,10 @@ export interface GuildChannelLike {
   /** Forum channels carry this — reconciled against WANTED_LAYOUT so the
    * marketplace rides Gallery View even after a manual flip. */
   defaultForumLayout?: number;
+  /** Forum channels — the live tag taxonomy deployments reconcile against. */
+  availableTags?: ForumTagLike[];
+  /** Forum channels — deployments seed + reconcile the marketplace taxonomy. */
+  setAvailableTags?(tags: Array<{ id?: string; name: string; moderated?: boolean }>): Promise<unknown>;
   edit?(opts: { defaultForumLayout?: number }): Promise<unknown>;
   /** Category's own overwrites — copied to created children so a rebuilt
    * mods/ops channel doesn't come up world-readable. */
@@ -113,12 +194,22 @@ export interface GuildChannelLike {
 
 export interface GuildLike {
   id: string;
+  /** Discord feature strings — deployments require "COMMUNITY" (forums). */
+  features?: string[];
   channels: {
     cache: { find(fn: (c: GuildChannelLike) => boolean): GuildChannelLike | undefined };
-    create(opts: { name: string; type: number; parent?: string; permissionOverwrites?: Array<{ id: string; allow: unknown; deny: unknown }> }): Promise<GuildChannelLike>;
+    /** discord.js accepts forum fields on create too — deployments pass
+     *  availableTags + defaultForumLayout so #characters lands Gallery-first. */
+    create(opts: { name: string; type: number; parent?: string; topic?: string; availableTags?: Array<{ name: string; moderated?: boolean }>; defaultForumLayout?: number; permissionOverwrites?: Array<{ id: string; allow: unknown; deny: unknown }> }): Promise<GuildChannelLike>;
   };
   roles?: {
     cache?: { find(fn: (r: { id: string; name: string }) => boolean): { id: string; name: string } | undefined };
+  };
+  /** The bot's own member — deployments check its permissions before
+   *  creating surfaces. `fetchMe` preferred; `me` is the cache path. */
+  members?: {
+    me?: { permissions?: { has(flag: bigint): boolean } | null } | null;
+    fetchMe?(): Promise<{ permissions?: { has(flag: bigint): boolean } | null } | null>;
   };
 }
 
@@ -156,6 +247,9 @@ export interface OpsDeps {
   /** Guild member lookups for the verify button + link sweep. */
   fetchMember: (guildId: string, userId: string) => Promise<MemberLike | null>;
   listMembers: (guildId: string) => Promise<MemberLike[]>;
+  /** User lookup for display names — deployment sweeps credit listing
+   *  creators on mirror posts without holding an interaction. */
+  fetchUser?: (userId: string) => Promise<{ username?: string; globalName?: string | null } | null>;
   /** The bot's own user id — gate-card idempotency checks message authorship. */
   botId: string | null;
   exec: (cmd: string) => Promise<{ stdout: string; stderr: string }>;
@@ -175,7 +269,8 @@ export function initOps(d: OpsDeps): void { opsDeps = d; }
  *  are wired at ClientReady, long before any interaction can arrive. */
 export function getOpsDeps(): OpsDeps | null { return opsDeps; }
 
-// Test-only: raid/burst windows and breach latches are module state.
+// Test-only: raid/burst windows, breach latches, and the deployment cache
+// are module state — fakes count on a clean slate per test.
 export function resetOpsState(): void {
   joinTimes.length = 0;
   lastRaidAlertAt = 0;
@@ -183,6 +278,7 @@ export function resetOpsState(): void {
   burstWindow.clear();
   lastActedAt.clear();
   activeBreaches.clear();
+  deploymentCache.clear();
 }
 
 async function opsChannel(deps: OpsDeps): Promise<SendableChannel | null> {
@@ -250,7 +346,7 @@ export async function handleHouseMemberAdd(member: MemberLike, deps: OpsDeps): P
   if (await onboardMember(member, deps, { welcome: !raidHot })) welcomed.add(member.user.id);
   // Deferred adoptee threads — adopters who joined the house AFTER adopting
   // elsewhere (import paths) get their private threads opened on arrival.
-  await ensureAdopteeThreadsForUser(member.user.id, deps).catch(e => {
+  await ensureAdopteeThreadsForUser(member.user.id, deps, { guildId: null }).catch(e => {
     inc("ops.adoptee_thread_error"); logError("member-add adoptee ensure failed", e);
   });
 }
@@ -271,7 +367,7 @@ export async function handleHouseMemberUpdate(
     if (!welcomed.has(newMember.user.id) && await onboardMember(newMember, deps)) welcomed.add(newMember.user.id);
     // Screening just cleared — retry deferred adoptee threads in case the
     // pending member couldn't be added to a private thread at join.
-    await ensureAdopteeThreadsForUser(newMember.user.id, deps).catch(e => {
+    await ensureAdopteeThreadsForUser(newMember.user.id, deps, { guildId: null }).catch(e => {
       inc("ops.adoptee_thread_error"); logError("member-update adoptee ensure failed", e);
     });
   }
@@ -284,7 +380,7 @@ export async function handleHouseMemberUpdate(
   if (memberRole
     && newMember.roles?.cache?.has?.(memberRole) === true
     && oldMember.roles?.cache?.has?.(memberRole) !== true) {
-    await ensureAdopteeThreadsForUser(newMember.user.id, deps).catch(e => {
+    await ensureAdopteeThreadsForUser(newMember.user.id, deps, { guildId: null }).catch(e => {
       inc("ops.adoptee_thread_error"); logError("member-role adoptee ensure failed", e);
     });
   }
@@ -516,9 +612,17 @@ export function startLinkSweep(deps: OpsDeps): { stop: () => void } {
 // matched case-insensitively; a missing name skips its rule silently.
 // CURATED_TAGS lives in ./marketplace.js (the shared leaf module).
 
-export async function runTagSweep(deps: OpsDeps): Promise<number> {
-  if (!config.marketplaceChannelId) return 0;
-  const channel = await deps.fetchChannel(config.marketplaceChannelId).catch(() => null);
+/** One forum's badge reconcile — the per-mirror unit of runTagSweep.
+ *  `byThread` maps EVERY deployment's live post threads to their listing so
+ *  a partner forum's threads resolve identically to the house's. */
+async function sweepForumTags(
+  deps: OpsDeps,
+  forumChannelId: string,
+  byThread: Map<string, CompanionListing>,
+  stats: Map<number, { avg: number; count: number }>,
+  velocity: Map<number, number>,
+): Promise<number> {
+  const channel = await deps.fetchChannel(forumChannelId).catch(() => null);
   const available = channel?.availableTags ?? [];
   const threadsApi = channel?.threads;
   if (!available.length || !threadsApi?.fetchActive) return 0;
@@ -537,12 +641,6 @@ export async function runTagSweep(deps: OpsDeps): Promise<number> {
   const rawThreads = (fetched as { threads: Map<string, ThreadLike> | Iterable<[string, ThreadLike]> | Iterable<ThreadLike> }).threads;
   const threads: ThreadLike[] = [...(rawThreads instanceof Map ? rawThreads.values() : rawThreads)]
     .map(t => Array.isArray(t) ? (t as [string, ThreadLike])[1] : (t as ThreadLike));
-
-  // Bulk inputs — three queries per sweep regardless of thread count.
-  const listings = await deps.store.listActiveListingsWithThreads().catch(() => [] as Awaited<ReturnType<MemoryStore["listActiveListingsWithThreads"]>>);
-  const byThread = new Map(listings.filter(l => l.forumThreadId).map(l => [l.forumThreadId!, l] as const));
-  const stats = topId ? await deps.store.ratingStatsByListing().catch(() => new Map<number, { avg: number; count: number }>()) : new Map<number, { avg: number; count: number }>();
-  const velocity = trendId ? await deps.store.recentAdoptionCounts(config.marketTrendingWindowH * 3_600_000).catch(() => new Map<number, number>()) : new Map<number, number>();
 
   const now = Date.now();
   const newCutoffMs = config.marketNewTagDays * 86_400_000;
@@ -573,6 +671,32 @@ export async function runTagSweep(deps: OpsDeps): Promise<number> {
     const ok = await thread.setAppliedTags?.([...managedWanted, ...rest].slice(0, 5))
       .then(() => true).catch(() => false);
     if (ok) { changed++; inc("ops.tag_sweep"); }
+  }
+  return changed;
+}
+
+export async function runTagSweep(deps: OpsDeps): Promise<number> {
+  const forumIds = [...marketplaceForumIds()];
+  if (!forumIds.length) return 0;
+
+  // Bulk inputs once per sweep — the listing map now spans every deployment's
+  // posts (listing_posts), with forum_thread_id folding in for rows whose
+  // backfill hasn't landed yet.
+  const posts = await deps.store.listActiveListingPosts().catch(() => [] as Awaited<ReturnType<MemoryStore["listActiveListingPosts"]>>);
+  const byThread = new Map<string, CompanionListing>();
+  for (const { listing, post } of posts) if (post.threadId) byThread.set(post.threadId, listing);
+  const legacy = await deps.store.listActiveListingsWithThreads().catch(() => [] as Awaited<ReturnType<MemoryStore["listActiveListingsWithThreads"]>>);
+  for (const l of legacy) if (l.forumThreadId && !byThread.has(l.forumThreadId)) byThread.set(l.forumThreadId, l);
+  // Stats/velocity are computed lazily per forum before, but the queries are
+  // shared — pull once up front; per-forum sweeps may still no-op early when
+  // a forum lacks the curated tags entirely.
+  const stats = await deps.store.ratingStatsByListing().catch(() => new Map<number, { avg: number; count: number }>());
+  const velocity = await deps.store.recentAdoptionCounts(config.marketTrendingWindowH * 3_600_000).catch(() => new Map<number, number>());
+
+  let changed = 0;
+  for (const forumId of forumIds) {
+    changed += await sweepForumTags(deps, forumId, byThread, stats, velocity)
+      .catch(e => { inc("ops.sweep_error"); logError(`tag sweep failed for forum ${forumId}`, e); return 0; });
   }
   return changed;
 }
@@ -969,10 +1093,27 @@ async function ensureAdopteeManageRow(thread: TicketThreadLike, companion: Compa
   await (sent as { pin?(): Promise<unknown> } | null)?.pin?.().catch(() => {});
 }
 
+/** Resolve the adoptees surface for a guild: the house channel resolves from
+ *  env/name (adopteesChannel); partner deployments carry the channel id on
+ *  their row. Returns null when the surface is gone — callers fall back. */
+async function adopteesChannelFor(deps: OpsDeps, guildId: string | null): Promise<SendableChannel | null> {
+  if (!guildId || guildId === config.houseGuildId) return adopteesChannel(deps);
+  const dep = deploymentFor(guildId);
+  if (!dep || dep.status !== "active" || !dep.adopteesChannelId) return null;
+  return deps.fetchChannel(dep.adopteesChannelId).catch(() => null);
+}
+
 /** Create (or reuse) the private adoptee thread for an adoption. Idempotent —
  *  a live `chat_thread_id` short-circuits unless `reopen` is asked (re-adopt
  *  unarchives the locked thread so the history continues). The companion
- *  introduces themselves on creation — that's what unlocks server summoning. */
+ *  introduces themselves on creation — that's what unlocks server summoning.
+ *
+ *  v59 multi-server: the thread is homed where the adoption was adopted
+ *  (chat_guild_id; NULL = house). `ctx.targetGuildId` overrides at adopt
+ *  time before the row is stamped. A thread is only reachable while the
+ *  adopter is a member of its host guild AND the deployment is still live —
+ *  otherwise it archives (partner admins shouldn't keep reading it) and the
+ *  adoption relocates to the house, where ensure rebuilds on next touch. */
 export async function ensureAdopteeThread(
   deps: OpsDeps,
   ctx: {
@@ -981,34 +1122,112 @@ export async function ensureAdopteeThread(
     listing?: { id: number; greeting: string } | null;
     username?: string;
     reopen?: boolean;
+    /** Where the Add was clicked — overrides adoption.chatGuildId so the
+     *  intent survives even if the thread create fails afterwards. */
+    targetGuildId?: string | null;
   },
 ): Promise<EnsureAdopteeThreadResult> {
   const { adoption, companion } = ctx;
-  if (!isHouse(config.houseGuildId)) return { failed: true };
+  const houseId = config.houseGuildId ?? null;
+  let targetId = ctx.targetGuildId !== undefined
+    ? (ctx.targetGuildId ?? houseId)
+    : (adoption.chatGuildId ?? houseId);
+  if (!targetId) return { failed: true };
+
+  /** Relocate this adoption to the house: clear the dead thread + guild so
+   *  the next ensure (here and later) aims home. */
+  const relocateToHouse = async () => {
+    targetId = houseId;
+    if (adoption.chatGuildId || adoption.chatThreadId) {
+      await deps.store.setAdoptionLocation(adoption.id, { guildId: null, channelId: null, threadId: null }).catch(() => {});
+      adoption.chatGuildId = null; adoption.chatChannelId = null; adoption.chatThreadId = null;
+    }
+  };
+
   if (adoption.chatThreadId) {
     const existing = await deps.fetchChannel(adoption.chatThreadId).catch(() => null);
     if (existing) {
       const ex = existing as TicketThreadLike;
-      if (ctx.reopen) await ex.setLocked?.(false).catch(() => {});
-      // Private-thread membership lapses when the adopter leaves and rejoins
-      // the house — re-add idempotently so a live thread reappears for them,
-      // and resurface anything Discord auto-archived out from under them.
-      await ex.setArchived?.(false).catch(() => {});
-      await ex.members?.add?.(adoption.userId).catch(e => {
-        inc("ops.adoptee_reattach_error"); logError("adoptee thread re-attach failed", e);
-      });
-      // Threads created before the manage row shipped get it backfilled.
-      await ensureAdopteeManageRow(ex, companion).catch(() => {});
-      return { thread: ex, greeted: false, created: false };
+      // A live thread is only usable while the adopter is a member of its
+      // host guild — leaving drops private-thread membership silently.
+      const member = await deps.fetchMember(targetId, adoption.userId).catch(() => null);
+      if (member) {
+        // Always unlock on reattach, not just explicit reopens: a leave
+        // (handleDeploymentMemberRemove) locks the thread, and rejoining
+        // without the unlock leaves the member able to read but not type.
+        // Active-only locks are either this one or ctx.reopen's — banned
+        // and dropped adoptions never reach this branch.
+        await ex.setLocked?.(false).catch(() => {});
+        // Private-thread membership lapses when the adopter leaves and
+        // rejoins — re-add idempotently so a live thread reappears for them,
+        // and resurface anything Discord auto-archived out from under them.
+        await ex.setArchived?.(false).catch(() => {});
+        await ex.members?.add?.(adoption.userId).catch(e => {
+          inc("ops.adoptee_reattach_error"); logError("adoptee thread re-attach failed", e);
+        });
+        // Threads created before the manage row shipped get it backfilled.
+        await ensureAdopteeManageRow(ex, companion).catch(() => {});
+        return { thread: ex, greeted: false, created: false };
+      }
+      // Adopter is gone from the host server — archive the stale thread so
+      // partner admins aren't left reading it, then rebuild in the house.
+      await ex.setLocked?.(true).catch(() => {});
+      await ex.setArchived?.(true).catch(() => {});
+      await relocateToHouse();
+    } else {
+      // Deleted thread (mod cleanup) — rebuild in the SAME host guild while
+      // it's still viable; the deployment-gone check below relocates.
+      adoption.chatThreadId = null;
     }
-    // Deleted thread (mod cleanup) — fall through and rebuild.
   }
-  // The adopter must be a house member to see their private thread — everyone
-  // else gets pointed at the invite (backfill picks them up on join).
-  const member = await deps.fetchMember(config.houseGuildId!, adoption.userId).catch(() => null);
+
+  // Partner target sanity: the deployment must still be active and the
+  // adopter still a member. Anything less collapses the target to the house.
+  if (targetId !== houseId) {
+    const dep = deploymentFor(targetId);
+    const member = dep?.status === "active"
+      ? await deps.fetchMember(targetId, adoption.userId).catch(() => null)
+      : null;
+    if (!member) await relocateToHouse();
+  }
+  if (!targetId) return { failed: true };
+
+  // The adopter must be a member of the target guild to see their private
+  // thread — everyone else gets pointed at the house invite.
+  const member = await deps.fetchMember(targetId, adoption.userId).catch(() => null);
   if (!member) return { needsInvite: true };
-  const parent = await adopteesChannel(deps);
-  if (!parent || typeof parent.threads?.create !== "function") {
+  const parent = await adopteesChannelFor(deps, targetId);
+  if (!parent) {
+    // Partner surface deleted out from under the deployment — house
+    // fallback keeps the adoption usable; the sweep flags the broken row.
+    if (targetId !== houseId) {
+      await relocateToHouse();
+      if (!houseId) return { failed: true };
+      const houseMember = await deps.fetchMember(houseId, adoption.userId).catch(() => null);
+      if (!houseMember) return { needsInvite: true };
+      const houseParent = await adopteesChannelFor(deps, houseId);
+      if (!houseParent || typeof houseParent.threads?.create !== "function") {
+        inc("ops.adoptee_thread_missing_channel");
+        return { failed: true };
+      }
+      return createAdopteeThread(deps, ctx, houseParent, houseId);
+    }
+    inc("ops.adoptee_thread_missing_channel");
+    return { failed: true };
+  }
+  return createAdopteeThread(deps, ctx, parent, targetId);
+}
+
+/** The create half of ensureAdopteeThread — opens the private thread under
+ *  `parent`, stamps the adoption's home, greets, and pins the manage row. */
+async function createAdopteeThread(
+  deps: OpsDeps,
+  ctx: { adoption: CompanionAdoption; companion: Companion; listing?: { id: number; greeting: string } | null },
+  parent: SendableChannel,
+  guildId: string,
+): Promise<EnsureAdopteeThreadResult> {
+  const { adoption, companion } = ctx;
+  if (typeof parent.threads?.create !== "function") {
     inc("ops.adoptee_thread_missing_channel");
     return { failed: true };
   }
@@ -1029,7 +1248,12 @@ export async function ensureAdopteeThread(
     await thread.setArchived?.(true).catch(() => {});
     return { failed: true };
   }
-  await deps.store.setAdoptionThread(adoption.id, thread.id).catch(e => {
+  const isHouseTarget = guildId === config.houseGuildId;
+  await deps.store.setAdoptionLocation(adoption.id, {
+    guildId: isHouseTarget ? null : guildId,
+    channelId: parent.id ?? null,
+    threadId: thread.id,
+  }).catch(e => {
     inc("ops.adoptee_thread_error"); logError("adoption thread stamp failed", e);
   });
   const greeted = await greetAdopteeInThread(
@@ -1068,12 +1292,14 @@ export async function setAdopteeThreadLocked(
   }
 }
 
-/** Ensure every active adoption of a user has its thread AND that the adopter
- *  is still a member of it — leaving the guild drops private-thread
- *  membership, so the join hook and the interactive paths both drain the full
- *  active set through here (create missing, re-attach live, rebuild deleted). */
-export async function ensureAdopteeThreadsForUser(userId: string, deps: OpsDeps): Promise<void> {
-  const rows = await deps.store.activeAdoptionsForUser(userId).catch(() => []);
+/** Ensure a user's active adoptions have their threads AND that the adopter
+ *  is still a member of each — leaving the guild drops private-thread
+ *  membership, so join hooks and interactive paths both drain through here
+ *  (create missing, re-attach live, rebuild deleted). `opts.guildId` scopes
+ *  to adoptions hosted in one deployment (member-add in a partner guild only
+ *  re-attaches threads living there); NULL means the house. */
+export async function ensureAdopteeThreadsForUser(userId: string, deps: OpsDeps, opts: { guildId?: string | null } = {}): Promise<void> {
+  const rows = await deps.store.activeAdoptionsForUser(userId, opts.guildId).catch(() => []);
   for (const row of rows) {
     await ensureAdopteeThread(deps, row).catch(e => {
       inc("ops.adoptee_thread_error"); logError("ensure adoptee thread failed", e);
@@ -1083,18 +1309,364 @@ export async function ensureAdopteeThreadsForUser(userId: string, deps: OpsDeps)
 
 /** Boot/interval sweep — same shape as greetPendingInstalls: bounded batch,
  *  per-row fault tolerance, permanent dedupe via chat_thread_id. Non-members
- *  are skipped silently; the member-add hook catches them when they join. */
+ *  are skipped silently; the member-add hook catches them when they join.
+ *  Each row's chat_guild_id picks the host guild — the house takes whatever
+ *  is un-homed (NULL) or whose deployment died. */
 export async function backfillAdopteeThreads(deps: OpsDeps): Promise<void> {
-  if (!deps || !config.houseGuildId) return;
+  if (!deps) return;
   const missing = await deps.store.activeAdoptionsMissingThreads(10).catch(e => {
     inc("ops.adoptee_backfill_error"); logError("adoptee backfill query failed", e); return [];
   });
   for (const row of missing) {
-    const member = await deps.fetchMember(config.houseGuildId!, row.adoption.userId).catch(() => null);
+    const hostGuild = row.adoption.chatGuildId ?? config.houseGuildId;
+    if (!hostGuild) continue;
+    const member = await deps.fetchMember(hostGuild, row.adoption.userId).catch(() => null);
     if (!member) continue;
     await ensureAdopteeThread(deps, { ...row, username: member.user.username }).catch(e => {
       inc("ops.adoptee_thread_error"); logError("adoptee backfill create failed", e);
     });
+  }
+}
+
+// ── Partner deployments (v59) ──────────────────────────────────────────────
+// A deployed server gets one "Characterly" category holding the mirrored
+// shelf (#characters forum) and the private adoptee-thread surface
+// (#adoptees). Layout is created idempotently — rows land on
+// guild_deployments, posts fan out via listing_posts. MARKET_DEPLOY_ENABLED
+// gates the whole feature; the house server never goes through this path
+// (its layout is WANTED_LAYOUT + env).
+
+/** Guild-scoped partner command — registered ONLY in deployments granted via
+ *  `/ops deploygrant`, never in the global command list (the feature stays
+ *  invisible until announced). ManageGuild = the server's admins. Defined
+ *  here (not commands.ts) so the grant action registers it without an
+ *  ops→commands import cycle. */
+export const MARKETPLACE_GUILD_COMMAND = {
+  name: "marketplace",
+  description: "Admin: manage this server's Characterly companion shelf",
+  default_member_permissions: PermissionFlagsBits.ManageGuild.toString(),
+  integrationTypes: [0], contexts: [0],
+  options: [
+    { name: "deploy", type: 1, description: "Create the mirrored #characters shelf + #adoptees channel here" },
+    { name: "status", type: 1, description: "Show this server's marketplace deployment state" },
+    { name: "remove", type: 1, description: "Archive this server's shelf and stop syncing it" },
+  ],
+};
+
+const DEPLOY_CATEGORY_NAME = "Characterly";
+const DEPLOY_MARKET_NAME = "characters";
+const DEPLOY_ADOPTEES_NAME = "adoptees";
+
+const DEPLOY_REQUIRED_PERMS: Array<{ bit: bigint; label: string }> = [
+  { bit: PermissionFlagsBits.ViewChannel, label: "View Channels" },
+  { bit: PermissionFlagsBits.ManageChannels, label: "Manage Channels" },
+  { bit: PermissionFlagsBits.ManageThreads, label: "Manage Threads" },
+  { bit: PermissionFlagsBits.ManageWebhooks, label: "Manage Webhooks" },
+  { bit: PermissionFlagsBits.SendMessages, label: "Send Messages" },
+  { bit: PermissionFlagsBits.SendMessagesInThreads, label: "Send Messages in Threads" },
+  { bit: PermissionFlagsBits.CreatePrivateThreads, label: "Create Private Threads" },
+];
+
+export interface DeployOutcome {
+  ok: boolean;
+  error?: string;
+  created?: string[];
+  posted?: number;
+  failed?: number;
+}
+
+/** Idempotent surface reconcile for one deployed guild: find-or-create the
+ *  category, the #characters forum (tags merged by name — existing tag ids
+ *  preserved since applied tags reference them), and the locked-down
+ *  #adoptees text channel. Returns the resolved ids for the deployment row. */
+async function ensureDeploymentLayout(
+  guild: GuildLike,
+  row: GuildDeployment | null,
+): Promise<{ categoryId: string; marketplaceChannelId: string; adopteesChannelId: string; created: string[] } | null> {
+  const created: string[] = [];
+  const everyone = guild.id; // @everyone overwrite id == guild id
+  const findChan = (type: number, name: string) =>
+    guild.channels.cache.find(c => c.type === type && normName(c.name) === normName(name));
+  const byId = (id: string | null | undefined) =>
+    id ? guild.channels.cache.find(c => c.id === id) : undefined;
+
+  let category = byId(row?.categoryId) ?? findChan(ChannelType.GuildCategory, DEPLOY_CATEGORY_NAME);
+  if (!category) {
+    category = await guild.channels.create({ name: DEPLOY_CATEGORY_NAME, type: ChannelType.GuildCategory })
+      .catch(e => { logError("deploy category create failed", e); return undefined; });
+    if (!category) return null;
+    created.push(`category ${DEPLOY_CATEGORY_NAME}`);
+  }
+
+  // #characters — forum, Gallery view, comments open but only the bot posts.
+  let forum = byId(row?.marketplaceChannelId) ?? findChan(ChannelType.GuildForum, DEPLOY_MARKET_NAME);
+  const forumOverwrites = [{
+    id: everyone,
+    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessagesInThreads],
+    deny: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.CreatePublicThreads, PermissionFlagsBits.CreatePrivateThreads],
+  }];
+  if (!forum) {
+    forum = await guild.channels.create({
+      name: DEPLOY_MARKET_NAME,
+      type: ChannelType.GuildForum,
+      parent: category.id,
+      topic: "The Characterly shelf — every companion here can be adopted with one click. Comment on a card, or hit Add.",
+      availableTags: PARTNER_TAG_SET.map(t => ({ name: t.name, moderated: t.moderated })),
+      defaultForumLayout: 2, // GalleryView — covers carry the shelf.
+      permissionOverwrites: forumOverwrites,
+    }).catch(e => { logError("deploy forum create failed", e); return undefined; });
+    if (!forum) return null;
+    created.push(`#${DEPLOY_MARKET_NAME}`);
+  } else {
+    // Reconcile an existing forum: seed any missing taxonomy names (existing
+    // tags pass through with their ids — applied tags reference them), and
+    // force Gallery layout like the house reconciler does. Overwrites also
+    // reconcile — a pre-made "characters" forum with open perms would let
+    // anyone create threads on the shelf.
+    await ensureOpenThreads(forum, created, `#${DEPLOY_MARKET_NAME}`, everyone);
+    const existing = (forum.availableTags ?? []).map(t => ({ id: t.id, name: t.name, moderated: t.moderated ?? false }));
+    const missing = PARTNER_TAG_SET.filter(t => !existing.some(e => e.name.toLowerCase() === t.name.toLowerCase()))
+      .map(t => ({ name: t.name, moderated: t.moderated }));
+    if (missing.length && forum.setAvailableTags) {
+      await forum.setAvailableTags([...existing, ...missing])
+        .then(() => created.push(`tags +${missing.length}`))
+        .catch(e => logError("deploy forum tag reconcile failed", e));
+    }
+    if (forum.defaultForumLayout !== 2) {
+      await forum.edit?.({ defaultForumLayout: 2 }).catch(() => {});
+    }
+  }
+
+  // #adoptees — visible channel (threads are what's private), silent for
+  // members: no posting, no thread creation; thread members can still type
+  // inside their own private thread.
+  let adoptees = byId(row?.adopteesChannelId) ?? findChan(ChannelType.GuildText, DEPLOY_ADOPTEES_NAME);
+  if (!adoptees) {
+    adoptees = await guild.channels.create({
+      name: DEPLOY_ADOPTEES_NAME,
+      type: ChannelType.GuildText,
+      parent: category.id,
+      permissionOverwrites: [{
+        id: everyone,
+        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessagesInThreads],
+        deny: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.CreatePublicThreads, PermissionFlagsBits.CreatePrivateThreads],
+      }],
+    }).catch(e => { logError("deploy adoptees create failed", e); return undefined; });
+    if (!adoptees) return null;
+    created.push(`#${DEPLOY_ADOPTEES_NAME}`);
+  } else {
+    // Found-by-name channels keep their own overwrites otherwise — a pre-made
+    // "adoptees" channel with default perms would let anyone post or open
+    // public threads in the adoptee surface.
+    await ensureOpenThreads(adoptees, created, `#${DEPLOY_ADOPTEES_NAME}`, everyone);
+  }
+
+  return { categoryId: category.id, marketplaceChannelId: forum.id, adopteesChannelId: adoptees.id, created };
+}
+
+/** The `/marketplace deploy` workhorse: validate the guild (granted, COMMUNITY,
+ *  bot perms), reconcile the layout, activate the row, then fan the whole
+ *  catalog into the new forum. Safe to re-run — a retry only fills gaps. */
+export async function deployMarketplace(deps: OpsDeps, guildId: string, deployerId?: string): Promise<DeployOutcome> {
+  if (!config.marketDeployEnabled) return { ok: false, error: "Partner deployment isn't open yet." };
+  if (guildId === config.houseGuildId) return { ok: false, error: "This server is already Characterly's home — the shelf lives here natively." };
+  const row = await deps.store.deploymentFor(guildId).catch(() => null);
+  if (!row || row.status === "disabled") {
+    return { ok: false, error: "This server isn't approved for deployment — a Characterly operator grants that first." };
+  }
+  const guild = await deps.fetchGuild(guildId).catch(() => null);
+  if (!guild) return { ok: false, error: "I can't reach this server — am I still a member?" };
+  if (!(guild.features ?? []).includes("COMMUNITY")) {
+    return { ok: false, error: "Enable **Community** first (Server Settings → Enable Community) — the shelf is a forum channel, and forums require it." };
+  }
+  const me = guild.members?.me ?? await guild.members?.fetchMe?.().catch(() => null) ?? null;
+  if (!permHas(me?.permissions, PermissionFlagsBits.Administrator)) {
+    const missing = DEPLOY_REQUIRED_PERMS.filter(p => !permHas(me?.permissions, p.bit)).map(p => p.label);
+    if (missing.length) {
+      return { ok: false, error: `I'm missing permissions: **${missing.join(", ")}** — grant them (or Administrator) and run this again.` };
+    }
+  }
+
+  const layout = await ensureDeploymentLayout(guild, row).catch(e => {
+    logError("deployment layout failed", e);
+    return null;
+  });
+  if (!layout) {
+    await deps.store.upsertDeployment({ guildId, status: row.status, lastError: "layout reconcile failed" }).catch(() => {});
+    return { ok: false, error: "Couldn't create the Characterly surfaces — check my permissions and try again." };
+  }
+  await deps.store.upsertDeployment({
+    guildId,
+    status: "active",
+    categoryId: layout.categoryId,
+    marketplaceChannelId: layout.marketplaceChannelId,
+    adopteesChannelId: layout.adopteesChannelId,
+    deployedBy: deployerId ?? row.deployedBy,
+    lastError: null,
+  }).catch(() => {});
+  await refreshDeploymentCache(deps.store);
+
+  // Fan the whole catalog into the fresh forum. Best-effort: individual post
+  // failures land as retryable rows for the sync sweep.
+  const dep = deploymentFor(guildId);
+  const res = dep
+    ? await postActiveListingsToDeployments(deps.fetchChannel, [dep], deps.store,
+        async (uid) => {
+          const u = await deps.fetchUser?.(uid).catch(() => null);
+          return u?.globalName ?? u?.username ?? null;
+        }, 100)
+    : { posted: 0, failed: 0 };
+  inc("ops.deploy");
+  return { ok: true, created: layout.created, posted: res.posted, failed: res.failed };
+}
+
+/** `/marketplace remove` + ops revoke: the row flips to disabled, live mirror
+ *  posts archive (a dead server's catalog shouldn't keep selling), hosted
+ *  adoptee threads lock+archive and rehome to the house, and the in-process
+ *  cache forgets the surfaces.
+ *
+ *  The adoptee drain is not optional hygiene: once the row is disabled the
+ *  channel leaves `adopteesChannelIds()`, so `isAdopteeThread` stops matching
+ *  and a still-open thread falls into the normal guild pipeline — private
+ *  DM-scope conversations would be archived as partner-server messages, and
+ *  that server's admins could keep reading them. */
+export async function removeDeployment(deps: OpsDeps, guildId: string): Promise<{ ok: boolean; error?: string; archived?: number }> {
+  if (guildId === config.houseGuildId) return { ok: false, error: "The house server can't be removed." };
+  const row = await deps.store.deploymentFor(guildId).catch(() => null);
+  if (!row) return { ok: false, error: "No deployment exists for this server." };
+  await deps.store.setDeploymentStatus(guildId, "disabled").catch(() => {});
+  const live = (await deps.store.listingPostsForGuild(guildId).catch(() => [] as Awaited<ReturnType<MemoryStore["listingPostsForGuild"]>>))
+    .filter(p => p.status === "live" && p.threadId);
+  let archived = 0;
+  if (live.length) {
+    archived = await archiveListingPosts(deps.fetchChannel, live, {
+      note: "This server has left the Characterly marketplace — this listing is archived here. It's still live on the main shelf.",
+    });
+    for (const p of live) await deps.store.markListingPost(p.listingId, guildId, "archived").catch(() => {});
+  }
+  // Adoptee threads homed here: seal and rehome. The row's location fields
+  // clear so the next ensure (backfill sweep or interactive touch) rebuilds
+  // a fresh thread under the house #adoptees.
+  let rehomed = 0;
+  for (const adoption of await deps.store.adoptionsInGuild(guildId).catch(() => [] as Awaited<ReturnType<MemoryStore["adoptionsInGuild"]>>)) {
+    if (adoption.chatThreadId) {
+      const thread = await deps.fetchChannel(adoption.chatThreadId).catch(() => null) as TicketThreadLike | null;
+      if (thread) {
+        await thread.setLocked?.(true).catch(() => {});
+        await thread.setArchived?.(true).catch(() => {});
+      }
+    }
+    await deps.store.setAdoptionLocation(adoption.id, { guildId: null, channelId: null, threadId: null }).catch(() => {});
+    rehomed++;
+  }
+  await refreshDeploymentCache(deps.store);
+  inc("ops.deploy_remove");
+  return { ok: true, archived: archived + rehomed };
+}
+
+/** Deployment sync sweep — the janitor for mirrors: ensures partner layouts
+ *  still exist (deleted forum → recreate + re-stamp the row), retries failed
+ *  posts, and backfills listings a deployment missed. Runs alongside the tag
+ *  sweep; the kill switch short-circuits it. */
+export async function syncDeployments(deps: OpsDeps): Promise<void> {
+  if (!config.marketDeployEnabled) return;
+  await refreshDeploymentCache(deps.store).catch(() => {});
+  // Seed the mirror map from forum_thread_id BEFORE the missing-posts queue
+  // computes — pre-v59 listings have no listing_posts row, and without this
+  // they all read "missing" in the house deployment: the sweep would post a
+  // duplicate house thread for every one of them.
+  if (config.houseGuildId) {
+    await deps.store.backfillListingPosts(config.houseGuildId).catch(e => {
+      inc("ops.sweep_error"); logError("listing_posts backfill failed", e);
+    });
+  }
+  const partners = [...deploymentCache.values()].filter(d => d.status === "active" && d.guildId !== config.houseGuildId);
+  for (const dep of partners) {
+    const guild = await deps.fetchGuild(dep.guildId).catch(() => null);
+    if (!guild) {
+      await deps.store.setDeploymentStatus(dep.guildId, dep.status, "guild unreachable").catch(() => {});
+      continue;
+    }
+    // Self-heal: an admin deleting #characters shouldn't silently freeze the
+    // mirror — the layout reconcile re-creates and re-stamps the row.
+    const forumOk = dep.marketplaceChannelId
+      ? await deps.fetchChannel(dep.marketplaceChannelId).then(c => !!c).catch(() => false)
+      : false;
+    const adopteesOk = dep.adopteesChannelId
+      ? await deps.fetchChannel(dep.adopteesChannelId).then(c => !!c).catch(() => false)
+      : false;
+    if (!forumOk || !adopteesOk) {
+      const layout = await ensureDeploymentLayout(guild, dep).catch(() => null);
+      if (layout) {
+        await deps.store.upsertDeployment({
+          guildId: dep.guildId,
+          status: dep.status,
+          categoryId: layout.categoryId,
+          marketplaceChannelId: layout.marketplaceChannelId,
+          adopteesChannelId: layout.adopteesChannelId,
+          lastError: null,
+        }).catch(() => {});
+        await refreshDeploymentCache(deps.store).catch(() => {});
+        // A recreated forum took every mirror thread it hosted down with it —
+        // the rows still read 'live' against dead threads and would never
+        // requeue. Clear them so the backfill below reposts the catalog.
+        if (layout.marketplaceChannelId !== dep.marketplaceChannelId) {
+          await deps.store.resetListingPostsForGuild(dep.guildId).catch(e => {
+            inc("ops.sweep_error"); logError("listing_posts reset failed", e);
+          });
+        }
+      } else {
+        await deps.store.setDeploymentStatus(dep.guildId, dep.status, "layout reconcile failed").catch(() => {});
+      }
+    }
+  }
+  // Backfill + retry: every active deployment gets the catalog rows it's missing.
+  const active = [...deploymentCache.values()].filter(d => d.status === "active");
+  await postActiveListingsToDeployments(deps.fetchChannel, active, deps.store,
+    async (uid) => {
+      const u = await deps.fetchUser?.(uid).catch(() => null);
+      return u?.globalName ?? u?.username ?? null;
+    }).catch(e => { inc("ops.sweep_error"); logError("deployment sync fan-out failed", e); });
+}
+
+export function startDeploymentSync(deps: OpsDeps, intervalMs = 300_000): { stop: () => void } {
+  const t = setInterval(() => {
+    void syncDeployments(deps).catch(e => { inc("ops.sweep_error"); logError("deployment sync failed", e); });
+  }, intervalMs);
+  t.unref?.();
+  return { stop: () => clearInterval(t) };
+}
+
+/** Re-attach adoptee threads when a member joins a DEPLOYED partner server —
+ *  the house has its own hook; this one only handles threads homed in the
+ *  guild joined. */
+export async function handleDeploymentMemberAdd(member: MemberLike, deps: OpsDeps): Promise<void> {
+  if (member.user.bot) return;
+  const dep = deploymentFor(member.guild.id);
+  if (!dep || dep.status !== "active" || dep.guildId === config.houseGuildId) return;
+  await ensureAdopteeThreadsForUser(member.user.id, deps, { guildId: dep.guildId }).catch(e => {
+    inc("ops.adoptee_thread_error"); logError("partner member-add adoptee ensure failed", e);
+  });
+}
+
+/** Leaving a deployed guild drops private-thread membership silently — lock
+ *  + archive the threads hosted there so partner admins aren't left reading
+ *  a dead member's chats. The adoption rows stay (chat_guild_id intact);
+ *  rejoin re-opens, and other surfaces relocate to the house on next touch. */
+export async function handleDeploymentMemberRemove(member: MemberLike, deps: OpsDeps): Promise<void> {
+  if (member.user.bot) return;
+  const dep = deploymentFor(member.guild.id);
+  if (!dep || dep.status !== "active" || dep.guildId === config.houseGuildId) return;
+  const rows = await deps.store.activeAdoptionsForUser(member.user.id, dep.guildId)
+    .catch(() => [] as Awaited<ReturnType<MemoryStore["activeAdoptionsForUser"]>>);
+  for (const row of rows) {
+    const tid = row.adoption.chatThreadId;
+    if (!tid) continue;
+    const thread = await deps.fetchChannel(tid).catch(() => null) as TicketThreadLike | null;
+    if (!thread) continue;
+    await thread.setLocked?.(true).catch(() => {});
+    await thread.setArchived?.(true).catch(() => {});
+    inc("ops.adoptee_thread_departed");
   }
 }
 
@@ -1907,7 +2479,8 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
     const existing = await deps.store.listMyListings(deps.botId).catch(() => null);
     if (!existing) return interaction.editReply("Couldn't read existing listings — check the database.");
     const byName = new Map(existing.map(l => [l.name.toLowerCase(), l]));
-    const cardAs = { client: interaction.client, user: interaction.client.user ?? interaction.user };
+    const fetchChannel = (id: string) => interaction.client.channels.fetch(id).catch(() => null);
+    const deployFanout = () => [...deployedGuildIds()].map(id => deploymentFor(id)).filter((d): d is GuildDeployment => !!d);
     const results: string[] = [];
     for (const p of SEED_LISTINGS) {
       let listing = byName.get(p.name.toLowerCase());
@@ -1922,7 +2495,9 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
         }
         if (listing.status !== "active") { results.push(`· ${p.name} — status ${listing.status}, left alone`); continue; }
         if (!listing.forumThreadId) {
-          const tid = await postListingThread(cardAs, listing, deps.store, { tagNames: p.tags, coverFile: p.coverFile });
+          const fan = await postListingToDeployments(fetchChannel,
+            deployFanout(), "the Characterly house", listing, deps.store, { tagNames: p.tags, coverFile: p.coverFile });
+          const tid = fan.posted.find(x => x.guildId === config.houseGuildId)?.threadId ?? null;
           if (!tid) { results.push(`✖ ${p.name} — thread recovery failed`); continue; }
           await deps.store.setListingThread(listing.id, tid).catch(() => {});
           results.push(`✔ ${p.name} — recovered (thread re-posted)`);
@@ -1969,7 +2544,9 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
       const hosted = p.coverFile ? await uploadAvatarFile(marketplaceAssetPath(p.coverFile) ?? "") : null;
       const res = await deps.store.createListing(deps.botId, { ...p, avatarUrl: hosted ?? p.avatarUrl }).catch(() => null);
       if (!res?.ok) { results.push(`✖ ${p.name} — listing create failed`); continue; }
-      const threadId = await postListingThread(cardAs, res.listing, deps.store, { tagNames: p.tags, coverFile: p.coverFile });
+      const fan = await postListingToDeployments(fetchChannel,
+        deployFanout(), "the Characterly house", res.listing, deps.store, { tagNames: p.tags, coverFile: p.coverFile });
+      const threadId = fan.posted.find(x => x.guildId === config.houseGuildId)?.threadId ?? null;
       if (!threadId) {
         await deps.store.delistListing(res.listing.id).catch(() => {});
         results.push(`✖ ${p.name} — thread post failed (rolled back)`);
@@ -1982,6 +2559,62 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
     }
     const made = results.filter(r => r.startsWith("✔")).length;
     return interaction.editReply(`**Seed roster** — ${made} created, ${results.length - made} skipped/failed:\n${results.join("\n")}`.slice(0, 1990));
+  }
+
+  // Partner deployments — ops controls the grant; the partner admin then runs
+  // guild-scoped /marketplace deploy in their own server. Grant also registers
+  // that command in the target guild (it's absent from the global list).
+  if (action === "deploygrant" || action === "deployrevoke" || action === "deploystatus") {
+    const guildId = interaction.options.getString("guild")?.trim();
+    if (!guildId) return interaction.reply({ content: "Give me the target server id (`guild` option).", ephemeral: true });
+    if (guildId === config.houseGuildId) return interaction.reply({ content: "The house doesn't need a deployment — it IS one.", ephemeral: true });
+
+    if (action === "deploygrant") {
+      if (!config.marketDeployEnabled) {
+        return interaction.reply({ content: "Partner deployment is disabled (`MARKET_DEPLOY_ENABLED` isn't set) — granting now would register a dead command.", ephemeral: true });
+      }
+      await deps.store.grantDeployment(guildId, interaction.user.id).catch(() => null);
+      const registered = await (async () => {
+        try {
+          const app = interaction.client.application;
+          if (!app?.commands?.set) return false;
+          await app.commands.set([MARKETPLACE_GUILD_COMMAND as never], guildId);
+          return true;
+        } catch (e) { logError("deploygrant command register failed", e); return false; }
+      })();
+      await refreshDeploymentCache(deps.store);
+      inc("ops.deploygrant");
+      return interaction.reply({
+        ephemeral: true,
+        content: `**Granted** \`${guildId}\` for marketplace deployment${registered ? " — `/marketplace` registered there" : " (couldn't register `/marketplace` — check my app access to that guild)"}. They can run \`/marketplace deploy\` now.`,
+      });
+    }
+
+    if (action === "deploystatus") {
+      const row = await deps.store.deploymentFor(guildId).catch(() => null);
+      if (!row) return interaction.reply({ content: `No deployment row for \`${guildId}\`.`, ephemeral: true });
+      const posts = await deps.store.listingPostsForGuild(guildId).catch(() => []);
+      const counts = posts.reduce<Record<string, number>>((m, p) => { m[p.status] = (m[p.status] ?? 0) + 1; return m; }, {});
+      return interaction.reply({
+        ephemeral: true,
+        content:
+          `**Deployment \`${guildId}\`** — status \`${row.status}\`\n` +
+          `forum ${row.marketplaceChannelId ? `<#${row.marketplaceChannelId}>` : "—"} · adoptees ${row.adopteesChannelId ? `<#${row.adopteesChannelId}>` : "—"} · category ${row.categoryId ? `<#${row.categoryId}>` : "—"}\n` +
+          `posts: ${Object.entries(counts).map(([s, n]) => `${s}=${n}`).join(" ") || "none"}${row.lastError ? `\nlast error: ${row.lastError}` : ""}`,
+      });
+    }
+
+    // deployrevoke
+    const res = await removeDeployment(deps, guildId).catch(e => ({ ok: false as const, error: String((e as Error)?.message ?? e) }));
+    // Clear the guild-scoped command either way — a revoked deployment loses
+    // /marketplace regardless of archive success.
+    try {
+      const app = interaction.client.application;
+      if (app?.commands?.set) await app.commands.set([], guildId);
+    } catch (e) { logError("deployrevoke command clear failed", e); }
+    if (!res.ok) return interaction.reply({ content: res.error ?? "Revoke failed.", ephemeral: true });
+    inc("ops.deployrevoke");
+    return interaction.reply({ ephemeral: true, content: `**Revoked** \`${guildId}\` — ${res.archived ?? 0} mirror posts archived, command unregistered.` });
   }
 
   return interaction.reply({ content: `Unknown /ops action: ${action}`, ephemeral: true });

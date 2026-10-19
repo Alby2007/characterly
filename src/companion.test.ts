@@ -940,6 +940,7 @@ test("DM lane: awakening owns DMs; adopted companions get private #adoptees thre
     listingById: async () => listing,
     listingForCompanion: async () => null,
     setAdoptionThread: async (_a: number, t: string) => { stampedThreads.push(t); adoption.chatThreadId = t; },
+    setAdoptionLocation: async (_a: number, loc: { threadId?: string | null }) => { stampedThreads.push(loc.threadId ?? ""); adoption.chatThreadId = loc.threadId ?? null; },
     markDmIntroduced: async (a: number) => { introduced.push(a); },
     creatorBan: async () => null,
     accountForDiscordUser: async () => null,

@@ -8,11 +8,11 @@ import { isSafeUrl, resolvesToPrivateAddress } from "./tools.js";
 import { detectProviderFromKey, guardedLlmFetch } from "./brains.js";
 import { runProfileBuild, PROFILE_BUILD_COOLDOWN_MS } from "./profile-build.js";
 import { inc, metricsSnapshot } from "./metrics.js";
-import type { ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, MessageEvent } from "./types.js";
+import type { ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, GuildDeployment, MessageEvent } from "./types.js";
 import { config } from "./config.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
-import { handleOpsCommand, handleHouseButton, handleTicketButton, isHouse, isMarketplaceThread, getOpsDeps, ensureAdopteeThread, ensureAdopteeThreadsForUser, setAdopteeThreadLocked, adopteeManagePayload } from "./ops.js";
-import { CURATED_TAGS, postListingThread, buildListingCard, buildListingComponents } from "./marketplace.js";
+import { handleOpsCommand, handleHouseButton, handleTicketButton, isHouse, isMarketplaceThread, getOpsDeps, ensureAdopteeThread, ensureAdopteeThreadsForUser, setAdopteeThreadLocked, adopteeManagePayload, deployedGuildIds, deploymentFor, deployMarketplace, removeDeployment } from "./ops.js";
+import { CURATED_TAGS, PARTNER_TAG_SET, archiveListingPosts, postListingToDeployments, buildListingCard, buildListingComponents } from "./marketplace.js";
 import { parseCardFile, cardToPersona, cardImportMeta, cardFileHash, CARD_MAX_BYTES, type ImportPersona, type CardImportMeta, type ParsedCard } from "./charcard.js";
 import { parseChatFile, chatImportMeta, chatFileHash, type ParsedChat, type ChatImportMeta } from "./chathist.js";
 import { enqueue, pauseGuildClaims } from "./jobs.js";
@@ -577,14 +577,18 @@ export function buildMarketPersonaModal(listing: CompanionListing): ModalBuilder
 export { buildListingCard, buildListingComponents } from "./marketplace.js";
 
 /** Ephemeral multi-select of the forum's creator-pickable (non-moderated)
- *  tags — the curated badges never appear here. Returns null when the forum
- *  has none so callers can simply omit the row. Options carry forum tag ids;
- *  `market:tagsel:{listingId}` re-checks ownership at submit time. */
-export async function tagPickerRow(client: Client, listingId: number): Promise<ActionRowBuilder<StringSelectMenuBuilder> | null> {
-  if (!config.marketplaceChannelId) return null;
-  const channel = await client.channels.fetch(config.marketplaceChannelId).catch(() => null);
-  if (!channel || channel.type !== ChannelType.GuildForum) return null;
-  const pickable = (channel.availableTags ?? []).filter(t => !t.moderated).slice(0, 25);
+ *  tags — the curated badges never appear here. Options carry tag NAMES, not
+ *  ids: ids differ per forum, names are what persist to `creator_tags` and
+ *  re-resolve per mirror at submit. `guildId` picks which forum's live
+ *  taxonomy renders; absent/dead forums fall back to the canonical names. */
+export async function tagPickerRow(client: Client, listingId: number, guildId?: string | null): Promise<ActionRowBuilder<StringSelectMenuBuilder> | null> {
+  const forumId = (guildId ? deploymentFor(guildId)?.marketplaceChannelId : null) ?? config.marketplaceChannelId;
+  const channel = forumId ? await client.channels.fetch(forumId).catch(() => null) : null;
+  const live = channel && channel.type === ChannelType.GuildForum ? (channel.availableTags ?? []) : [];
+  const names = live.length
+    ? live.filter(t => !t.moderated).map(t => t.name)
+    : PARTNER_TAG_SET.filter(t => !t.moderated).map(t => t.name);
+  const pickable = names.slice(0, 25);
   if (!pickable.length) return null;
   return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
     new StringSelectMenuBuilder()
@@ -594,7 +598,7 @@ export async function tagPickerRow(client: Client, listingId: number): Promise<A
       // Three picks, same as c.ai's category cap — keeps the taxonomy
       // meaningful instead of everything wearing every tag.
       .setMaxValues(Math.min(3, pickable.length))
-      .setOptions(pickable.map(t => ({ label: t.name, value: t.id }))),
+      .setOptions(pickable.map(name => ({ label: name, value: name }))),
   );
 }
 
@@ -717,24 +721,82 @@ async function listingSlotError(
   return LISTING_CAP_MSG;
 }
 
-/** Re-render the listing card in place after a rating lands. Best-effort —
- *  a deleted thread or archived card just skips the refresh. */
+/** A channel fetcher over an interaction's client — the marketplace fan-out
+ *  helpers take this so ops sweeps can pass deps.fetchChannel instead. */
+const channelFetcher = (client: Client) => (id: string) => client.channels.fetch(id).catch(() => null);
+
+/** Every active deployment (house first — synthesized from env) for mirror
+ *  fan-out. Empty caches degrade to just the house when env is set. */
+function deployTargets(): GuildDeployment[] {
+  return [...deployedGuildIds()]
+    .map(id => deploymentFor(id))
+    .filter((d): d is GuildDeployment => !!d && d.status === "active" && !!d.marketplaceChannelId);
+}
+
+interface MirrorThread {
+  id: string;
+  appliedTags?: string[];
+  fetchStarterMessage?(): Promise<unknown>;
+  setLocked?(locked: boolean): Promise<unknown>;
+  setArchived?(archived: boolean): Promise<unknown>;
+  setAppliedTags?(tags: string[]): Promise<unknown>;
+}
+
+/** Visit every live mirror thread of a listing — the listing_posts rows
+ *  across deployments, plus forum_thread_id as the pre-backfill fallback.
+ *  Per-thread failures are swallowed; mirrors are best-effort. */
+async function eachListingThread(
+  client: Client,
+  listing: CompanionListing,
+  store: MemoryStore,
+  fn: (thread: MirrorThread) => Promise<void>,
+): Promise<void> {
+  const ids = new Set<string>();
+  for (const p of await store.liveListingPosts(listing.id).catch(() => [] as Awaited<ReturnType<MemoryStore["liveListingPosts"]>>)) {
+    if (p.threadId) ids.add(p.threadId);
+  }
+  if (listing.forumThreadId) ids.add(listing.forumThreadId);
+  for (const id of ids) {
+    const thread = await client.channels.fetch(id).catch(() => null);
+    if (thread) await fn(thread as MirrorThread).catch(() => {});
+  }
+}
+
+/** Post a listing's card into every active deployment's forum; the HOUSE
+ *  post is the canonical one — its thread id keeps forum_thread_id pointing
+ *  home. Returns the house thread id (null = roll back). When the house post
+ *  fails, the partner mirrors it already landed are torn down too — callers
+ *  delist on null and ghost cards would keep selling a dead listing. */
+export async function publishToAllMirrors(
+  client: Client,
+  creatorName: string,
+  listing: CompanionListing,
+  store: MemoryStore,
+  opts: { tagNames?: string[]; coverFile?: string } = {},
+): Promise<string | null> {
+  const { posted } = await postListingToDeployments(channelFetcher(client), deployTargets(), creatorName, listing, store, opts);
+  const housePost = posted.find(p => p.guildId === config.houseGuildId)?.threadId ?? null;
+  if (!housePost && posted.length) {
+    await archiveListingPosts(channelFetcher(client), posted).catch(() => {});
+    await store.markAllListingPosts(listing.id, "live", "archived").catch(() => {});
+  }
+  return housePost;
+}
+
+/** Re-render the listing card in place after a rating lands — in EVERY
+ *  mirror. Best-effort: a deleted thread or archived card just skips. */
 async function refreshListingCard(client: Client, listing: CompanionListing, store: MemoryStore): Promise<void> {
-  if (!listing.forumThreadId || !config.marketplaceChannelId) return;
-  const channel = await client.channels.fetch(config.marketplaceChannelId).catch(() => null);
-  const thread = channel && channel.type === ChannelType.GuildForum
-    ? await channel.threads.fetch(listing.forumThreadId).catch(() => null)
-    : null;
-  if (!thread) return;
-  const starter = await thread.fetchStarterMessage().catch(() => null);
-  if (!starter) return;
   const creator = await client.users.fetch(listing.creatorUserId).catch(() => null);
   const creatorName = creator?.globalName ?? creator?.username ?? "a creator";
   const stats = await store.listingRatingStats(listing.id).catch(() => undefined);
-  await starter.edit({
-    embeds: [buildListingCard(listing, creatorName, stats)],
-    components: [buildListingComponents(listing.id)],
-  }).catch(() => {});
+  await eachListingThread(client, listing, store, async (thread) => {
+    const starter = await thread.fetchStarterMessage?.().catch(() => null) as { edit(o: { embeds: EmbedBuilder[]; components: ActionRowBuilder<ButtonBuilder>[] }): Promise<unknown> } | null;
+    if (!starter) return;
+    await starter.edit({
+      embeds: [buildListingCard(listing, creatorName, stats)],
+      components: [buildListingComponents(listing.id)],
+    }).catch(() => {});
+  });
 }
 
 /** Rating gate: on the house guild, a verified Member (or a marketplace mod —
@@ -762,13 +824,15 @@ async function unlistListing(interaction: ChatInputCommandInteraction | ButtonIn
     }
     return interaction.reply({ content: refused, ephemeral: true });
   }
-  if (listing.forumThreadId && config.marketplaceChannelId) {
-    const channel = await interaction.client.channels.fetch(config.marketplaceChannelId).catch(() => null);
-    const thread = channel && channel.type === ChannelType.GuildForum
-      ? await channel.threads.fetch(listing.forumThreadId).catch(() => null)
-      : null;
-    if (thread) await thread.setLocked(true).then(() => thread.setArchived(true)).catch(() => {});
+  // Every mirror archives, not just the house card — partner shelves can't
+  // keep selling a delisted listing. forum_thread_id covers listings whose
+  // house post predates the listing_posts backfill.
+  const live = await store.liveListingPosts(listing.id).catch(() => [] as Awaited<ReturnType<MemoryStore["liveListingPosts"]>>);
+  if (listing.forumThreadId && !live.some(p => p.threadId === listing.forumThreadId)) {
+    live.push({ listingId: listing.id, guildId: config.houseGuildId ?? "house", threadId: listing.forumThreadId, status: "live", lastError: null });
   }
+  await archiveListingPosts(channelFetcher(interaction.client), live).catch(() => {});
+  await store.markAllListingPosts(listing.id, "live", "archived").catch(() => {});
   const content = `**${listing.name}** has been removed from the marketplace. Bring it back anytime with \`/companion relist\`.`;
   if (typeof (interaction as ButtonInteraction).isButton === "function" && (interaction as ButtonInteraction).isButton()) {
     return (interaction as ButtonInteraction).update({ content, components: [] });
@@ -803,14 +867,14 @@ async function doRelist(
         : "That listing isn't yours to relist.";
     return reply(msg);
   }
-  const threadId = await postListingThread(interaction, res.listing, store);
+  const threadId = await publishToAllMirrors(interaction.client, interaction.user.globalName ?? interaction.user.username ?? "a creator", res.listing, store);
   if (!threadId) {
     await store.delistListing(res.listing.id);
     return reply("I couldn't create the forum post — check my permissions in the marketplace channel.");
   }
   await store.setListingThread(res.listing.id, threadId);
   inc("market.relisted");
-  const tagRow = await tagPickerRow(interaction.client, res.listing.id);
+  const tagRow = await tagPickerRow(interaction.client, res.listing.id, interaction.guildId);
   return reply(
     `**${res.listing.name}** is back on the shelf in <#${config.marketplaceChannelId}>!` +
     (tagRow ? " Pick the tags that fit it below." : "") +
@@ -869,7 +933,7 @@ function companionAction(interaction: { options: { getSubcommand?(required?: boo
  *  private #adoptees thread and lands the greeting. Returns a UI-ready mention
  *  or the fallback the caller should show. */
 async function adopteeThreadResult(
-  args: { adoption: CompanionAdoption; companion: Companion; listing: { id: number; greeting: string } | null; username: string; reopen?: boolean },
+  args: { adoption: CompanionAdoption; companion: Companion; listing: { id: number; greeting: string } | null; username: string; reopen?: boolean; targetGuildId?: string | null },
 ): Promise<{ thread?: string; needsInvite?: true; failed?: true }> {
   const deps = getOpsDeps();
   if (!deps) return { failed: true };
@@ -1109,9 +1173,13 @@ export const commandDefinitions = [
       { name: "announce — post to the announcements channel", value: "announce" },
       { name: "layout — reconcile house channels, perms + resource posts", value: "layout" },
       { name: "seedmarket — populate the marketplace with the official roster", value: "seedmarket" },
+      { name: "deploygrant — approve a partner server for marketplace deploy", value: "deploygrant" },
+      { name: "deploystatus — show a server's marketplace deployment state", value: "deploystatus" },
+      { name: "deployrevoke — pull a server's marketplace deployment", value: "deployrevoke" },
     ] },
     { name: "text", description: "Announcement text (action=announce)", type: 3, required: false },
     { name: "lines", description: "Journal lines for action=logs (default 30, max 200)", type: 4, required: false },
+    { name: "guild", description: "Target server id (deploygrant/deploystatus/deployrevoke)", type: 3, required: false },
   ] },
   // Message context menu — right-click → Apps → "Report message" on a comment
   // inside a marketplace listing thread. Validated to that surface in the
@@ -1122,6 +1190,10 @@ export const commandDefinitions = [
   // "Pin to memory" — right-click any message to store it as a pinned memory.
   { name: "Pin to memory", type: 3 },
 ];
+
+/** Guild-scoped partner command — defined in ops.ts (the grant action
+ *  registers it); re-exported so index.ts can seed it on boot. */
+export { MARKETPLACE_GUILD_COMMAND } from "./ops.js";
 
 const confidence = (value: number | undefined) => {
   if (value === undefined) return "Unknown";
@@ -1181,13 +1253,69 @@ export const SERVER_ONLY_COMMANDS = new Set([
   "companions-pause", "companions-resume",
   "status", "memory-triage",
   "limits", "ignore-channel", "unignore-channel", "quiet-channel", "unquiet-channel",
-  "share-facts",
+  "share-facts", "marketplace",
 ]);
 
 /** Command definitions with Discord install contexts applied — the app
  *  supports guild + user installs (dev portal), so DM-safe commands are
  *  invocable in the App DM (contexts: 0=guild, 1=bot DM; private channels
  *  (2) deliberately excluded) while server-only ones stay guild-scoped. */
+/** `/marketplace deploy|status|remove` — the partner-server admin surface.
+ *  Registered guild-scoped only in ops-granted guilds; the grant row is
+ *  re-checked here anyway since Discord caches command visibility. */
+async function handleMarketplaceCommand(interaction: ChatInputCommandInteraction, store: MemoryStore) {
+  const deps = getOpsDeps();
+  if (!deps) return interaction.reply({ content: "Still starting up — try again in a moment.", ephemeral: true });
+  const guildId = interaction.guildId;
+  if (!guildId) return interaction.reply({ content: "This only runs inside a Discord server.", ephemeral: true });
+  const sub = (() => { try { return interaction.options.getSubcommand(false); } catch { return null; } })() ?? "status";
+  const row = await store.deploymentFor(guildId).catch(() => null);
+
+  if (sub === "status") {
+    if (!row) return interaction.reply({ content: "This server doesn't have a Characterly deployment.", ephemeral: true });
+    const posts = await store.listingPostsForGuild(guildId).catch(() => [] as Awaited<ReturnType<MemoryStore["listingPostsForGuild"]>>);
+    const live = posts.filter(p => p.status === "live").length;
+    const failed = posts.filter(p => p.status === "failed").length;
+    return interaction.reply({
+      ephemeral: true,
+      embeds: [new EmbedBuilder()
+        .setTitle("Marketplace deployment")
+        .setDescription(
+          `**Status:** ${row.status}\n` +
+          `**Shelf:** ${row.marketplaceChannelId ? `<#${row.marketplaceChannelId}>` : "not created yet"}\n` +
+          `**Adoptees:** ${row.adopteesChannelId ? `<#${row.adopteesChannelId}>` : "not created yet"}\n` +
+          `**Mirrored listings:** ${live} live${failed ? ` · ${failed} retrying` : ""}` +
+          (row.lastError ? `\n**Last error:** ${row.lastError}` : "")),
+      ],
+    });
+  }
+
+  if (sub === "deploy") {
+    if (!row) {
+      return interaction.reply({ content: "This server isn't approved for the Characterly marketplace yet — deployment is in a quiet pilot; ask in the Characterly server to be added.", ephemeral: true });
+    }
+    await interaction.deferReply({ ephemeral: true });
+    const res = await deployMarketplace(deps, guildId, interaction.user.id).catch(e => ({ ok: false as const, error: String((e as Error)?.message ?? e) }));
+    if (!res.ok) return interaction.editReply(res.error ?? "Deployment failed.");
+    return interaction.editReply(
+      `**Deployed.** ${res.created?.length ? `Created: ${res.created.join(", ")}.` : "Surfaces already existed — reconciled."} ` +
+      `The shelf is syncing: **${res.posted ?? 0}** listings mirrored${res.failed ? `, ${res.failed} retrying in the background` : ""}. ` +
+      `Members browse **#characters** and hit **Add** — their private threads open under **#adoptees**.`,
+    );
+  }
+
+  if (sub === "remove") {
+    await interaction.deferReply({ ephemeral: true });
+    const res = await removeDeployment(deps, guildId).catch(e => ({ ok: false as const, error: String((e as Error)?.message ?? e) }));
+    if (!res.ok) return interaction.editReply(res.error ?? "Remove failed.");
+    return interaction.editReply(
+      `**Removed.** ${res.archived ?? 0} mirrored post${res.archived === 1 ? "" : "s"} archived — the catalog stops syncing here. ` +
+      `Members' adoptions stay theirs; their threads re-open in the Characterly house server when they next talk. ` +
+      `You can delete the Characterly category whenever you're ready.`,
+    );
+  }
+}
+
 export function scopedCommandDefinitions<T extends { name: string }>(defs: readonly T[]): T[] {
   return defs.map(def => SERVER_ONLY_COMMANDS.has(def.name)
     ? { ...def, integrationTypes: [0], contexts: [0] }
@@ -1198,6 +1326,10 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
   // /ops self-gates on OPS_USER_IDS and house-guild context — dispatch before
   // the server-only/link gates so an allowlisted operator can use it in DMs.
   if (interaction.commandName === "ops") return handleOpsCommand(interaction);
+  // /marketplace is guild-scoped to granted deployments — registered only
+  // there, but the handler still re-checks (a forged/stale command id on an
+  // ungranted guild gets refused, not an error).
+  if (interaction.commandName === "marketplace") return handleMarketplaceCommand(interaction, store);
   if (!interaction.guildId && SERVER_ONLY_COMMANDS.has(interaction.commandName)) {
     return interaction.reply({ content: "That command can only be used inside a Discord server.", ephemeral: true });
   }
@@ -1761,7 +1893,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
           return interaction.reply({ content: msg, ephemeral: true });
         }
         const t = res.adoption
-          ? await adopteeThreadResult({ adoption: res.adoption, companion: res.companion, listing: dupe, username: interaction.user.username, reopen: true })
+          ? await adopteeThreadResult({ adoption: res.adoption, companion: res.companion, listing: dupe, username: interaction.user.username, reopen: true, targetGuildId: interaction.guildId })
           : {};
         return interaction.reply({
           ephemeral: true,
@@ -2620,7 +2752,7 @@ export async function handleCompanionModal(
       return interaction.reply({ content: res.reason === "daily_cap" ? DAILY_PUBLISH_MSG : LISTING_CAP_MSG, ephemeral: true });
     }
     const listing = res.listing;
-    const threadId = await postListingThread(interaction, listing, store);
+    const threadId = await publishToAllMirrors(interaction.client, interaction.user.globalName ?? interaction.user.username ?? "a creator", listing, store);
     if (!threadId) {
       await store.delistListing(listing.id);
       return interaction.reply({ content: "I couldn't create the forum post — check my permissions in the marketplace channel.", ephemeral: true });
@@ -2631,7 +2763,7 @@ export async function handleCompanionModal(
       new ButtonBuilder().setCustomId(`market:editmodal:${listing.id}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`market:cover:${listing.id}`).setLabel("Cover image").setStyle(ButtonStyle.Secondary),
     );
-    const tagRow = await tagPickerRow(interaction.client, listing.id);
+    const tagRow = await tagPickerRow(interaction.client, listing.id, interaction.guildId);
     return interaction.reply({
       ephemeral: true,
       content:
@@ -2704,7 +2836,7 @@ export async function handleCompanionModal(
       });
     }
     const listing = res.listing;
-    const threadId = await postListingThread(interaction, listing, store);
+    const threadId = await publishToAllMirrors(interaction.client, interaction.user.globalName ?? interaction.user.username ?? "a creator", listing, store);
     if (!threadId) {
       await store.delistListing(listing.id);
       return interaction.reply({ content: "I couldn't create the forum post — check my permissions in the marketplace channel.", ephemeral: true });
@@ -2716,7 +2848,7 @@ export async function handleCompanionModal(
       new ButtonBuilder().setCustomId(`market:editmodal:${listing.id}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`market:cover:${listing.id}`).setLabel("Cover image").setStyle(ButtonStyle.Secondary),
     );
-    const tagRow = await tagPickerRow(interaction.client, listing.id);
+    const tagRow = await tagPickerRow(interaction.client, listing.id, interaction.guildId);
     return interaction.reply({
       ephemeral: true,
       content:
@@ -2805,11 +2937,14 @@ export async function handleCompanionModal(
           : `Edits saved (v${listing.version}) — **${listing.name}** is still under review, so the marketplace post stays down until a moderator clears it.`,
       });
     }
-    if (existing?.forumThreadId) {
-      const old = await channel.threads.fetch(existing.forumThreadId).catch(() => null);
-      if (old) await old.setLocked(true).then(() => old.setArchived(true)).catch(() => {});
+    // Republish replaces the card in EVERY mirror — stale posts archive first
+    // (the forum_thread_id fallback covers listings predating listing_posts).
+    const prevPosts = await store.liveListingPosts(listing.id).catch(() => [] as Awaited<ReturnType<MemoryStore["liveListingPosts"]>>);
+    if (existing?.forumThreadId && !prevPosts.some(p => p.threadId === existing.forumThreadId)) {
+      prevPosts.push({ listingId: listing.id, guildId: config.houseGuildId ?? "house", threadId: existing.forumThreadId, status: "live", lastError: null });
     }
-    const threadId = await postListingThread(interaction, listing, store);
+    if (prevPosts.length) await archiveListingPosts(channelFetcher(interaction.client), prevPosts).catch(() => {});
+    const threadId = await publishToAllMirrors(interaction.client, interaction.user.globalName ?? interaction.user.username ?? "a creator", listing, store);
     if (!threadId) {
       await store.delistListing(listing.id);
       return interaction.reply({ content: "I couldn't create the forum post — check my permissions in the marketplace channel.", ephemeral: true });
@@ -2820,7 +2955,7 @@ export async function handleCompanionModal(
       new ButtonBuilder().setCustomId(`market:editmodal:${listing.id}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`market:cover:${listing.id}`).setLabel("Cover image").setStyle(ButtonStyle.Secondary),
     );
-    const tagRow = await tagPickerRow(interaction.client, listing.id);
+    const tagRow = await tagPickerRow(interaction.client, listing.id, interaction.guildId);
     return interaction.reply({
       ephemeral: true,
       content:
@@ -3040,7 +3175,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         return interaction.update({ content: msg, components: [] });
       }
       const t = res.adoption
-        ? await adopteeThreadResult({ adoption: res.adoption, companion: res.companion, listing: created.listing, username: interaction.user.username, reopen: true })
+        ? await adopteeThreadResult({ adoption: res.adoption, companion: res.companion, listing: created.listing, username: interaction.user.username, reopen: true, targetGuildId: interaction.guildId })
         : {};
       inc("market.imported");
       return interaction.update({
@@ -3173,20 +3308,22 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       if (!listing) {
         return interaction.update({ content: `Listing ${listingId} no longer exists.`, components: [] });
       }
-      const archiveThread = async (threadId: string | null) => {
-        if (!threadId || !config.marketplaceChannelId) return;
-        const channel = await interaction.client.channels.fetch(config.marketplaceChannelId).catch(() => null);
-        const thread = channel && channel.type === ChannelType.GuildForum
-          ? await channel.threads.fetch(threadId).catch(() => null)
-          : null;
-        if (thread) await thread.setLocked(true).then(() => thread.setArchived(true)).catch(() => {});
+      // Archive EVERY mirror — a mod delist/ban can't leave the card live on
+      // partner shelves. forum_thread_id covers pre-backfill house posts.
+      const archiveAll = async (l: CompanionListing) => {
+        const posts = await store.liveListingPosts(l.id).catch(() => [] as Awaited<ReturnType<MemoryStore["liveListingPosts"]>>);
+        if (l.forumThreadId && !posts.some(p => p.threadId === l.forumThreadId)) {
+          posts.push({ listingId: l.id, guildId: config.houseGuildId ?? "house", threadId: l.forumThreadId, status: "live", lastError: null });
+        }
+        await archiveListingPosts(channelFetcher(interaction.client), posts);
+        await store.markAllListingPosts(l.id, "live", "archived").catch(() => {});
       };
       if (action === "unflag" || action === "delist" || action === "ban") {
         const updated = await store.modAction(listingId, userId, action);
         if (!updated) {
           return interaction.update({ content: `**${listing.name}** is already ${listing.status} — nothing to do.`, components: [] });
         }
-        if (action !== "unflag") await archiveThread(listing.forumThreadId);
+        if (action !== "unflag") await archiveAll(listing);
         // Adoptee threads: a banned listing freezes its clones' chats; an
         // unflag that restores to live unlocks them again. Delist keeps
         // clones (and their threads) alive.
@@ -3216,7 +3353,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       }
       if (action === "bancreator") {
         const banned = await store.banCreator(listing.creatorUserId, userId);
-        for (const l of banned) await archiveThread(l.forumThreadId);
+        for (const l of banned) await archiveAll(l);
         const depsB = getOpsDeps();
         if (depsB) {
           for (const l of banned) {
@@ -3310,7 +3447,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       if (target.author.id === userId) {
         return interaction.update({ content: "You can't report your own comment.", components: [] });
       }
-      const listing = await store.listingByThreadId(channelId).catch(() => null);
+      const listing = await store.listingByPostThreadId(channelId).catch(() => null);
       const rep = await store.reportComment({
         listingId: listing?.id ?? null,
         threadId: channelId,
@@ -3419,7 +3556,11 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       return interaction.update({ content: `Rated **${listing.name}** ${"★".repeat(stars)} — the card's been updated.`, components: [] });
     }
 
-    if (sub === "add") {
+    if (sub === "addcancel") {
+      return interaction.update({ content: "Adoption cancelled — nothing changed.", components: [] });
+    }
+
+    if (sub === "add" || sub === "confirmadd") {
       const listing = await store.listingById(id);
       if (!listing || listing.status !== "active") {
         return interaction.reply({ content: "That listing is no longer available.", ephemeral: true });
@@ -3451,6 +3592,25 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
         return interaction.reply({ ephemeral: true,
           content: `You need to **log in** to adopt companions — press **Verify** in ${config.houseVerifyChannelId ? `<#${config.houseVerifyChannelId}>` : "the gate channel"} to link your account or add a personal BYOK key, then hit **Add** again.` });
       }
+      // Partner-server adoption: the private thread is created HERE, and this
+      // server's admins can read private threads — disclose it once before the
+      // adoption lands. The confirm button re-enters this branch with the
+      // disclosure bypassed.
+      const originDep = interaction.guildId ? deploymentFor(interaction.guildId) : null;
+      const partnerGuild = !!originDep && originDep.status === "active" && originDep.guildId !== config.houseGuildId;
+      if (sub === "add" && partnerGuild) {
+        const guildName = (interaction as { guild?: { name?: string } }).guild?.name ?? "this server";
+        return interaction.reply({
+          ephemeral: true,
+          content:
+            `**Quick heads-up** — your private chat with **${listing.name}** will live in **${guildName}**. ` +
+            `That server's admins can read private threads here (your Characterly DMs stay ours alone). Adopt anyway?`,
+          components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder().setCustomId(`market:confirmadd:${id}`).setLabel("Adopt here").setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`market:addcancel:${id}`).setLabel("Cancel").setStyle(ButtonStyle.Secondary),
+          )],
+        });
+      }
       // Self-host lane has no billing → no adoption cap; hosted free = FREE_ADOPTION_SLOTS, premium uncapped.
       // The daily anti-farming cap is enforced inside the transaction so
       // parallel Add clicks can't both squeeze under it.
@@ -3470,6 +3630,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       const t = await adopteeThreadResult({
         adoption: res.adoption, companion: res.companion, listing,
         username: interaction.user.username, reopen: true,
+        targetGuildId: interaction.guildId,
       });
       inc("market.adopted");
       // A user who only ever adopts never sees the DM onboarding path — keep
@@ -4145,10 +4306,10 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
 // a comment can't steal a character; that one's listing-only.
 const COMMENT_REPORT_CATEGORIES = REPORT_CATEGORIES.filter(([c]) => c !== "theft");
 
-/** Creator tag select — `market:tagsel:{listingId}`. Re-checks ownership at
- *  submit (picks can arrive long after the ephemeral reply rendered), drops
- *  forged tag ids against the forum's live non-moderated tags, and merges the
- *  moderated curated badges back in so a re-tag can't strip them. */
+/** Creator tag select — `market:tagsel:{listingId}`. Options carry tag NAMES
+ *  (v59): ids differ per forum, so the picks persist to `creator_tags` and
+ *  re-resolve against each mirror's live taxonomy. Ownership re-checks at
+ *  submit; curated badges on each thread are preserved across a re-tag. */
 export async function handleMarketSelect(interaction: StringSelectMenuInteraction, store: MemoryStore) {
   const parts = interaction.customId.split(":");
   if (parts[0] !== "market" || parts[1] !== "tagsel") return;
@@ -4157,31 +4318,45 @@ export async function handleMarketSelect(interaction: StringSelectMenuInteractio
   if (!listing || listing.creatorUserId !== interaction.user.id) {
     return interaction.update({ content: "That's not your listing to tag.", components: [] });
   }
-  const channel = config.marketplaceChannelId
-    ? await interaction.client.channels.fetch(config.marketplaceChannelId).catch(() => null)
-    : null;
-  const thread = channel && channel.type === ChannelType.GuildForum && listing.forumThreadId
-    ? await channel.threads.fetch(listing.forumThreadId).catch(() => null)
-    : null;
-  if (!thread) {
-    return interaction.update({ content: "That listing's thread isn't reachable.", components: [] });
+  // Whitelist: non-moderated names from the canonical taxonomy plus the
+  // live forum the picker rendered — house forums can carry tags outside
+  // PARTNER_TAG_SET and dropping them here would silently eat real picks. A
+  // forged option still can't smuggle a moderated badge or arbitrary string.
+  const allowed = new Set(PARTNER_TAG_SET.filter(t => !t.moderated).map(t => t.name.toLowerCase()));
+  const forumId = (interaction.guildId ? deploymentFor(interaction.guildId)?.marketplaceChannelId : null) ?? config.marketplaceChannelId;
+  const renderedForum = forumId ? await interaction.client.channels.fetch(forumId).catch(() => null) : null;
+  if (renderedForum && renderedForum.type === ChannelType.GuildForum) {
+    for (const t of renderedForum.availableTags ?? []) if (!t.moderated) allowed.add(t.name.toLowerCase());
   }
-  const available = channel && channel.type === ChannelType.GuildForum ? channel.availableTags ?? [] : [];
-  const pickable = new Set(available.filter(t => !t.moderated).map(t => t.id));
-  const moderated = new Set(available.filter(t => t.moderated).map(t => t.id));
-  const picks = interaction.values.filter(v => pickable.has(v)).slice(0, 3);
-  // Curated badges are preserved across a re-tag — only the creator's own
-  // selections are replaced by `picks`.
-  const keep = (thread.appliedTags ?? []).filter(t => moderated.has(t));
-  const ok = await thread.setAppliedTags([...keep, ...picks].slice(0, 5))
-    .then(() => true).catch(() => false);
-  if (!ok) {
-    return interaction.update({ content: "I couldn't update the tags — check my permissions on the forum.", components: [] });
+  const picks = interaction.values.filter(v => allowed.has(v.toLowerCase())).slice(0, 3);
+  await store.setListingCreatorTags(listing.id, picks).catch(() => {});
+  listing.creatorTags = picks;
+
+  // Apply to every mirror: names → each forum's local tag ids; that thread's
+  // moderated badges keep their slots.
+  let applied = 0;
+  const namesLower = new Set(picks.map(p => p.toLowerCase()));
+  const posts = await store.listingPostsFor(listing.id).catch(() => [] as Awaited<ReturnType<MemoryStore["listingPostsFor"]>>);
+  for (const dep of deployTargets()) {
+    const post = posts.find(p => p.guildId === dep.guildId && p.threadId)
+      ?? (dep.guildId === config.houseGuildId && listing.forumThreadId
+        ? { threadId: listing.forumThreadId } as { threadId: string } : null);
+    if (!post?.threadId) continue;
+    const forum = await interaction.client.channels.fetch(dep.marketplaceChannelId!).catch(() => null);
+    const thread = await interaction.client.channels.fetch(post.threadId).catch(() => null) as MirrorThread | null;
+    if (!forum || forum.type !== ChannelType.GuildForum || !thread?.setAppliedTags) continue;
+    const available = forum.availableTags ?? [];
+    const idByName = new Map(available.filter(t => !t.moderated).map(t => [t.name.toLowerCase(), t.id] as const));
+    const moderated = new Set(available.filter(t => t.moderated).map(t => t.id));
+    const pickIds = picks.map(n => idByName.get(n.toLowerCase())).filter((x): x is string => !!x);
+    const keep = (thread.appliedTags ?? []).filter(t => moderated.has(t));
+    const ok = await thread.setAppliedTags([...keep, ...pickIds].slice(0, 5)).then(() => true).catch(() => false);
+    if (ok) applied++;
   }
   inc("market.tagged");
   return interaction.update({
     content: picks.length
-      ? `Tags saved — ${picks.map(id => available.find(t => t.id === id)?.name ?? id).join(", ")} on **${listing.name}**.`
+      ? `Tags saved — ${picks.join(", ")} on **${listing.name}**${applied > 1 ? ` (mirrored to ${applied} servers)` : ""}.`
       : `Tags cleared on **${listing.name}**.`,
     components: [],
   });
@@ -4192,7 +4367,9 @@ export async function handleMarketSelect(interaction: StringSelectMenuInteractio
 async function handleReportMessageCommand(interaction: MessageContextMenuCommandInteraction) {
   const target = interaction.targetMessage;
   const channel = target.channel ?? interaction.channel;
-  if (!isHouse(interaction.guildId) || !isMarketplaceThread(channel)) {
+  // Deployment-aware: any mirrored listing thread is reportable — the report
+  // still lands in the house's mod queue (moderation is central).
+  if (!isMarketplaceThread(channel)) {
     return interaction.reply({ content: "This only works on comments inside marketplace listings.", ephemeral: true });
   }
   if (target.author.id === interaction.user.id) {
@@ -4244,7 +4421,27 @@ async function handleStaffPickCommand(interaction: MessageContextMenuCommandInte
   const next = has ? applied.filter(t => t !== tag.id) : [tag.id, ...applied].slice(0, 5);
   const ok = await thread.setAppliedTags(next).then(() => true).catch(() => false);
   if (!ok) return interaction.reply({ content: "Couldn't update the thread's tags — check my permissions.", ephemeral: true });
-  const listing = await store.listingByThreadId(channel.id).catch(() => null);
+  const listing = await store.listingByPostThreadId(channel.id).catch(() => null);
+  // Propagate the badge to every mirror — each forum's "Staff Pick" tag id
+  // resolves locally; threads that lack it simply skip.
+  if (listing) {
+    const fresh = { ...listing };
+    await eachListingThread(interaction.client, fresh, store, async (t) => {
+      if (t.id === channel.id || !t.setAppliedTags) return;
+      // The mirror's forum tag id for the same NAME — resolve via its parent.
+      const parentId = (t as { parentId?: string | null }).parentId;
+      const forum = parentId ? await interaction.client.channels.fetch(parentId).catch(() => null) : null;
+      const mirrorTag = forum && forum.type === ChannelType.GuildForum
+        ? forum.availableTags?.find(x => x.name.toLowerCase() === CURATED_TAGS.staffPick.toLowerCase())
+        : null;
+      if (!mirrorTag) return;
+      const cur = t.appliedTags ?? [];
+      const nextTags = has ? cur.filter(x => x !== mirrorTag.id) : [mirrorTag.id, ...cur].slice(0, 5);
+      if (nextTags.length !== cur.length || nextTags.some((x, i) => x !== cur[i])) {
+        await t.setAppliedTags(nextTags).catch(() => {});
+      }
+    });
+  }
   inc("market.staffpick");
   return interaction.reply({
     content: has

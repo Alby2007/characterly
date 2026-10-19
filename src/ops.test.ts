@@ -7,6 +7,7 @@ import {
   ensureVerifyGate, handleHouseButton, runMemberLinkSweep, runTagSweep, ensureResourcePosts,
   ensureTicketPanel, handleTicketButton, handleTicketModal,
   ensureAdopteeThread, setAdopteeThreadLocked, backfillAdopteeThreads,
+  removeDeployment, syncDeployments,
   TERMS_VERSION, RESOURCE_POSTS,
   type OpsDeps, type AutomodMessage, type MemberLike,
 } from "./ops.js";
@@ -14,6 +15,7 @@ import { PermissionFlagsBits } from "discord.js";
 import { config } from "./config.js";
 import { SEED_LISTINGS } from "./seed-personas.js";
 import type { MemoryStore } from "./database.js";
+import type { GuildDeployment } from "./types.js";
 
 // Config is a plain object — tests pin house/ops ids and restore on exit.
 const prev = {
@@ -1465,6 +1467,7 @@ function forumDeps(threads: ReturnType<typeof makeThread>[], over: {
   return makeDeps({
     store: {
       listActiveListingsWithThreads: async () => over.listings ?? [],
+      listActiveListingPosts: async () => [],
       ratingStatsByListing: async () => over.stats ?? new Map(),
       recentAdoptionCounts: async () => over.velocity ?? new Map(),
     } as unknown as MemoryStore,
@@ -1583,6 +1586,8 @@ test("/ops seedmarket: creates missing personas with genre tags, skips existing,
       relistListing: async (id: number) => { relisted.push(id); return { ok: true, listing: { ...beansRow, status: "active" } }; },
       delistListing: async () => true,
       setListingThread: async () => true,
+      setListingPost: async () => true,
+      setListingPostFailed: async () => true,
       listingRatingStats: async () => undefined,
     } as unknown as MemoryStore,
   }));
@@ -1702,6 +1707,7 @@ function adopteeDeps(opts: {
   const deps = makeDeps({
     store: {
       setAdoptionThread: async (a: number, t: string) => { stamped.push([a, t]); },
+      setAdoptionLocation: async (a: number, loc: { threadId?: string | null }) => { stamped.push([a, loc.threadId ?? ""]); },
       markDmIntroduced: async (a: number) => { introduced.push(a); },
       activeAdoptionsForUser: async () => [],
       activeAdoptionsMissingThreads: async () => opts.missingRows ?? [],
@@ -1717,12 +1723,17 @@ test("isAdopteeThread: env-id parent matches; name fallback catches pre-env chan
   assert.equal(isAdopteeThread({ isThread: () => true, parentId: "c-elsewhere" }), false);
   assert.equal(isAdopteeThread(null), false);
   assert.equal(isAdopteeThread({ isThread: () => true }), false);
-  const saved = config.houseAdopteesChannelId;
+  const saved = { a: config.houseAdopteesChannelId, g: config.houseGuildId };
   config.houseAdopteesChannelId = undefined;
+  config.houseGuildId = "g-house";
   try {
-    assert.equal(isAdopteeThread({ isThread: () => true, parent: { name: "#Adoptees" } }), true);
-    assert.equal(isAdopteeThread({ isThread: () => true, parent: { name: "support-ticket" } }), false);
-  } finally { config.houseAdopteesChannelId = saved; }
+    // The name fallback only fires in the house guild — a foreign server's
+    // "adoptees" channel is just a channel, not our surface.
+    assert.equal(isAdopteeThread({ isThread: () => true, guildId: "g-house", parent: { name: "#Adoptees" } }), true);
+    assert.equal(isAdopteeThread({ isThread: () => true, guildId: "g-house", parent: { name: "support-ticket" } }), false);
+    assert.equal(isAdopteeThread({ isThread: () => true, guildId: "g-other", parent: { name: "#Adoptees" } }), false);
+    assert.equal(isAdopteeThread({ isThread: () => true, parent: { name: "#Adoptees" } }), false, "no guild context → no match");
+  } finally { config.houseAdopteesChannelId = saved.a; config.houseGuildId = saved.g; }
 });
 
 test("ensureAdopteeThread: creates a named private thread, adds the adopter, greets, stamps", async () => {
@@ -1803,6 +1814,32 @@ test("setAdopteeThreadLocked: lock posts the note then locks+archives; unlock re
   await setAdopteeThreadLocked(deps, "t-gone", true);
 });
 
+test("ensureAdopteeThread: a dead partner deployment relocates the adoption to the house", async () => {
+  const created: Array<Record<string, unknown>> = [];
+  const stamped: Array<[number, string]> = [];
+  const cleared: Array<[number, unknown]> = [];
+  const thread = makeAdopteeThread("t-home");
+  const { deps } = adopteeDeps({ thread, created, stamped });
+  (deps.store as { setAdoptionLocation(a: number, loc: unknown): Promise<void> })
+    .setAdoptionLocation = async (a, loc) => {
+      cleared.push([a, loc]);
+      const t = (loc as { threadId?: string | null }).threadId;
+      if (t) stamped.push([a, t]);
+    };
+  // The adoption is homed in a partner guild that no longer has a live
+  // deployment (revoked/purged) — ensure must collapse it to the house and
+  // build the thread there instead of failing or re-homing dead.
+  const fixture = adopteeFixture();
+  (fixture.adoption as unknown as { chatGuildId: string | null }).chatGuildId = "g-partner";
+  const res = await ensureAdopteeThread(deps, fixture as never);
+  assert.ok("thread" in res && res.created, "house thread created after relocation");
+  assert.equal(created.length, 1);
+  // First stamp clears the partner location, second writes the house home.
+  const clear = cleared.find(([, loc]) => (loc as { guildId?: string | null }).guildId === null && (loc as { threadId?: string | null }).threadId === null);
+  assert.ok(clear, "partner location cleared during relocation");
+  assert.deepEqual(stamped, [[7, "t-home"]]);
+});
+
 test("backfillAdopteeThreads: creates threads for members, skips non-members", async () => {
   const created: Array<Record<string, unknown>> = [];
   const stamped: Array<[number, string]> = [];
@@ -1872,4 +1909,82 @@ test("house member update: gaining the Member role re-attaches adoptee threads",
     await handleHouseMemberUpdate(hasRole, makeMember({ id: "u-adopter", hasRole: true }), deps);
     assert.deepEqual(live.addedMembers, []);
   } finally { config.houseMemberRoleId = saved; }
+});
+
+// ── Deployment lifecycle (v59) ───────────────────────────────────────────────
+
+test("rejoining adopters get their thread UNLOCKED — leave locks it, rejoin must reverse both halves", async () => {
+  // handleDeploymentMemberRemove locks+archives; the rejoin path used to
+  // unarchive but left the lock — the member could read but never type.
+  const live = makeAdopteeThread("t-rejoin");
+  live.locked = true;
+  live.archived = true;
+  const created: Array<Record<string, unknown>> = [];
+  const { deps } = adopteeDeps({ created, channels: { "t-rejoin": live } });
+  const adoption = { ...adopteeFixture().adoption, chatThreadId: "t-rejoin" };
+  const rows = [{ ...adopteeFixture({ adoption }), username: "Joiner" }];
+  (deps.store as { activeAdoptionsForUser(uid: string): Promise<unknown[]> })
+    .activeAdoptionsForUser = async uid => uid === "u-adopter" ? rows : [];
+  await handleHouseMemberAdd(makeMember({ id: "u-adopter" }), deps);
+  assert.equal(created.length, 0, "existing thread reattached, not rebuilt");
+  assert.deepEqual(live.addedMembers, ["u-adopter"]);
+  assert.equal(live.archived, false);
+  assert.equal(live.locked, false, "the member-leave lock is released on rejoin");
+});
+
+test("removeDeployment: hosted adoptee threads seal and rehome — partner admins can't keep reading private chats", async () => {
+  const thread = makeAdopteeThread("t-hosted");
+  const located: Array<[number, unknown]> = [];
+  const statuses: string[] = [];
+  const { deps } = adopteeDeps({ channels: { "t-hosted": thread } });
+  (deps.store as any).deploymentFor = async () => ({ guildId: "g-partner", status: "active" });
+  (deps.store as any).setDeploymentStatus = async (_g: string, s: string) => { statuses.push(s); };
+  (deps.store as any).listingPostsForGuild = async () => [];
+  (deps.store as any).adoptionsInGuild = async () => [{ id: 7, userId: "u-adopter", chatThreadId: "t-hosted" }];
+  (deps.store as any).setAdoptionLocation = async (a: number, loc: unknown) => { located.push([a, loc]); };
+  (deps.store as any).deployments = async () => [];
+
+  const res = await removeDeployment(deps, "g-partner");
+  assert.ok(res.ok);
+  assert.deepEqual(statuses, ["disabled"]);
+  assert.equal(thread.locked && thread.archived, true, "the private thread is sealed in place");
+  assert.deepEqual(located, [[7, { guildId: null, channelId: null, threadId: null }]],
+    "the adoption row rehomes to the house — the next ensure rebuilds there");
+});
+
+test("syncDeployments: backfills listing_posts before the missing queue, and resets dead post rows when the forum is recreated", async () => {
+  const calls: string[] = [];
+  const partner = {
+    guildId: "g-partner", status: "active",
+    marketplaceChannelId: "c-forum-old", adopteesChannelId: "c-adoptees-old",
+    categoryId: "c-cat-old", deployedBy: null, deployedAt: null, lastError: null,
+  } as GuildDeployment;
+  const { deps } = adopteeDeps();
+  (deps.store as any).deployments = async () => [partner];
+  (deps.store as any).backfillListingPosts = async () => { calls.push("backfill"); };
+  (deps.store as any).resetListingPostsForGuild = async (g: string) => { calls.push(`reset:${g}`); };
+  (deps.store as any).missingListingPosts = async () => [];
+  // Record-only: the real row's cached `dep` object stays stale through the
+  // compare (refreshDeploymentCache rebuilds the map, it doesn't mutate) —
+  // mutating it here would mask the recreate-detection branch.
+  (deps.store as any).upsertDeployment = async () => { calls.push("upsert"); };
+  // The old forum is gone; the adoptees channel still lives.
+  deps.fetchChannel = async (id: string) => id === "c-adoptees-old" ? ({ id } as never) : null;
+  deps.fetchGuild = async () => ({
+    id: "g-partner",
+    features: ["COMMUNITY"],
+    channels: {
+      cache: { find: () => undefined },
+      create: async (o: { name: string; type: number }) => ({
+        id: `c-${o.name}-new`, name: o.name, type: o.type,
+      }),
+    },
+  } as never);
+  const saved = config.marketDeployEnabled;
+  config.marketDeployEnabled = true;
+  try {
+    await syncDeployments(deps);
+  } finally { config.marketDeployEnabled = saved; }
+  assert.ok(calls.includes("backfill"), "the pre-v59 seed runs before the queue computes");
+  assert.ok(calls.includes("reset:g-partner"), "dead forum → its 'live' post rows clear so the sweep reposts");
 });

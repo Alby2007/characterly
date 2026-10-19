@@ -18,6 +18,13 @@
 - Edge functions live under `supabase/functions/` and deploy via `npx supabase functions deploy <name> --project-ref tfukkoektmsrolykliop` — or, when the CLI isn't authed, the Supabase MCP `deploy_edge_function` tool (pass file contents; keep `verify_jwt`: `stripe-webhook`→false, `create-checkout`→true).
 - Stripe catalog lives on the `stripe` MCP (account `acct_1UQa85GAOUmNDfnh`, live). Prices/products are managed there; the ids are mirrored in `create-checkout`/`stripe-webhook` constants and `docs/operations.md` → Billing.
 
+## Partner deployments (multi-server marketplace, v59)
+
+- `guild_deployments` = per-server registry (house synthesized from env); `listing_posts` = the mirror map (nullable `thread_id` — failed rows use NULL, never `""`); `companion_adoptions.chat_guild_id` homes adoptee threads (NULL = house, lazy relocation back when the host dies).
+- `MARKET_DEPLOY_ENABLED=1` is the master switch — off refuses `/ops deploygrant`, `/marketplace deploy`, and the sync sweep. `/marketplace` is guild-scoped, registered only in granted servers.
+- Flow: `/ops deploygrant <guild_id>` → partner admin runs `/marketplace deploy` (requires Community mode + bot perms) → idempotent category/`#characters` forum/`#adoptees` layout → catalog backfill. `/ops deploystatus|deployrevoke` inspect/undo.
+- Everything fans out by tag NAME (ids differ per forum); delist/ban archive every mirror. Details: `docs/marketplace.md` → Partner deployments.
+
 ## Auth emails
 
 - Branded templates live in `supabase/templates/` (confirm / magic-link / recovery) and are referenced from `config.toml` for local dev. On the hosted project they're pasted into Dashboard → Authentication → Email Templates — keep the two in sync when editing.

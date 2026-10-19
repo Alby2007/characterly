@@ -106,6 +106,10 @@ const env = z.object({
   MARKET_TOP_RATING_MIN: z.coerce.number().int().min(1).default(5),
   MARKET_TRENDING_COUNT: z.coerce.number().int().min(1).default(5),
   MARKET_TRENDING_WINDOW_H: z.coerce.number().int().min(1).default(72),
+  // Multi-server marketplace: master switch for partner deployments
+  // (guild_deployments rows, mirrored listing posts, partner adoptee
+  // threads). Off = the marketplace stays house-only even if DB rows exist.
+  MARKET_DEPLOY_ENABLED: z.string().optional(),
   // Character-card imports: private unlisted listings a user can hold at once.
   // The adopted clones they spawn still consume normal adoption slots.
   CHARACTER_IMPORT_CAP: z.coerce.number().int().min(1).default(25),
@@ -244,6 +248,10 @@ export const config = {
   marketTopRatingMin: env.MARKET_TOP_RATING_MIN,
   marketTrendingCount: env.MARKET_TRENDING_COUNT,
   marketTrendingWindowH: env.MARKET_TRENDING_WINDOW_H,
+  // Partner-server marketplace deployments — kill switch for the whole
+  // multi-server layer (see ops.ts deployments). Command registration,
+  // handlers, and the sync sweep all no-op when unset.
+  marketDeployEnabled: env.MARKET_DEPLOY_ENABLED === "1",
   characterImportCap: env.CHARACTER_IMPORT_CAP,
   chatImportCap: env.CHAT_IMPORT_CAP,
   chatImportMaxWindows: env.CHAT_IMPORT_MAX_WINDOWS,

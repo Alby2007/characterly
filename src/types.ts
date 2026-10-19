@@ -332,7 +332,12 @@ export type CompanionListing = {
   backstory: string;
   greeting: string;
   avatarUrl: string | null;
+  /** House forum thread id — the canonical post. Mirrors in partner servers
+   *  live in listing_posts (v59); this column stays the house pointer. */
   forumThreadId: string | null;
+  /** Creator-picked forum tag NAMES (not ids — ids differ per deployed
+   *  forum; names are the sync currency across mirrors). */
+  creatorTags: string[];
   version: number;
   /** 'unlisted' = private import — browsable nowhere, adoptable only by its
    *  creator, free of the live-listing cap until published. */
@@ -354,8 +359,38 @@ export type CompanionAdoption = {
   droppedAt: string | null;
   cooldownUntil: string | null;
   dmIntroducedAt: string | null;
-  /** Private house thread under #adoptees where this companion chats (v54). */
+  /** Private thread under #adoptees where this companion chats (v54). With
+   *  v59 it can live in any deployed server — see chatGuildId. */
   chatThreadId: string | null;
+  /** Guild hosting chatThreadId — NULL means the house server. */
+  chatGuildId: string | null;
+  /** The adoptees channel the thread sits under (rebuilds target it). */
+  chatChannelId: string | null;
+};
+
+/** One server's Characterly deployment (v59): the marketplace forum +
+ *  adoptees surface a partner guild self-provisions via /marketplace deploy.
+ *  status: granted (ops allowed it, not yet deployed) | active | disabled. */
+export type GuildDeployment = {
+  guildId: string;
+  status: "granted" | "active" | "disabled";
+  marketplaceChannelId: string | null;
+  adopteesChannelId: string | null;
+  categoryId: string | null;
+  deployedBy: string | null;
+  deployedAt: string | null;
+  lastError: string | null;
+};
+
+/** A listing's forum thread in one server — the mirror map (v59). The house
+ *  post also keeps companion_listings.forum_thread_id in sync. */
+export type ListingPost = {
+  listingId: number;
+  guildId: string;
+  /** NULL on failed/pending rows — no thread was ever created. */
+  threadId: string | null;
+  status: "live" | "archived" | "failed" | "pending";
+  lastError: string | null;
 };
 
 export type CompanionSpec = {

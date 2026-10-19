@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto";
-import type { AppInstall, AttributeStatus, ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, ConversationSummary, EvidenceEffect, EvidenceType, GuildCompanion, JournalCandidate, JournalEntry, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, SupportTicket, VerificationVerdict, WebhookMessageRecord } from "./types.js";
+import type { AppInstall, AttributeStatus, ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, ConversationSummary, EvidenceEffect, EvidenceType, GuildCompanion, GuildDeployment, JournalCandidate, JournalEntry, ListingPost, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, SupportTicket, VerificationVerdict, WebhookMessageRecord } from "./types.js";
 import { sql as defaultSql, type Sql } from "./db.js";
 import { runMigrations } from "./migrations.js";
 import { findMentionedUsers } from "./entity-resolution.js";
@@ -424,6 +424,13 @@ export class MemoryStore {
       await tx`DELETE FROM jobs WHERE guild_id = ${guildId}`;
       await tx`DELETE FROM guild_usage WHERE guild_id = ${guildId}`;
       await tx`DELETE FROM server_settings WHERE guild_id = ${guildId}`;
+      // Multi-server marketplace (v59): the deployment and its mirrored
+      // listing posts die with the guild; adoptee threads hosted there are
+      // already gone, so hosted adoptions fall back to the house (NULL guild
+      // + cleared thread → next ensure rebuilds under house #adoptees).
+      await tx`DELETE FROM listing_posts WHERE guild_id = ${guildId}`;
+      await tx`DELETE FROM guild_deployments WHERE guild_id = ${guildId}`;
+      await tx`UPDATE companion_adoptions SET chat_guild_id = NULL, chat_channel_id = NULL, chat_thread_id = NULL WHERE chat_guild_id = ${guildId}`;
     });
     this.settingsCache.delete(guildId);
   }
@@ -2691,6 +2698,7 @@ export class MemoryStore {
       greeting: r.greeting,
       avatarUrl: r.avatar_url,
       forumThreadId: r.forum_thread_id,
+      creatorTags: r.creator_tags ?? [],
       version: Number(r.version),
       status: r.status,
       personaSource: r.persona_source ?? "authored",
@@ -2713,6 +2721,8 @@ export class MemoryStore {
       cooldownUntil: r.cooldown_until ? ts(r.cooldown_until) : null,
       dmIntroducedAt: r.dm_introduced_at ? ts(r.dm_introduced_at) : null,
       chatThreadId: r.chat_thread_id ?? null,
+      chatGuildId: r.chat_guild_id ?? null,
+      chatChannelId: r.chat_channel_id ?? null,
     };
   }
 
@@ -3458,6 +3468,259 @@ export class MemoryStore {
     return rows[0] ? this.rowToAdoption(rows[0]) : null;
   }
 
+  // ── Multi-server deployments (v59) ───────────────────────────────────────
+  // guild_deployments: one row per server running Characterly surfaces (house
+  // included — its row is seeded from env at boot). listing_posts: the mirror
+  // map — a canonical listing fans out to one forum thread per deployed
+  // server. companion_listings.forum_thread_id stays the HOUSE post pointer;
+  // this table is authoritative for everything.
+
+  private rowToDeployment(r: any): GuildDeployment {
+    return {
+      guildId: r.guild_id,
+      status: r.status,
+      marketplaceChannelId: r.marketplace_channel_id ?? null,
+      adopteesChannelId: r.adoptees_channel_id ?? null,
+      categoryId: r.category_id ?? null,
+      deployedBy: r.deployed_by ?? null,
+      deployedAt: r.deployed_at ? ts(r.deployed_at) : null,
+      lastError: r.last_error ?? null,
+    };
+  }
+
+  private rowToListingPost(r: any): ListingPost {
+    return {
+      listingId: Number(r.listing_id),
+      guildId: r.guild_id,
+      threadId: r.thread_id,
+      status: r.status,
+      lastError: r.last_error ?? null,
+    };
+  }
+
+  async deployments(): Promise<GuildDeployment[]> {
+    const rows = await this.sql<Array<any>>`SELECT * FROM guild_deployments ORDER BY created_at ASC`;
+    return rows.map(r => this.rowToDeployment(r));
+  }
+
+  async deploymentFor(guildId: string): Promise<GuildDeployment | null> {
+    const rows = await this.sql<Array<any>>`SELECT * FROM guild_deployments WHERE guild_id = ${guildId}`;
+    return rows[0] ? this.rowToDeployment(rows[0]) : null;
+  }
+
+  /** Ops grant — allows a guild to self-deploy via /marketplace deploy. */
+  async grantDeployment(guildId: string, byUserId: string): Promise<void> {
+    await this.sql`
+      INSERT INTO guild_deployments (guild_id, status, deployed_by)
+      VALUES (${guildId}, 'granted', ${byUserId})
+      ON CONFLICT (guild_id) DO UPDATE SET
+        status = CASE WHEN guild_deployments.status = 'disabled' THEN 'granted' ELSE guild_deployments.status END,
+        deployed_by = ${byUserId}, updated_at = NOW()
+    `;
+  }
+
+  /** Pull the grant — a disabled deployment can be re-granted; an active one
+   *  is downgraded to disabled (its surfaces stay but mirrors stop syncing). */
+  async revokeDeployment(guildId: string): Promise<void> {
+    await this.sql`
+      UPDATE guild_deployments SET status = 'disabled', updated_at = NOW() WHERE guild_id = ${guildId}
+    `;
+  }
+
+  async upsertDeployment(d: {
+    guildId: string; marketplaceChannelId?: string | null; adopteesChannelId?: string | null;
+    categoryId?: string | null; status?: GuildDeployment["status"]; deployedBy?: string | null; lastError?: string | null;
+  }): Promise<void> {
+    await this.sql`
+      INSERT INTO guild_deployments (guild_id, status, marketplace_channel_id, adoptees_channel_id, category_id, deployed_by, deployed_at, last_error)
+      VALUES (${d.guildId}, ${d.status ?? "active"}, ${d.marketplaceChannelId ?? null}, ${d.adopteesChannelId ?? null},
+              ${d.categoryId ?? null}, ${d.deployedBy ?? null}, NOW(), ${d.lastError ?? null})
+      ON CONFLICT (guild_id) DO UPDATE SET
+        status = ${d.status ?? "active"},
+        marketplace_channel_id = coalesce(${d.marketplaceChannelId ?? null}, guild_deployments.marketplace_channel_id),
+        adoptees_channel_id    = coalesce(${d.adopteesChannelId ?? null}, guild_deployments.adoptees_channel_id),
+        category_id            = coalesce(${d.categoryId ?? null}, guild_deployments.category_id),
+        deployed_by            = coalesce(${d.deployedBy ?? null}, guild_deployments.deployed_by),
+        deployed_at            = coalesce(guild_deployments.deployed_at, NOW()),
+        last_error             = ${d.lastError ?? null},
+        updated_at             = NOW()
+    `;
+  }
+
+  async setDeploymentStatus(guildId: string, status: GuildDeployment["status"], lastError?: string | null): Promise<void> {
+    await this.sql`
+      UPDATE guild_deployments SET status = ${status}, last_error = ${lastError ?? null}, updated_at = NOW()
+      WHERE guild_id = ${guildId}
+    `;
+  }
+
+  // ── Listing posts (the mirror map) ─────────────────────────────────────────
+
+  /** One guild's mirror posts — deploy/remove paths archive + remark them. */
+  async listingPostsForGuild(guildId: string): Promise<ListingPost[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM listing_posts WHERE guild_id = ${guildId} ORDER BY created_at ASC
+    `;
+    return rows.map(r => this.rowToListingPost(r));
+  }
+
+  async listingPostsFor(listingId: number): Promise<ListingPost[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM listing_posts WHERE listing_id = ${listingId} ORDER BY created_at ASC
+    `;
+    return rows.map(r => this.rowToListingPost(r));
+  }
+
+  /** Live (postable) threads for a listing across every deployed server. */
+  async liveListingPosts(listingId: number): Promise<ListingPost[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM listing_posts WHERE listing_id = ${listingId} AND status = 'live'
+    `;
+    return rows.map(r => this.rowToListingPost(r));
+  }
+
+  async setListingPost(listingId: number, guildId: string, threadId: string, status: ListingPost["status"] = "live"): Promise<void> {
+    await this.sql`
+      INSERT INTO listing_posts (listing_id, guild_id, thread_id, status)
+      VALUES (${listingId}, ${guildId}, ${threadId}, ${status})
+      ON CONFLICT (listing_id, guild_id) DO UPDATE SET
+        thread_id = EXCLUDED.thread_id, status = EXCLUDED.status,
+        last_error = NULL, updated_at = NOW()
+    `;
+  }
+
+  /** Fan-out failure record — upserts with NULL thread_id so the sync sweep
+   *  retries it (missingListingPosts treats fresh failures as present for an
+   *  hour, then re-queues). */
+  async setListingPostFailed(listingId: number, guildId: string, error: string): Promise<void> {
+    const err = error.slice(0, 500);
+    await this.sql`
+      INSERT INTO listing_posts (listing_id, guild_id, thread_id, status, last_error)
+      VALUES (${listingId}, ${guildId}, NULL, 'failed', ${err})
+      ON CONFLICT (listing_id, guild_id) DO UPDATE SET
+        status = 'failed', last_error = ${err}, updated_at = NOW()
+    `;
+  }
+
+  async markListingPost(listingId: number, guildId: string, status: ListingPost["status"], lastError?: string | null): Promise<void> {
+    await this.sql`
+      UPDATE listing_posts SET status = ${status}, last_error = ${lastError ?? null}, updated_at = NOW()
+      WHERE listing_id = ${listingId} AND guild_id = ${guildId}
+    `;
+  }
+
+  /** Drop a guild's whole mirror map — the sync sweep calls this when the
+   *  forum channel itself was recreated, orphaning every thread the rows
+   *  pointed at. Deleting (not status-flipping) requeues the pairs in
+   *  missingListingPosts immediately instead of waiting out the failed-row
+   *  backoff. */
+  async resetListingPostsForGuild(guildId: string): Promise<void> {
+    await this.sql`DELETE FROM listing_posts WHERE guild_id = ${guildId}`;
+  }
+
+  /** Every mirror's status flips at once — delist/ban/disable paths. */
+  async markAllListingPosts(listingId: number, from: ListingPost["status"], to: ListingPost["status"]): Promise<void> {
+    await this.sql`
+      UPDATE listing_posts SET status = ${to}, updated_at = NOW()
+      WHERE listing_id = ${listingId} AND status = ${from}
+    `;
+  }
+
+  /** Resolve ANY server's listing thread to its listing — replaces the
+   *  forum_thread_id-only lookup once mirrors exist. The house column remains
+   *  the fallback for rows predating their listing_posts backfill. */
+  async listingByPostThreadId(threadId: string): Promise<CompanionListing | null> {
+    const rows = await this.sql<Array<any>>`
+      SELECT l.* FROM companion_listings l
+      JOIN listing_posts p ON p.listing_id = l.id
+      WHERE p.thread_id = ${threadId}
+    `;
+    if (rows[0]) return this.rowToListing(rows[0]);
+    return this.listingByThreadId(threadId);
+  }
+
+  /** Active listings joined to their live posts — the multi-forum tag sweep's
+   *  universe: one row per (listing, server-post) pair. */
+  async listActiveListingPosts(): Promise<Array<{ listing: CompanionListing; post: ListingPost }>> {
+    const rows = await this.sql<Array<any>>`
+      SELECT p.guild_id AS p_guild_id, p.thread_id AS p_thread_id, p.status AS p_status,
+             p.last_error AS p_last_error, l.*
+      FROM listing_posts p
+      JOIN companion_listings l ON l.id = p.listing_id
+      WHERE l.status = 'active' AND p.status = 'live'
+      ORDER BY l.id ASC
+    `;
+    return rows.map(r => ({
+      listing: this.rowToListing(r),
+      post: this.rowToListingPost({ listing_id: r.id, guild_id: r.p_guild_id, thread_id: r.p_thread_id, status: r.p_status, last_error: r.p_last_error }),
+    }));
+  }
+
+  /** Active listings × active deployments missing a live post — the sync
+   *  sweep's repair queue (also the new-server catalog backfill). Failed
+   *  rows count as covered for an hour so a dead forum isn't retried every
+   *  tick; after that they re-enter the queue. */
+  async missingListingPosts(limit = 10): Promise<Array<{ listingId: number; guildId: string }>> {
+    const rows = await this.sql<Array<{ listing_id: number | string; guild_id: string }>>`
+      SELECT l.id AS listing_id, d.guild_id
+      FROM companion_listings l
+      CROSS JOIN guild_deployments d
+      WHERE l.status = 'active' AND d.status = 'active' AND d.marketplace_channel_id IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM listing_posts p
+          WHERE p.listing_id = l.id AND p.guild_id = d.guild_id
+            AND (p.status IN ('live', 'pending')
+                 OR (p.status = 'failed' AND p.updated_at > NOW() - INTERVAL '1 hour'))
+        )
+      ORDER BY l.id ASC LIMIT ${limit}
+    `;
+    return rows.map(r => ({ listingId: Number(r.listing_id), guildId: r.guild_id }));
+  }
+
+  /** Seed listing_posts from the legacy forum_thread_id column — idempotent
+   *  boot backfill so the mirror map covers pre-v59 listings. */
+  async backfillListingPosts(houseGuildId: string): Promise<number> {
+    const res = await this.sql`
+      INSERT INTO listing_posts (listing_id, guild_id, thread_id, status)
+      SELECT id, ${houseGuildId}, forum_thread_id, 'live'
+      FROM companion_listings
+      WHERE forum_thread_id IS NOT NULL
+      ON CONFLICT (listing_id, guild_id) DO NOTHING
+    `;
+    return res.count;
+  }
+
+  /** Active adoptions hosted in one guild — the member-leave archive path
+   *  and /marketplace remove both drain this. */
+  async adoptionsInGuild(guildId: string): Promise<CompanionAdoption[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM companion_adoptions
+      WHERE dropped_at IS NULL AND chat_thread_id IS NOT NULL AND chat_guild_id = ${guildId}
+    `;
+    return rows.map(r => this.rowToAdoption(r));
+  }
+
+  /** Record where an adoption's thread lives — outright assignment of all
+   *  three columns (guildId NULL = house; threadId NULL clears a dead
+   *  thread). Callers pass the complete location each time. */
+  async setAdoptionLocation(adoptionId: number, loc: { guildId: string | null; channelId: string | null; threadId: string | null }): Promise<void> {
+    await this.sql`
+      UPDATE companion_adoptions SET
+        chat_guild_id   = ${loc.guildId},
+        chat_channel_id = ${loc.channelId},
+        chat_thread_id  = ${loc.threadId}
+      WHERE id = ${adoptionId}
+    `;
+  }
+
+  /** Creator tag picks (names, not ids) — the mirror-sync currency. */
+  async setListingCreatorTags(listingId: number, tagNames: string[]): Promise<void> {
+    await this.sql`
+      UPDATE companion_listings SET creator_tags = ${tagNames}, updated_at = NOW()
+      WHERE id = ${listingId}
+    `;
+  }
+
   // ── Adoptee chat threads (v54) ───────────────────────────────────────────
   // Each active adoption owns one private thread under the house's #adoptees
   // channel. Messages there run the dm:<adopterId> pipeline — the thread is a
@@ -3539,8 +3802,9 @@ export class MemoryStore {
   /** Every active adoption for a user — the member-join hook drains this to
    *  create missing threads AND repair lapsed private-thread membership
    *  (leaving the guild drops thread membership; chat_thread_id rows are
-   *  re-attached, not rebuilt). */
-  async activeAdoptionsForUser(userId: string): Promise<Array<{ adoption: CompanionAdoption; companion: Companion; listing: { id: number; greeting: string } | null }>> {
+   *  re-attached, not rebuilt). `guildId` narrows to threads hosted in one
+   *  deployment (NULL = house); omit it for the full active set. */
+  async activeAdoptionsForUser(userId: string, guildId?: string | null): Promise<Array<{ adoption: CompanionAdoption; companion: Companion; listing: { id: number; greeting: string } | null }>> {
     const rows = await this.sql<Array<any>>`
       SELECT a.*, c.id AS c_id, c.owner_user_id AS c_owner_user_id, c.name AS c_name,
              coalesce(c.avatar_url, l.avatar_url) AS c_avatar_url, c.voice_persona AS c_voice_persona,
@@ -3556,6 +3820,7 @@ export class MemoryStore {
       LEFT JOIN companion_listings l ON l.id = a.listing_id
       WHERE a.dropped_at IS NULL AND a.user_id = ${userId}
         AND (l.id IS NULL OR l.status <> 'banned')
+        AND (${guildId === undefined} OR a.chat_guild_id IS NOT DISTINCT FROM ${guildId ?? null})
       ORDER BY a.adopted_at ASC
     `;
     return rows.map(r => ({

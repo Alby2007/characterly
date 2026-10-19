@@ -411,11 +411,72 @@ The mechanics in one paragraph:
   `MARKET_ADOPT_DAILY_CAP` (20) — all per UTC day, all enforced inside the
   same advisory-locked write transactions as the slot caps.
 
+## Partner deployments — the shelf in other servers (v59)
+
+Partner servers can host a **mirrored** copy of the shelf plus their own
+`#adoptees` surface. This is the answer to two scaling problems at once:
+Discord caps a server at ~1,000 *active* threads, and every deployed server
+is a storefront that recruits new users.
+
+**Schema.** `guild_deployments` is the registry (`guild_id`, status
+`granted → active → disabled`, that guild's forum/adoptees/category channel
+ids). `listing_posts` (`listing_id, guild_id, thread_id`, nullable thread)
+is the mirror map — one row per listing per deployment. `companion_adoptions`
+gains `chat_guild_id`/`chat_channel_id` — NULL guild = the house.
+
+**Lifecycle.**
+
+1. An operator grants a server: `/ops deploygrant <guild_id>` — writes the
+   `granted` row and registers the guild-scoped `/marketplace` command there.
+   (The command never appears in the global list; `MARKET_DEPLOY_ENABLED`
+   must be set for any of this.)
+2. A server admin (ManageGuild) runs `/marketplace deploy`. Requirements:
+   the guild must have **Community** enabled (forum channels require it) and
+   the bot needs Manage Channels + Manage Threads (or Administrator). The
+   deployer idempotently creates a **Characterly** category holding a
+   `#characters` forum (same tag taxonomy, resolved by *name* per forum) and
+   a locked-down `#adoptees` (everyone reads + types in existing threads,
+   nobody posts or creates threads), then activates the row and backfills
+   the whole catalog.
+3. `/marketplace status` shows the row + post counts; `/marketplace remove`
+   (or `/ops deployrevoke`) disables the deployment, archives every live
+   mirror post, seals + rehomes hosted adoptee threads (see below), and
+   unregisters the command.
+
+**Fan-out.** `postListingToDeployments` posts every publish/relist/seed into
+*every* active deployment's forum and records a `listing_posts` row per
+guild. Failures land as `status='failed'` rows — best-effort, never blocking
+the publish; the deployment-sync sweep retries them and backfills listings a
+deployment missed. Ratings, edits, creator tag picks, delists and bans all
+propagate across mirrors (`archiveListingPosts` locks+archives the lot).
+
+**Adoption placement.** Add clicked in a partner guild homes the private
+thread *there* (`chat_guild_id = that guild`), behind an ephemeral confirm
+disclosing that the partner's admins can read private threads. If the user
+leaves the guild, the deployment dies, or the channel is deleted, the next
+touch relocates the adoption to the house (`chat_guild_id → NULL`) and
+rebuilds — memories are `dm:<user>`-scoped so nothing is lost but the old
+scrollback. Member-add in a partner guild re-attaches threads homed there;
+member-remove locks+archives them so partner admins aren't left reading a
+departed member's chat. Deployment removal seals the same way — threads
+hosted in a removed guild lock+archive and their adoption rows clear to the
+house, so private chats never linger in a server Characterly left (and the
+disabled deployment can no longer match `isAdopteeThread`, which would
+otherwise route those messages into the normal guild memory pipeline).
+
+`purgeGuild` (bot kicked) deletes the deployment + mirror rows and clears
+adoption locations homed there — orphaned adoptions relocate lazily.
+
+**Hidden rollout.** `MARKET_DEPLOY_ENABLED` gates grant/deploy/sync; the
+command is only registered per-granted-guild; the handler re-checks the
+grant row anyway. Nothing about this is visible until we choose to announce.
+
 ## Config reference
 
 | Env | Default | Meaning |
 |-----|---------|---------|
 | `MARKETPLACE_CHANNEL_ID` | unset → publishing disabled | Forum channel in the hub server |
+| `MARKET_DEPLOY_ENABLED` | unset → partner deployments off | Master switch for `/ops deploygrant`, `/marketplace deploy`, and the deployment sync sweep |
 | `MARKETPLACE_MOD_CHANNEL_ID` | unset | Text channel pinged on reports (with mod action buttons) |
 | `MARKETPLACE_MOD_ROLE_IDS` | unset → ManageGuild | Comma-separated role ids allowed to act on report pings |
 | `FREE_ADOPTION_SLOTS` | 1 | Active adoptions per free account |

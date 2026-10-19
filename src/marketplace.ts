@@ -7,7 +7,7 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, type ChatInputCommandInteraction } from "discord.js";
-import type { CompanionListing } from "./types.js";
+import type { CompanionListing, GuildDeployment, ListingPost } from "./types.js";
 import type { MemoryStore } from "./database.js";
 import { config } from "./config.js";
 
@@ -20,6 +20,30 @@ export const CURATED_TAGS = {
   trending: "Trending",
   staffPick: "Staff Pick",
 } as const;
+
+/** The tag taxonomy a deployed partner forum is created with (v59): curated
+ *  badges moderated (bot-only), genre tags open for creators. Names are the
+ *  sync currency across mirrors — tag ids differ per forum. */
+export const PARTNER_TAG_SET: Array<{ name: string; moderated: boolean }> = [
+  { name: CURATED_TAGS.new, moderated: true },
+  { name: CURATED_TAGS.topRated, moderated: true },
+  { name: CURATED_TAGS.trending, moderated: true },
+  { name: CURATED_TAGS.staffPick, moderated: true },
+  { name: "Companion", moderated: false },
+  { name: "Slice of Life", moderated: false },
+  { name: "RPG", moderated: false },
+  { name: "Fantasy", moderated: false },
+  { name: "Adventure", moderated: false },
+  { name: "Anime", moderated: false },
+  { name: "Games", moderated: false },
+  { name: "OC", moderated: false },
+  { name: "Romance", moderated: false },
+  { name: "Horror", moderated: false },
+  { name: "Sci-Fi", moderated: false },
+  { name: "Helpers", moderated: false },
+  { name: "Historical", moderated: false },
+  { name: "Comedy", moderated: false },
+];
 
 /** Resolve a committed cover asset under assets/marketplace/. The filename is
  *  basename'd so a persona can't path-traverse out of the asset dir. Returns
@@ -66,22 +90,35 @@ export function buildListingComponents(listingId: number): ActionRowBuilder<Butt
   );
 }
 
-/** Create the forum thread + listing card the bot owns (both publish paths,
- *  relist, and the seed catalog). `opts.tagNames` are additional forum tag
- *  names (genre picks for seeds) resolved live against `availableTags`;
+interface ForumLike {
+  id: string;
+  type: number;
+  guild?: { id?: string };
+  availableTags?: Array<{ id: string; name: string; moderated?: boolean | null }>;
+  threads?: { create(o: unknown): Promise<{ id: string } | null> };
+}
+
+/** Anything that resolves a channel id — discord.js `client.channels.fetch`
+ *  in interactions, `deps.fetchChannel` in ops sweeps. */
+export type ChannelFetcher = (id: string) => Promise<unknown>;
+
+/** Create the listing thread inside ONE forum channel — the per-mirror unit
+ *  the fan-out drives. `opts.tagNames` are forum tag NAMES (genre picks for
+ *  seeds, creator picks for re-posts) resolved live against `availableTags`;
  *  `opts.coverFile` attaches a committed asset from assets/marketplace/ — the
  *  attachment doubles as the thread's Gallery View cover. Returns the new
  *  thread id, or null on failure — the caller decides whether to roll the
  *  listing row back. */
-export async function postListingThread(
-  interaction: { client: ChatInputCommandInteraction["client"]; user: { username?: string; globalName?: string | null } },
+export async function postListingInForum(
+  fetchChannel: ChannelFetcher,
+  forumChannelId: string,
+  creatorName: string,
   listing: CompanionListing,
   store: MemoryStore,
   opts: { tagNames?: string[]; coverFile?: string } = {},
 ): Promise<string | null> {
-  const channel = await interaction.client.channels.fetch(config.marketplaceChannelId!).catch(() => null);
-  if (!channel || channel.type !== ChannelType.GuildForum) return null;
-  const creatorName = interaction.user.globalName ?? interaction.user.username ?? "a creator";
+  const channel = (await fetchChannel(forumChannelId).catch(() => null)) as ForumLike | null;
+  if (!channel || channel.type !== ChannelType.GuildForum || typeof channel.threads?.create !== "function") return null;
   const stats = await store.listingRatingStats(listing.id).catch(() => undefined);
   // Every fresh thread earns the curated "New" badge — the tag sweep strips
   // it once the thread ages past MARKET_NEW_TAG_DAYS. Genre tag names resolve
@@ -107,4 +144,106 @@ export async function postListingThread(
     },
   }).catch(() => null);
   return thread?.id ?? null;
+}
+
+/** Single-forum posting for the pre-v59 call sites: the house marketplace
+ *  channel from env. Kept as a thin wrapper — new code should prefer
+ *  postListingToDeployments so partner mirrors stay in step. */
+export async function postListingThread(
+  interaction: { client: ChatInputCommandInteraction["client"]; user: { username?: string; globalName?: string | null } },
+  listing: CompanionListing,
+  store: MemoryStore,
+  opts: { tagNames?: string[]; coverFile?: string } = {},
+): Promise<string | null> {
+  if (!config.marketplaceChannelId) return null;
+  const creatorName = interaction.user.globalName ?? interaction.user.username ?? "a creator";
+  return postListingInForum(id => interaction.client.channels.fetch(id), config.marketplaceChannelId, creatorName, listing, store, opts);
+}
+
+/** Fan-out: post a listing's card into EVERY active deployment's forum and
+ *  record a listing_posts row per guild — the mirrored catalog. Partner
+ *  failures are recorded (`status='failed'`) for the sync sweep to retry and
+ *  never block the publish; the caller only rolls back when ZERO posts
+ *  succeeded. Returns the live posts written plus per-guild failures. */
+export async function postListingToDeployments(
+  fetchChannel: ChannelFetcher,
+  deployments: GuildDeployment[],
+  creatorName: string,
+  listing: CompanionListing,
+  store: MemoryStore,
+  opts: { tagNames?: string[]; coverFile?: string } = {},
+): Promise<{ posted: ListingPost[]; failed: Array<{ guildId: string; error: string }> }> {
+  const tagNames = opts.tagNames ?? listing.creatorTags ?? [];
+  const posted: ListingPost[] = [];
+  const failed: Array<{ guildId: string; error: string }> = [];
+  for (const dep of deployments) {
+    if (dep.status !== "active" || !dep.marketplaceChannelId) continue;
+    const threadId = await postListingInForum(fetchChannel, dep.marketplaceChannelId, creatorName, listing, store, { ...opts, tagNames })
+      .catch(e => { failed.push({ guildId: dep.guildId, error: String((e as Error)?.message ?? e).slice(0, 200) }); return null; });
+    if (threadId) {
+      await store.setListingPost(listing.id, dep.guildId, threadId, "live").catch(() => {});
+      posted.push({ listingId: listing.id, guildId: dep.guildId, threadId, status: "live", lastError: null });
+    } else {
+      if (!failed.some(f => f.guildId === dep.guildId)) failed.push({ guildId: dep.guildId, error: "post failed" });
+      await store.setListingPostFailed(listing.id, dep.guildId, failed.find(f => f.guildId === dep.guildId)?.error ?? "post failed").catch(() => {});
+    }
+  }
+  return { posted, failed };
+}
+
+/** Catalog backfill: every active listing that lacks a live post in the
+ *  given deployments gets one. Driven by `missingListingPosts` so retries of
+ *  failed mirrors share the same queue as new-server seeds. Bounded by the
+ *  SQL limit — the sweep re-runs to drain larger gaps. `creatorName` is used
+ *  when the listing's creator can't be resolved. */
+export async function postActiveListingsToDeployments(
+  fetchChannel: ChannelFetcher,
+  deployments: GuildDeployment[],
+  store: MemoryStore,
+  fetchCreator: (creatorId: string) => Promise<string | null>,
+  limit = 10,
+): Promise<{ posted: number; failed: number }> {
+  const targets = new Set(deployments.filter(d => d.status === "active" && d.marketplaceChannelId).map(d => d.guildId));
+  if (!targets.size) return { posted: 0, failed: 0 };
+  const queue = (await store.missingListingPosts(limit).catch(() => []))
+    .filter(q => targets.has(q.guildId));
+  let posted = 0, failed = 0;
+  for (const q of queue) {
+    const listing = await store.listingById(q.listingId).catch(() => null);
+    const dep = deployments.find(d => d.guildId === q.guildId);
+    if (!listing || !dep) continue;
+    const creatorName = (await fetchCreator(listing.creatorUserId).catch(() => null)) ?? "a Characterly creator";
+    const threadId = await postListingInForum(fetchChannel, dep.marketplaceChannelId!, creatorName, listing, store, { tagNames: listing.creatorTags ?? [] })
+      .catch(() => null);
+    if (threadId) {
+      await store.setListingPost(listing.id, dep.guildId, threadId, "live").catch(() => {});
+      posted++;
+    } else {
+      await store.setListingPostFailed(listing.id, dep.guildId, "backfill post failed").catch(() => {});
+      failed++;
+    }
+  }
+  return { posted, failed };
+}
+
+/** Lock + archive every live mirror of a listing — delist/ban/disable paths.
+ *  Threads are fetched per-post (thread ids are globally unique, so no forum
+ *  resolution is needed). Returns the count actually archived. */
+export async function archiveListingPosts(
+  fetchChannel: ChannelFetcher,
+  posts: ListingPost[],
+  opts: { note?: string } = {},
+): Promise<number> {
+  let archived = 0;
+  for (const post of posts) {
+    if (!post.threadId) continue;
+    const thread = await fetchChannel(post.threadId).catch(() => null) as
+      { send?(o: unknown): Promise<unknown>; setLocked?(b: boolean): Promise<unknown>; setArchived?(b: boolean): Promise<unknown> } | null;
+    if (!thread) continue;
+    if (opts.note) await thread.send?.({ content: opts.note, allowedMentions: { parse: [] } }).catch(() => {});
+    await thread.setLocked?.(true).catch(() => {});
+    const ok = await thread.setArchived?.(true).then(() => true).catch(() => false) ?? false;
+    if (ok) archived++;
+  }
+  return archived;
 }

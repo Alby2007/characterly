@@ -51,6 +51,8 @@ import {
   handleHouseMemberAdd, handleHouseMemberUpdate, handleHouseMemberRemove,
   ensureHouseLayout, ensureResourcePosts, ensureTicketPanel, handleTicketModal, startHostWatchdog, ensureVerifyGate, startLinkSweep,
   startTagSweep, backfillAdopteeThreads, ensureAdopteeThreadsForUser,
+  handleDeploymentMemberAdd, handleDeploymentMemberRemove, refreshDeploymentCache,
+  startDeploymentSync, syncDeployments, MARKETPLACE_GUILD_COMMAND, untrackDeployment,
   type OpsDeps, type GuildLike,
 } from "./ops.js";
 import { exec as cpExec } from "node:child_process";
@@ -92,10 +94,11 @@ const client = new Client({
     GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.DirectMessageReactions,
-    // Privileged — member join/update/remove for house ops only. Gated on
-    // HOUSE_GUILD_ID so deployments without house ops never request it; the
+    // Privileged — member join/update/remove for house ops + partner
+    // deployments (thread re-attach on join, lock on leave). Gated on
+    // either feature so deployments without them never request it; the
     // portal toggle must be on before this ships to prod or login fails.
-    ...(config.houseGuildId ? [GatewayIntentBits.GuildMembers] : []),
+    ...(config.houseGuildId || config.marketDeployEnabled ? [GatewayIntentBits.GuildMembers] : []),
   ],
   // Reactions on uncached messages arrive as partials — the listener resolves
   // them explicitly before interpreting.
@@ -240,6 +243,7 @@ let worker: { stop: () => Promise<void> } | undefined;
 let watchdog: { stop: () => void } | undefined;
 let linkSweep: { stop: () => void } | undefined;
 let tagSweep: { stop: () => void } | undefined;
+let deploySweep: { stop: () => void } | undefined;
 
 async function init() {
   store = await MemoryStore.create();
@@ -336,6 +340,30 @@ client.once(Events.ClientReady, async ready => {
       linkSweep = startLinkSweep(opsDeps); // Member role ↔ account-link reconciliation
       tagSweep = startTagSweep(opsDeps);   // Curated marketplace badges ↔ live stats
       await opsAlert(opsDeps, `🟢 Characterly online — sha \`${opsDeps.gitSha ?? "?"}\` · migrations applied · host watchdog armed`);
+
+      // Partner deployments (v59): seed the house row from env, warm the
+      // in-process cache, register /marketplace in every granted guild, and
+      // arm the mirror-sync sweep. The house row is env-authoritative —
+      // renames in the house reconcile here each boot.
+      if (config.marketplaceChannelId || config.houseAdopteesChannelId) {
+        await store.upsertDeployment({
+          guildId: config.houseGuildId,
+          status: "active",
+          marketplaceChannelId: config.marketplaceChannelId ?? null,
+          adopteesChannelId: config.houseAdopteesChannelId ?? null,
+        }).catch(e => { inc("ops.init_error"); logError("house deployment seed failed", e); });
+      }
+      await refreshDeploymentCache(store).catch(e => { inc("ops.init_error"); logError("deployment cache warm failed", e); });
+      if (config.marketDeployEnabled) {
+        const rows = await store.deployments().catch(() => [] as Awaited<ReturnType<MemoryStore["deployments"]>>);
+        for (const d of rows) {
+          if (d.guildId === config.houseGuildId || d.status === "disabled") continue;
+          await ready.application.commands.set([MARKETPLACE_GUILD_COMMAND as never], d.guildId)
+            .catch(e => { inc("ops.init_error"); logError(`marketplace command register failed for ${d.guildId}`, e); });
+        }
+        deploySweep = startDeploymentSync(opsDeps);
+        void syncDeployments(opsDeps).catch(e => { inc("ops.sweep_error"); logError("deployment sync boot run failed", e); });
+      }
     } catch (error) { inc("ops.init_error"); logError("house ops init failed", error); }
   }
   // Backfill Discord display fields for code-linked accounts predating v38 —
@@ -366,7 +394,7 @@ client.on(Events.GuildCreate, guild => {
 client.on(Events.GuildDelete, guild => {
   if (!store) return;
   handleGuildDelete(guild as Guild & { unavailable?: boolean }, store)
-    .then(purged => { if (purged) { inc("guild.purged"); console.log(`Purged all data for removed guild ${guild.id} (${guild.name})`); } })
+    .then(purged => { if (purged) { untrackDeployment(guild.id); inc("guild.purged"); console.log(`Purged all data for removed guild ${guild.id} (${guild.name})`); } })
     .catch(error => { inc("guild.purge_error"); logError(`Guild purge failed for ${guild.id}`, error); });
 });
 
@@ -374,9 +402,15 @@ client.on(Events.GuildDelete, guild => {
 // GuildMembers is a privileged intent (requested only when HOUSE_GUILD_ID is
 // configured). isHouse re-checks inside each handler too — belt and suspenders.
 client.on(Events.GuildMemberAdd, member => {
-  if (!store || !isHouse(member.guild.id)) return;
-  handleHouseMemberAdd(member, opsDeps)
-    .catch(e => { inc("ops.member_error"); logError("house member-add failed", e); });
+  if (!store) return;
+  if (isHouse(member.guild.id)) {
+    handleHouseMemberAdd(member, opsDeps)
+      .catch(e => { inc("ops.member_error"); logError("house member-add failed", e); });
+  } else {
+    // Partner deployments: re-attach adoptee threads homed in this guild.
+    handleDeploymentMemberAdd(member, opsDeps)
+      .catch(e => { inc("ops.member_error"); logError("deployment member-add failed", e); });
+  }
 });
 
 client.on(Events.GuildMemberUpdate, (oldMember, newMember) => {
@@ -386,9 +420,15 @@ client.on(Events.GuildMemberUpdate, (oldMember, newMember) => {
 });
 
 client.on(Events.GuildMemberRemove, member => {
-  if (!store || !isHouse(member.guild.id)) return;
-  handleHouseMemberRemove(member, opsDeps)
-    .catch(e => { inc("ops.member_error"); logError("house member-remove failed", e); });
+  if (!store) return;
+  if (isHouse(member.guild.id)) {
+    handleHouseMemberRemove(member, opsDeps)
+      .catch(e => { inc("ops.member_error"); logError("house member-remove failed", e); });
+  } else {
+    // Leaving a deployed guild: lock that member's threads hosted there.
+    handleDeploymentMemberRemove(member, opsDeps)
+      .catch(e => { inc("ops.member_error"); logError("deployment member-remove failed", e); });
+  }
 });
 
 async function applyRetention() {
@@ -400,6 +440,7 @@ async function applyRetention() {
     const known = client.guilds.cache.map(g => g.id);
     for (const orphanId of await store.guildsNotIn(known)) {
       await store.purgeGuild(orphanId);
+      untrackDeployment(orphanId);
       inc("guild.purged");
       console.log(`Purged zombie rows for removed guild ${orphanId}`);
     }
@@ -1608,22 +1649,25 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
   }
   if (!message.content.trim() && !images.length) return;
   if (config.guildId && message.guild.id !== config.guildId) return;
-  // House private threads must never hit automod (a user pasting a phishing
-  // link shouldn't watch their own ticket get deleted) — privacy surfaces.
-  // Registered #adoptees threads are the exception inside the same gate:
-  // they run the adopter's dm:<user> pipeline — a DM rendered in a guild
-  // channel — while support tickets and other private threads bypass the
-  // whole pipeline. Scoped to the house: private threads elsewhere can
-  // still host summoned companions.
-  if (isHouse(message.guild.id) && message.channel.type === ChannelType.PrivateThread) {
+  // Private threads on deployed surfaces never hit automod or the memory
+  // pipeline (a user pasting a phishing link shouldn't watch their own
+  // ticket get deleted). Registered #adoptees threads run the adopter's
+  // dm:<user> pipeline — a DM rendered in a guild channel — in ANY deployed
+  // guild (v59), while the house's other private threads (tickets) bypass
+  // the whole pipeline. Foreign guilds' private threads are untouched.
+  if (message.channel.type === ChannelType.PrivateThread) {
     if (isAdopteeThread(message.channel)) {
       const adoptee = await store.companionThreadForChannel(message.channel.id).catch(() => null);
       if (adoptee) {
         await handleAdopteeThreadMessage(message, images, adoptee)
           .catch(e => { inc("dm.adoptee_error"); logError("adoptee thread turn failed", e); });
       }
+      // A thread under a deployed #adoptees that isn't a live adoption is a
+      // stale surface — drop it from the pipeline rather than archiving
+      // private content as server memory.
+      return;
     }
-    return;
+    if (isHouse(message.guild.id)) return;
   }
   // House automod runs before archive/LLM work — a deleted scam never enters
   // the memory pipeline or spends a credit. Bots/webhook-echoes are skipped

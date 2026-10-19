@@ -76,6 +76,7 @@ The marketplace lives in a forum channel on the hub server. **`MARKETPLACE_CHANN
 | `MARKET_TOP_RATING_MIN` | `5` | Minimum rating count for `Top Rated`. |
 | `MARKET_TRENDING_COUNT` | `5` | Adoptions inside the window that earn `Trending`. |
 | `MARKET_TRENDING_WINDOW_H` | `72` | `Trending` window in hours. |
+| `MARKET_DEPLOY_ENABLED` | (off) | Master switch for partner-server deployments — `/marketplace` command registration, `/ops deploygrant`, deploy, and the sync sweep all refuse when unset. The house server never needs it. |
 | `SAFETY_MODEL` | `GROQ_MODEL` | Classifier model for listing publish/edit screens and adopted-companion reply screens. |
 
 ### Semantic recall (embeddings)

@@ -5571,6 +5571,73 @@ const migrations: Migration[] = [
       `;
     },
   },
+
+  // ── v59: multi-server marketplace deployments ─────────────────────────────
+  // The marketplace + adoptees surfaces stop being house-only singletons:
+  //  • guild_deployments — one row per participating server (the house row is
+  //    seeded from env at boot, not here — env isn't visible to SQL).
+  //    status lifecycle: granted → active → disabled.
+  //  • listing_posts — the mirror map: one canonical companion_listings row
+  //    fans out to one forum thread per deployed server. forum_thread_id stays
+  //    as the house post pointer during the transition.
+  //  • companion_listings.creator_tags — creator tag picks as NAMES (tag ids
+  //    differ per forum; names are the sync currency).
+  //  • companion_adoptions.chat_guild_id / chat_channel_id — which server hosts
+  //    the adopter's private thread. NULL = house (no backfill needed).
+  {
+    version: 59,
+    name: "v59_multi_server_marketplace",
+    up: async (sql) => {
+      await sql`
+        CREATE TABLE IF NOT EXISTS guild_deployments (
+          guild_id                TEXT PRIMARY KEY,
+          status                  TEXT NOT NULL DEFAULT 'granted',
+          marketplace_channel_id  TEXT,
+          adoptees_channel_id     TEXT,
+          category_id             TEXT,
+          deployed_by             TEXT,
+          deployed_at             TIMESTAMPTZ,
+          last_error              TEXT,
+          created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+      await sql`ALTER TABLE guild_deployments ENABLE ROW LEVEL SECURITY`;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS listing_posts (
+          listing_id  BIGINT NOT NULL REFERENCES companion_listings(id) ON DELETE CASCADE,
+          guild_id    TEXT NOT NULL,
+          thread_id   TEXT,
+          status      TEXT NOT NULL DEFAULT 'live',
+          last_error  TEXT,
+          created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (listing_id, guild_id)
+        )
+      `;
+      // Thread ids are globally unique — any mirror resolves to its listing.
+      // Partial: failed rows carry NULL thread_id and must not collide.
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS listing_posts_thread_idx ON listing_posts(thread_id) WHERE thread_id IS NOT NULL`;
+      await sql`ALTER TABLE listing_posts ENABLE ROW LEVEL SECURITY`;
+
+      await sql`ALTER TABLE companion_listings ADD COLUMN IF NOT EXISTS creator_tags TEXT[] NOT NULL DEFAULT '{}'`;
+      await sql`ALTER TABLE companion_adoptions ADD COLUMN IF NOT EXISTS chat_guild_id TEXT`;
+      await sql`ALTER TABLE companion_adoptions ADD COLUMN IF NOT EXISTS chat_channel_id TEXT`;
+      // No new thread index needed — v54's `adoptions_thread` is the same
+      // (chat_thread_id) WHERE chat_thread_id IS NOT NULL.
+    },
+    down: async (sql) => {
+      await sql`DROP TABLE IF EXISTS listing_posts`;
+      await sql`DROP TABLE IF EXISTS guild_deployments`;
+      // Cleans up the duplicate shipped in the first version of this
+      // migration on DBs that already applied it.
+      await sql`DROP INDEX IF EXISTS companion_adoptions_thread_idx`;
+      await sql`ALTER TABLE companion_listings DROP COLUMN IF EXISTS creator_tags`;
+      await sql`ALTER TABLE companion_adoptions DROP COLUMN IF EXISTS chat_guild_id`;
+      await sql`ALTER TABLE companion_adoptions DROP COLUMN IF EXISTS chat_channel_id`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

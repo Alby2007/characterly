@@ -1019,10 +1019,12 @@ test("Report message: only marketplace-thread comments are reportable", async ()
   config.houseGuildId = "g1";
   config.marketplaceChannelId = "c-forum";
   try {
-    // Outside the house guild entirely.
+    // Channel ids are globally unique, so a thread whose parentId IS the
+    // marketplace forum is a marketplace thread wherever it's reported from
+    // (mirror threads under deployed-guild forums work the same way).
     const foreign = stubCtxMenu({ guildId: "g-other", target: { id: "m1", author: { id: "u-a" }, channel: { id: "t-x", parentId: "c-forum" } } });
     await handleMarketplaceContext(foreign.interaction, nullCtxStore);
-    assert.match(foreign.replies[0]?.content ?? "", /only works on comments inside marketplace/i);
+    assert.equal(foreign.replies[0]?.ephemeral, true);
 
     // A regular (non-thread, or other-parent) channel in the house.
     const channelMsg = stubCtxMenu({ target: { id: "m1", author: { id: "u-a" }, channel: { id: "c-chat", parentId: null, isThread: () => false } } });
@@ -1115,23 +1117,25 @@ test("market:tagsel — forged ids dropped, curated badges preserved, non-owner 
     const listing = res.listing;
     await store.setListingThread(listing.id, "t-1");
 
-    const saved = config.marketplaceChannelId;
+    const saved = { f: config.marketplaceChannelId, g: config.houseGuildId };
     config.marketplaceChannelId = "c-forum";
+    config.houseGuildId = "g1";
     try {
       const thread = fakeTagThread("t-1", ["tag-new", "tag-genre2"]);
       const updates: Replies = [];
       const interaction = {
         customId: `market:tagsel:${listing.id}`,
         user: { id: "u-creator" },
-        // tag-forged isn't on the forum; tag-new is moderated — both must be
-        // rejected as creator picks. genre2 was the previous pick and is
-        // replaced by the new selection.
-        values: ["tag-genre", "tag-forged", "tag-new"],
-        client: { channels: { fetch: async () => fakeForum({ "t-1": thread }) } },
+        // Values are tag NAMES (v59 — ids differ per mirror). "Forged" isn't
+        // in the taxonomy; "New" is moderated — both must be rejected as
+        // creator picks. The previous pick (Horror) is replaced.
+        values: ["Slice of Life", "Forged", "New"],
+        client: { channels: { fetch: async (cid: string) => cid === "t-1" ? thread : cid === "c-forum" ? fakeForum({ "t-1": thread }) : null } },
         update: async (r: (typeof updates)[number]) => { updates.push(r); return r; },
       };
       await handleMarketSelect(interaction as unknown as StringSelectMenuInteraction, store);
       assert.deepEqual(thread.calls[0], ["tag-new", "tag-genre"], "moderated badge kept + only the valid pick applied");
+      assert.deepEqual((await store.listingById(listing.id))!.creatorTags, ["Slice of Life"], "picks persist as names");
       assert.match(updates[0]?.content ?? "", /Slice of Life/);
 
       // Non-owner re-tag refused — no write.
@@ -1140,13 +1144,13 @@ test("market:tagsel — forged ids dropped, curated badges preserved, non-owner 
       await handleMarketSelect({
         customId: `market:tagsel:${listing.id}`,
         user: { id: "u-nope" },
-        values: ["tag-genre"],
-        client: { channels: { fetch: async () => fakeForum({ "t-1": thread2 }) } },
+        values: ["Slice of Life"],
+        client: { channels: { fetch: async (cid: string) => cid === "t-1" ? thread2 : cid === "c-forum" ? fakeForum({ "t-1": thread2 }) : null } },
         update: async (r: (typeof denied)[number]) => { denied.push(r); return r; },
       } as unknown as StringSelectMenuInteraction, store);
       assert.equal(thread2.calls.length, 0);
       assert.match(denied[0]?.content ?? "", /not your listing/i);
-    } finally { config.marketplaceChannelId = saved; }
+    } finally { config.marketplaceChannelId = saved.f; config.houseGuildId = saved.g; }
   } finally { await sql.end(); }
 });
 
@@ -1208,18 +1212,20 @@ test("Staff pick — mod toggles the badge on/off; non-mod and non-marketplace r
 
 // ── Marketplace: cover image ─────────────────────────────────────────────────
 
-function stubCoverSubmit(opts: { listingId: number; userId: string; coverUrl?: string; edits?: unknown[] }) {
+function stubCoverSubmit(opts: { listingId: number; userId: string; coverUrl?: string; edits?: unknown[]; threadId?: string }) {
   const replies: Replies = [];
   const edits = opts.edits ?? [];
   const starter = { edit: async (p: unknown) => { edits.push(p); return p; } };
-  const thread = { fetchStarterMessage: async () => starter };
-  const forum = { type: ChannelType.GuildForum, threads: { fetch: async () => thread } };
+  const thread = { id: opts.threadId ?? "t-99", fetchStarterMessage: async () => starter };
+  const forum = { id: "c-forum", type: ChannelType.GuildForum, threads: { fetch: async () => thread } };
   const interaction = {
     customId: `market_cover:${opts.listingId}`,
     user: { id: opts.userId, username: "C" },
     fields: { getTextInputValue: () => opts.coverUrl ?? "" },
     client: {
-      channels: { fetch: async () => forum },
+      // Mirror-aware refresh fetches the THREAD by id directly — the forum
+      // only resolves for its own id.
+      channels: { fetch: async (id: string) => (id === "c-forum" ? forum : id === thread.id ? thread : null) },
       users: { fetch: async () => ({ globalName: "The Creator", username: "C" }) },
     },
     reply: async (r: (typeof replies)[number]) => { replies.push(r); return r; },
@@ -1466,4 +1472,55 @@ test("market:drop is two-click — confirm drops, cancel restores the row, stale
   await handleMemoryButton(ok.interaction, store, brainFor);
   assert.equal(drops, 1);
   assert.match(ok.updates[0]?.content ?? "", /Dropped — you can't re-adopt/);
+});
+
+// ── Mirror rollback (v59) ────────────────────────────────────────────────────
+
+test("publishToAllMirrors: house failure tears down partner mirrors it already posted", async () => {
+  const { publishToAllMirrors } = await import("./commands.js");
+  const { refreshDeploymentCache } = await import("./ops.js");
+  const listing = {
+    id: 9, creatorUserId: "u1", sourceCompanionId: null, name: "Nyx", tagline: "t",
+    voicePersona: "v", coreTraits: [], ownerDynamic: "d", backstory: "b", greeting: "g",
+    avatarUrl: null, version: 1, status: "active", addCount: 0, reportCount: 0,
+    forumThreadId: null, personaSource: "authored", importMeta: null, creatorTags: [],
+    createdAt: "2026-01-01", updatedAt: "2026-01-01",
+  } as never;
+  const marks: Array<[number, string, string]> = [];
+  const posts: Array<[number, string, string]> = [];
+  const store = {
+    deployments: async () => [{
+      guildId: "g-partner", status: "active", marketplaceChannelId: "f-partner",
+      adopteesChannelId: null, categoryId: null, deployedBy: null, deployedAt: null, lastError: null,
+    }],
+    listingRatingStats: async () => undefined,
+    setListingPost: async (l: number, g: string, t: string) => { posts.push([l, g, t]); },
+    setListingPostFailed: async () => {},
+    markAllListingPosts: async (l: number, from: string, to: string) => { marks.push([l, from, to]); },
+  } as unknown as MemoryStore;
+  const partnerThread = { id: "t-p", locked: false, archived: false,
+    setLocked: async (b: boolean) => { partnerThread.locked = b; },
+    setArchived: async (b: boolean) => { partnerThread.archived = b; } };
+  const channels: Record<string, unknown> = {
+    "f-house": { type: ChannelType.GuildForum, availableTags: [], threads: { create: async () => { throw new Error("no perms"); } } },
+    "f-partner": { type: ChannelType.GuildForum, availableTags: [], threads: { create: async () => partnerThread } },
+    "t-p": partnerThread,
+  };
+  const client = { channels: { fetch: async (id: string) => channels[id] ?? null } } as never;
+  const saved = { g: config.houseGuildId, m: config.marketplaceChannelId };
+  config.houseGuildId = "g-house";
+  config.marketplaceChannelId = "f-house";
+  try {
+    await refreshDeploymentCache(store);
+    const threadId = await publishToAllMirrors(client, "a creator", listing, store);
+    assert.equal(threadId, null, "house post failed → callers roll back");
+    assert.deepEqual(posts, [[9, "g-partner", "t-p"]], "partner mirror did post");
+    assert.equal(partnerThread.locked && partnerThread.archived, true,
+      "the orphaned partner card is archived — no ghost mirror sells a delisted listing");
+    assert.deepEqual(marks, [[9, "live", "archived"]]);
+  } finally {
+    config.houseGuildId = saved.g;
+    config.marketplaceChannelId = saved.m;
+    await refreshDeploymentCache({ deployments: async () => [] } as unknown as MemoryStore);
+  }
 });
