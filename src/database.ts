@@ -3744,6 +3744,8 @@ export class MemoryStore {
       marketplaceChannelId: r.marketplace_channel_id ?? null,
       adopteesChannelId: r.adoptees_channel_id ?? null,
       categoryId: r.category_id ?? null,
+      loginChannelId: r.login_channel_id ?? null,
+      grantKind: r.grant_kind ?? "ops",
       deployedBy: r.deployed_by ?? null,
       deployedAt: r.deployed_at ? ts(r.deployed_at) : null,
       lastError: r.last_error ?? null,
@@ -3770,14 +3772,16 @@ export class MemoryStore {
     return rows[0] ? this.rowToDeployment(rows[0]) : null;
   }
 
-  /** Ops grant — allows a guild to self-deploy via /marketplace deploy. */
-  async grantDeployment(guildId: string, byUserId: string): Promise<void> {
+  /** Grant a guild the right to deploy via /marketplace deploy. `kind`
+   *  records the grant's provenance — 'ops' for /ops deploygrant, 'self' for
+   *  the self-serve path that auto-grants linked-account deployers (v63). */
+  async grantDeployment(guildId: string, byUserId: string, kind: "ops" | "self" = "ops"): Promise<void> {
     await this.sql`
-      INSERT INTO guild_deployments (guild_id, status, deployed_by)
-      VALUES (${guildId}, 'granted', ${byUserId})
+      INSERT INTO guild_deployments (guild_id, status, deployed_by, grant_kind)
+      VALUES (${guildId}, 'granted', ${byUserId}, ${kind})
       ON CONFLICT (guild_id) DO UPDATE SET
         status = CASE WHEN guild_deployments.status = 'disabled' THEN 'granted' ELSE guild_deployments.status END,
-        deployed_by = ${byUserId}, updated_at = NOW()
+        deployed_by = ${byUserId}, grant_kind = ${kind}, updated_at = NOW()
     `;
   }
 
@@ -3791,17 +3795,19 @@ export class MemoryStore {
 
   async upsertDeployment(d: {
     guildId: string; marketplaceChannelId?: string | null; adopteesChannelId?: string | null;
-    categoryId?: string | null; status?: GuildDeployment["status"]; deployedBy?: string | null; lastError?: string | null;
+    categoryId?: string | null; loginChannelId?: string | null;
+    status?: GuildDeployment["status"]; deployedBy?: string | null; lastError?: string | null;
   }): Promise<void> {
     await this.sql`
-      INSERT INTO guild_deployments (guild_id, status, marketplace_channel_id, adoptees_channel_id, category_id, deployed_by, deployed_at, last_error)
+      INSERT INTO guild_deployments (guild_id, status, marketplace_channel_id, adoptees_channel_id, category_id, login_channel_id, deployed_by, deployed_at, last_error)
       VALUES (${d.guildId}, ${d.status ?? "active"}, ${d.marketplaceChannelId ?? null}, ${d.adopteesChannelId ?? null},
-              ${d.categoryId ?? null}, ${d.deployedBy ?? null}, NOW(), ${d.lastError ?? null})
+              ${d.categoryId ?? null}, ${d.loginChannelId ?? null}, ${d.deployedBy ?? null}, NOW(), ${d.lastError ?? null})
       ON CONFLICT (guild_id) DO UPDATE SET
         status = ${d.status ?? "active"},
         marketplace_channel_id = coalesce(${d.marketplaceChannelId ?? null}, guild_deployments.marketplace_channel_id),
         adoptees_channel_id    = coalesce(${d.adopteesChannelId ?? null}, guild_deployments.adoptees_channel_id),
         category_id            = coalesce(${d.categoryId ?? null}, guild_deployments.category_id),
+        login_channel_id       = coalesce(${d.loginChannelId ?? null}, guild_deployments.login_channel_id),
         deployed_by            = coalesce(${d.deployedBy ?? null}, guild_deployments.deployed_by),
         deployed_at            = coalesce(guild_deployments.deployed_at, NOW()),
         last_error             = ${d.lastError ?? null},

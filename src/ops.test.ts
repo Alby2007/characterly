@@ -7,11 +7,11 @@ import {
   ensureVerifyGate, handleHouseButton, runMemberLinkSweep, runTagSweep, ensureResourcePosts,
   ensureTicketPanel, handleTicketButton, handleTicketModal,
   ensureAdopteeThread, setAdopteeThreadLocked, backfillAdopteeThreads,
-  removeDeployment, syncDeployments,
+  removeDeployment, syncDeployments, deployMarketplace, houseAdopteesPressure,
   TERMS_VERSION, RESOURCE_POSTS,
   type OpsDeps, type AutomodMessage, type MemberLike,
 } from "./ops.js";
-import { PermissionFlagsBits } from "discord.js";
+import { PermissionFlagsBits, ChannelType } from "discord.js";
 import { config } from "./config.js";
 import { SEED_LISTINGS } from "./seed-personas.js";
 import type { MemoryStore } from "./database.js";
@@ -2090,4 +2090,204 @@ test("syncDeployments: backfills listing_posts before the missing queue, and res
   } finally { config.marketDeployEnabled = saved; }
   assert.ok(calls.includes("backfill"), "the pre-v59 seed runs before the queue computes");
   assert.ok(calls.includes("reset:g-partner"), "dead forum → its 'live' post rows clear so the sweep reposts");
+});
+
+// ── Self-serve deployment layout (v63) ───────────────────────────────────────
+
+type DeployedChannel = { id: string; name: string; type: number; parentId?: string; edited?: Array<Record<string, unknown>>; edit?(o: Record<string, unknown>): Promise<unknown> };
+
+function deployFake(opts: { existing?: DeployedChannel[] } = {}) {
+  const created: DeployedChannel[] = [];
+  const existing = opts.existing ?? [];
+  const guild = {
+    id: "g-partner",
+    features: ["COMMUNITY"],
+    members: { me: { permissions: { has: () => true } } },
+    channels: {
+      cache: { find: (fn: (c: DeployedChannel) => boolean) => [...existing, ...created].find(fn) },
+      create: async (o: { name: string; type: number; parent?: string }) => {
+        const c: DeployedChannel = { id: `c-${o.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, name: o.name, type: o.type, parentId: o.parent };
+        created.push(c);
+        return c;
+      },
+    },
+  };
+  return { guild, created };
+}
+
+function loginChannelCapture() {
+  const sent: Array<{ content?: string; components?: unknown }> = [];
+  const msgs: Array<{ author?: { id: string }; content?: string; pin(): Promise<void>; delete(): Promise<void> }> = [];
+  const ch = {
+    id: "c-log-in",
+    send: async (p: { content?: string; components?: unknown }) => {
+      sent.push(p);
+      const m = { id: `m-${sent.length}`, author: { id: "bot-1" }, content: p.content, pinned: false,
+        pin: async () => { (m as { pinned: boolean }).pinned = true; },
+        delete: async () => { msgs.splice(msgs.indexOf(m), 1); } };
+      msgs.push(m);
+      return m;
+    },
+    messages: { fetch: async () => msgs },
+  };
+  return { ch, sent, msgs };
+}
+
+test("deployMarketplace: builds characterly.app category with #log-in + pinned login card", async () => {
+  const { guild, created } = deployFake();
+  const login = loginChannelCapture();
+  const upserts: Array<Record<string, unknown>> = [];
+  const { deps } = adopteeDeps({ channels: { "c-log-in": login.ch } });
+  (deps.store as any).deploymentFor = async () => ({ guildId: "g-partner", status: "granted", grantKind: "ops" });
+  (deps.store as any).upsertDeployment = async (d: Record<string, unknown>) => { upserts.push(d); };
+  (deps.store as any).deployments = async () => [{ guildId: "g-partner", status: "active", marketplaceChannelId: "c-characters" }];
+  (deps.store as any).missingListingPosts = async () => [];
+  deps.fetchGuild = async () => guild as never;
+  const saved = config.marketDeployEnabled;
+  config.marketDeployEnabled = true;
+  try {
+    const res = await deployMarketplace(deps, "g-partner", "u-admin");
+    assert.ok(res.ok, res.error ?? "deploy should succeed");
+  } finally { config.marketDeployEnabled = saved; }
+  const names = created.map(c => c.name);
+  assert.ok(names.includes("characterly.app"), `category created: ${names}`);
+  assert.ok(names.includes("log-in"), `login channel created: ${names}`);
+  assert.equal(created.find(c => c.name === "log-in")?.type, ChannelType.GuildText);
+  const up = upserts.find(u => u.status === "active");
+  assert.equal(up?.loginChannelId, "c-log-in", "the row persists the login channel id");
+  assert.equal(login.sent.length, 1, "one login card posted");
+  assert.match(login.sent[0].content ?? "", /Char\.ly log-in card/, "the card carries its dedupe marker");
+  assert.match(login.sent[0].content ?? "", /\/link/, "the card teaches the link flow");
+});
+
+test("deployMarketplace: a pre-rename 'Characterly' category is reused + renamed, not duplicated", async () => {
+  const edits: Array<Record<string, unknown>> = [];
+  const legacy: DeployedChannel = {
+    id: "c-cat-legacy", name: "Characterly", type: ChannelType.GuildCategory,
+    edit: async (o: Record<string, unknown>) => { edits.push(o); (legacy as { name: string }).name = o.name as string; },
+  };
+  const { guild, created } = deployFake({ existing: [legacy] });
+  const { deps } = adopteeDeps({ channels: {} });
+  (deps.store as any).deploymentFor = async () => ({ guildId: "g-partner", status: "granted" });
+  (deps.store as any).upsertDeployment = async () => {};
+  (deps.store as any).deployments = async () => [];
+  (deps.store as any).missingListingPosts = async () => [];
+  deps.fetchGuild = async () => guild as never;
+  const saved = config.marketDeployEnabled;
+  config.marketDeployEnabled = true;
+  try {
+    const res = await deployMarketplace(deps, "g-partner");
+    assert.ok(res.ok, res.error ?? "deploy should succeed");
+  } finally { config.marketDeployEnabled = saved; }
+  assert.deepEqual(edits, [{ name: "characterly.app" }], "the legacy category is renamed in place");
+  assert.equal(created.filter(c => c.type === ChannelType.GuildCategory).length, 0, "no duplicate category");
+});
+
+test("deployMarketplace: rerun is idempotent — stored ids reused, no second login card", async () => {
+  const existing: DeployedChannel[] = [
+    { id: "c-cat", name: "characterly.app", type: ChannelType.GuildCategory },
+    { id: "c-characters", name: "characters", type: ChannelType.GuildForum },
+    { id: "c-adoptees", name: "adoptees", type: ChannelType.GuildText },
+    { id: "c-log-in", name: "log-in", type: ChannelType.GuildText },
+  ];
+  const { guild, created } = deployFake({ existing });
+  const login = loginChannelCapture();
+  // A live marked card already stands — the reconcile must not repost.
+  login.msgs.push({ author: { id: "bot-1" }, content: "…Char.ly log-in card…", pin: async () => {}, delete: async () => {} });
+  const { deps } = adopteeDeps({ channels: { "c-log-in": login.ch } });
+  (deps.store as any).deploymentFor = async () => ({ guildId: "g-partner", status: "granted", loginChannelId: "c-log-in" });
+  (deps.store as any).upsertDeployment = async () => {};
+  (deps.store as any).deployments = async () => [];
+  (deps.store as any).missingListingPosts = async () => [];
+  deps.fetchGuild = async () => guild as never;
+  const saved = config.marketDeployEnabled;
+  config.marketDeployEnabled = true;
+  try {
+    const res = await deployMarketplace(deps, "g-partner");
+    assert.ok(res.ok, res.error ?? "deploy should succeed");
+  } finally { config.marketDeployEnabled = saved; }
+  assert.equal(created.length, 0, "everything found by id/name — nothing recreated");
+  assert.equal(login.sent.length, 0, "the standing card is kept, not duplicated");
+});
+
+// ── Floodgate (v63) ──────────────────────────────────────────────────────────
+
+function adopteesChannelCapture() {
+  const sent: Array<{ content?: string }> = [];
+  const msgs: Array<{ id: string; author?: { id: string }; content?: string; pinned: boolean; pin(): Promise<void>; delete(): Promise<void> }> = [];
+  const deleted: string[] = [];
+  const ch = {
+    id: "c-adoptees",
+    send: async (p: { content?: string }) => {
+      sent.push(p);
+      const m = { id: `m-${sent.length}`, author: { id: "bot-1" }, content: p.content, pinned: false,
+        pin: async () => { m.pinned = true; },
+        delete: async () => { deleted.push(m.id); const i = msgs.indexOf(m); if (i >= 0) msgs.splice(i, 1); } };
+      msgs.push(m);
+      return m;
+    },
+    messages: { fetch: async () => msgs },
+  };
+  return { ch, sent, msgs, deleted };
+}
+
+function houseGuildWithThreads(n: number) {
+  const threads = new Map<string, { id: string; parentId: string }>();
+  for (let i = 0; i < n; i++) threads.set(`t-${i}`, { id: `t-${i}`, parentId: "c-adoptees" });
+  threads.set("t-elsewhere", { id: "t-elsewhere", parentId: "c-other" }); // not ours
+  return {
+    id: HOUSE,
+    channels: {
+      cache: { find: () => undefined },
+      create: async () => { throw new Error("never create in the house"); },
+      fetchActiveThreads: async () => ({ threads }),
+    },
+  };
+}
+
+function pressureDeps(n: number, adoptees: ReturnType<typeof adopteesChannelCapture>) {
+  const { deps } = adopteeDeps({ channels: { "c-adoptees": adoptees.ch } });
+  (deps.store as any).deployments = async () => [];
+  (deps.store as any).backfillListingPosts = async () => {};
+  (deps.store as any).resetListingPostsForGuild = async () => {};
+  (deps.store as any).missingListingPosts = async () => [];
+  deps.fetchGuild = async () => houseGuildWithThreads(n) as never;
+  deps.botInviteUrl = "https://discord.com/oauth2/authorize?client_id=x";
+  const saved = config.marketDeployEnabled;
+  config.marketDeployEnabled = true;
+  return { deps, restore: () => { config.marketDeployEnabled = saved; } };
+}
+
+test("floodgate: ≥warn posts+pins the marked card once; rerun reuses it", async () => {
+  const adoptees = adopteesChannelCapture();
+  const { deps, restore } = pressureDeps(710, adoptees);
+  try {
+    await syncDeployments(deps);
+    assert.equal(adoptees.sent.length, 1, "the card posts at the warn line");
+    assert.match(adoptees.sent[0].content ?? "", /Char\.ly floodgate/);
+    assert.match(adoptees.sent[0].content ?? "", /marketplace deploy/, "the card teaches the self-serve path");
+    assert.equal(adoptees.msgs[0].pinned, true, "the card pins itself");
+    assert.equal(houseAdopteesPressure().active, true);
+    assert.equal(houseAdopteesPressure().count, 710);
+    await syncDeployments(deps);
+    assert.equal(adoptees.sent.length, 1, "the standing card is reused, not duplicated");
+  } finally { restore(); }
+});
+
+test("floodgate: in-band counts hold the card (hysteresis); below clear it comes down", async () => {
+  const adoptees = adopteesChannelCapture();
+  // Activate at the warn line, then wobble inside the 600–700 band — the card
+  // must stay standing through the band so the sweep can't flap it.
+  const { deps, restore } = pressureDeps(705, adoptees);
+  try { await syncDeployments(deps); } finally { restore(); }
+  assert.equal(houseAdopteesPressure().active, true);
+  const band = pressureDeps(650, adoptees);
+  try { await syncDeployments(band.deps); } finally { band.restore(); }
+  assert.equal(houseAdopteesPressure().active, true, "mid-band stays active");
+  assert.equal(adoptees.sent.length, 1, "no new card in the band");
+  const quiet = pressureDeps(550, adoptees);
+  try { await syncDeployments(quiet.deps); } finally { quiet.restore(); }
+  assert.equal(houseAdopteesPressure().active, false, "below clear the latch releases");
+  assert.equal(adoptees.deleted.length, 1, "the marked card is removed");
+  assert.equal(adoptees.msgs.length, 0);
 });

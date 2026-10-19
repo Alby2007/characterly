@@ -377,6 +377,11 @@ export type GuildDeployment = {
   marketplaceChannelId: string | null;
   adopteesChannelId: string | null;
   categoryId: string | null;
+  /** v63 — the deployed #log-in link surface (NULL on pre-v63 deploys). */
+  loginChannelId: string | null;
+  /** v63 — 'ops' = granted by an operator; 'self' = auto-granted to a
+   *  linked-account deployer under self-serve. */
+  grantKind: "ops" | "self";
   deployedBy: string | null;
   deployedAt: string | null;
   lastError: string | null;

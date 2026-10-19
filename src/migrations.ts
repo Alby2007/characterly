@@ -5920,6 +5920,23 @@ export const migrations: Migration[] = [
       await sql`ALTER TABLE user_bot_settings DROP COLUMN IF EXISTS analytics_opt_out`;
     },
   },
+  {
+    // v63: self-serve deployments. grant_kind distinguishes ops-granted
+    // ('ops') deployments from self-serve linked-account grants ('self') —
+    // deploys stay attributable; ops revoke (status='disabled') still
+    // requires an ops re-grant. login_channel_id tracks the deployed #log-in
+    // link surface alongside the forum + adoptees ids.
+    version: 63,
+    name: "v63_self_serve_deployments",
+    up: async (sql) => {
+      await sql`ALTER TABLE guild_deployments ADD COLUMN IF NOT EXISTS grant_kind TEXT NOT NULL DEFAULT 'ops'`;
+      await sql`ALTER TABLE guild_deployments ADD COLUMN IF NOT EXISTS login_channel_id TEXT`;
+    },
+    down: async (sql) => {
+      await sql`ALTER TABLE guild_deployments DROP COLUMN IF EXISTS grant_kind`;
+      await sql`ALTER TABLE guild_deployments DROP COLUMN IF EXISTS login_channel_id`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

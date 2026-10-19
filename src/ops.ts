@@ -51,7 +51,10 @@ export const isAdopteeThread = (channel: { isThread?(): boolean; parentId?: stri
 
 const deploymentCache = new Map<string, GuildDeployment>();
 
-/** House row synthesized from env — present even before the DB seed lands. */
+/** House row synthesized from env — present even before the DB seed lands.
+ *  The house's log-in channel IS the verify gate (different card, different
+ *  flow) — seeding it here keeps the sweep's loginOk check green without
+ *  ever reconciling a deployed layout or signpost card into the house. */
 function houseDeployment(): GuildDeployment | null {
   if (!config.houseGuildId) return null;
   return {
@@ -59,7 +62,8 @@ function houseDeployment(): GuildDeployment | null {
     status: "active",
     marketplaceChannelId: config.marketplaceChannelId ?? null,
     adopteesChannelId: config.houseAdopteesChannelId ?? null,
-    categoryId: null, deployedBy: null, deployedAt: null, lastError: null,
+    categoryId: null, loginChannelId: config.houseVerifyChannelId ?? null, grantKind: "ops",
+    deployedBy: null, deployedAt: null, lastError: null,
   };
 }
 
@@ -124,6 +128,9 @@ interface ForumTagLike {
 
 interface ThreadLike {
   id: string;
+  /** The channel a thread hangs under — the floodgate counts #adoptees
+   *  children, not the whole guild's active threads. */
+  parentId?: string | null;
   appliedTags?: string[];
   createdTimestamp?: number | null;
   setAppliedTags?(tags: string[]): Promise<unknown>;
@@ -178,7 +185,7 @@ export interface GuildChannelLike {
   availableTags?: ForumTagLike[];
   /** Forum channels — deployments seed + reconcile the marketplace taxonomy. */
   setAvailableTags?(tags: Array<{ id?: string; name: string; moderated?: boolean }>): Promise<unknown>;
-  edit?(opts: { defaultForumLayout?: number }): Promise<unknown>;
+  edit?(opts: { defaultForumLayout?: number; name?: string }): Promise<unknown>;
   /** Category's own overwrites — copied to created children so a rebuilt
    * mods/ops channel doesn't come up world-readable. */
   /** True when the channel's overwrites match its parent's (Discord "synced").
@@ -202,6 +209,9 @@ export interface GuildLike {
     /** discord.js accepts forum fields on create too — deployments pass
      *  availableTags + defaultForumLayout so #characters lands Gallery-first. */
     create(opts: { name: string; type: number; parent?: string; topic?: string; availableTags?: Array<{ name: string; moderated?: boolean }>; defaultForumLayout?: number; permissionOverwrites?: Array<{ id: string; allow: unknown; deny: unknown }> }): Promise<GuildChannelLike>;
+    /** Guild-level active-thread fetch — the floodgate counts live #adoptees
+     *  children. Absent on test fakes that don't exercise the floodgate. */
+    fetchActiveThreads?(): Promise<{ threads: Map<string, ThreadLike> | Iterable<[string, ThreadLike]> | Iterable<ThreadLike> }>;
   };
   roles?: {
     cache?: { find(fn: (r: { id: string; name: string }) => boolean): { id: string; name: string } | undefined };
@@ -258,6 +268,9 @@ export interface OpsDeps {
   fetchUser?: (userId: string) => Promise<{ username?: string; globalName?: string | null } | null>;
   /** The bot's own user id — gate-card idempotency checks message authorship. */
   botId: string | null;
+  /** OAuth install link — the floodgate card's "add me to your server" button.
+   *  Built from the live application id in index.ts; null where unavailable. */
+  botInviteUrl?: string | null;
   exec: (cmd: string) => Promise<{ stdout: string; stderr: string }>;
   exit: (code: number) => void;
   /** Timed SELECT 1 — index.ts runs it on the shared pool. */
@@ -288,6 +301,8 @@ export function resetOpsState(): void {
   lastActedAt.clear();
   activeBreaches.clear();
   deploymentCache.clear();
+  pressureState.active = false;
+  pressureState.count = null;
 }
 
 async function opsChannel(deps: OpsDeps): Promise<SendableChannel | null> {
@@ -1375,21 +1390,11 @@ export async function backfillAdopteeThreads(deps: OpsDeps): Promise<void> {
  *  invisible until announced). ManageGuild = the server's admins. Defined
  *  here (not commands.ts) so the grant action registers it without an
  *  ops→commands import cycle. */
-export const MARKETPLACE_GUILD_COMMAND = {
-  name: "marketplace",
-  description: "Admin: manage this server's Characterly companion shelf",
-  default_member_permissions: PermissionFlagsBits.ManageGuild.toString(),
-  integrationTypes: [0], contexts: [0],
-  options: [
-    { name: "deploy", type: 1, description: "Create the mirrored #characters shelf + #adoptees channel here" },
-    { name: "status", type: 1, description: "Show this server's marketplace deployment state" },
-    { name: "remove", type: 1, description: "Archive this server's shelf and stop syncing it" },
-  ],
-};
-
-const DEPLOY_CATEGORY_NAME = "Characterly";
+const DEPLOY_CATEGORY_NAME = "characterly.app";
 const DEPLOY_MARKET_NAME = "characters";
 const DEPLOY_ADOPTEES_NAME = "adoptees";
+const DEPLOY_LOGIN_NAME = "log-in";
+const LOGIN_CARD_MARKER = "Char.ly log-in card";
 
 const DEPLOY_REQUIRED_PERMS: Array<{ bit: bigint; label: string }> = [
   { bit: PermissionFlagsBits.ViewChannel, label: "View Channels" },
@@ -1411,12 +1416,12 @@ export interface DeployOutcome {
 
 /** Idempotent surface reconcile for one deployed guild: find-or-create the
  *  category, the #characters forum (tags merged by name — existing tag ids
- *  preserved since applied tags reference them), and the locked-down
- *  #adoptees text channel. Returns the resolved ids for the deployment row. */
+ *  preserved since applied tags reference them), the locked-down #adoptees
+ *  and #log-in channels. Returns the resolved ids for the deployment row. */
 async function ensureDeploymentLayout(
   guild: GuildLike,
   row: GuildDeployment | null,
-): Promise<{ categoryId: string; marketplaceChannelId: string; adopteesChannelId: string; created: string[] } | null> {
+): Promise<{ categoryId: string; marketplaceChannelId: string; adopteesChannelId: string; loginChannelId: string; created: string[] } | null> {
   const created: string[] = [];
   const everyone = guild.id; // @everyone overwrite id == guild id
   const findChan = (type: number, name: string) =>
@@ -1424,12 +1429,17 @@ async function ensureDeploymentLayout(
   const byId = (id: string | null | undefined) =>
     id ? guild.channels.cache.find(c => c.id === id) : undefined;
 
-  let category = byId(row?.categoryId) ?? findChan(ChannelType.GuildCategory, DEPLOY_CATEGORY_NAME);
+  let category = byId(row?.categoryId) ?? findChan(ChannelType.GuildCategory, DEPLOY_CATEGORY_NAME)
+    ?? findChan(ChannelType.GuildCategory, "Characterly"); // pre-rename deploys
   if (!category) {
     category = await guild.channels.create({ name: DEPLOY_CATEGORY_NAME, type: ChannelType.GuildCategory })
       .catch(e => { logError("deploy category create failed", e); return undefined; });
     if (!category) return null;
     created.push(`category ${DEPLOY_CATEGORY_NAME}`);
+  } else if (category.name !== DEPLOY_CATEGORY_NAME && category.edit) {
+    await category.edit({ name: DEPLOY_CATEGORY_NAME })
+      .then(() => created.push(`category → ${DEPLOY_CATEGORY_NAME}`))
+      .catch(e => logError("deploy category rename failed", e));
   }
 
   // #characters — forum, Gallery view, comments open but only the bot posts.
@@ -1495,7 +1505,61 @@ async function ensureDeploymentLayout(
     await ensureOpenThreads(adoptees, created, `#${DEPLOY_ADOPTEES_NAME}`, everyone);
   }
 
-  return { categoryId: category.id, marketplaceChannelId: forum.id, adopteesChannelId: adoptees.id, created };
+  // #log-in — a read-only signpost, not a gate: adoption outside the house
+  // only needs a linked account, so this channel just carries the card.
+  let login = byId(row?.loginChannelId) ?? findChan(ChannelType.GuildText, DEPLOY_LOGIN_NAME);
+  if (!login) {
+    login = await guild.channels.create({
+      name: DEPLOY_LOGIN_NAME,
+      type: ChannelType.GuildText,
+      parent: category.id,
+      permissionOverwrites: [{
+        id: everyone,
+        allow: [PermissionFlagsBits.ViewChannel],
+        deny: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.CreatePublicThreads, PermissionFlagsBits.CreatePrivateThreads],
+      }],
+    }).catch(e => { logError("deploy log-in create failed", e); return undefined; });
+    if (!login) return null;
+    created.push(`#${DEPLOY_LOGIN_NAME}`);
+  } else {
+    await ensureOpenThreads(login, created, `#${DEPLOY_LOGIN_NAME}`, everyone);
+  }
+
+  return { categoryId: category.id, marketplaceChannelId: forum.id, adopteesChannelId: adoptees.id, loginChannelId: login.id, created };
+}
+
+/** The pinned card every deployed #log-in carries — marked + deduped like
+ *  resource posts so reconcile stays idempotent. It explains the one thing
+ *  the channel can't do itself: link a Characterly account. */
+async function ensureDeploymentLoginCard(deps: OpsDeps, channelId: string): Promise<void> {
+  const ch = await deps.fetchChannel(channelId).catch(() => null);
+  if (!ch?.send || !deps.botId) return;
+  const payload = {
+    content:
+      "**Log in & link.**\n" +
+      "Adopting companions needs a free Characterly account — it takes a minute.\n\n" +
+      `**1.** Create one at **${config.siteUrl}**\n` +
+      "**2.** Run `/link` — it hands you a one-time code\n" +
+      "**3.** Paste the code in your dashboard under **Discord**\n\n" +
+      "Then hit **Add** on any character in the shelf — their private thread opens under **#adoptees**.\n" +
+      `*${LOGIN_CARD_MARKER}*`,
+    components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setLabel("Open characterly.app").setStyle(ButtonStyle.Link).setURL(config.siteUrl),
+    )],
+    allowedMentions: { parse: [] },
+  };
+  const recent = await ch.messages?.fetch({ limit: 20 }).catch(() => null);
+  if (recent) {
+    for (const entry of recent) {
+      const m = (Array.isArray(entry) ? entry[1] : entry) as {
+        author?: { id?: string }; content?: string; pin?(): Promise<unknown>; delete?(): Promise<unknown>;
+      };
+      if (m.author?.id !== deps.botId || !m.content?.includes(LOGIN_CARD_MARKER)) continue;
+      return; // a live card is already there — nothing to reconcile
+    }
+  }
+  const sent = await ch.send(payload).catch(e => { inc("ops.login_card_error"); logError("login card post failed", e); return null; });
+  await (sent as { pin?(): Promise<unknown> } | null)?.pin?.().catch(() => {});
 }
 
 /** The `/marketplace deploy` workhorse: validate the guild (granted, COMMUNITY,
@@ -1535,10 +1599,12 @@ export async function deployMarketplace(deps: OpsDeps, guildId: string, deployer
     categoryId: layout.categoryId,
     marketplaceChannelId: layout.marketplaceChannelId,
     adopteesChannelId: layout.adopteesChannelId,
+    loginChannelId: layout.loginChannelId,
     deployedBy: deployerId ?? row.deployedBy,
     lastError: null,
   }).catch(() => inc("ops.deploy_error"));
   await refreshDeploymentCache(deps.store);
+  await ensureDeploymentLoginCard(deps, layout.loginChannelId).catch(() => inc("ops.login_card_error"));
 
   // Fan the whole catalog into the fresh forum. Best-effort: individual post
   // failures land as retryable rows for the sync sweep.
@@ -1629,7 +1695,10 @@ export async function syncDeployments(deps: OpsDeps): Promise<void> {
     const adopteesOk = dep.adopteesChannelId
       ? await deps.fetchChannel(dep.adopteesChannelId).then(c => !!c).catch(() => false)
       : false;
-    if (!forumOk || !adopteesOk) {
+    const loginOk = dep.loginChannelId
+      ? await deps.fetchChannel(dep.loginChannelId).then(c => !!c).catch(() => false)
+      : false;
+    if (!forumOk || !adopteesOk || !loginOk) {
       const layout = await ensureDeploymentLayout(guild, dep).catch(() => null);
       if (layout) {
         await deps.store.upsertDeployment({
@@ -1638,9 +1707,15 @@ export async function syncDeployments(deps: OpsDeps): Promise<void> {
           categoryId: layout.categoryId,
           marketplaceChannelId: layout.marketplaceChannelId,
           adopteesChannelId: layout.adopteesChannelId,
+          loginChannelId: layout.loginChannelId,
           lastError: null,
         }).catch(() => inc("ops.deploy_error"));
         await refreshDeploymentCache(deps.store).catch(() => inc("ops.deploy_error"));
+        // House #log-in is the verify gate, not a deployment signpost —
+        // never post the partner card there even if the house self-heals.
+        if (!isHouse(dep.guildId)) {
+          await ensureDeploymentLoginCard(deps, layout.loginChannelId).catch(() => inc("ops.login_card_error"));
+        }
         // A recreated forum took every mirror thread it hosted down with it —
         // the rows still read 'live' against dead threads and would never
         // requeue. Clear them so the backfill below reposts the catalog.
@@ -1661,6 +1736,86 @@ export async function syncDeployments(deps: OpsDeps): Promise<void> {
       const u = await deps.fetchUser?.(uid).catch(() => null);
       return u?.globalName ?? u?.username ?? null;
     }).catch(e => { inc("ops.sweep_error"); logError("deployment sync fan-out failed", e); });
+
+  // Floodgate — after deployments reconcile, measure house thread pressure.
+  await ensureAdopteePressureCard(deps).catch(e => { inc("ops.pressure_error"); logError("pressure card reconcile failed", e); });
+}
+
+// ── Floodgate ────────────────────────────────────────────────────────────────
+// Discord caps a guild at ~1,000 ACTIVE threads (any kind — archived ones
+// don't count). The house spends them under #adoptees. The gauge watches
+// that count on this sweep: at HOUSE_THREAD_WARN a pinned card in #adoptees
+// starts diverting users to self-serve deployments; below HOUSE_THREAD_CLEAR
+// it comes down. The band between is hysteresis — the 5-minute sweep can't
+// flap the card off and on around a wobbling count.
+
+const PRESSURE_CARD_MARKER = "Char.ly floodgate";
+
+const pressureState = { active: false, count: null as number | null };
+/** Last swept pressure state — the adopt reply reads this instead of
+ *  re-fetching threads per interaction (the sweep is the sole writer). */
+export function houseAdopteesPressure(): { active: boolean; count: number | null } {
+  return { ...pressureState };
+}
+
+async function countHouseAdopteeThreads(deps: OpsDeps): Promise<number | null> {
+  if (!config.houseGuildId || !config.houseAdopteesChannelId) return null;
+  const guild = await deps.fetchGuild(config.houseGuildId).catch(() => null);
+  if (!guild?.channels.fetchActiveThreads) return null;
+  const res = await guild.channels.fetchActiveThreads()
+    .catch(e => { logError("house active threads fetch failed", e); return null; });
+  if (!res) return null;
+  let n = 0;
+  for (const entry of res.threads as Iterable<ThreadLike | [unknown, ThreadLike]>) {
+    const t = Array.isArray(entry) ? entry[1] : entry;
+    if (t.parentId === config.houseAdopteesChannelId) n += 1;
+  }
+  return n;
+}
+
+async function ensureAdopteePressureCard(deps: OpsDeps): Promise<void> {
+  if (!config.houseAdopteesChannelId || !deps.botId) return;
+  const count = await countHouseAdopteeThreads(deps);
+  pressureState.count = count;
+  if (count === null) return; // fetch failed — don't touch the card on stale data
+  const ch = await deps.fetchChannel(config.houseAdopteesChannelId).catch(() => null);
+  if (!ch?.send) return;
+  const recent = await ch.messages?.fetch({ limit: 20 }).catch(() => null);
+  const mine: Array<{ content?: string; delete?(): Promise<unknown> }> = [];
+  if (recent) {
+    for (const entry of recent) {
+      const m = (Array.isArray(entry) ? entry[1] : entry) as { author?: { id?: string }; content?: string; delete?(): Promise<unknown> };
+      if (m.author?.id === deps.botId && m.content?.includes(PRESSURE_CARD_MARKER)) mine.push(m);
+    }
+  }
+  if (count < config.houseThreadClearCount) {
+    pressureState.active = false;
+    for (const m of mine) await m.delete?.().catch(() => {});
+    return;
+  }
+  if (count >= config.houseThreadWarnCount) pressureState.active = true;
+  if (!pressureState.active) return; // inside the band, inactive — leave it
+  // Active: exactly one marked card should stand.
+  for (const m of mine.slice(1)) await m.delete?.().catch(() => {});
+  if (mine.length) return;
+  const sent = await ch.send({
+    content:
+      "**The house is filling up — run your own shelf.**\n" +
+      "Discord caps a server at ~1,000 live private threads, and this channel is getting close. You can host your own Characterly instead — it takes about five minutes.\n\n" +
+      "**1.** Create a Discord server (just you works)\n" +
+      "**2.** Add Characterly to it — button below\n" +
+      "**3.** Enable **Community** in Server Settings (the shelf needs a forum)\n" +
+      "**4.** Run `/marketplace deploy`\n\n" +
+      "A `characterly.app` category appears — your own shelf, your own private adoptee threads, no house limits.\n" +
+      `*${PRESSURE_CARD_MARKER}*`,
+    ...(deps.botInviteUrl ? {
+      components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setLabel("Add Characterly to a server").setStyle(ButtonStyle.Link).setURL(deps.botInviteUrl),
+      )],
+    } : {}),
+    allowedMentions: { parse: [] },
+  }).catch(e => { inc("ops.pressure_error"); logError("pressure card post failed", e); return null; });
+  await (sent as { pin?(): Promise<unknown> } | null)?.pin?.().catch(() => {});
 }
 
 export function startDeploymentSync(deps: OpsDeps, intervalMs = 300_000): { stop: () => void } {
@@ -2734,19 +2889,17 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
         return interaction.reply({ content: "Partner deployment is disabled (`MARKET_DEPLOY_ENABLED` isn't set) — granting now would register a dead command.", ephemeral: true });
       }
       await deps.store.grantDeployment(guildId, interaction.user.id).catch(() => null);
-      const registered = await (async () => {
-        try {
-          const app = interaction.client.application;
-          if (!app?.commands?.set) return false;
-          await app.commands.set([MARKETPLACE_GUILD_COMMAND as never], guildId);
-          return true;
-        } catch (e) { logError("deploygrant command register failed", e); return false; }
-      })();
+      // /marketplace is globally registered now — clear the legacy
+      // guild-scoped copy so the guild doesn't see a duplicate command.
+      try {
+        const app = interaction.client.application;
+        if (app?.commands?.set) await app.commands.set([], guildId);
+      } catch (e) { logError("deploygrant legacy command clear failed", e); }
       await refreshDeploymentCache(deps.store);
       inc("ops.deploygrant");
       return interaction.reply({
         ephemeral: true,
-        content: `**Granted** \`${guildId}\` for marketplace deployment${registered ? " — `/marketplace` registered there" : " (couldn't register `/marketplace` — check my app access to that guild)"}. They can run \`/marketplace deploy\` now.`,
+        content: `**Granted** \`${guildId}\` for marketplace deployment. They can run \`/marketplace deploy\` now.`,
       });
     }
 
@@ -2755,12 +2908,14 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
       if (!row) return interaction.reply({ content: `No deployment row for \`${guildId}\`.`, ephemeral: true });
       const posts = await deps.store.listingPostsForGuild(guildId).catch(() => []);
       const counts = posts.reduce<Record<string, number>>((m, p) => { m[p.status] = (m[p.status] ?? 0) + 1; return m; }, {});
+      const pressure = houseAdopteesPressure();
       return interaction.reply({
         ephemeral: true,
         content:
-          `**Deployment \`${guildId}\`** — status \`${row.status}\`\n` +
-          `forum ${row.marketplaceChannelId ? `<#${row.marketplaceChannelId}>` : "—"} · adoptees ${row.adopteesChannelId ? `<#${row.adopteesChannelId}>` : "—"} · category ${row.categoryId ? `<#${row.categoryId}>` : "—"}\n` +
-          `posts: ${Object.entries(counts).map(([s, n]) => `${s}=${n}`).join(" ") || "none"}${row.lastError ? `\nlast error: ${row.lastError}` : ""}`,
+          `**Deployment \`${guildId}\`** — status \`${row.status}\` · grant \`${row.grantKind}\`\n` +
+          `forum ${row.marketplaceChannelId ? `<#${row.marketplaceChannelId}>` : "—"} · adoptees ${row.adopteesChannelId ? `<#${row.adopteesChannelId}>` : "—"} · log-in ${row.loginChannelId ? `<#${row.loginChannelId}>` : "—"} · category ${row.categoryId ? `<#${row.categoryId}>` : "—"}\n` +
+          `posts: ${Object.entries(counts).map(([s, n]) => `${s}=${n}`).join(" ") || "none"}${row.lastError ? `\nlast error: ${row.lastError}` : ""}` +
+          (isHouse(guildId) && pressure.count !== null ? `\nfloodgate: ${pressure.active ? "**ACTIVE**" : "inactive"} — ${pressure.count} active #adoptees threads (warn ${config.houseThreadWarnCount} / clear ${config.houseThreadClearCount})` : ""),
       });
     }
 

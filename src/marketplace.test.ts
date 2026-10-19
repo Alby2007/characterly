@@ -35,7 +35,7 @@ test("CURATED_TAGS owns the four managed badge names", () => {
 
 const dep = (guildId: string, forumId: string | null): GuildDeployment => ({
   guildId, status: "active", marketplaceChannelId: forumId, adopteesChannelId: null,
-  categoryId: null, deployedBy: null, deployedAt: null, lastError: null,
+  categoryId: null, loginChannelId: null, grantKind: "ops", deployedBy: null, deployedAt: null, lastError: null,
 });
 
 test("postListingToDeployments: every active forum gets a card; a dead partner never blocks", async () => {

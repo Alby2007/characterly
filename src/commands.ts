@@ -12,7 +12,7 @@ import type { ChatImport, Companion, CompanionAdoption, CompanionListing, Compan
 import { config } from "./config.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
 import { TurnLedger } from "./turn-billing.js";
-import { handleOpsCommand, handleHouseButton, handleTicketButton, isHouse, isMarketplaceThread, getOpsDeps, ensureAdopteeThread, ensureAdopteeThreadsForUser, setAdopteeThreadLocked, adopteeManagePayload, deployedGuildIds, deploymentFor, deployMarketplace, removeDeployment } from "./ops.js";
+import { handleOpsCommand, handleHouseButton, handleTicketButton, isHouse, isMarketplaceThread, getOpsDeps, ensureAdopteeThread, ensureAdopteeThreadsForUser, setAdopteeThreadLocked, adopteeManagePayload, deployedGuildIds, deploymentFor, deployMarketplace, removeDeployment, houseAdopteesPressure } from "./ops.js";
 import { CURATED_TAGS, PARTNER_TAG_SET, archiveListingPosts, postListingToDeployments, buildListingCard, buildListingComponents } from "./marketplace.js";
 import { parseCardFile, cardToPersona, cardImportMeta, cardFileHash, CARD_MAX_BYTES, type ImportPersona, type CardImportMeta, type ParsedCard } from "./charcard.js";
 import { parseChatFile, chatImportMeta, chatFileHash, type ParsedChat, type ChatImportMeta } from "./chathist.js";
@@ -1150,6 +1150,11 @@ export const commandDefinitions = [
     { name: "share-facts", type: 1, description: "Server: let companions carry facts about you into owners' DM digests", options: [
       { name: "enabled", description: "true = companions may relay your facts to owners' DMs; omit to see your setting", type: 5, required: false }] },
   ] },
+  { name: "marketplace", description: "Admin: manage this server's Characterly companion shelf", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
+    { name: "deploy", type: 1, description: "Create the mirrored #characters shelf + #adoptees channel here" },
+    { name: "status", type: 1, description: "Show this server's marketplace deployment state" },
+    { name: "remove", type: 1, description: "Archive this server's shelf and stop syncing it" },
+  ] },
   { name: "server", description: "Admin: Characterly settings for this server", default_member_permissions: PermissionFlagsBits.ManageGuild.toString(), options: [
     { name: "status", type: 1, description: "Server status, active companions, queue health, today's LLM usage" },
     { name: "settings", type: 1, description: "Effective settings — retention, ignored/quiet channels, daily cap" },
@@ -1248,10 +1253,6 @@ export const commandDefinitions = [
   { name: "Pin to memory", type: 3 },
 ];
 
-/** Guild-scoped partner command — defined in ops.ts (the grant action
- *  registers it); re-exported so index.ts can seed it on boot. */
-export { MARKETPLACE_GUILD_COMMAND } from "./ops.js";
-
 const confidence = (value: number | undefined) => {
   if (value === undefined) return "Unknown";
   return value >= .8 ? "High" : value >= .55 ? "Medium" : "Low";
@@ -1343,15 +1344,16 @@ export function effectiveCommandName(interaction: Pick<ChatInputCommandInteracti
  *  invocable in the App DM (contexts: 0=guild, 1=bot DM; private channels
  *  (2) deliberately excluded) while server-only ones stay guild-scoped. */
 /** `/marketplace deploy|status|remove` — the partner-server admin surface.
- *  Registered guild-scoped only in ops-granted guilds; the grant row is
- *  re-checked here anyway since Discord caches command visibility. */
+ *  Globally registered; ManageGuild gates visibility. A missing deployment
+ *  row self-grants when the deployer has a linked account (grant_kind='self')
+ *  — a `disabled` row never gets here, so an ops revoke can't be resurrected. */
 async function handleMarketplaceCommand(interaction: ChatInputCommandInteraction, store: MemoryStore) {
   const deps = getOpsDeps();
   if (!deps) return interaction.reply({ content: "Still starting up — try again in a moment.", ephemeral: true });
   const guildId = interaction.guildId;
   if (!guildId) return interaction.reply({ content: "This only runs inside a Discord server.", ephemeral: true });
   const sub = (() => { try { return interaction.options.getSubcommand(false); } catch { return null; } })() ?? "status";
-  const row = await store.deploymentFor(guildId).catch(() => null);
+  let row = await store.deploymentFor(guildId).catch(() => null);
 
   if (sub === "status") {
     if (!row) return interaction.reply({ content: "This server doesn't have a Characterly deployment.", ephemeral: true });
@@ -1364,8 +1366,10 @@ async function handleMarketplaceCommand(interaction: ChatInputCommandInteraction
         .setTitle("Marketplace deployment")
         .setDescription(
           `**Status:** ${row.status}\n` +
+          `**Grant:** ${row.grantKind === "self" ? "self-serve (linked account)" : "operator"}\n` +
           `**Shelf:** ${row.marketplaceChannelId ? `<#${row.marketplaceChannelId}>` : "not created yet"}\n` +
           `**Adoptees:** ${row.adopteesChannelId ? `<#${row.adopteesChannelId}>` : "not created yet"}\n` +
+          `**Log in:** ${row.loginChannelId ? `<#${row.loginChannelId}>` : "not created yet"}\n` +
           `**Mirrored listings:** ${live} live${failed ? ` · ${failed} retrying` : ""}` +
           (row.lastError ? `\n**Last error:** ${row.lastError}` : "")),
       ],
@@ -1374,7 +1378,19 @@ async function handleMarketplaceCommand(interaction: ChatInputCommandInteraction
 
   if (sub === "deploy") {
     if (!row) {
-      return interaction.reply({ content: "This server isn't approved for the Characterly marketplace yet — deployment is in a quiet pilot; ask in the Characterly server to be added.", ephemeral: true });
+      // Self-serve: deploying needs a linked Characterly account — that's the
+      // abuse gate and the billing/boundary anchor. grant_kind='self' marks
+      // the row as organic so ops can tell it apart from pilot grants.
+      const account = await store.accountForDiscordUser(interaction.user.id).catch(() => null);
+      if (!account) {
+        return interaction.reply({
+          content: `Deploying the marketplace needs a linked Characterly account — create one free at ${config.siteUrl} and run \`/link\` here first, then \`/marketplace deploy\` again.`,
+          ephemeral: true,
+        });
+      }
+      await store.grantDeployment(guildId, interaction.user.id, "self").catch(e => { logError("self-serve deployment grant failed", e); });
+      row = await store.deploymentFor(guildId).catch(() => null);
+      if (!row) return interaction.reply({ content: "Couldn't grant this server for deployment — try again, and ping us in the Characterly server if it persists.", ephemeral: true });
     }
     await interaction.deferReply({ ephemeral: true });
     const res = await deployMarketplace(deps, guildId, interaction.user.id).catch(e => ({ ok: false as const, error: String((e as Error)?.message ?? e) }));
@@ -3987,7 +4003,8 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
         ? `**${res.companion.name}** is already in your companions${adoptPointerCopy(t)} — done with them? Drop below.`
         : `**${res.companion.name}** has joined your companions${res.reused ? " (re-adopted — your history with them continues)" : ""} —${adoptPointerCopy(t)}` +
           " Once they've said hello there, `/companion summon` works in other servers too." +
-          (hasAwakened ? "" : " Awaken a permanent companion of your own — that's the bond that stays yours forever, in my DMs."),
+          (hasAwakened ? "" : " Awaken a permanent companion of your own — that's the bond that stays yours forever, in my DMs.") +
+          (houseAdopteesPressure().active ? " The house's adoptee threads are filling up — you can host your own shelf instead: create a server, add Characterly, run `/marketplace deploy`." : ""),
       components: rows,
     });
   }

@@ -201,6 +201,41 @@ Related env (defaults are sane): `ADOPTION_COOLDOWN_MS=43200000` (12h re-adopt c
 
 Moderation policy + runbook (freeze SQL, unban, audit): `docs/moderation.md`.
 
+## Partner deployments + the floodgate (v59/v63)
+
+Servers can host a mirrored shelf + their own `#adoptees` surface — full
+mechanics in `docs/marketplace.md` → Partner deployments. This is the ops view.
+
+**Grants.** `guild_deployments.grant_kind` marks provenance: `'ops'` rows come
+from `/ops deploygrant <guild_id>`; `'self'` rows are self-serve — a guild
+admin with a **linked account** ran `/marketplace deploy` (globally
+registered; ManageGuild gates it) and got granted on the spot. `MARKET_DEPLOY_ENABLED`
+must be set for either path, and a `disabled` row is a hard wall — ops revoke
+can't be resurrected by the deployer.
+
+**Controls.**
+
+- `/ops deploygrant <guild_id>` — grant a server (legacy pilot path; also clears any stale guild-scoped `/marketplace` registration).
+- `/ops deploystatus <guild_id>` — row status + grant kind, all channel ids (shelf/adoptees/log-in/category), mirror post counts, last error. For the house it also prints **floodgate state** — latched or not, live thread count, warn/clear thresholds.
+- `/ops deployrevoke <guild_id>` — flips the row to `disabled`, archives every live mirror post, seals + rehomes hosted adoptee threads, clears leftover command registration.
+
+**The floodgate.** The house's ~1,000 active-thread ceiling is spent under
+`#adoptees`. The deployment sweep counts live threads there; at
+`HOUSE_THREAD_WARN` (default **700**) a pinned card in `#adoptees` starts
+diverting users to self-serve deployments; below `HOUSE_THREAD_CLEAR`
+(**600**) it comes down — the band is deliberate hysteresis. Adoption
+confirmations carry a one-line pointer while latched. It only *diverts new
+clicks*: existing threads never auto-migrate out of the house. If the card
+is missing while latched, the sweep re-posts it — check
+`houseAdopteesPressure()` via `/ops deploystatus` on the house, or the
+`ops.pressure_error` metric if posting is failing.
+
+Expected emergency flow: count climbs → card appears → users create servers,
+enable Community (required — forums need it; the deploy refusal teaches it),
+`/marketplace deploy` lands a `characterly.app` category (shelf forum +
+`#adoptees` + `#log-in` signpost) → new adoptions home there. Free
+advertising + thread-cap relief in one mechanism.
+
 ## Install greeting (v47) — Discord Webhook Events
 
 Users who add the app *to their account* get a welcome DM automatically (no user-first-message needed). Flow: Discord → `POST https://<site>/discord/events` (website worker, Ed25519-verified) → `record_app_install` RPC → `app_installs` → bot sweep DMs the `onboard:start` card (~20s cadence, permanent `greeted_at` dedupe).

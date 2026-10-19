@@ -116,6 +116,8 @@ const env = z.object({
   MARKET_PUBLISH_DAILY_CAP: z.coerce.number().int().min(1).default(5),
   MARKET_REPORT_DAILY_CAP: z.coerce.number().int().min(1).default(20),
   MARKET_ADOPT_DAILY_CAP: z.coerce.number().int().min(1).default(20),
+  HOUSE_THREAD_WARN: z.coerce.number().int().min(1).default(700),
+  HOUSE_THREAD_CLEAR: z.coerce.number().int().min(1).default(600),
   // Curated forum tags — the bot-managed badges on listing threads. Names are
   // fixed constants in ops.ts; these are the thresholds that earn them.
   MARKET_NEW_TAG_DAYS: z.coerce.number().int().min(1).default(7),
@@ -284,6 +286,11 @@ export const config = {
   houseAnnounceChannelId: env.HOUSE_ANNOUNCE_CHANNEL_ID,
   houseVerifyChannelId: env.HOUSE_VERIFY_CHANNEL_ID,
   houseAdopteesChannelId: env.HOUSE_ADOPTEES_CHANNEL_ID,
+  // Floodgate thresholds — active threads under #adoptees. Warn posts the
+  // "host your own" card; the gap to clear is hysteresis so it doesn't flap.
+  // Discord's real ceiling is ~1000 active threads per guild.
+  houseThreadWarnCount: env.HOUSE_THREAD_WARN,
+  houseThreadClearCount: env.HOUSE_THREAD_CLEAR,
   houseInviteUrl: env.HOUSE_INVITE_URL,
   opsChannelId: env.OPS_CHANNEL_ID ?? env.MARKETPLACE_MOD_CHANNEL_ID,
   opsUserIds: (env.OPS_USER_IDS ?? "").split(",").map(s => s.trim()).filter(Boolean),

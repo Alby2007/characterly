@@ -56,7 +56,7 @@ import {
   ensureHouseLayout, ensureResourcePosts, ensureTicketPanel, handleTicketModal, startHostWatchdog, ensureVerifyGate, startLinkSweep,
   startTagSweep, backfillAdopteeThreads, ensureAdopteeThreadsForUser,
   handleDeploymentMemberAdd, handleDeploymentMemberRemove, refreshDeploymentCache,
-  startDeploymentSync, syncDeployments, MARKETPLACE_GUILD_COMMAND, untrackDeployment,
+  startDeploymentSync, syncDeployments, untrackDeployment,
   type OpsDeps, type GuildLike,
 } from "./ops.js";
 import { exec as cpExec } from "node:child_process";
@@ -383,11 +383,14 @@ client.once(Events.ClientReady, async ready => {
       }
       await refreshDeploymentCache(store).catch(e => { inc("ops.init_error"); logError("deployment cache warm failed", e); });
       if (config.marketDeployEnabled) {
+        // /marketplace is a global command now — clear the legacy
+        // guild-scoped registration in every deployed guild so members
+        // don't see a duplicate command alongside the global one.
         const rows = await store.deployments().catch(() => [] as Awaited<ReturnType<MemoryStore["deployments"]>>);
         for (const d of rows) {
-          if (d.guildId === config.houseGuildId || d.status === "disabled") continue;
-          await ready.application.commands.set([MARKETPLACE_GUILD_COMMAND as never], d.guildId)
-            .catch(e => { inc("ops.init_error"); logError(`marketplace command register failed for ${d.guildId}`, e); });
+          if (d.guildId === config.houseGuildId) continue;
+          await ready.application.commands.set([], d.guildId)
+            .catch(e => { inc("ops.init_error"); logError(`legacy marketplace command clear failed for ${d.guildId}`, e); });
         }
         deploySweep = startDeploymentSync(opsDeps);
         void syncDeployments(opsDeps).catch(e => { inc("ops.sweep_error"); logError("deployment sync boot run failed", e); });
@@ -1046,6 +1049,12 @@ const opsDeps: OpsDeps = {
     return coll ? [...coll.values()] as unknown as import("./ops.js").MemberLike[] : [];
   },
   get botId() { return client.user?.id ?? null; },
+  // OAuth install link — same bare shape as the website's "Add to Discord"
+  // CTA (no explicit permissions/scopes; Discord shows the app's defaults).
+  get botInviteUrl() {
+    const id = client.application?.id;
+    return id ? `https://discord.com/oauth2/authorize?client_id=${id}` : null;
+  },
   // Bounded: a stalled `git pull` or hung `npm ci` must not freeze the /ops
   // console forever — a timeout lands as a catchable error instead.
   exec: cmd => execAsync(cmd, { maxBuffer: 4 * 1024 * 1024, timeout: 300_000 }),

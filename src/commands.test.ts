@@ -1568,3 +1568,105 @@ test("chargeOnboardingTurn: free under the cap and on BYOK, 2 tokens past it, re
   assert.match(!refused.ok ? refused.message : "", /Awaken & Lock In/);
   assert.deepEqual(spends, [2, 2]);
 });
+
+// ── Self-serve marketplace deploy (v63) ──────────────────────────────────────
+
+function marketplaceInteraction(sub: string, userId = "u-user") {
+  return stubCommand({ commandName: "marketplace", subcommand: sub, userId, admin: true });
+}
+
+function selfServeHarness(opts: { row?: Record<string, unknown> | null; account?: unknown } = {}) {
+  const grants: Array<[string, string, string]> = [];
+  let row = opts.row ?? null;
+  const sent: Array<{ content?: string }> = [];
+  const store = {
+    deploymentFor: async () => row,
+    accountForDiscordUser: async () => opts.account ?? null,
+    grantDeployment: async (g: string, u: string, k: string) => {
+      grants.push([g, u, k]);
+      row = { guildId: g, status: "granted", grantKind: k };
+    },
+    upsertDeployment: async () => {},
+    deployments: async () => [],
+    listingPostsForGuild: async () => [],
+    missingListingPosts: async () => [],
+  } as unknown as MemoryStore;
+  const guild = {
+    id: "g1",
+    features: ["COMMUNITY"],
+    members: { me: { permissions: { has: () => true } } },
+    channels: {
+      cache: { find: () => undefined },
+      create: async (o: { name: string; type: number }) => ({ id: `c-${o.name}`, name: o.name, type: o.type }),
+    },
+  };
+  const deps = {
+    store,
+    fetchChannel: async () => ({ send: async (p: { content?: string }) => { sent.push(p); }, messages: { fetch: async () => [] } }),
+    fetchGuild: async () => guild,
+    fetchMember: async () => null,
+    listMembers: async () => [],
+    botId: "bot-1",
+    exec: async () => ({ stdout: "", stderr: "" }),
+    exit: () => {},
+    dbPing: async () => 1,
+    lagMs: () => 1,
+    gitSha: null,
+  } as unknown as import("./ops.js").OpsDeps;
+  return { grants, sent, store, deps };
+}
+
+async function withMarketplaceInit(deps: import("./ops.js").OpsDeps, fn: () => Promise<void>) {
+  const { initOps, getOpsDeps } = await import("./ops.js");
+  const prevDeps = getOpsDeps();
+  initOps(deps);
+  const saved = { d: config.marketDeployEnabled, h: config.houseGuildId, a: config.houseAdopteesChannelId, v: config.houseVerifyChannelId };
+  config.marketDeployEnabled = true;
+  config.houseGuildId = "g-house";
+  try { await fn(); }
+  finally {
+    config.marketDeployEnabled = saved.d; config.houseGuildId = saved.h;
+    config.houseAdopteesChannelId = saved.a; config.houseVerifyChannelId = saved.v;
+    if (prevDeps) initOps(prevDeps);
+  }
+}
+
+test("/marketplace deploy: unlinked account is refused — no self-grant", async () => {
+  const h = selfServeHarness({ row: null, account: null });
+  await withMarketplaceInit(h.deps, async () => {
+    const { interaction, replies } = marketplaceInteraction("deploy");
+    await handleMemoryCommand(interaction, h.store, brainFor, evStore);
+    assert.match(replies[0]?.content ?? "", /linked Characterly account/);
+    assert.equal(h.grants.length, 0, "no grant written for an unlinked deployer");
+  });
+});
+
+test("/marketplace deploy: linked account self-grants with grant_kind='self' and deploys", async () => {
+  const h = selfServeHarness({ row: null, account: { id: "acct-1" } });
+  await withMarketplaceInit(h.deps, async () => {
+    const { interaction, replies } = marketplaceInteraction("deploy");
+    await handleMemoryCommand(interaction, h.store, brainFor, evStore);
+    assert.deepEqual(h.grants, [["g1", "u-user", "self"]], "the missing row self-grants the linked deployer");
+    assert.match(replies.map(r => r.content ?? "").join(" "), /Deployed\./);
+  });
+});
+
+test("/marketplace deploy: a disabled (revoked) row can't be resurrected by self-serve", async () => {
+  const h = selfServeHarness({ row: { guildId: "g1", status: "disabled", grantKind: "ops" }, account: { id: "acct-1" } });
+  await withMarketplaceInit(h.deps, async () => {
+    const { interaction, replies } = marketplaceInteraction("deploy");
+    await handleMemoryCommand(interaction, h.store, brainFor, evStore);
+    assert.equal(h.grants.length, 0, "no grant attempt on a disabled row");
+    assert.match(replies.map(r => r.content ?? "").join(" "), /isn't approved/);
+  });
+});
+
+test("/marketplace deploy: an ops-granted row deploys without a second grant", async () => {
+  const h = selfServeHarness({ row: { guildId: "g1", status: "granted", grantKind: "ops" }, account: { id: "acct-1" } });
+  await withMarketplaceInit(h.deps, async () => {
+    const { interaction, replies } = marketplaceInteraction("deploy");
+    await handleMemoryCommand(interaction, h.store, brainFor, evStore);
+    assert.equal(h.grants.length, 0, "an existing grant is used as-is — no re-grant");
+    assert.match(replies.map(r => r.content ?? "").join(" "), /Deployed\./);
+  });
+});

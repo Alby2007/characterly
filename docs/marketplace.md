@@ -423,29 +423,40 @@ Discord caps a server at ~1,000 *active* threads, and every deployed server
 is a storefront that recruits new users.
 
 **Schema.** `guild_deployments` is the registry (`guild_id`, status
-`granted → active → disabled`, that guild's forum/adoptees/category channel
-ids). `listing_posts` (`listing_id, guild_id, thread_id`, nullable thread)
-is the mirror map — one row per listing per deployment. `companion_adoptions`
-gains `chat_guild_id`/`chat_channel_id` — NULL guild = the house.
+`granted → active → disabled`, that guild's forum/adoptees/category/login
+channel ids, and `grant_kind` — `'ops'` for `/ops deploygrant`, `'self'` for
+the self-serve path). `listing_posts` (`listing_id, guild_id, thread_id`,
+nullable thread) is the mirror map — one row per listing per deployment.
+`companion_adoptions` gains `chat_guild_id`/`chat_channel_id` — NULL guild =
+the house.
 
 **Lifecycle.**
 
-1. An operator grants a server: `/ops deploygrant <guild_id>` — writes the
-   `granted` row and registers the guild-scoped `/marketplace` command there.
-   (The command never appears in the global list; `MARKET_DEPLOY_ENABLED`
-   must be set for any of this.)
-2. A server admin (ManageGuild) runs `/marketplace deploy`. Requirements:
-   the guild must have **Community** enabled (forum channels require it) and
+1. A grant exists before anyone deploys — and since v63 it can arrive two
+   ways. **Self-serve (normal mode):** `/marketplace` is globally registered
+   (ManageGuild gates visibility); a guild admin running `/marketplace
+   deploy` with no row is granted on the spot **iff their account is linked**
+   — `grant_kind='self'` records the provenance. Unlinked deployers get the
+   link instructions instead. **Ops-granted (pilot mode):** `/ops deploygrant
+   <guild_id>` writes `grant_kind='ops'` — same row, same deploy path.
+2. A server admin runs `/marketplace deploy`. Requirements: the guild must
+   have **Community** enabled (forum channels require it — Discord won't let
+   the bot enable it, so the refusal teaches the Server Settings path) and
    the bot needs Manage Channels + Manage Threads (or Administrator). The
-   deployer idempotently creates a **Characterly** category holding a
-   `#characters` forum (same tag taxonomy, resolved by *name* per forum) and
-   a locked-down `#adoptees` (everyone reads + types in existing threads,
-   nobody posts or creates threads), then activates the row and backfills
-   the whole catalog.
-3. `/marketplace status` shows the row + post counts; `/marketplace remove`
-   (or `/ops deployrevoke`) disables the deployment, archives every live
-   mirror post, seals + rehomes hosted adoptee threads (see below), and
-   unregisters the command.
+   deployer idempotently creates a **`characterly.app`** category holding a
+   `#characters` forum (same tag taxonomy, resolved by *name* per forum), a
+   locked-down `#adoptees` (everyone reads + types in existing threads,
+   nobody posts or creates threads), and a read-only **`#log-in`** — a
+   pinned card teaching the account-link flow (it's a signpost, not the
+   house verify gate: outside the house, adoption only needs a linked
+   account). Pre-v63 categories named `Characterly` are renamed in place, not
+   duplicated. The row activates and the whole catalog backfills.
+3. `/marketplace status` shows the row, grant kind, channels + post counts;
+   `/marketplace remove` (or `/ops deployrevoke`) disables the deployment,
+   archives every live mirror post, and seals + rehomes hosted adoptee
+   threads (see below). A `disabled` row can't be re-deployed by the guild —
+   a self-serve deploy hits the same refusal as an unapproved server, so an
+   ops revoke is final until ops grant again.
 
 **Fan-out.** `postListingToDeployments` posts every publish/relist/seed into
 *every* active deployment's forum and records a `listing_posts` row per
@@ -471,20 +482,32 @@ otherwise route those messages into the normal guild memory pipeline).
 `purgeGuild` (bot kicked) deletes the deployment + mirror rows and clears
 adoption locations homed there — orphaned adoptions relocate lazily.
 
-**Hidden rollout.** `MARKET_DEPLOY_ENABLED` gates grant/deploy/sync; the
-command is only registered per-granted-guild; the handler re-checks the
-grant row anyway. Nothing about this is visible until we choose to announce.
-Setting it requests the privileged **Server Members Intent** — member-add
-re-attaches hosted adoptee threads, member-remove locks them — so toggle it
-in the dev portal *before* enabling or login fails (same caveat as
-`HOUSE_GUILD_ID`).
+**The floodgate (v63).** The house spends its ~1,000 active-thread budget
+under `#adoptees`. The deployment sweep counts live threads parented there
+and keeps a pinned card in the channel while pressure is high: at
+`HOUSE_THREAD_WARN` (default **700**) the card posts+pins — it teaches the
+self-serve path (create a server → add the bot → `/marketplace deploy`,
+with an install-link button) — and below `HOUSE_THREAD_CLEAR` (default
+**600**) it's removed. The band between is hysteresis so the sweep can't
+flap the card. While pressure is latched, adopt confirmations append a
+one-line pointer to hosting your own shelf. Existing house threads never
+drain automatically — the gate diverts *new* adoption clicks only; each
+adoption's thread stays homed where it was clicked until that host dies.
+
+`MARKET_DEPLOY_ENABLED` gates grant/deploy/sync — the floodgate rides the
+same sweep, so the switch also gates it. Setting it requests the privileged
+**Server Members Intent** — member-add re-attaches hosted adoptee threads,
+member-remove locks them — so toggle it in the dev portal *before* enabling
+or login fails (same caveat as `HOUSE_GUILD_ID`).
 
 ## Config reference
 
 | Env | Default | Meaning |
 |-----|---------|---------|
 | `MARKETPLACE_CHANNEL_ID` | unset → publishing disabled | Forum channel in the hub server |
-| `MARKET_DEPLOY_ENABLED` | unset → partner deployments off | Master switch for `/ops deploygrant`, `/marketplace deploy`, and the deployment sync sweep |
+| `MARKET_DEPLOY_ENABLED` | unset → partner deployments off | Master switch for `/ops deploygrant`, `/marketplace deploy`, the deployment sync sweep, and the floodgate gauge |
+| `HOUSE_THREAD_WARN` | 700 | Active #adoptees threads at which the floodgate card posts |
+| `HOUSE_THREAD_CLEAR` | 600 | Count below which the floodgate card is removed (hysteresis band) |
 | `MARKETPLACE_MOD_CHANNEL_ID` | unset | Text channel pinged on reports (with mod action buttons) |
 | `MARKETPLACE_MOD_ROLE_IDS` | unset → ManageGuild | Comma-separated role ids allowed to act on report pings |
 | `FREE_ADOPTION_SLOTS` | 1 | Active adoptions per free account |
