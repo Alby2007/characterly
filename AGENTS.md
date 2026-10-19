@@ -26,6 +26,13 @@
 - Flow: `/ops deploygrant <guild_id>` → partner admin runs `/marketplace deploy` (requires Community mode + bot perms) → idempotent category/`#characters` forum/`#adoptees` layout → catalog backfill. `/ops deploystatus|deployrevoke` inspect/undo.
 - Everything fans out by tag NAME (ids differ per forum); delist/ban archive every mirror. Details: `docs/marketplace.md` → Partner deployments.
 
+## Prompt hygiene (injection hardening)
+
+- **Every** member- or third-party-authored string must pass a `src/prompt-safety.ts` helper before entering an LLM prompt — never interpolate raw. `promptInline` for values (single-line guarantee), `promptName` for speaker/label positions (reserved names → fallback, markup stripped), `sanitizeBlock` + `wrapUntrusted` for inherently multi-line tool/web output, `sanitizeJsonValue` for JSON evidence payloads.
+- Pipeline prompts (extract/verify/triage/dossier/onboarding) append the shared `MEMBER_TEXT_IS_DATA` clause in `brain.ts`; the reply prompt adds the KNOWLEDGE & PRIVACY contract plus lane rules (VAULT RULE server-side, DIGEST RULE for the server→DM digest).
+- At the storage boundary: `learnAlias` rejects reserved names, `upsertMember`/companion-name writes strip invisible/format chars via `sanitizeStoredName`.
+- Adversarial coverage lives in `src/prompt-injection.test.ts` (structure guarantees, digest edge-consent, storage rejects). The digest relays member edges only with `share_facts_with_companion_owners` consent.
+
 ## Auth emails
 
 - Branded templates live in `supabase/templates/` (confirm / magic-link / recovery) and are referenced from `config.toml` for local dev. On the hosted project they're pasted into Dashboard → Authentication → Email Templates — keep the two in sync when editing.

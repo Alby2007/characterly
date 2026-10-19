@@ -314,6 +314,10 @@ test("/companion commands and cross-context bridges enforce privacy boundaries a
         ? [{ id: 1, guildId: "g1", subjectId: "companion:1", otherId: "u-bob", summary: "playful rivals", valence: 0.4, observationCount: 3, lastObservedAt: null, updatedAt: "", behavioralCount: 8, partyCount: 2, trend: "warming", inferred: false }]
         : [],
     displayNameFor: async (_scope: string, uid: string) => (uid === "u-bob" ? "Bob" : "Alice"),
+    // Digest edge consent: u-bob opted into share-facts so the companion's
+    // edge with him may be relayed into the owner's DM.
+    getMember: async (_scope: string, uid: string) =>
+      uid === "u-bob" ? { shareFactsWithCompanionOwners: true } : undefined,
     relevantMemories: async (scope: string, subj: string) =>
       scope === "dm:u-alice" && subj === "u-alice"
         ? [{ id: 10, guildId: "dm:u-alice", subjectId: "u-alice", status: "active", content: "Alice is planning a surprise trip", confidence: 0.92 }]

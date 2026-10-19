@@ -1,6 +1,7 @@
 import { MemoryStore } from "./database.js";
 import type { EventStore } from "./events.js";
 import type { Companion } from "./types.js";
+import { promptInline, promptName } from "./prompt-safety.js";
 
 // ── Cross-Context Consciousness (DM ↔ Server Bridge) ─────────────────────────
 // Two strictly asymmetric bridges connect a user's private 1:1 DM with their
@@ -11,6 +12,13 @@ import type { Companion } from "./types.js";
 //  2. Server → DM (`gatherServerDigestForDm`): pulls recent events, relationship
 //     edges, and channel activity from shared servers so in 1:1 DMs the
 //     companion can gossip, debrief, and reference what happened in the group.
+//
+// Everything crossing either bridge is member- or server-authored text riding
+// into someone else's prompt — an injection surface. Every interpolated string
+// is sanitized via prompt-safety.ts (no value can forge prompt structure), and
+// member-attributed items obey the same share-facts consent rule the memory
+// lane already enforced: memory opt-in was never consent to being gossiped
+// into someone else's DM.
 
 export async function gatherOwnerSubtextForServer(
   store: MemoryStore,
@@ -39,20 +47,30 @@ export async function gatherOwnerSubtextForServer(
   const lines: string[] = [];
   if (activeAttrs.length) {
     lines.push(
-      `Owner facets from private DMs: ${activeAttrs.map(a => `${a.field}: ${a.value}`).join("; ")}`,
+      `Owner facets from private DMs: ${activeAttrs.map(a => `${promptInline(a.field, 40)}: ${promptInline(a.value, 120)}`).join("; ")}`,
     );
   }
   for (const m of activeOwnerMems.slice(0, maxMemories)) {
-    lines.push(`- [Private DM memory] ${m.content}`);
+    lines.push(`- [Private DM memory] ${promptInline(m.content)}`);
   }
   for (const m of activeCompMems.slice(0, 3)) {
-    lines.push(`- [Shared DM moment] ${m.content}`);
+    lines.push(`- [Shared DM moment] ${promptInline(m.content)}`);
   }
   for (const j of dmJournal.slice(0, 3)) {
-    lines.push(`- [Your private DM memory] ${j.content}`);
+    lines.push(`- [Your private DM memory] ${promptInline(j.content)}`);
   }
 
   return lines.length ? lines.join("\n") : undefined;
+}
+
+/** Does the member on the other side of an edge consent to their dynamic
+ * being gossiped into a companion owner's DM? The recipient's own side and
+ * non-member subjects (companions, server lore) are exempt — this gate exists
+ * for third-party members, matching the digestFor memory rule. */
+async function shareFactsConsented(store: MemoryStore, guildId: string, otherId: string, recipientId: string): Promise<boolean> {
+  if (otherId === recipientId || otherId === "server" || otherId.startsWith("companion:")) return true;
+  const m = await store.getMember(guildId, otherId).catch(() => undefined);
+  return m?.shareFactsWithCompanionOwners === true;
 }
 
 export async function gatherServerDigestForDm(
@@ -69,7 +87,7 @@ export async function gatherServerDigestForDm(
   const sections: string[] = [];
 
   for (const guildId of guildIds.slice(0, 3)) {
-    const guildLabel = resolveGuildName?.(guildId) ?? `Server ${guildId}`;
+    const guildLabel = promptInline(resolveGuildName?.(guildId) ?? `Server ${guildId}`, 80);
     const [eventList, compEdges, ownerEdges, recentMems] = await Promise.all([
       eventStore.listEvents(guildId, { limit: 3 }),
       store.relationshipsFor(guildId, compSubj),
@@ -84,23 +102,23 @@ export async function gatherServerDigestForDm(
     const items: string[] = [];
     for (const ev of eventList.events) {
       if (ev.title) {
-        items.push(`Event: "${ev.title}"${ev.summary ? ` — ${ev.summary}` : ""}`);
+        items.push(`Event: "${promptInline(ev.title, 120)}"${ev.summary ? ` — ${promptInline(ev.summary)}` : ""}`);
       }
     }
 
     for (const edge of compEdges.slice(0, 4)) {
-      if (!edge.inferred && edge.summary) {
-        const otherName = await store.displayNameFor(guildId, edge.otherId);
-        items.push(`Your dynamic with ${otherName}: "${edge.summary}"${edge.trend ? ` (${edge.trend})` : ""}`);
+      if (!edge.inferred && edge.summary && await shareFactsConsented(store, guildId, edge.otherId, ownerUserId)) {
+        const otherName = promptName(await store.displayNameFor(guildId, edge.otherId));
+        items.push(`Your dynamic with ${otherName}: "${promptInline(edge.summary)}"${edge.trend ? ` (${promptInline(edge.trend, 80)})` : ""}`);
       }
     }
 
     for (const edge of ownerEdges.slice(0, 4)) {
       if (edge.otherId === compSubj || edge.subjectId === compSubj) continue;
-      if (!edge.inferred && edge.summary) {
-        const otherId = edge.subjectId === ownerUserId ? edge.otherId : edge.subjectId;
-        const otherName = await store.displayNameFor(guildId, otherId);
-        items.push(`Owner's dynamic with ${otherName}: "${edge.summary}"`);
+      const otherId = edge.subjectId === ownerUserId ? edge.otherId : edge.subjectId;
+      if (!edge.inferred && edge.summary && await shareFactsConsented(store, guildId, otherId, ownerUserId)) {
+        const otherName = promptName(await store.displayNameFor(guildId, otherId));
+        items.push(`Owner's dynamic with ${otherName}: "${promptInline(edge.summary)}"`);
       }
     }
 
@@ -108,7 +126,7 @@ export async function gatherServerDigestForDm(
     // data, inert until claimed, so the digest never surfaces one. The belt-
     // and-braces filter here keeps that true even if a caller drops the flag.
     for (const m of recentMems.filter(m => m.subjectId !== "unknown").slice(0, 3)) {
-      items.push(`Server note (${m.subjectLabel}): ${m.content}`);
+      items.push(`Server note (${promptName(m.subjectLabel)}): ${promptInline(m.content)}`);
     }
 
     if (items.length) {

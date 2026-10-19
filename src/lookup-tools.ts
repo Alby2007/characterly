@@ -3,6 +3,7 @@ import type { EventStore } from "./events.js";
 import type { ProfileStore } from "./profiles.js";
 import type { PairContext } from "./types.js";
 import { formatPairContext, formatReplyProfile, monthYear, shortDate } from "./reply-format.js";
+import { promptInline, promptName } from "./prompt-safety.js";
 
 // Internal lookup tools for the reply path — read-only queries over the bot's
 // own data, callable by the model when conversation turns to someone outside
@@ -75,7 +76,9 @@ async function hasConsent(ctx: ToolCtx, userId: string): Promise<boolean> {
 export async function executeLookupTool(name: string, args: Record<string, unknown>, ctx: ToolCtx): Promise<string> {
   try {
     if (name === "lookup_person") {
-      const person = typeof args.name === "string" ? args.name.trim() : "";
+      // Args are model-emitted user text echoed into tool results — sanitize
+      // once at parse so every interpolation below is prompt-safe.
+      const person = typeof args.name === "string" ? promptInline(args.name, 60) : "";
       if (!person) return "error: missing name";
       const id = ctx.resolveName(person);
       if (!id) return `no member known as "${person}"`;
@@ -91,8 +94,8 @@ export async function executeLookupTool(name: string, args: Record<string, unkno
     }
 
     if (name === "lookup_relationship") {
-      const a = typeof args.person_a === "string" ? args.person_a.trim() : "";
-      const b = typeof args.person_b === "string" ? args.person_b.trim() : "";
+      const a = typeof args.person_a === "string" ? promptInline(args.person_a, 60) : "";
+      const b = typeof args.person_b === "string" ? promptInline(args.person_b, 60) : "";
       if (!a || !b) return "error: missing person_a or person_b";
       const aId = ctx.resolveName(a), bId = ctx.resolveName(b);
       if (!aId) return `no member known as "${a}"`;
@@ -107,37 +110,37 @@ export async function executeLookupTool(name: string, args: Record<string, unkno
     }
 
     if (name === "search_memories") {
-      const query = typeof args.query === "string" ? args.query.trim() : "";
+      const query = typeof args.query === "string" ? promptInline(args.query, 200) : "";
       if (!query) return "error: missing query";
-      const subject = typeof args.subject === "string" ? args.subject.trim() : "";
+      const subject = typeof args.subject === "string" ? promptInline(args.subject, 60) : "";
       if (subject) {
         const id = ctx.resolveName(subject);
         if (!id) return `no member known as "${subject}"`;
         if (!(await hasConsent(ctx, id))) return `"${subject}" hasn't opted in to profiles`;
         const { memories } = await ctx.store.listMemories(ctx.guildId, id, { search: query });
         if (!memories.length) return `no memories matching "${query}" for "${subject}"`;
-        const label = await ctx.store.displayNameFor(ctx.guildId, id);
-        return memories.slice(0, 5).map(m => `- [${label}] ${m.content} (${(m.confidence ?? 0).toFixed(2)})`).join("\n");
+        const label = promptName(await ctx.store.displayNameFor(ctx.guildId, id));
+        return memories.slice(0, 5).map(m => `- [${label}] ${promptInline(m.content)} (${(m.confidence ?? 0).toFixed(2)})`).join("\n");
       }
       const hits = await ctx.store.searchMemories(ctx.guildId, query, 5);
       if (!hits.length) return `no memories matching "${query}"`;
       const labels = new Map<string, string>();
       for (const h of hits) {
-        if (!labels.has(h.subjectId)) labels.set(h.subjectId, await ctx.store.displayNameFor(ctx.guildId, h.subjectId));
+        if (!labels.has(h.subjectId)) labels.set(h.subjectId, promptName(await ctx.store.displayNameFor(ctx.guildId, h.subjectId)));
       }
-      return hits.map(h => `- [${labels.get(h.subjectId)}] ${h.content} (${h.confidence.toFixed(2)})`).join("\n");
+      return hits.map(h => `- [${labels.get(h.subjectId)}] ${promptInline(h.content)} (${h.confidence.toFixed(2)})`).join("\n");
     }
 
     if (name === "lookup_event") {
       // Deliberately ungated: events are shared server context, not person
       // profiles — participants are part of what happened, like minutes of a
       // meeting. Person-scoped memories still require subject consent above.
-      const title = typeof args.title === "string" ? args.title.trim() : "";
+      const title = typeof args.title === "string" ? promptInline(args.title, 120) : "";
       if (!title) return "error: missing title";
       const events = await ctx.eventStore.searchEvents(ctx.guildId, title, 3);
       if (!events.length) return `no events matching "${title}"`;
       return events.map(e =>
-        `${e.title || `Event #${e.id}`} (${shortDate(e.occurredAt.toISOString())}) — ${e.summary || "no summary"}. Participants: ${e.participants.map(p => `${p.userName} (${p.role})`).join(", ") || "unknown"}`
+        `${promptInline(e.title, 120) || `Event #${e.id}`} (${shortDate(e.occurredAt.toISOString())}) — ${promptInline(e.summary) || "no summary"}. Participants: ${e.participants.map(p => `${promptName(p.userName)} (${p.role})`).join(", ") || "unknown"}`
       ).join("\n");
     }
 

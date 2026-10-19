@@ -3,6 +3,7 @@ import type { MemoryStore } from "./database.js";
 import { defaultEmbedder, vectorLiteral } from "./embeddings.js";
 import { FatalJobError } from "./jobs.js";
 import { inc } from "./metrics.js";
+import { promptInline, promptName } from "./prompt-safety.js";
 import { logError } from "./secrets.js";
 
 // ── Journal job handler ──────────────────────────────────────────────────────
@@ -51,7 +52,7 @@ export async function runJournalJob(scope: string, payload: JournalJobPayload, d
   const recent = await store.recentContext(scope, payload.channelId, 8);
   const context = recent
     .filter(r => r.content?.trim())
-    .map(r => `${r.authorName} (${r.authorId}): ${r.content}`)
+    .map(r => `${promptName(r.authorName)} (${r.authorId}): ${promptInline(r.content, 500)}`)
     .join("\n");
 
   const entries = await brain.writeJournal({

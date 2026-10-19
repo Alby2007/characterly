@@ -3,6 +3,8 @@
 // ever touches image bytes/URLs is Brain.describeImage; everything here
 // operates on attachment metadata.
 
+import { promptInline, promptName } from "./prompt-safety.js";
+
 export const IMAGE_MAX_PER_MESSAGE = 3;
 
 export type AttachmentMeta = { url: string; contentType?: string | null; size: number; name?: string };
@@ -31,7 +33,8 @@ export function qualifyingImages(
  * direct_observation/uncertain_inference and keeps the reply model from
  * reciting depicted content as the author's claims. */
 export function formatImageContext(descriptions: string[], authorName: string): string {
-  if (!descriptions.length) return "";
-  const lines = descriptions.map(d => `"${d}"`).join("; ");
-  return `${authorName} attached image${descriptions.length > 1 ? "s" : ""} — content observed by the bot: ${lines}`;
+  const clean = descriptions.map(d => promptInline(d, 500)).filter(Boolean);
+  if (!clean.length) return "";
+  const lines = clean.map(d => `"${d}"`).join("; ");
+  return `${promptName(authorName)} attached image${clean.length > 1 ? "s" : ""} — content observed by the bot: ${lines}`;
 }

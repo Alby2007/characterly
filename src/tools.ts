@@ -6,6 +6,7 @@ import type { IncomingMessage } from "node:http";
 import type { LookupFunction } from "node:net";
 import type { Readable } from "node:stream";
 import { executeLookupTool, LOOKUP_TOOL_NAMES, type ToolCtx } from "./lookup-tools.js";
+import { sanitizeBlock, wrapUntrusted } from "./prompt-safety.js";
 
 // Local tool implementations for gpt-oss-120b tool calling — free alternatives to
 // Groq Compound's billed built-ins. web_search scrapes DuckDuckGo's lite endpoint
@@ -348,11 +349,13 @@ export async function executeTool(name: string, argsJson: string, ctx?: ToolCtx)
     const args = JSON.parse(argsJson || "{}") as Record<string, unknown>;
     if (name === "web_search") {
       if (typeof args.query !== "string" || !args.query.trim()) return "error: missing query";
-      return await webSearch(args.query.trim());
+      // Arbitrary third-party text — the classic injection channel. Sanitize
+      // and marker-wrap so page content can't masquerade as instructions.
+      return wrapUntrusted(sanitizeBlock(await webSearch(args.query.trim())), "WEB CONTENT");
     }
     if (name === "visit_url") {
       if (typeof args.url !== "string" || !args.url.trim()) return "error: missing url";
-      return await visitUrl(args.url.trim());
+      return wrapUntrusted(sanitizeBlock(await visitUrl(args.url.trim())), "WEB CONTENT");
     }
     if (LOOKUP_TOOL_NAMES.has(name)) {
       if (!ctx) return "error: lookup tools unavailable";

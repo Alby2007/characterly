@@ -3,6 +3,7 @@ import { config } from "./config.js";
 import type { MemoryStore } from "./database.js";
 import { FatalJobError } from "./jobs.js";
 import { inc } from "./metrics.js";
+import { promptInline, promptName } from "./prompt-safety.js";
 import { logError } from "./secrets.js";
 
 // ── Story-summary job handler ────────────────────────────────────────────────
@@ -60,7 +61,7 @@ export async function runSummaryJob(scope: string, payload: SummaryJobPayload, d
 
   const transcript = window
     .filter(r => r.content?.trim())
-    .map(r => `${r.authorName}: ${r.content}`)
+    .map(r => `${promptName(r.authorName)}: ${promptInline(r.content, 500)}`)
     .join("\n");
   if (!transcript.trim()) { inc("jobs.dropped_stale"); return; }
 

@@ -7,6 +7,7 @@ import { inc } from "./metrics.js";
 import { findMentionedUsers } from "./entity-resolution.js";
 import { calculateInitialConfidence, updateConfidence, calculateDefaultImportance, calculateDefaultExplicitness } from "./confidence.js";
 import { contentPolarity, listAttributes, listAttributesForSubjects, listContestedAttributes, recomputeForMemories, transferProvenance } from "./attributes.js";
+import { isReservedName, sanitizeStoredName } from "./prompt-safety.js";
 
 /** Cap on members.known_names — unbounded growth would inflate the alias map
  * and every per-message regex built from it. Oldest names are evicted. */
@@ -724,15 +725,19 @@ export class MemoryStore {
 
   async upsertMember(guildId: string, userId: string, displayName: string, at: Date, countMessage = true): Promise<void> {
     const inc = countMessage ? 1 : 0;
+    // Strip invisible/format chars before the name ever reaches known_names —
+    // a zero-width or RTLO-laden display name must not be stored (and from
+    // there, echoed into every prompt label). Empty falls back to "member".
+    const display = sanitizeStoredName(displayName) || "member";
     await this.sql`
       INSERT INTO members (guild_id, user_id, known_names, first_seen_at, last_seen_at, message_count)
-      VALUES (${guildId}, ${userId}, ${[displayName]}, ${at.toISOString()}, ${at.toISOString()}, ${inc})
+      VALUES (${guildId}, ${userId}, ${[display]}, ${at.toISOString()}, ${at.toISOString()}, ${inc})
       ON CONFLICT (guild_id, user_id) DO UPDATE SET
         known_names   = CASE
-          WHEN ${displayName} = ANY(members.known_names) THEN members.known_names
+          WHEN ${display} = ANY(members.known_names) THEN members.known_names
           WHEN cardinality(members.known_names) >= ${MAX_KNOWN_NAMES}
-            THEN array_append(members.known_names[2:cardinality(members.known_names)], ${displayName})
-          ELSE array_append(members.known_names, ${displayName})
+            THEN array_append(members.known_names[2:cardinality(members.known_names)], ${display})
+          ELSE array_append(members.known_names, ${display})
         END,
         first_seen_at = LEAST(members.first_seen_at, EXCLUDED.first_seen_at),
         last_seen_at  = GREATEST(members.last_seen_at, EXCLUDED.last_seen_at),
@@ -797,8 +802,10 @@ export class MemoryStore {
    * Records provenance in alias_candidates and applies it to known_names so the
    * alias map resolves it from then on. Idempotent per evidence message. */
   async learnAlias(guildId: string, userId: string, name: string, source: string, messageId: string): Promise<boolean> {
-    const clean = name.trim();
-    if (!clean) return false;
+    const clean = sanitizeStoredName(name);
+    // A reserved label ("system", "you", "owner"…) is a spoofing attempt, not
+    // a name — reject before it reaches the candidate log or known_names.
+    if (!clean || isReservedName(clean)) return false;
     return await this.sql.begin(async sql => {
       const inserted = await sql`
         INSERT INTO alias_candidates (guild_id, user_id, name, source, evidence_message_id)
@@ -823,7 +830,7 @@ export class MemoryStore {
   /** Log a name that failed entity resolution — the discovery surface for
    * aliases self-naming can't catch and recurring non-member entities. */
   async logUnresolvedName(guildId: string, name: string, messageId: string): Promise<void> {
-    const clean = name.trim();
+    const clean = sanitizeStoredName(name);
     if (!clean) return;
     await this.sql`
       INSERT INTO unresolved_names (guild_id, name, message_id)
@@ -2691,11 +2698,14 @@ export class MemoryStore {
     const existing = await this.getCompanionByOwner(ownerUserId);
     if (existing?.onboardingState === "active") return existing;
     const incTurn = incrementTurn ? 1 : 0;
+    // Control/format chars can't hide in a companion name — the draft came
+    // from owner text via the onboarding model, and names reach prompts.
+    const cleanName = sanitizeStoredName(spec.name ?? "", 64);
     const rows = await this.sql<Array<any>>`
       INSERT INTO companions (owner_user_id, name, avatar_url, voice_persona, core_traits, owner_dynamic, backstory, onboarding_state, onboarding_turns, created_at, updated_at)
       VALUES (
         ${ownerUserId},
-        ${spec.name?.trim() ?? ""},
+        ${cleanName},
         ${spec.avatarUrl ?? null},
         ${spec.voicePersona?.trim() ?? ""},
         ${spec.coreTraits ?? []},
@@ -2706,7 +2716,7 @@ export class MemoryStore {
         NOW(), NOW()
       )
       ON CONFLICT (owner_user_id) WHERE kind = 'awakened' DO UPDATE SET
-        name             = CASE WHEN ${spec.name?.trim() ?? ""} <> '' THEN ${spec.name?.trim() ?? ""} ELSE companions.name END,
+        name             = CASE WHEN ${cleanName} <> '' THEN ${cleanName} ELSE companions.name END,
         avatar_url       = COALESCE(${spec.avatarUrl ?? null}, companions.avatar_url),
         voice_persona    = CASE WHEN ${spec.voicePersona?.trim() ?? ""} <> '' THEN ${spec.voicePersona?.trim() ?? ""} ELSE companions.voice_persona END,
         core_traits      = CASE WHEN cardinality(${spec.coreTraits ?? []}::text[]) > 0 THEN ${spec.coreTraits ?? []} ELSE companions.core_traits END,
@@ -2734,11 +2744,12 @@ export class MemoryStore {
     if (existing?.onboardingState === "active") return existing;
     const dmScope = `dm:${ownerUserId}`;
     await this.ensureSettings(dmScope);
+    const cleanName = sanitizeStoredName(spec.name, 64);
     const rows = await this.sql<Array<any>>`
       INSERT INTO companions (owner_user_id, name, avatar_url, voice_persona, core_traits, owner_dynamic, backstory, onboarding_state, onboarding_turns, created_at, updated_at)
       VALUES (
         ${ownerUserId},
-        ${spec.name.trim() || "Companion"},
+        ${cleanName || "Companion"},
         ${spec.avatarUrl ?? null},
         ${spec.voicePersona.trim()},
         ${spec.coreTraits},
@@ -2749,7 +2760,7 @@ export class MemoryStore {
         NOW(), NOW()
       )
       ON CONFLICT (owner_user_id) WHERE kind = 'awakened' DO UPDATE SET
-        name             = CASE WHEN ${spec.name.trim()} <> '' THEN ${spec.name.trim()} ELSE companions.name END,
+        name             = CASE WHEN ${cleanName} <> '' THEN ${cleanName} ELSE companions.name END,
         avatar_url       = COALESCE(${spec.avatarUrl ?? null}, companions.avatar_url),
         voice_persona    = CASE WHEN ${spec.voicePersona.trim()} <> '' THEN ${spec.voicePersona.trim()} ELSE companions.voice_persona END,
         core_traits      = CASE WHEN cardinality(${spec.coreTraits}::text[]) > 0 THEN ${spec.coreTraits} ELSE companions.core_traits END,
@@ -4167,11 +4178,14 @@ export class MemoryStore {
       }
 
       let companionId: number;
+      // Marketplace-authored text — clean the name before it becomes a
+      // companion (promptName() handles reserved labels at prompt use).
+      const listingName = sanitizeStoredName(listing.name, 64) || "Companion";
       if (existing) {
         companionId = Number(existing.companion_id);
         await sql`
           UPDATE companions SET
-            name = ${listing.name}, voice_persona = ${listing.voice_persona},
+            name = ${listingName}, voice_persona = ${listing.voice_persona},
             core_traits = ${listing.core_traits}, owner_dynamic = ${listing.owner_dynamic},
             backstory = ${listing.backstory}, avatar_url = ${listing.avatar_url},
             listing_version = ${listing.version}, updated_at = NOW()
@@ -4185,7 +4199,7 @@ export class MemoryStore {
         const compRows = await sql<Array<any>>`
           INSERT INTO companions (owner_user_id, name, avatar_url, voice_persona, core_traits, owner_dynamic, backstory, onboarding_state, onboarding_turns, kind, adopted_from_listing_id, listing_version, persona_source, import_meta, created_at, updated_at)
           VALUES (
-            ${userId}, ${listing.name}, ${listing.avatar_url}, ${listing.voice_persona},
+            ${userId}, ${listingName}, ${listing.avatar_url}, ${listing.voice_persona},
             ${listing.core_traits}, ${listing.owner_dynamic}, ${listing.backstory},
             'active', 0, 'adopted', ${listingId}, ${listing.version},
             ${listing.persona_source ?? "authored"}, ${listing.import_meta ?? null}, NOW(), NOW()
