@@ -71,6 +71,49 @@ test("a trackEvent racing setAnalyticsOptOut cannot leak a post-wipe row", dbTes
   } finally { await sql.end(); await other.end(); }
 });
 
+test("a trackEvent blocked behind a committing opt-out still sees the flag", dbTest, async () => {
+  const sql = makeTestSql();
+  const other = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    // The queue-behind-a-bare-lock test above always grants the insert first
+    // (advisory waits are FIFO), so it never exercises "opt-out wins". The
+    // dangerous ordering needs the flag+delete tx holding the key while the
+    // insert's statement starts — fixing its READ COMMITTED snapshot before
+    // the flag commits. setAnalyticsOptOut can't be held open mid-tx, so this
+    // replays its exact statements under the same key on a second session.
+    let release!: () => void, acquired!: () => void;
+    const gate = new Promise<void>(r => (release = r));
+    const held = new Promise<void>(r => (acquired = r));
+    const optTx = other.begin(async tx => {
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended('u-race2', 0))`;
+      await tx`INSERT INTO user_bot_settings (discord_user_id, analytics_opt_out) VALUES ('u-race2', true)
+               ON CONFLICT (discord_user_id) DO UPDATE SET analytics_opt_out = true, updated_at = now()`;
+      await tx`DELETE FROM analytics_events WHERE discord_user_id = 'u-race2'`;
+      acquired();
+      await gate;
+    });
+    await held;
+    const insertP = store.trackEvent("u-race2", "awaken");
+    // The insert must be provably blocked on the lock — not merely slow — so
+    // its statement snapshot predates the flag commit. Poll pg_stat_activity
+    // for the advisory wait rather than sleeping a fixed interval.
+    let blocked = false;
+    for (let i = 0; i < 40 && !blocked; i++) {
+      const w = await sql`SELECT 1 FROM pg_stat_activity
+                          WHERE wait_event_type = 'Lock' AND wait_event = 'advisory'
+                            AND query LIKE '%pg_advisory_xact_lock%'`;
+      if (w.length) { blocked = true; break; }
+      await new Promise(r => setTimeout(r, 50));
+    }
+    assert.ok(blocked, "insert never reached the advisory-lock wait");
+    release();
+    await Promise.all([insertP, optTx.catch(() => {})]);
+    const rows = await sql`SELECT id FROM analytics_events WHERE discord_user_id = 'u-race2'`;
+    assert.equal(rows.length, 0, "an insert that waited behind the opt-out must see its flag");
+  } finally { await sql.end(); await other.end(); }
+});
+
 test("flushMetricDeltas accumulates into the daily rollup", dbTest, async () => {
   const sql = makeTestSql();
   try {

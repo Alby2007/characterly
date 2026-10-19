@@ -520,16 +520,21 @@ export class MemoryStore {
       }
       // The advisory lock serializes against setAnalyticsOptOut's tx: this row
       // either commits before the opt-out's DELETE (and is wiped with the rest)
-      // or waits for the flag commit and the NOT EXISTS gate blocks it — the
-      // flag→delete commit gap can't leak a row. Guild events (null user) skip
-      // the lock; opt-out never targets them.
-      await this.sql`
-        WITH l AS (SELECT pg_advisory_xact_lock(hashtextextended(${discordUserId}, 0)))
-        INSERT INTO analytics_events (discord_user_id, event, scope, meta)
-        SELECT ${discordUserId}, ${event}, ${scope}, ${JSON.stringify(meta)}::jsonb
-        FROM l
-        WHERE NOT EXISTS (SELECT 1 FROM user_bot_settings WHERE discord_user_id = ${discordUserId} AND analytics_opt_out)
-      `;
+      // or waits for the flag commit and the NOT EXISTS gate blocks it. The
+      // lock must be its OWN statement — READ COMMITTED fixes each statement's
+      // snapshot at statement start, so a lock riding in the INSERT's CTE
+      // would evaluate NOT EXISTS on the pre-wait snapshot and never see a
+      // flag committed during the wait (the row would leak post-wipe). With a
+      // separate lock statement, the gated INSERT snapshots after the grant.
+      // Guild events (null user) skip the lock; opt-out never targets them.
+      await this.sql.begin(async sql => {
+        await sql`SELECT pg_advisory_xact_lock(hashtextextended(${discordUserId}, 0))`;
+        await sql`
+          INSERT INTO analytics_events (discord_user_id, event, scope, meta)
+          SELECT ${discordUserId}, ${event}, ${scope}, ${JSON.stringify(meta)}::jsonb
+          WHERE NOT EXISTS (SELECT 1 FROM user_bot_settings WHERE discord_user_id = ${discordUserId} AND analytics_opt_out)
+        `;
+      });
     } catch {
       inc("analytics.event_error");
     }
