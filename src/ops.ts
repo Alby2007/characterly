@@ -412,26 +412,14 @@ export const TERMS_URL = `${config.siteUrl.replace(/\/+$/, "")}/terms`;
 export const PRIVACY_URL = `${config.siteUrl.replace(/\/+$/, "")}/privacy`;
 const CONSENT_CUSTOM_ID = "house:consent";
 
-/** Post the verify card if the gate channel doesn't already carry one —
- *  and delete duplicate copies of it while we're looking. */
-export async function ensureVerifyGate(deps: OpsDeps): Promise<boolean> {
-  if (!config.houseVerifyChannelId) return false;
-  const ch = await deps.fetchChannel(config.houseVerifyChannelId).catch(() => null);
-  if (!ch) return false;
-  const recent = await ch.messages?.fetch({ limit: 20 }).catch(() => null);
-  if (recent) {
-    let kept = false;
-    for (const entry of recent) {
-      // discord.js message fetches return a Collection — iterating yields
-      // [snowflake, Message] pairs, not messages. Unwrap before probing.
-      const m = (Array.isArray(entry) ? entry[1] : entry) as { author?: { id?: string }; components?: unknown[]; delete?(): Promise<unknown> };
-      if (m.author?.id !== deps.botId || !JSON.stringify(m.components ?? []).includes(VERIFY_CUSTOM_ID)) continue;
-      if (kept) await m.delete?.().catch(() => {}); // stale duplicate card — self-heal
-      else kept = true;
-    }
-    if (kept) return false; // card already up
-  }
-  await ch.send({
+// Verify-card version — bump when the embed's copy or the site URL changes so
+// ensureVerifyGate edits the live card in place (same pattern as
+// RESOURCE_POSTS: footer marker + version compare).
+const VERIFY_CARD_VERSION = 2;
+const VERIFY_CARD_MARKER = "Char.ly verify gate";
+
+function buildVerifyCard() {
+  return {
     embeds: [new EmbedBuilder()
       .setTitle("Verify your Characterly account")
       .setDescription(
@@ -439,12 +427,47 @@ export async function ensureVerifyGate(deps: OpsDeps): Promise<boolean> {
         "**How:** create an account at " + config.siteUrl + ", run `/link` in the bot's DMs, then click below.\n" +
         "_Just joined? Accept the rules first — the button unlocks once you have._\n" +
         "_Verifying asks you to accept our Terms & Privacy Policy._",
-      )],
+      )
+      .setFooter({ text: `${VERIFY_CARD_MARKER} · v${VERIFY_CARD_VERSION}` })],
     components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId(VERIFY_CUSTOM_ID).setLabel("Verify — I'm a Characterly member").setStyle(ButtonStyle.Success),
     )],
-    allowedMentions: { parse: [] },
-  });
+    allowedMentions: { parse: [] as never[] },
+  };
+}
+
+/** Post the verify card if the gate channel doesn't already carry one,
+ *  delete duplicate copies, and edit the card in place when its version
+ *  marker is behind — a stale card used to persist forever (an outdated
+ *  site URL once lived in it for weeks). */
+export async function ensureVerifyGate(deps: OpsDeps): Promise<boolean> {
+  if (!config.houseVerifyChannelId) return false;
+  const ch = await deps.fetchChannel(config.houseVerifyChannelId).catch(() => null);
+  if (!ch) return false;
+  const versionRe = new RegExp(`${VERIFY_CARD_MARKER} · v(\\d+)`);
+  const recent = await ch.messages?.fetch({ limit: 20 }).catch(() => null);
+  if (recent) {
+    let kept = false;
+    let edited = false;
+    for (const entry of recent) {
+      // discord.js message fetches return a Collection — iterating yields
+      // [snowflake, Message] pairs, not messages. Unwrap before probing.
+      const m = (Array.isArray(entry) ? entry[1] : entry) as {
+        author?: { id?: string }; components?: unknown[]; embeds?: unknown[];
+        edit?(o: unknown): Promise<unknown>; delete?(): Promise<unknown>;
+      };
+      if (m.author?.id !== deps.botId || !JSON.stringify(m.components ?? []).includes(VERIFY_CUSTOM_ID)) continue;
+      if (kept) { await m.delete?.().catch(() => {}); continue; } // stale duplicate card — self-heal
+      kept = true;
+      const match = JSON.stringify(m.embeds ?? []).match(versionRe);
+      // No marker = a card from before versioning — treat as v1 and refresh.
+      if ((!match || Number(match[1]) < VERIFY_CARD_VERSION) && m.edit) {
+        await m.edit(buildVerifyCard()).then(() => { edited = true; }).catch(() => {});
+      }
+    }
+    if (kept) return edited;
+  }
+  await ch.send(buildVerifyCard());
   return true;
 }
 
