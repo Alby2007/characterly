@@ -919,6 +919,9 @@ input.toggle:focus-visible { outline: 2px solid var(--gold-hi); outline-offset: 
   .hero { grid-template-columns: 1fr; gap: 64px; padding-top: 40px; }
   .scene { max-width: 600px; width: 100%; margin: 0 auto; }
   .rite { grid-template-columns: 1fr; gap: 44px; }
+  /* nth-child(even) above carries higher specificity — the order reset alone
+   * doesn't collapse its two-column template, so it must be overridden too. */
+  .rite:nth-child(even) { grid-template-columns: 1fr; }
   .rite:nth-child(even) .rite-text { order: 0; }
   .ledger ul { grid-template-columns: 1fr 1fr; }
   .ledger li:nth-child(3) { border-left: 0; padding-left: 0; }
