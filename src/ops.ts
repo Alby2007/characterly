@@ -1164,7 +1164,7 @@ export async function ensureAdopteeThread(
   const relocateToHouse = async () => {
     targetId = houseId;
     if (adoption.chatGuildId || adoption.chatThreadId) {
-      await deps.store.setAdoptionLocation(adoption.id, { guildId: null, channelId: null, threadId: null }).catch(() => {});
+      await deps.store.setAdoptionLocation(adoption.id, { guildId: null, channelId: null, threadId: null }).catch(() => inc("ops.adoptee_thread_error"));
       adoption.chatGuildId = null; adoption.chatChannelId = null; adoption.chatThreadId = null;
     }
   };
@@ -1191,7 +1191,7 @@ export async function ensureAdopteeThread(
           inc("ops.adoptee_reattach_error"); logError("adoptee thread re-attach failed", e);
         });
         // Threads created before the manage row shipped get it backfilled.
-        await ensureAdopteeManageRow(ex, companion).catch(() => {});
+        await ensureAdopteeManageRow(ex, companion).catch(() => inc("ops.adoptee_thread_error"));
         return { thread: ex, greeted: false, created: false };
       }
       // Adopter is gone from the host server — archive the stale thread so
@@ -1284,7 +1284,7 @@ async function createAdopteeThread(
   const greeted = await greetAdopteeInThread(
     deps, thread, parent, companion, ctx.listing?.greeting ?? "",
   );
-  if (greeted) await deps.store.markDmIntroduced(adoption.id).catch(() => {});
+  if (greeted) await deps.store.markDmIntroduced(adoption.id).catch(() => inc("ops.adoptee_thread_error"));
   // Pinned manage row — Drop is the one destructive act every adopter
   // eventually needs, and burying it in a 16-item slash enum made it
   // undiscoverable. The market:drop handler reuses the shared path (row
@@ -1517,7 +1517,7 @@ export async function deployMarketplace(deps: OpsDeps, guildId: string, deployer
     return null;
   });
   if (!layout) {
-    await deps.store.upsertDeployment({ guildId, status: row.status, lastError: "layout reconcile failed" }).catch(() => {});
+    await deps.store.upsertDeployment({ guildId, status: row.status, lastError: "layout reconcile failed" }).catch(() => inc("ops.deploy_error"));
     return { ok: false, error: "Couldn't create the Characterly surfaces — check my permissions and try again." };
   }
   await deps.store.upsertDeployment({
@@ -1528,7 +1528,7 @@ export async function deployMarketplace(deps: OpsDeps, guildId: string, deployer
     adopteesChannelId: layout.adopteesChannelId,
     deployedBy: deployerId ?? row.deployedBy,
     lastError: null,
-  }).catch(() => {});
+  }).catch(() => inc("ops.deploy_error"));
   await refreshDeploymentCache(deps.store);
 
   // Fan the whole catalog into the fresh forum. Best-effort: individual post
@@ -1559,7 +1559,7 @@ export async function removeDeployment(deps: OpsDeps, guildId: string): Promise<
   if (guildId === config.houseGuildId) return { ok: false, error: "The house server can't be removed." };
   const row = await deps.store.deploymentFor(guildId).catch(() => null);
   if (!row) return { ok: false, error: "No deployment exists for this server." };
-  await deps.store.setDeploymentStatus(guildId, "disabled").catch(() => {});
+  await deps.store.setDeploymentStatus(guildId, "disabled").catch(() => inc("ops.deploy_error"));
   const live = (await deps.store.listingPostsForGuild(guildId).catch(() => [] as Awaited<ReturnType<MemoryStore["listingPostsForGuild"]>>))
     .filter(p => p.status === "live" && p.threadId);
   let archived = 0;
@@ -1567,7 +1567,7 @@ export async function removeDeployment(deps: OpsDeps, guildId: string): Promise<
     archived = await archiveListingPosts(deps.fetchChannel, live, {
       note: "This server has left the Characterly marketplace — this listing is archived here. It's still live on the main shelf.",
     });
-    for (const p of live) await deps.store.markListingPost(p.listingId, guildId, "archived").catch(() => {});
+    for (const p of live) await deps.store.markListingPost(p.listingId, guildId, "archived").catch(() => inc("market.post_registry_error"));
   }
   // Adoptee threads homed here: seal and rehome. The row's location fields
   // clear so the next ensure (backfill sweep or interactive touch) rebuilds
@@ -1581,7 +1581,7 @@ export async function removeDeployment(deps: OpsDeps, guildId: string): Promise<
         await thread.setArchived?.(true).catch(() => {});
       }
     }
-    await deps.store.setAdoptionLocation(adoption.id, { guildId: null, channelId: null, threadId: null }).catch(() => {});
+    await deps.store.setAdoptionLocation(adoption.id, { guildId: null, channelId: null, threadId: null }).catch(() => inc("ops.adoptee_thread_error"));
     rehomed++;
   }
   await refreshDeploymentCache(deps.store);
@@ -1595,7 +1595,7 @@ export async function removeDeployment(deps: OpsDeps, guildId: string): Promise<
  *  sweep; the kill switch short-circuits it. */
 export async function syncDeployments(deps: OpsDeps): Promise<void> {
   if (!config.marketDeployEnabled) return;
-  await refreshDeploymentCache(deps.store).catch(() => {});
+  await refreshDeploymentCache(deps.store).catch(() => inc("ops.deploy_error"));
   // Seed the mirror map from forum_thread_id BEFORE the missing-posts queue
   // computes — pre-v59 listings have no listing_posts row, and without this
   // they all read "missing" in the house deployment: the sweep would post a
@@ -1609,7 +1609,7 @@ export async function syncDeployments(deps: OpsDeps): Promise<void> {
   for (const dep of partners) {
     const guild = await deps.fetchGuild(dep.guildId).catch(() => null);
     if (!guild) {
-      await deps.store.setDeploymentStatus(dep.guildId, dep.status, "guild unreachable").catch(() => {});
+      await deps.store.setDeploymentStatus(dep.guildId, dep.status, "guild unreachable").catch(() => inc("ops.deploy_error"));
       continue;
     }
     // Self-heal: an admin deleting #characters shouldn't silently freeze the
@@ -1630,8 +1630,8 @@ export async function syncDeployments(deps: OpsDeps): Promise<void> {
           marketplaceChannelId: layout.marketplaceChannelId,
           adopteesChannelId: layout.adopteesChannelId,
           lastError: null,
-        }).catch(() => {});
-        await refreshDeploymentCache(deps.store).catch(() => {});
+        }).catch(() => inc("ops.deploy_error"));
+        await refreshDeploymentCache(deps.store).catch(() => inc("ops.deploy_error"));
         // A recreated forum took every mirror thread it hosted down with it —
         // the rows still read 'live' against dead threads and would never
         // requeue. Clear them so the backfill below reposts the catalog.
@@ -1641,7 +1641,7 @@ export async function syncDeployments(deps: OpsDeps): Promise<void> {
           });
         }
       } else {
-        await deps.store.setDeploymentStatus(dep.guildId, dep.status, "layout reconcile failed").catch(() => {});
+        await deps.store.setDeploymentStatus(dep.guildId, dep.status, "layout reconcile failed").catch(() => inc("ops.deploy_error"));
       }
     }
   }
@@ -2558,7 +2558,7 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
             deployFanout(), "the Characterly house", listing, deps.store, { tagNames: p.tags, coverFile: p.coverFile });
           const tid = fan.posted.find(x => x.guildId === config.houseGuildId)?.threadId ?? null;
           if (!tid) { results.push(`✖ ${p.name} — thread recovery failed`); continue; }
-          await deps.store.setListingThread(listing.id, tid).catch(() => {});
+          await deps.store.setListingThread(listing.id, tid).catch(() => inc("market.post_registry_error"));
           results.push(`✔ ${p.name} — recovered (thread re-posted)`);
           continue;
         }
@@ -2607,11 +2607,11 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
         deployFanout(), "the Characterly house", res.listing, deps.store, { tagNames: p.tags, coverFile: p.coverFile });
       const threadId = fan.posted.find(x => x.guildId === config.houseGuildId)?.threadId ?? null;
       if (!threadId) {
-        await deps.store.delistListing(res.listing.id).catch(() => {});
+        await deps.store.delistListing(res.listing.id).catch(() => inc("market.cleanup_error"));
         results.push(`✖ ${p.name} — thread post failed (rolled back)`);
         continue;
       }
-      await deps.store.setListingThread(res.listing.id, threadId).catch(() => {});
+      await deps.store.setListingThread(res.listing.id, threadId).catch(() => inc("market.post_registry_error"));
       inc("market.published");
       results.push(`✔ ${p.name} — ${p.tags.join(", ")}`);
       await new Promise(r => setTimeout(r, 300)); // forum pacing — thread creates aren't free

@@ -10,6 +10,13 @@ if (!url) throw new Error("DATABASE_URL (or TEST_DATABASE_URL) must be set");
 export const sql = postgres(url, {
   max: 10,
   onnotice: () => {}, // suppress "relation already exists" notices from idempotent DDL
+  // A hung query must not pin a pool slot forever: 120s caps any single
+  // statement (worst offenders are retention deletes — batched per-scope),
+  // connect_timeout fails fast on a dead pooler, idle_timeout recycles
+  // connections the pooler may have half-dropped.
+  connect_timeout: 10,
+  idle_timeout: 60,
+  connection: { statement_timeout: 120_000, application_name: "characterly" },
 });
 
 export type Sql = typeof sql;

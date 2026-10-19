@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, type ChatInputCommandInteraction } from "discord.js";
 import type { CompanionListing, GuildDeployment, ListingPost } from "./types.js";
 import type { MemoryStore } from "./database.js";
+import { inc } from "./metrics.js";
 import { config } from "./config.js";
 
 /** The four moderated forum tags the bot owns. Names are the contract —
@@ -181,11 +182,11 @@ export async function postListingToDeployments(
     const threadId = await postListingInForum(fetchChannel, dep.marketplaceChannelId, creatorName, listing, store, { ...opts, tagNames })
       .catch(e => { failed.push({ guildId: dep.guildId, error: String((e as Error)?.message ?? e).slice(0, 200) }); return null; });
     if (threadId) {
-      await store.setListingPost(listing.id, dep.guildId, threadId, "live").catch(() => {});
+      await store.setListingPost(listing.id, dep.guildId, threadId, "live").catch(() => inc("market.post_registry_error"));
       posted.push({ listingId: listing.id, guildId: dep.guildId, threadId, status: "live", lastError: null });
     } else {
       if (!failed.some(f => f.guildId === dep.guildId)) failed.push({ guildId: dep.guildId, error: "post failed" });
-      await store.setListingPostFailed(listing.id, dep.guildId, failed.find(f => f.guildId === dep.guildId)?.error ?? "post failed").catch(() => {});
+      await store.setListingPostFailed(listing.id, dep.guildId, failed.find(f => f.guildId === dep.guildId)?.error ?? "post failed").catch(() => inc("market.post_registry_error"));
     }
   }
   return { posted, failed };
@@ -216,10 +217,10 @@ export async function postActiveListingsToDeployments(
     const threadId = await postListingInForum(fetchChannel, dep.marketplaceChannelId!, creatorName, listing, store, { tagNames: listing.creatorTags ?? [] })
       .catch(() => null);
     if (threadId) {
-      await store.setListingPost(listing.id, dep.guildId, threadId, "live").catch(() => {});
+      await store.setListingPost(listing.id, dep.guildId, threadId, "live").catch(() => inc("market.post_registry_error"));
       posted++;
     } else {
-      await store.setListingPostFailed(listing.id, dep.guildId, "backfill post failed").catch(() => {});
+      await store.setListingPostFailed(listing.id, dep.guildId, "backfill post failed").catch(() => inc("market.post_registry_error"));
       failed++;
     }
   }

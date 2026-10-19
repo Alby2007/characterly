@@ -792,8 +792,8 @@ export async function publishToAllMirrors(
   const { posted } = await postListingToDeployments(channelFetcher(client), deployTargets(), creatorName, listing, store, opts);
   const housePost = posted.find(p => p.guildId === config.houseGuildId)?.threadId ?? null;
   if (!housePost && posted.length) {
-    await archiveListingPosts(channelFetcher(client), posted).catch(() => {});
-    await store.markAllListingPosts(listing.id, "live", "archived").catch(() => {});
+    await archiveListingPosts(channelFetcher(client), posted).catch(e => { inc("market.mirror_error"); logError(`mirror archive rollback failed for listing ${listing.id}`, e); });
+    await store.markAllListingPosts(listing.id, "live", "archived").catch(e => { inc("market.mirror_error"); logError(`post status rollback failed for listing ${listing.id}`, e); });
   }
   return housePost;
 }
@@ -846,8 +846,8 @@ async function unlistListing(interaction: ChatInputCommandInteraction | ButtonIn
   if (listing.forumThreadId && !live.some(p => p.threadId === listing.forumThreadId)) {
     live.push({ listingId: listing.id, guildId: config.houseGuildId ?? "house", threadId: listing.forumThreadId, status: "live", lastError: null });
   }
-  await archiveListingPosts(channelFetcher(interaction.client), live).catch(() => {});
-  await store.markAllListingPosts(listing.id, "live", "archived").catch(() => {});
+  await archiveListingPosts(channelFetcher(interaction.client), live).catch(e => { inc("market.mirror_error"); logError(`mirror archive failed for listing ${listing.id}`, e); });
+  await store.markAllListingPosts(listing.id, "live", "archived").catch(e => { inc("market.mirror_error"); logError(`post status archive failed for listing ${listing.id}`, e); });
   const content = `**${listing.name}** has been removed from the marketplace. Bring it back anytime with \`/companion relist\`.`;
   if (typeof (interaction as ButtonInteraction).isButton === "function" && (interaction as ButtonInteraction).isButton()) {
     return (interaction as ButtonInteraction).update({ content, components: [] });
@@ -2164,7 +2164,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       // adoptees own their private #adoptees threads. Opportunistically
       // create missing threads for house members before listing links.
       const deps = getOpsDeps();
-      if (deps) await ensureAdopteeThreadsForUser(interaction.user.id, deps).catch(() => {});
+      if (deps) await ensureAdopteeThreadsForUser(interaction.user.id, deps).catch(e => { inc("ops.adoptee_thread_error"); logError(`adoptee thread ensure failed for u:${interaction.user.id}`, e); });
       const awakened = active.find(c => c.kind === "awakened");
       const adopted = active.filter(c => c.kind === "adopted");
       const lines: string[] = [];
@@ -3044,7 +3044,7 @@ export async function handleCompanionModal(
     if (existing?.forumThreadId && !prevPosts.some(p => p.threadId === existing.forumThreadId)) {
       prevPosts.push({ listingId: listing.id, guildId: config.houseGuildId ?? "house", threadId: existing.forumThreadId, status: "live", lastError: null });
     }
-    if (prevPosts.length) await archiveListingPosts(channelFetcher(interaction.client), prevPosts).catch(() => {});
+    if (prevPosts.length) await archiveListingPosts(channelFetcher(interaction.client), prevPosts).catch(e => { inc("market.mirror_error"); logError(`stale mirror archive failed for listing ${listing.id}`, e); });
     const threadId = await publishToAllMirrors(interaction.client, interaction.user.globalName ?? interaction.user.username ?? "a creator", listing, store);
     if (!threadId) {
       await store.delistListing(listing.id);
@@ -3267,7 +3267,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
       if (!res.ok) {
         // Adoption failed → the private row is orphaned; clean it up so a
         // retry isn't told "already imported".
-        await store.deleteUnlistedListing(created.listing.id, userId).catch(() => {});
+        await store.deleteUnlistedListing(created.listing.id, userId).catch(e => { inc("market.cleanup_error"); logError(`orphaned import cleanup failed for listing ${created.listing.id}`, e); });
         const msg = res.reason === "cap"
           ? `Your companion roster is full — free accounts hold ${config.freeAdoptionSlots} adopted companion${config.freeAdoptionSlots === 1 ? "" : "s"}. Drop one with \`/companion drop\` or go Premium, then import again: ${config.siteUrl}/dashboard#billing`
           : res.reason === "daily_cap"
@@ -3417,7 +3417,7 @@ export async function handleMemoryButton(interaction: ButtonInteraction, store: 
           posts.push({ listingId: l.id, guildId: config.houseGuildId ?? "house", threadId: l.forumThreadId, status: "live", lastError: null });
         }
         await archiveListingPosts(channelFetcher(interaction.client), posts);
-        await store.markAllListingPosts(l.id, "live", "archived").catch(() => {});
+        await store.markAllListingPosts(l.id, "live", "archived").catch(e => { inc("market.mirror_error"); logError(`post status archive failed for listing ${l.id}`, e); });
       };
       if (action === "unflag" || action === "delist" || action === "ban") {
         const updated = await store.modAction(listingId, userId, action);
@@ -4442,7 +4442,7 @@ export async function handleMarketSelect(interaction: StringSelectMenuInteractio
     for (const t of renderedForum.availableTags ?? []) if (!t.moderated) allowed.add(t.name.toLowerCase());
   }
   const picks = interaction.values.filter(v => allowed.has(v.toLowerCase())).slice(0, 3);
-  await store.setListingCreatorTags(listing.id, picks).catch(() => {});
+  await store.setListingCreatorTags(listing.id, picks).catch(() => inc("market.tags_error"));
   listing.creatorTags = picks;
 
   // Apply to every mirror: names → each forum's local tag ids; that thread's

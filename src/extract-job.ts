@@ -141,7 +141,7 @@ export async function runExtractJob(payload: ExtractJobPayload, deps: ExtractJob
         }
       })).then(list => list.filter((d): d is string => !!d));
       imageContext = formatImageContext(descs, event.authorName) || undefined;
-      if (imageContext) await store.setImageContext(guildId, event.messageId, imageContext).catch(() => {});
+      if (imageContext) await store.setImageContext(guildId, event.messageId, imageContext).catch(() => inc("recall.image_context_error"));
     }
 
     // Established nature labels — the model reuses "close friends" instead of

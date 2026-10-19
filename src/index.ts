@@ -815,6 +815,14 @@ async function sweepMissedSignalsOnce(windowMs: number) {
   }
 }
 
+// Gateway resilience listeners — 'error' on an EventEmitter with no listener
+// throws (crash); shard events would otherwise be invisible in the logs.
+client.on(Events.Error, error => { inc("client.error"); logError("Discord client error", error); });
+client.on(Events.Warn, info => { inc("client.warn"); console.warn(`[discord] ${info}`); });
+client.on(Events.ShardError, (error, shardId) => { inc("client.shard_error"); logError(`Shard ${shardId} error`, error); });
+client.on(Events.ShardDisconnect, (event, shardId) => { inc("client.shard_disconnect"); console.warn(`[discord] shard ${shardId} disconnected (${event.code})`); });
+client.on(Events.ShardResume, (shardId, replayed) => { inc("client.shard_resume"); console.warn(`[discord] shard ${shardId} resumed (${replayed} events replayed)`); });
+
 client.on(Events.InteractionCreate, async interaction => {
   try {
     if (interaction.isChatInputCommand()) await handleMemoryCommand(interaction, store, brainFor, eventStore, profileStore);
@@ -828,7 +836,10 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isButton()) await handleMemoryButton(interaction, store, brainFor, eventStore, isHostedScope);
   } catch (error) {
     inc("handler.interaction_error");
-    logError("Interaction handling failed", error);
+    const what = "commandName" in interaction ? `/${interaction.commandName}`
+      : "customId" in interaction ? interaction.customId
+      : `type ${(interaction as { type: number }).type}`;
+    logError(`Interaction failed [${what} u:${interaction.user?.id} g:${interaction.guildId ?? "dm"}]`, error);
     // Best-effort user-facing error; ignore failures (already replied/expired).
     try {
       if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
@@ -841,7 +852,7 @@ client.on(Events.InteractionCreate, async interaction => {
 client.on(Events.MessageCreate, message => {
   // Outer catch lives here, not inline: an unhandled rejection in a listener
   // crashes the process, so every failure mode lands in this log instead.
-  handleMessage(message).catch(error => { inc("handler.message_error"); logError("Message handling failed", error); });
+  handleMessage(message).catch(error => { inc("handler.message_error"); logError(`Message handling failed [${message.guild?.id ?? "dm"} #${message.channelId} u:${message.author?.id} m:${message.id}]`, error); });
 });
 
 // Edits update the archive row; the extraction-time snapshot in memory_evidence
@@ -855,7 +866,7 @@ client.on(Events.MessageUpdate, (_old, message) => {
   const promise = message.guild
     ? store.updateMessageContent(message.guild.id, message.id, message.content)
     : store.updateMessageContentById(message.id, message.content);
-  promise.catch(error => { inc("handler.message_error"); logError("Message update handling failed", error); });
+  promise.catch(error => { inc("handler.message_error"); logError(`Message update failed [${message.guild?.id ?? "dm"} m:${message.id}]`, error); });
 });
 
 // Deletes remove the raw row (so the sweep never extracts deleted content)
@@ -867,7 +878,7 @@ client.on(Events.MessageDelete, message => {
   const promise = message.guild
     ? store.deleteMessage(message.guild.id, message.id)
     : store.deleteMessageById(message.id);
-  promise.catch(error => { inc("handler.message_error"); logError("Message delete handling failed", error); });
+  promise.catch(error => { inc("handler.message_error"); logError(`Message delete failed [${message.guild?.id ?? "dm"} m:${message.id}]`, error); });
 });
 
 // Alias maps are shared per guild rather than built per message — the same map
@@ -1155,7 +1166,7 @@ async function handleDmMessage(
       if (adopted.length) {
         // Materialize any missing threads first so the links listed below
         // are real — joins and screening can defer creation.
-        if (opsDeps) await ensureAdopteeThreadsForUser(userId, opsDeps).catch(() => {});
+        if (opsDeps) await ensureAdopteeThreadsForUser(userId, opsDeps).catch(e => { inc("ops.adoptee_thread_error"); logError(`adoptee thread ensure failed for u:${userId}`, e); });
         const lines = (await Promise.all(adopted.slice(0, 10).map(async c => {
           const ad = await store.adoptionForCompanion(c.id).catch(() => null);
           return ad?.chatThreadId ? `• **${c.name}** — <#${ad.chatThreadId}>` : `• **${c.name}**`;
@@ -1577,7 +1588,7 @@ async function runCompanionTurn(opts: {
         }
       }))).filter((d): d is string => !!d);
       imageContext = imgDescs.length ? formatImageContext(imgDescs, freshOwnerName) : undefined;
-      if (imageContext) await store.setImageContext(scope, event.messageId, imageContext).catch(() => {});
+      if (imageContext) await store.setImageContext(scope, event.messageId, imageContext).catch(() => inc("recall.image_context_error"));
     }
 
     const toolCtx: ToolCtx = {
@@ -1848,7 +1859,7 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     const descs = await describeImages(list, activeBrain);
     if (!descs.length) return "";
     const formatted = formatImageContext(descs, authorName);
-    if (sourceMessageId && formatted) await store.setImageContext(event.guildId, sourceMessageId, formatted).catch(() => {});
+    if (sourceMessageId && formatted) await store.setImageContext(event.guildId, sourceMessageId, formatted).catch(() => inc("recall.image_context_error"));
     return formatted;
   };
   // Resolve the scope brain BEFORE the throttle check — hostedScopes only
@@ -2161,6 +2172,21 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
     stopTyping();
   }
 }
+
+// Process-level crash surfaces — without these, an unhandled rejection or a
+// discord.js 'error' event (unlistened EventEmitter 'error' throws) exits the
+// process with no counter and possibly no redacted log. Rejections log and
+// continue (fire-and-forget paths shouldn't kill the bot); a true uncaught
+// exception logs, then exits nonzero so systemd restarts a clean process.
+process.on("unhandledRejection", reason => {
+  inc("handler.unhandled_rejection");
+  logError("Unhandled promise rejection", reason);
+});
+process.on("uncaughtException", error => {
+  inc("handler.uncaught_exception");
+  logError("Uncaught exception — exiting", error);
+  process.exit(1);
+});
 
 // Graceful shutdown — close the Discord socket and the pg pool cleanly so
 // container/systemd restarts don't sever in-flight work. worker.stop() waits

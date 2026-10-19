@@ -162,7 +162,7 @@ export async function runChatImportJob(
     // Last attempt spent — the row can't keep pretending it runs. A parked
     // BudgetExceeded is the exception: it's rescheduled, not dying.
     if (!(error instanceof FatalJobError) && !(error instanceof BudgetExceeded) && attempts >= MAX_JOB_ATTEMPTS) {
-      await store.failChatImport(imp.id, "distill failed after retries").catch(() => {});
+      await store.failChatImport(imp.id, "distill failed after retries").catch(() => inc("jobs.chat_import_error"));
     }
     throw error; // BudgetExceeded + transient faults rethrow for the worker's own retry/backoff.
   }
