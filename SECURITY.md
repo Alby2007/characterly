@@ -6,7 +6,7 @@
 
 Report vulnerabilities via:
 
-- A **#support-ticket** in the [Characterly community server](https://discord.gg/vCjQ9v3md) — mark it "security"; tickets open a private staff-only thread, or
+- A **#support-ticket** in the [Characterly community server](https://discord.gg/tNGCeaTPtC) — mark it "security"; tickets open a private staff-only thread, or
 - A direct message to [Alby2007](https://github.com/Alby2007) (GitHub profile is public).
 
 Include: what you found, how to reproduce it, and what data or capability it exposes. A proof of concept helps but isn't required — describe the impact honestly.

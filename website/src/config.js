@@ -5,7 +5,7 @@ export const LINKS = {
   // so the authorize page offers BOTH "Add to Server" and "Add to My Apps".
   // Pinning scope=bot here would force guild-only and hide the DM option.
   addToDiscord: "https://discord.com/oauth2/authorize?client_id=1549171765056639048",
-  discord: "https://discord.gg/vCjQ9v3md",
+  discord: "https://discord.gg/tNGCeaTPtC",
   // First-party charter pages — they render the repo's .md files at build.
   privacy: "/privacy",
   terms: "/terms",

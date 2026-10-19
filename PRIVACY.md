@@ -53,4 +53,4 @@ Characterly ("the bot") is a Discord bot that hosts personal AI companions. This
 
 ## Contact
 
-Operated by [Alby2007](https://github.com/Alby2007). Questions or deletion requests: open a **#support-ticket** in the [Characterly community server](https://discord.gg/vCjQ9v3md) — tickets create a private staff-only thread — or delete your account directly from the dashboard's Delete section.
+Operated by [Alby2007](https://github.com/Alby2007). Questions or deletion requests: open a **#support-ticket** in the [Characterly community server](https://discord.gg/tNGCeaTPtC) — tickets create a private staff-only thread — or delete your account directly from the dashboard's Delete section.
