@@ -2459,7 +2459,8 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
   }
 
   if (action === "announce") {
-    const text = interaction.options.getString("text")?.trim();
+    // Slash-command strings can't hold real newlines — \n escapes stand in.
+    const text = interaction.options.getString("text")?.trim().replace(/\\n/g, "\n");
     if (!text) return interaction.reply({ content: "Give me the announcement text.", ephemeral: true });
     const chId = interaction.options.getChannel?.("channel")?.id ?? config.houseAnnounceChannelId;
     if (!chId) return interaction.reply({ content: "HOUSE_ANNOUNCE_CHANNEL_ID isn't set.", ephemeral: true });
