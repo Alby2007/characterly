@@ -201,6 +201,14 @@ test("summaries: counter claim is atomic; user_edited flag round-trips", async (
     assert.equal(await store.claimStoryUpdate(cid, "g1", "c1", 10), true, "threshold crossed — claims and resets");
     assert.equal(await store.claimStoryUpdate(cid, "g1", "c1", 10), false, "second claim loses the race");
 
+    // unclaimStoryUpdate re-arms a claim whose enqueue failed — the counter
+    // goes back to threshold so the next bump re-fires the claim instead of
+    // the fold silently covering a double window.
+    await store.bumpStoryCounter(cid, "g1", "c1");
+    await store.unclaimStoryUpdate(cid, "g1", "c1", 10);
+    assert.equal(await store.claimStoryUpdate(cid, "g1", "c1", 10), true, "re-armed claim refires");
+    assert.equal(await store.claimStoryUpdate(cid, "g1", "c1", 10), false, "reclaimed counter resets cleanly");
+
     await store.setStoryUserText(cid, "g1", "c1", "We escaped the castle, Kael is wounded.");
     const row = await store.getStorySummary(cid, "g1", "c1");
     assert.equal(row?.summary, "We escaped the castle, Kael is wounded.");

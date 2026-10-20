@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { EventStore } from "./events.js";
 import { EventPipeline } from "./event-detection.js";
+import { BudgetExceeded } from "./budget.js";
 import { calculateSignificance } from "./event-significance.js";
 import type { Brain } from "./brain.js";
 import type { MessageEvent, MemoryCandidate } from "./types.js";
@@ -141,6 +142,30 @@ test("EventStore: updateSignificance promotes tier to event", async () => {
     assert.equal(fresh.tier, "event");
     assert.equal(fresh.title, "The Bet");
     assert.ok(fresh.significance > 0.8);
+  } finally { await sql.end(); }
+});
+
+test("EventStore: listEventsForSubjects matches per-member listEvents; shared events reach every subject", async () => {
+  const sql = makeTestSql();
+  try {
+    const { eventStore } = await makeStore(sql);
+    const mk = (minAgo: number, participants: Array<{ userId: string; userName: string }>) =>
+      eventStore.createEvent({
+        guildId: guild, channelId: channel, title: "", summary: "",
+        significance: 0.7, tier: "event", occurredAt: new Date(Date.now() - minAgo * 60_000),
+        participants: participants.map(p => ({ ...p, role: "participant" as const })),
+      });
+    const shared = await mk(1, [{ userId: "u1", userName: "Alice" }, { userId: "u2", userName: "Bob" }]);
+    await mk(5, [{ userId: "u1", userName: "Alice" }]);
+    await mk(3, [{ userId: "u9", userName: "Outsider" }]); // not in the id set
+
+    const batched = await eventStore.listEventsForSubjects(guild, ["u1", "u2"]);
+    const perMember = (await eventStore.listEvents(guild, { subjectUserId: "u1" })).events;
+    assert.deepEqual(batched.get("u1")!.map(e => e.id), perMember.map(e => e.id), "same ids, same recency order");
+    assert.deepEqual(batched.get("u2")!.map(e => e.id), [shared.id]);
+    assert.equal(batched.has("u9"), false);
+    // The shared event hydrates once and both subjects see all participants.
+    assert.deepEqual(batched.get("u2")![0].participants.map(p => p.userId).sort(), ["u1", "u2"]);
   } finally { await sql.end(); }
 });
 
@@ -358,6 +383,73 @@ test("pipeline: maintainEvents passes the event's archived messages to classifyE
       "I can't believe Tom bet £20 on Arsenal",
       "he lost it in ten minutes",
     ]);
+  } finally { await sql.end(); }
+});
+
+test("pipeline: maintainEvents caps an oversized cluster at head+tail", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store, eventStore } = await makeStore(sql);
+    const pipeline = new EventPipeline();
+    const ev = await eventStore.createEvent({ guildId: guild, channelId: channel, title: "", summary: "", significance: 0, tier: "candidate", occurredAt: new Date(Date.now() - 60_000), participants: [] });
+    // 60 attached messages — over the head(10)+tail(30) prompt budget.
+    for (let i = 0; i < 60; i++) {
+      const id = `cl-${String(i).padStart(3, "0")}`;
+      await store.recordMessage({ ...msg(id, `line ${i}`), createdAt: new Date(Date.now() - 60_000 + i * 1000) });
+      await eventStore.attachMessage(guild, ev.id, id);
+    }
+    await eventStore.closeEvent(guild, ev.id);
+    const seen: Array<{ messages: Array<{ content: string }>; messageCount?: number }> = [];
+    const brain = {
+      classifyEvent: async (cluster: { messages: Array<{ content: string }>; messageCount?: number }) => {
+        seen.push(cluster);
+        return { significance: 0.5, tier: "medium" as const, tone: "calm", narrativeComplete: true, futureRelevant: false, title: "T", summary: "S" };
+      },
+    } as unknown as Brain;
+    await pipeline.maintainEvents(guild, eventStore, store, brain);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].messages.length, 40, "the cluster prompt is capped at head+tail");
+    assert.equal(seen[0].messageCount, 60, "the true total is reported alongside");
+    const expected = [...Array(10).keys(), ...Array.from({ length: 30 }, (_, i) => i + 30)];
+    assert.deepEqual(seen[0].messages.map(m => m.content), expected.map(i => `line ${i}`), "first 10 + last 30, chronological");
+  } finally { await sql.end(); }
+});
+
+test("maintainEvents counts failed classifications — a poisonous cluster stops being repurchased", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store, eventStore } = await makeStore(sql);
+    const pipeline = new EventPipeline();
+    await store.recordMessage(msg("poi-1", "boom"));
+    const ev = await eventStore.createEvent({ guildId: guild, channelId: channel, title: "", summary: "", significance: 0, tier: "candidate", occurredAt: new Date(Date.now() - 60_000), participants: [] });
+    await eventStore.attachMessage(guild, ev.id, "poi-1");
+    await eventStore.closeEvent(guild, ev.id);
+    let calls = 0;
+    const brain = { classifyEvent: async () => { calls++; throw new Error("poisoned"); } } as unknown as Brain;
+    for (let pass = 1; pass <= 3; pass++) {
+      await pipeline.maintainEvents(guild, eventStore, store, brain);
+      assert.equal(calls, pass, `pass ${pass} repurchases the call`);
+    }
+    const fresh = (await eventStore.getEvent(guild, ev.id))!;
+    assert.equal(fresh.classifications, 3, "attempts count, not just successes");
+    await pipeline.maintainEvents(guild, eventStore, store, brain);
+    assert.equal(calls, 3, "at-cap events leave the work list instead of retrying forever");
+    assert.equal((await eventStore.listUnscoredCandidates(guild, 0)).length, 0);
+  } finally { await sql.end(); }
+});
+
+test("maintainEvents: a budget-refused classify doesn't consume a retry slot", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store, eventStore } = await makeStore(sql);
+    const pipeline = new EventPipeline();
+    await store.recordMessage(msg("bg-1", "boom"));
+    const ev = await eventStore.createEvent({ guildId: guild, channelId: channel, title: "", summary: "", significance: 0, tier: "candidate", occurredAt: new Date(Date.now() - 60_000), participants: [] });
+    await eventStore.attachMessage(guild, ev.id, "bg-1");
+    await eventStore.closeEvent(guild, ev.id);
+    const brain = { classifyEvent: async () => { throw new BudgetExceeded(guild, 5); } } as unknown as Brain;
+    await assert.rejects(pipeline.maintainEvents(guild, eventStore, store, brain), BudgetExceeded);
+    assert.equal((await eventStore.getEvent(guild, ev.id))!.classifications, 0, "a refusal spent nothing — the slot stays for a funded day");
   } finally { await sql.end(); }
 });
 

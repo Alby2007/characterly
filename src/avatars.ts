@@ -1,6 +1,7 @@
 import { config } from "./config.js";
 import { inc } from "./metrics.js";
 import { logError } from "./secrets.js";
+import { fetchImageBytes } from "./tools.js";
 
 const TIMEOUT_MS = 8_000;
 const ALLOWED_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
@@ -15,7 +16,10 @@ async function uploadAvatar(bytes: Uint8Array, contentType: string): Promise<str
     const res = await fetch(`${config.siteUrl.replace(/\/+$/, "")}/avatar`, {
       method: "PUT",
       headers: { "content-type": contentType, "x-characterly-secret": config.avatarUploadSecret },
-      body: bytes.buffer as ArrayBuffer,
+      // new Uint8Array copies into a fresh exact-size ArrayBuffer — Buffer's
+      // slice() is a view alias, and a pooled .buffer would smuggle heap
+      // beyond byteOffset/byteLength into the PUT body.
+      body: new Uint8Array(bytes).buffer,
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     if (!res.ok) return null;
@@ -28,14 +32,19 @@ async function uploadAvatar(bytes: Uint8Array, contentType: string): Promise<str
   }
 }
 
-export async function rehostAvatar(sourceUrl: string): Promise<string | null> {
+export async function rehostAvatar(
+  sourceUrl: string,
+  // fetchImageBytes re-validates isSafeUrl on every redirect hop and gates
+  // connect-time DNS through safeLookup — a plain fetch() would follow a 302
+  // straight past the callers' input-time checks into a private/LAN host.
+  // The seam is injectable for tests since safeRequest refuses loopback.
+  fetchImage: (url: string, maxBytes: number) => Promise<{ buf: Buffer; mime: string }> = fetchImageBytes,
+): Promise<string | null> {
   if (!config.avatarUploadSecret) return null;
   try {
-    const src = await fetch(sourceUrl, { signal: AbortSignal.timeout(TIMEOUT_MS) });
-    if (!src.ok) return null;
-    const type = (src.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+    const { buf, mime } = await fetchImage(sourceUrl, config.imageMaxBytes);
+    const type = mime.toLowerCase();
     if (!ALLOWED_TYPES.has(type)) return null;
-    const buf = new Uint8Array(await src.arrayBuffer());
     if (!buf.byteLength || buf.byteLength > config.imageMaxBytes) return null;
     return uploadAvatar(buf, type);
   } catch (e) {

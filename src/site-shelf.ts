@@ -97,29 +97,27 @@ export async function fetchListing(env: ShelfEnv, id: number): Promise<ShelfList
 export async function fetchListingRating(env: ShelfEnv, listingId: number): Promise<ShelfRating> {
   const rest = restBase(env);
   if (!rest) return { avg: 0, count: 0 };
-  const res = await fetch(`${rest.base}/rest/v1/listing_ratings?select=stars&listing_id=eq.${listingId}`, { headers: rest.headers }).catch(() => null);
+  // listing_rating_stats is a GROUP BY view (v64) — one row back regardless
+  // of how many rating rows the table holds.
+  const res = await fetch(`${rest.base}/rest/v1/listing_rating_stats?select=avg,rating_count&listing_id=eq.${listingId}`, { headers: rest.headers }).catch(() => null);
   if (!res?.ok) return { avg: 0, count: 0 };
-  const rows = (await res.json().catch(() => [])) as Array<{ stars: number }>;
-  if (!Array.isArray(rows) || !rows.length) return { avg: 0, count: 0 };
-  return { avg: rows.reduce((a, r) => a + r.stars, 0) / rows.length, count: rows.length };
+  const rows = (await res.json().catch(() => [])) as Array<{ avg: number | null; rating_count: number }>;
+  const row = rows[0];
+  if (!row || row.avg == null) return { avg: 0, count: 0 };
+  return { avg: Number(row.avg), count: Number(row.rating_count) };
 }
 
-/** All rating stats in one query — the index renders every card's stars. */
+/** All rating stats in one query — the index renders every card's stars.
+ *  The view returns one row per rated listing, not per rating. */
 export async function fetchRatingStats(env: ShelfEnv): Promise<Map<number, ShelfRating>> {
   const rest = restBase(env);
   const out = new Map<number, ShelfRating>();
   if (!rest) return out;
-  const res = await fetch(`${rest.base}/rest/v1/listing_ratings?select=listing_id,stars`, { headers: rest.headers }).catch(() => null);
+  const res = await fetch(`${rest.base}/rest/v1/listing_rating_stats?select=listing_id,avg,rating_count`, { headers: rest.headers }).catch(() => null);
   if (!res?.ok) return out;
-  const rows = (await res.json().catch(() => [])) as Array<{ listing_id: number; stars: number }>;
+  const rows = (await res.json().catch(() => [])) as Array<{ listing_id: number; avg: number | null; rating_count: number }>;
   if (!Array.isArray(rows)) return out;
-  const acc = new Map<number, { sum: number; count: number }>();
-  for (const r of rows) {
-    const e = acc.get(r.listing_id) ?? { sum: 0, count: 0 };
-    e.sum += r.stars; e.count++;
-    acc.set(r.listing_id, e);
-  }
-  for (const [id, v] of acc) out.set(id, { avg: v.sum / v.count, count: v.count });
+  for (const r of rows) if (r.avg != null) out.set(r.listing_id, { avg: Number(r.avg), count: Number(r.rating_count) });
   return out;
 }
 

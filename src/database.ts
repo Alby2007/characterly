@@ -115,6 +115,40 @@ function rowToEdge(r: RelationshipRow): RelationshipEdge {
   };
 }
 
+/** The counterparty-collapsed view mergedEdges produces: A→B and B→A rows
+ *  fold into one edge so bidirectional pairs aren't fragmented. */
+export type MergedEdge = {
+  otherId: string; summary: string; natures: string[];
+  valence: number | null; observationCount: number; lastObservedAt: string | null;
+  behavioralCount: number; trend: string | null; inferred: boolean;
+};
+
+function mergeEdgesForSubject(edges: RelationshipEdge[], subjectId: string): MergedEdge[] {
+  const byOther = new Map<string, RelationshipEdge[]>();
+  for (const e of edges) {
+    const other = e.subjectId === subjectId ? e.otherId : e.subjectId;
+    const list = byOther.get(other);
+    if (list) list.push(e); else byOther.set(other, [e]);
+  }
+  return [...byOther.entries()].map(([otherId, list]) => {
+    const total = list.reduce((s, e) => s + e.observationCount, 0);
+    const scored = list.filter(e => e.valence != null && e.observationCount > 0);
+    const valence = scored.length
+      ? scored.reduce((s, e) => s + e.valence! * e.observationCount, 0) / scored.reduce((s, e) => s + e.observationCount, 0)
+      : null;
+    const byRecency = [...list].sort((a, b) => (b.lastObservedAt ?? "").localeCompare(a.lastObservedAt ?? ""));
+    return {
+      otherId,
+      summary: byRecency[0].summary,
+      natures: [...new Set(byRecency.map(e => e.summary).filter(Boolean))],
+      valence, observationCount: total, lastObservedAt: byRecency[0].lastObservedAt,
+      behavioralCount: list.reduce((m, e) => Math.max(m, e.behavioralCount), 0),
+      trend: byRecency[0].trend,
+      inferred: list.every(e => e.inferred),
+    };
+  }).sort((a, b) => b.observationCount - a.observationCount || b.behavioralCount - a.behavioralCount);
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function ts(d: Date | string): string {
@@ -734,7 +768,12 @@ export class MemoryStore {
       VALUES (${guildId}, ${userId}, ${[display]}, ${at.toISOString()}, ${at.toISOString()}, ${inc})
       ON CONFLICT (guild_id, user_id) DO UPDATE SET
         known_names   = CASE
-          WHEN ${display} = ANY(members.known_names) THEN members.known_names
+          -- Case-insensitive dedupe: "Alice"/"alice" is one name — the first-
+          -- seen casing wins rather than burning a second known_names slot.
+          WHEN EXISTS (
+            SELECT 1 FROM unnest(members.known_names) AS n(name)
+            WHERE lower(n.name) = lower(${display})
+          ) THEN members.known_names
           WHEN cardinality(members.known_names) >= ${MAX_KNOWN_NAMES}
             THEN array_append(members.known_names[2:cardinality(members.known_names)], ${display})
           ELSE array_append(members.known_names, ${display})
@@ -755,7 +794,9 @@ export class MemoryStore {
     return rows.map(rowToMember);
   }
 
-  /** Fallback for rows archived before the members table existed (pre-v7). */
+  /** Fallback for rows archived before the members table existed (pre-v7).
+   *  Full-archive DISTINCT — buildAliasMap only calls it when the members
+   *  registry is empty, which is exactly the all-legacy-archive case. */
   async listAuthorNames(guildId: string): Promise<Array<{ authorId: string; authorName: string }>> {
     const rows = await this.sql<Array<{ author_id: string; author_name: string }>>`
       SELECT DISTINCT author_id, author_name FROM messages WHERE guild_id = ${guildId}
@@ -1056,6 +1097,28 @@ export class MemoryStore {
     return rows.map(r => ({ content: r.content, createdAt: ts(r.created_at) }));
   }
 
+  /** Bulk sampleMessages — the same per-author top-60 sample, windowed so one
+   *  prolific author can't crowd out the rest. One round trip for the set. */
+  async sampleMessagesFor(guildId: string, authorIds: string[], perAuthor = 60): Promise<Map<string, Array<{ content: string; createdAt: string }>>> {
+    const out = new Map<string, Array<{ content: string; createdAt: string }>>();
+    if (!authorIds.length) return out;
+    const rows = await this.sql<Array<{ author_id: string; content: string; created_at: Date | string }>>`
+      SELECT author_id, content, created_at FROM (
+        SELECT author_id, content, created_at, id,
+               ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY created_at DESC, id DESC) AS rn
+        FROM messages
+        WHERE guild_id = ${guildId} AND author_id = ANY(${authorIds}) AND length(content) > 0
+      ) s WHERE rn <= ${perAuthor}
+      ORDER BY author_id, created_at DESC, id DESC
+    `;
+    for (const r of rows) {
+      const list = out.get(r.author_id);
+      const v = { content: r.content, createdAt: ts(r.created_at) };
+      if (list) list.push(v); else out.set(r.author_id, [v]);
+    }
+    return out;
+  }
+
   /** Literal-verdicted relationship observations (with reasons) involving a
    * member — either as the asserting side ("member_subject") or the observed
    * side ("member_other"). otherId is always the counterparty. Dossier
@@ -1081,6 +1144,46 @@ export class MemoryStore {
       source: r.source,
       createdAt: ts(r.created_at),
     }));
+  }
+
+  /** Bulk relationshipObservationsFor — one literal-verdict scan for the whole
+   *  set; a row between two in-set members lands in both members' lists, which
+   *  matches what two separate per-member calls would return. */
+  async relationshipObservationsForSubjects(guildId: string, subjectIds: string[]): Promise<Map<string, Array<{
+    otherId: string; nature: string; valence: number | null; reason: string;
+    direction: "member_subject" | "member_other"; source: string; createdAt: string;
+  }>>> {
+    const out = new Map<string, Array<{
+      otherId: string; nature: string; valence: number | null; reason: string;
+      direction: "member_subject" | "member_other"; source: string; createdAt: string;
+    }>>();
+    if (!subjectIds.length) return out;
+    const inSet = new Set(subjectIds);
+    const rows = await this.sql<Array<{
+      subject_id: string; other_id: string; nature: string; valence: number | null; reason: string; source: string; created_at: Date | string;
+    }>>`
+      SELECT subject_id, other_id, nature, valence, reason, source, created_at FROM relationship_observations
+      WHERE guild_id = ${guildId} AND (subject_id = ANY(${subjectIds}) OR other_id = ANY(${subjectIds}))
+        AND verdict = 'literal'
+      ORDER BY created_at DESC, id DESC
+    `;
+    for (const r of rows) {
+      for (const sid of [r.subject_id, r.other_id]) {
+        if (!inSet.has(sid)) continue;
+        const view = {
+          otherId: sid === r.subject_id ? r.other_id : r.subject_id,
+          nature: r.nature,
+          valence: r.valence != null ? Number(r.valence) : null,
+          reason: r.reason,
+          direction: (sid === r.subject_id ? "member_subject" : "member_other") as "member_subject" | "member_other",
+          source: r.source,
+          createdAt: ts(r.created_at),
+        };
+        const list = out.get(sid);
+        if (list) list.push(view); else out.set(sid, [view]);
+      }
+    }
+    return out;
   }
 
   /** Everything the graph knows about one ordered pair: directed edges both
@@ -1171,6 +1274,38 @@ export class MemoryStore {
     }));
   }
 
+  /** Bulk thirdPartyClaims keyed by subject — one scan for the set. EXISTS
+   *  replaces the DISTINCT-join: same "someone else authored evidence on this
+   *  memory" predicate, no row multiplication to collapse. */
+  async thirdPartyClaimsFor(guildId: string, subjectIds: string[]): Promise<Map<string, Array<{
+    memoryId: number; content: string; kind: Memory["kind"]; confidence: number; status: MemoryStatus; evidenceType: string;
+  }>>> {
+    const out = new Map<string, Array<{
+      memoryId: number; content: string; kind: Memory["kind"]; confidence: number; status: MemoryStatus; evidenceType: string;
+    }>>();
+    if (!subjectIds.length) return out;
+    const rows = await this.sql<Array<{
+      subject_id: string; id: number; content: string; kind: string; confidence: number; status: string; primary_evidence_type: string;
+    }>>`
+      SELECT m.subject_id, m.id, m.content, m.kind, m.confidence, m.status, m.primary_evidence_type
+      FROM memories m
+      WHERE m.guild_id = ${guildId} AND m.subject_id = ANY(${subjectIds})
+        AND m.status IN ('active', 'candidate')
+        AND EXISTS (SELECT 1 FROM memory_evidence e WHERE e.memory_id = m.id AND e.author_id <> m.subject_id)
+      ORDER BY m.subject_id, m.confidence DESC
+    `;
+    for (const r of rows) {
+      const view = {
+        memoryId: Number(r.id), content: r.content, kind: r.kind as Memory["kind"],
+        confidence: Number(r.confidence), status: r.status as MemoryStatus,
+        evidenceType: r.primary_evidence_type,
+      };
+      const list = out.get(r.subject_id);
+      if (list) list.push(view); else out.set(r.subject_id, [view]);
+    }
+    return out;
+  }
+
   // ── Interaction graph ──────────────────────────────────────────────────────
   // Deterministic "who addresses whom" topology from the raw archive — <@ID>
   // mentions, written name-references, and reply targets. Distinct from
@@ -1236,35 +1371,36 @@ export class MemoryStore {
    * observation-weighted, natures unioned (latest first). behavioralCount is
    * the undirected interaction stamp (max across directions — same number);
    * trend comes from the most recently observed edge. */
-  async mergedEdges(guildId: string, subjectId: string): Promise<Array<{
-    otherId: string; summary: string; natures: string[];
-    valence: number | null; observationCount: number; lastObservedAt: string | null;
-    behavioralCount: number; trend: string | null; inferred: boolean;
-  }>> {
-    const edges = await this.relationshipsFor(guildId, subjectId);
-    const byOther = new Map<string, RelationshipEdge[]>();
-    for (const e of edges) {
-      const other = e.subjectId === subjectId ? e.otherId : e.subjectId;
-      const list = byOther.get(other);
-      if (list) list.push(e); else byOther.set(other, [e]);
+  async mergedEdges(guildId: string, subjectId: string): Promise<MergedEdge[]> {
+    return mergeEdgesForSubject(await this.relationshipsFor(guildId, subjectId), subjectId);
+  }
+
+  /** Bulk mergedEdges — one edges scan for the whole set. The row set each
+   *  subject merges is identical to relationshipsFor's, and the global sort
+   *  preserves its per-subject ordering after filtering. */
+  async mergedEdgesFor(guildId: string, subjectIds: string[]): Promise<Map<string, MergedEdge[]>> {
+    const out = new Map<string, MergedEdge[]>();
+    if (!subjectIds.length) return out;
+    const inSet = new Set(subjectIds);
+    const rows = await this.sql<RelationshipRow[]>`
+      SELECT id, guild_id, subject_id, other_id, summary, valence, observation_count,
+             last_observed_at, updated_at, behavioral_count, party_count, trend, inferred
+      FROM relationships
+      WHERE guild_id = ${guildId} AND (subject_id = ANY(${subjectIds}) OR other_id = ANY(${subjectIds}))
+      ORDER BY inferred ASC, observation_count DESC, behavioral_count DESC
+    `;
+    const perSubject = new Map<string, RelationshipEdge[]>();
+    for (const r of rows) {
+      const e = rowToEdge(r);
+      for (const sid of new Set([e.subjectId, e.otherId])) {
+        if (!inSet.has(sid)) continue;
+        const list = perSubject.get(sid) ?? [];
+        list.push(e);
+        perSubject.set(sid, list);
+      }
     }
-    return [...byOther.entries()].map(([otherId, list]) => {
-      const total = list.reduce((s, e) => s + e.observationCount, 0);
-      const scored = list.filter(e => e.valence != null && e.observationCount > 0);
-      const valence = scored.length
-        ? scored.reduce((s, e) => s + e.valence! * e.observationCount, 0) / scored.reduce((s, e) => s + e.observationCount, 0)
-        : null;
-      const byRecency = [...list].sort((a, b) => (b.lastObservedAt ?? "").localeCompare(a.lastObservedAt ?? ""));
-      return {
-        otherId,
-        summary: byRecency[0].summary,
-        natures: [...new Set(byRecency.map(e => e.summary).filter(Boolean))],
-        valence, observationCount: total, lastObservedAt: byRecency[0].lastObservedAt,
-        behavioralCount: list.reduce((m, e) => Math.max(m, e.behavioralCount), 0),
-        trend: byRecency[0].trend,
-        inferred: list.every(e => e.inferred),
-      };
-    }).sort((a, b) => b.observationCount - a.observationCount || b.behavioralCount - a.behavioralCount);
+    for (const [sid, list] of perSubject) out.set(sid, mergeEdgesForSubject(list, sid));
+    return out;
   }
 
   /** Unverified observations joined to their source message + author names +
@@ -1941,6 +2077,48 @@ export class MemoryStore {
     return rows.map(rowToMemory);
   }
 
+  /** Bulk allActiveMemories keyed by subject — same per-subject ordering, one
+   *  round trip for the set (buildProfiles' nightly prefetch). */
+  async allActiveMemoriesFor(guildId: string, subjectIds: string[]): Promise<Map<string, Memory[]>> {
+    const out = new Map<string, Memory[]>();
+    if (!subjectIds.length) return out;
+    const rows = await this.sql<MemoryRow[]>`
+      SELECT * FROM memories WHERE guild_id = ${guildId} AND subject_id = ANY(${subjectIds}) AND status = 'active'
+        AND kind <> 'story_fact'
+      ORDER BY subject_id, importance * confidence DESC, last_confirmed_at DESC
+    `;
+    for (const r of rows) {
+      const m = rowToMemory(r);
+      const list = out.get(m.subjectId);
+      if (list) list.push(m); else out.set(m.subjectId, [m]);
+    }
+    return out;
+  }
+
+  /** Bulk candidate fetch — the top-`perSubject` page listMemories(status:
+   *  'candidate') serves, without its unused COUNT. Windowed per subject so
+   *  one deep queue can't crowd out the others. Callers filter confidence. */
+  async candidateMemoriesFor(guildId: string, subjectIds: string[], perSubject = 8): Promise<Map<string, Memory[]>> {
+    const out = new Map<string, Memory[]>();
+    if (!subjectIds.length) return out;
+    const rows = await this.sql<MemoryRow[]>`
+      SELECT * FROM (
+        SELECT m.*, ROW_NUMBER() OVER (
+          PARTITION BY subject_id ORDER BY importance * confidence DESC, last_confirmed_at DESC
+        ) AS rn
+        FROM memories m
+        WHERE guild_id = ${guildId} AND subject_id = ANY(${subjectIds}) AND status = 'candidate'
+      ) s WHERE rn <= ${perSubject}
+      ORDER BY subject_id, importance * confidence DESC, last_confirmed_at DESC
+    `;
+    for (const r of rows) {
+      const m = rowToMemory(r);
+      const list = out.get(m.subjectId);
+      if (list) list.push(m); else out.set(m.subjectId, [m]);
+    }
+    return out;
+  }
+
   /** Memories about a subject that a denial/correction message could target —
    * active + contested first, then candidates the subject might have seen surfaced. */
   async contestableMemories(guildId: string, subjectId: string, limit = 15): Promise<Memory[]> {
@@ -2529,6 +2707,27 @@ export class MemoryStore {
       episodeCount: Number(r.episode_count), confidence: Number(r.confidence),
       createdAt: ts(r.created_at), updatedAt: ts(r.updated_at), status: r.status,
     }));
+  }
+
+  /** Bulk patterns keyed by subject — same per-subject confidence ordering. */
+  async patternsFor(guildId: string, subjectIds: string[]): Promise<Map<string, BehavioralPattern[]>> {
+    const out = new Map<string, BehavioralPattern[]>();
+    if (!subjectIds.length) return out;
+    const rows = await this.sql<Array<{ id: number; guild_id: string; subject_id: string; description: string; episode_count: number; confidence: number; created_at: Date | string; updated_at: Date | string; status: string }>>`
+      SELECT id, guild_id, subject_id, description, episode_count, confidence, created_at, updated_at, status
+      FROM behavioral_patterns WHERE guild_id = ${guildId} AND subject_id = ANY(${subjectIds}) AND status = 'active'
+      ORDER BY subject_id, confidence DESC
+    `;
+    for (const r of rows) {
+      const p = {
+        id: Number(r.id), guildId: r.guild_id, subjectId: r.subject_id, description: r.description,
+        episodeCount: Number(r.episode_count), confidence: Number(r.confidence),
+        createdAt: ts(r.created_at), updatedAt: ts(r.updated_at), status: r.status,
+      };
+      const list = out.get(r.subject_id);
+      if (list) list.push(p); else out.set(r.subject_id, [p]);
+    }
+    return out;
   }
 
   async maintain(guildId: string, candidateThreshold = 0.7): Promise<{ promoted: number; quarantinedCandidates: number; quarantinedActive: number; resolved: number; patternsFound: number }> {
@@ -4609,6 +4808,17 @@ export class MemoryStore {
       RETURNING id
     `;
     return rows.length > 0;
+  }
+
+  /** Undo a successful claimStoryUpdate when the enqueue that followed it
+   *  failed — re-arms the counter at the threshold so the next reply bump
+   *  re-claims and retries, instead of the fold silently covering a double
+   *  window. GREATEST keeps any replies counted since the reset. */
+  async unclaimStoryUpdate(companionId: number, scope: string, channelId: string, threshold: number): Promise<void> {
+    await this.sql`
+      UPDATE conversation_summaries SET msgs_since = GREATEST(msgs_since, ${threshold})
+      WHERE companion_id = ${companionId} AND origin_scope = ${scope} AND channel_id = ${channelId}
+    `;
   }
 
   /** Fold a new summary in and advance the watermark. The job's text is

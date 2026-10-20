@@ -48,19 +48,42 @@ export class EventStore {
   // ── Reads ──────────────────────────────────────────────────────────────────
 
   private async hydrate(row: EventRow): Promise<StoredEvent> {
-    const participants = (await this.sql<ParticipantRow[]>`
-      SELECT user_id, user_name, role FROM event_participants WHERE event_id = ${row.id}
-    `).map(p => ({ userId: p.user_id, userName: p.user_name, role: p.role as ParticipantRole }));
+    return (await this.hydrateBatch([row]))[0];
+  }
 
-    const messageIds = (await this.sql<MessageRow[]>`
-      SELECT message_id FROM event_messages WHERE event_id = ${row.id}
-    `).map(r => r.message_id);
-
-    const memoryIds = (await this.sql<MemoryRow[]>`
-      SELECT memory_id FROM event_memories WHERE event_id = ${row.id}
-    `).map(r => Number(r.memory_id));
-
-    return rowToStored(row, participants, messageIds, memoryIds);
+  /** One participants + one messages + one memories query for any number of
+   *  events — hydrate() used to cost 3 round trips PER row. Order of the
+   *  input rows is preserved in the output. */
+  private async hydrateBatch(rows: EventRow[]): Promise<StoredEvent[]> {
+    if (!rows.length) return [];
+    const ids = rows.map(r => r.id);
+    const [participants, messageIds, memoryIds] = await Promise.all([
+      this.sql<Array<ParticipantRow & { event_id: number }>>`
+        SELECT event_id, user_id, user_name, role FROM event_participants WHERE event_id = ANY(${ids})
+      `,
+      this.sql<Array<MessageRow & { event_id: number }>>`
+        SELECT event_id, message_id FROM event_messages WHERE event_id = ANY(${ids})
+      `,
+      this.sql<Array<MemoryRow & { event_id: number }>>`
+        SELECT event_id, memory_id FROM event_memories WHERE event_id = ANY(${ids})
+      `,
+    ]);
+    const partBy = new Map<number, EventParticipant[]>();
+    for (const p of participants) {
+      const v = { userId: p.user_id, userName: p.user_name, role: p.role as ParticipantRole };
+      const l = partBy.get(Number(p.event_id)); if (l) l.push(v); else partBy.set(Number(p.event_id), [v]);
+    }
+    const msgBy = new Map<number, string[]>();
+    for (const m of messageIds) {
+      const k = Number(m.event_id);
+      const l = msgBy.get(k); if (l) l.push(m.message_id); else msgBy.set(k, [m.message_id]);
+    }
+    const memBy = new Map<number, number[]>();
+    for (const m of memoryIds) {
+      const k = Number(m.event_id);
+      const l = memBy.get(k); if (l) l.push(Number(m.memory_id)); else memBy.set(k, [Number(m.memory_id)]);
+    }
+    return rows.map(r => rowToStored(r, partBy.get(Number(r.id)) ?? [], msgBy.get(Number(r.id)) ?? [], memBy.get(Number(r.id)) ?? []));
   }
 
   async getEvent(guildId: string, eventId: number): Promise<StoredEvent | undefined> {
@@ -78,7 +101,7 @@ export class EventStore {
       FROM events WHERE guild_id = ${guildId} AND channel_id = ${channelId} AND closed_at IS NULL
       ORDER BY occurred_at DESC
     `;
-    return Promise.all(rows.map(r => this.hydrate(r)));
+    return this.hydrateBatch(rows);
   }
 
   /** All events that a given memory is linked to. */
@@ -88,7 +111,7 @@ export class EventStore {
              e.occurred_at, e.closed_at, e.reference_count, e.classifications, e.created_at, e.updated_at
       FROM events e JOIN event_memories em ON em.event_id = e.id WHERE em.memory_id = ${memoryId} AND e.guild_id = ${guildId}
     `;
-    return Promise.all(rows.map(r => this.hydrate(r)));
+    return this.hydrateBatch(rows);
   }
 
   async listEvents(guildId: string, options: { tier?: EventTier; subjectUserId?: string; page?: number; limit?: number } = {}): Promise<{ events: StoredEvent[]; total: number; page: number }> {
@@ -121,7 +144,42 @@ export class EventStore {
       `;
     }
 
-    return { events: await Promise.all(rows.map(r => this.hydrate(r))), total: Number(countResult[0].count), page };
+    return { events: await this.hydrateBatch(rows), total: Number(countResult[0].count), page };
+  }
+
+  /** Bulk subjectUserId-scoped listing — one query for the (member, event)
+   *  join plus one batched hydrate for the union of matched events. Each
+   *  subject gets its own top-`perSubject` by recency, matching listEvents'
+   *  page-1 semantics exactly. Events shared by several in-set subjects are
+   *  hydrated once and handed to each list. */
+  async listEventsForSubjects(
+    guildId: string, subjectIds: string[],
+    options: { tier?: EventTier; perSubject?: number } = {},
+  ): Promise<Map<string, StoredEvent[]>> {
+    const out = new Map<string, StoredEvent[]>();
+    if (!subjectIds.length) return out;
+    const tier = options.tier ?? "event";
+    const perSubject = options.perSubject ?? 8;
+    const rows = await this.sql<Array<EventRow & { subject_user_id: string }>>`
+      SELECT s.subject_user_id, e.id, e.guild_id, e.channel_id, e.title, e.summary, e.significance, e.tier,
+             e.occurred_at, e.closed_at, e.reference_count, e.classifications, e.created_at, e.updated_at
+      FROM (
+        SELECT ep.user_id AS subject_user_id, ep.event_id,
+               ROW_NUMBER() OVER (PARTITION BY ep.user_id ORDER BY e.occurred_at DESC) AS rn
+        FROM event_participants ep JOIN events e ON e.id = ep.event_id
+        WHERE e.guild_id = ${guildId} AND e.tier = ${tier} AND ep.user_id = ANY(${subjectIds})
+      ) s JOIN events e ON e.id = s.event_id
+      WHERE s.rn <= ${perSubject}
+      ORDER BY s.subject_user_id, e.occurred_at DESC
+    `;
+    const distinct = [...new Map(rows.map(r => [Number(r.id), r])).values()];
+    const hydrated = new Map((await this.hydrateBatch(distinct)).map(ev => [ev.id, ev]));
+    for (const r of rows) {
+      const ev = hydrated.get(Number(r.id))!;
+      const list = out.get(r.subject_user_id);
+      if (list) list.push(ev); else out.set(r.subject_user_id, [ev]);
+    }
+    return out;
   }
 
   /** Closed candidates still owed a classification pass — the maintainEvents
@@ -137,7 +195,7 @@ export class EventStore {
         AND significance <= 0 AND classifications < 3 AND id > ${afterId}
       ORDER BY id LIMIT ${limit}
     `;
-    return Promise.all(rows.map(r => this.hydrate(r)));
+    return this.hydrateBatch(rows);
   }
 
   /** Promoted events both users participated in — the shared-history layer for
@@ -169,7 +227,7 @@ export class EventStore {
       FROM events WHERE guild_id = ${guildId} AND tier = 'event' AND title ILIKE ${`%${escapeLike(query)}%`}
       ORDER BY significance DESC, occurred_at DESC LIMIT ${limit}
     `;
-    return Promise.all(rows.map(r => this.hydrate(r)));
+    return this.hydrateBatch(rows);
   }
 
   /** The event a message already belongs to, if any — the pipeline's
@@ -252,9 +310,10 @@ export class EventStore {
     await this.sql`UPDATE events SET significance = ${significance}, tier = ${tier}, title = ${title}, summary = ${summary}, updated_at = NOW() WHERE id = ${eventId} AND guild_id = ${guildId}`;
   }
 
-  /** One LLM classification pass was spent on this event — counted so a
-   * 'discard'-verdict candidate can't be re-classified on every future
-   * reference forever. */
+  /** One LLM classification attempt was spent on this event — callers count
+   *  failures too (not just successes), so a 'discard'-verdict candidate or a
+   *  cluster that always throws can't be re-classified on every future
+   *  reference/maintenance pass forever. */
   async noteClassification(guildId: string, eventId: number): Promise<void> {
     await this.sql`UPDATE events SET classifications = classifications + 1 WHERE id = ${eventId} AND guild_id = ${guildId}`;
   }

@@ -478,14 +478,19 @@ ${opts.isDm ? "" : "- This is a shared server channel — describe what happened
     messages: Array<{ authorName: string; content: string; createdAt: string }>;
     participants: string[];
     memoryCount: number;
+    /** Total messages attached to the event — when it exceeds messages.length
+     *  the sample is head+tail and the prompt says so. */
+    messageCount?: number;
   }): Promise<{ significance: number; tier: "low" | "medium" | "high"; tone: string; narrativeComplete: boolean; futureRelevant: boolean; title: string; summary: string }> {
     const messagesText = cluster.messages.map(m => `[${m.createdAt}] ${promptName(m.authorName)}: ${promptInline(m.content, 400)}`).join("\n");
+    const total = cluster.messageCount ?? cluster.messages.length;
+    const countNote = total > cluster.messages.length ? ` (first and last ${cluster.messages.length} of ${total} shown)` : "";
     const raw = await this.chatJson<{
       significance: number; tier: string; tone: string;
       narrativeComplete: boolean | string; futureRelevant: boolean | string;
       title: string; summary: string;
     }>({
-      prompt: `Evaluate this Discord conversation cluster and decide how significant it is as a shared event.\n\n${MEMBER_TEXT_IS_DATA}\n\nParticipants: ${cluster.participants.map(p => promptName(p)).join(", ")}\nMemories generated: ${cluster.memoryCount}\n\nMessages:\n${messagesText}\n\nRespond with a JSON object: {"significance": number, "tier": "low"|"medium"|"high", "tone": string, "narrativeComplete": boolean, "futureRelevant": boolean, "title": string, "summary": string}`,
+      prompt: `Evaluate this Discord conversation cluster and decide how significant it is as a shared event.\n\n${MEMBER_TEXT_IS_DATA}\n\nParticipants: ${cluster.participants.map(p => promptName(p)).join(", ")}\nMemories generated: ${cluster.memoryCount}\n\nMessages${countNote}:\n${messagesText}\n\nRespond with a JSON object: {"significance": number, "tier": "low"|"medium"|"high", "tone": string, "narrativeComplete": boolean, "futureRelevant": boolean, "title": string, "summary": string}`,
       name: "event_classification",
       schema: {
         type: "object", properties: {

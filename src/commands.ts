@@ -4,7 +4,7 @@ import { MemoryStore, type Memory } from "./database.js";
 import { EventStore } from "./events.js";
 import { ProfileStore } from "./profiles.js";
 import { encryptSecret, logError, maskKey, validateLlmKey } from "./secrets.js";
-import { isSafeUrl, resolvesToPrivateAddress } from "./tools.js";
+import { fetchImageBytes, isSafeUrl, resolvesToPrivateAddress } from "./tools.js";
 import { detectProviderFromKey, guardedLlmFetch } from "./brains.js";
 import { runProfileBuild, PROFILE_BUILD_COOLDOWN_MS } from "./profile-build.js";
 import { inc, metricsSnapshot } from "./metrics.js";
@@ -1882,9 +1882,10 @@ async function cmdCompanion(c: SlashCtx): Promise<unknown> {
     if (await resolvesToPrivateAddress(new URL(file.url).hostname).catch(() => true)) {
       return interaction.reply({ content: "That upload didn't give me a usable file URL — try exporting the card again.", ephemeral: true });
     }
-    const bytes = await fetch(file.url)
-      .then(r => (r.ok ? r.arrayBuffer() : null))
-      .then(b => (b ? new Uint8Array(b) : null))
+    // fetchImageBytes re-validates every redirect hop (isSafeUrl + connect-time
+    // safeLookup) — a plain fetch would follow a 302 past the checks above.
+    const bytes = await fetchImageBytes(file.url, CARD_MAX_BYTES)
+      .then(r => (r.buf.byteLength ? new Uint8Array(r.buf) : null))
       .catch(() => null);
     if (!bytes) {
       return interaction.reply({ content: "Couldn't fetch that upload — try re-attaching the file.", ephemeral: true });

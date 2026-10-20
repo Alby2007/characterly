@@ -98,9 +98,9 @@ Any open event window older than `maxAgeMs` (default 24 hours) is closed by sett
 
 ### Phase 2: Score closed candidates
 
-For each closed candidate event that has not yet been scored (`significance = 0`) and is under the re-classification cap (`classifications < 3`, v18 — each pass bumps the counter so a stuck candidate can't burn LLM calls forever):
+For each closed candidate event that has not yet been scored (`significance = 0`) and is under the re-classification cap (`classifications < 3`, v18 — each attempt bumps the counter, success or failure, so a stuck or poisonous candidate can't burn LLM calls forever; a `BudgetExceeded` refusal spent nothing and doesn't count):
 
-1. **Build a cluster** — retrieve the raw messages from the archive (if still present after retention purges) plus participant names and memory count.
+1. **Build a cluster** — retrieve the raw messages from the archive (if still present after retention purges) plus participant names and memory count. Oversized clusters are capped head+tail (10+30) so the prompt stays bounded — `classifyEvent` is told the true total.
 2. **LLM classification** — `brain.classifyEvent()` returns `significance` (0–1), `tier` (`low`/`medium`/`high`), `tone`, `narrativeComplete`, `futureRelevant`, `title`, `summary`.
 3. **Deterministic scoring** — `calculateSignificance()` combines structural and LLM signals.
 4. **Tier assignment** — update the event row.

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { makeStore, makeTestSql } from "./test-helpers.js";
 import { runChatImportJob } from "./chat-import-job.js";
+import { FatalJobError } from "./jobs.js";
 import type { MemoryStore } from "./database.js";
 
 const sql = makeTestSql();
@@ -320,6 +321,25 @@ test("job — terminal failure marks the import failed and retracts journal", as
   );
   const cur = await store.chatImportById(imp.id);
   assert.equal(cur?.status, "failed");
+  assert.equal(cur?.turns.length, 0);
+});
+
+test("job — a FatalJobError fails the import row, not just the job", async () => {
+  const { store } = await freshStore();
+  const comp = await awakenedCompanion(store, "u-fatal");
+  const imp = await store.createChatImport("u-fatal", comp.id, importOpts());
+  const fatalBrain = { async distillHistoryWindow() { throw new FatalJobError("poison payload"); } };
+
+  // Fatal means the worker dead-letters immediately — attempts are irrelevant.
+  // Before the fix the row stayed 'distilling' forever: a permanently-
+  // spinning import on the dashboard.
+  await assert.rejects(
+    runChatImportJob("dm:u-fatal", { importId: imp.id }, jobDeps(store, fatalBrain)),
+    /poison payload/,
+  );
+  const cur = await store.chatImportById(imp.id);
+  assert.equal(cur?.status, "failed");
+  assert.match(cur?.error ?? "", /poison payload/);
   assert.equal(cur?.turns.length, 0);
 });
 

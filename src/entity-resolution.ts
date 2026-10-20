@@ -49,13 +49,20 @@ export async function buildAliasMap(guildId: string, store: MemoryStore): Promis
     if (!ids) byName.set(key, (ids = new Set()));
     ids.add(userId);
   };
-  for (const member of await store.listMembers(guildId)) {
+  const members = await store.listMembers(guildId);
+  for (const member of members) {
     add(member.userId, member.userId);
     for (const name of member.knownNames) for (const key of aliasKeyVariants(name)) add(key, member.userId);
   }
-  for (const row of await store.listAuthorNames(guildId)) {
-    add(row.authorId, row.authorId);
-    for (const key of aliasKeyVariants(row.authorName)) add(key, row.authorId);
+  // The messages fallback exists for archives that predate the members
+  // registry (pre-v7): every post-v7 author already upserted a member row, so
+  // once the registry has any rows the DISTINCT over the whole archive is a
+  // full scan whose only yield is names of authors who haven't posted since.
+  if (members.length === 0) {
+    for (const row of await store.listAuthorNames(guildId)) {
+      add(row.authorId, row.authorId);
+      for (const key of aliasKeyVariants(row.authorName)) add(key, row.authorId);
+    }
   }
 
   const map: AliasMap = new Map();

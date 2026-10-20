@@ -6,6 +6,7 @@ import { buildAliasMap, resolveSubject } from "./entity-resolution.js";
 import { contestCue, detectSelfNaming } from "./perception.js";
 import { runContestCheck } from "./contest.js";
 import { ProfileStore } from "./profiles.js";
+import { metricsSnapshot } from "./metrics.js";
 import { applyProposals, listAttributes } from "./attributes.js";
 import type { Brain } from "./brain.js";
 import type { MessageEvent, ProfileSynthesis } from "./types.js";
@@ -80,6 +81,19 @@ test("known_names is capped — nickname spam can't grow the alias map unbounded
   } finally { await sql.end(); }
 });
 
+test("known_names dedupes case-insensitively — casing churn doesn't burn slots", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    await store.recordMessage(msg("a", { authorId: "u1", authorName: "Alice" }));
+    await store.recordMessage(msg("b", { authorId: "u1", authorName: "ALICE" }));
+    await store.recordMessage(msg("c", { authorId: "u1", authorName: "alice" }));
+    await store.recordMessage(msg("d", { authorId: "u1", authorName: "Alicia" }));
+    const member = await store.getMember("g1", "u1");
+    assert.deepEqual(member!.knownNames, ["Alice", "Alicia"], "first-seen casing wins; variants don't append");
+  } finally { await sql.end(); }
+});
+
 test("recordMessage persists reply_to_id", async () => {
   const sql = makeTestSql();
   try {
@@ -115,6 +129,31 @@ test("buildAliasMap drops ambiguous names shared by multiple users", async () =>
     const map = await buildAliasMap("g1", store);
     assert.equal(map.get("sam"), undefined);
     assert.equal(resolveSubject({ subjectName: "Sam" }, map, msg("Sam did a thing")), "unknown");
+  } finally { await sql.end(); }
+});
+
+test("buildAliasMap: once the members registry exists, the archive fallback is skipped", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    await store.recordMessage(msg("hi", { authorId: "u1", authorName: "Nova" }));
+    // Legacy archive shape: a message row with no member row (trackMember=false).
+    // With members non-empty the DISTINCT fallback is gated off — a full-archive
+    // scan whose only yield is authors who haven't posted since the registry.
+    await store.recordMessage(msg("hi", { authorId: "u2", authorName: "Legacy" }), undefined, false);
+    const map = await buildAliasMap("g1", store);
+    assert.equal(map.get("nova"), "u1");
+    assert.equal(map.get("legacy"), undefined);
+  } finally { await sql.end(); }
+});
+
+test("buildAliasMap: an empty members registry still falls back to the message archive", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    await store.recordMessage(msg("hi", { authorId: "u2", authorName: "Legacy" }), undefined, false);
+    const map = await buildAliasMap("g1", store);
+    assert.equal(map.get("legacy"), "u2");
   } finally { await sql.end(); }
 });
 
@@ -168,6 +207,35 @@ function stubBrain(
     },
   } as unknown as Brain;
 }
+
+test("buildProfiles batched pass keeps per-member data straight across a guild", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store, eventStore } = await makeStore(sql);
+    const profileStore = new ProfileStore(sql as any);
+    for (let i = 0; i < 6; i++) {
+      await store.recordMessage(msg(`alice-${i}`, { authorId: "u1", authorName: "Alice", channelId: "c-a" }));
+      await store.recordMessage(msg(`bob-${i}`, { authorId: "u2", authorName: "Bob", channelId: "c-b" }));
+    }
+    await store.setMemberOptIn("g1", "u1", true);
+    await store.setMemberOptIn("g1", "u2", true);
+    await activeFact(store, "Plays cello", "u1");
+    await activeFact(store, "Runs marathons", "u2");
+
+    const calls = { profile: 0, section: 0, sections: {} as Record<string, number>, extract: 0 };
+    const result = await profileStore.buildProfiles("g1", stubBrain(calls), store, eventStore);
+    assert.equal(result.built, 2);
+    assert.equal(calls.profile, 2, "one card synthesis per eligible member");
+
+    // Cross-contamination check: each profile reflects only its own member —
+    // deterministic extraction lands "location"-style fields only where the
+    // source memory lives.
+    const a1 = await listAttributes(sql, "g1", "u1");
+    const a2 = await listAttributes(sql, "g1", "u2");
+    assert.ok(!a1.some(a => a.value === "Runs marathons"), "u2's fact must not land on u1");
+    assert.ok(!a2.some(a => a.value === "Plays cello"), "u1's fact must not land on u2");
+  } finally { await sql.end(); }
+});
 
 test("buildProfiles builds a card and skips the LLM call when inputs are unchanged", async () => {
   const sql = makeTestSql();
@@ -595,6 +663,34 @@ test("buildProfiles builds the voice section and skips unchanged sections on re-
     assert.equal(second.built, 0);
     assert.equal(calls.profile, 1);
     assert.equal(calls.sections.voice, 1);
+  } finally { await sql.end(); }
+});
+
+test("buildProfiles surfaces LLM failures as metrics — a provider outage can't masquerade as 'nothing changed'", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store, eventStore } = await makeStore(sql);
+    const profileStore = new ProfileStore(sql as any);
+    // 50 msgs → dossier-eligible + voice-buildable; one fact feeds extraction.
+    for (let i = 0; i < 50; i++) await store.recordMessage(msg(`message ${i} hello`, { authorId: "u1", authorName: "Alice" }));
+    await store.setMemberOptIn("g1", "u1", true);
+    await activeFact(store, "Lives in Leeds");
+
+    const before = metricsSnapshot().counts;
+    const deadBrain = {
+      extractAttributes: async () => { throw new Error("provider down"); },
+      synthesizeProfile: async () => { throw new Error("provider down"); },
+      synthesizeDossierSection: async () => { throw new Error("provider down"); },
+    } as unknown as Brain;
+
+    // Still completes — failures degrade a member, they don't kill the pass.
+    await profileStore.buildProfiles("g1", deadBrain, store, eventStore);
+
+    const counts = metricsSnapshot().counts;
+    const delta = (name: string) => (counts[name] ?? 0) - (before[name] ?? 0);
+    assert.equal(delta("profiles.extract_error"), 1);
+    assert.equal(delta("profiles.synthesize_error"), 1);
+    assert.ok(delta("profiles.dossier_error") >= 1, "every failed section counts");
   } finally { await sql.end(); }
 });
 

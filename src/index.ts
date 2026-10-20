@@ -1133,7 +1133,15 @@ async function maybeEnqueueSummary(companionId: number, scope: string, channelId
   try {
     if (await store.bumpStoryCounter(companionId, scope, channelId) < SUMMARY_REPLY_INTERVAL) return;
     if (!(await store.claimStoryUpdate(companionId, scope, channelId, SUMMARY_REPLY_INTERVAL))) return;
-    await enqueue(sql, scope, "summary-update", { companionId, channelId });
+    try {
+      await enqueue(sql, scope, "summary-update", { companionId, channelId });
+    } catch (error) {
+      // The claim already zeroed the counter — re-arm it so the next reply
+      // re-claims and retries instead of the fold silently covering a
+      // double window.
+      await store.unclaimStoryUpdate(companionId, scope, channelId, SUMMARY_REPLY_INTERVAL).catch(() => {});
+      throw error;
+    }
     inc("summary.enqueued");
   } catch (error) {
     inc("jobs.enqueue_error");

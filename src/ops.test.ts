@@ -28,7 +28,7 @@ const prev = {
   automodMentionMax: config.automodMentionMax, automodNewAccountDays: config.automodNewAccountDays,
   hostHeapPct: config.hostHeapPct, hostDiskPct: config.hostDiskPct, hostLagMs: config.hostLagMs,
   opsRepoDir: config.opsRepoDir, marketplaceChannelId: config.marketplaceChannelId,
-  houseAdopteesChannelId: config.houseAdopteesChannelId,
+  houseAdopteesChannelId: config.houseAdopteesChannelId, houseInviteUrl: config.houseInviteUrl,
 };
 
 const HOUSE = "g-house";
@@ -597,6 +597,26 @@ test("automod: invite link deleted + alerted", async () => {
   assert.equal(await automodMessage(m, deps), true);
   assert.equal(m.deleted, true);
   assert.match(opsAlertText(deps), /invite link/);
+});
+
+test("automod: the house's own invite is exempt; bundling a foreign code still trips", async () => {
+  config.houseInviteUrl = "https://discord.gg/our-house";
+  try {
+    const deps = makeDeps();
+    const own = makeMsg({ content: "come hang https://discord.gg/our-house sometime" });
+    assert.equal(await automodMessage(own, deps), false, "house invite survives");
+    assert.equal(own.deleted, false);
+
+    const foreign = makeMsg({ content: "join https://discord.gg/elsewhere" });
+    assert.equal(await automodMessage(foreign, deps), true);
+    assert.equal(foreign.deleted, true);
+
+    // Bundling the house invite with a foreign code doesn't launder it.
+    resetOpsState();
+    const mixed = makeMsg({ content: "https://discord.gg/our-house and https://discord.gg/elsewhere" });
+    assert.equal(await automodMessage(mixed, deps), true);
+    assert.equal(mixed.deleted, true);
+  } finally { config.houseInviteUrl = undefined; }
 });
 
 test("automod: scam classes delete + 10m timeout", async () => {

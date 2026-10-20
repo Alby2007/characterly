@@ -951,3 +951,31 @@ test("migration v54 adds companion_adoptions.chat_thread_id + partial index, rol
     assert.equal(gone.length, 0, "rollback should drop chat_thread_id");
   } finally { await sql.end(); }
 });
+
+test("migration v64 creates the listing_rating_stats view — one row per listing, rolls back", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any);
+
+    const [l1] = await sql<[{ id: number }]>`INSERT INTO companion_listings (creator_user_id, name) VALUES ('u-v64', 'Rated') RETURNING id`;
+    const [l2] = await sql<[{ id: number }]>`INSERT INTO companion_listings (creator_user_id, name) VALUES ('u-v64', 'Unrated') RETURNING id`;
+    await sql`INSERT INTO listing_ratings (listing_id, rater_user_id, stars) VALUES
+              (${l1.id}, 'u-r1', 5), (${l1.id}, 'u-r2', 3), (${l1.id}, 'u-r3', 4)`;
+
+    // The view groups server-side — unrated listings produce no row at all.
+    const stats = await sql<Array<{ listing_id: number; avg: number; rating_count: number }>>`
+      SELECT listing_id, avg, rating_count FROM listing_rating_stats`;
+    assert.equal(stats.length, 1);
+    assert.equal(Number(stats[0].listing_id), Number(l1.id));
+    assert.equal(stats[0].avg, 4);
+    assert.equal(stats[0].rating_count, 3);
+    const unrated = await sql`SELECT * FROM listing_rating_stats WHERE listing_id = ${l2.id}`;
+    assert.equal(unrated.length, 0);
+
+    await runMigrations(sql as any, 63);
+    const gone = await sql<[{ t: string | null }]>`
+      SELECT to_regclass('public.listing_rating_stats') AS t`;
+    assert.equal(gone[0].t, null, "rollback should drop the view");
+  } finally { await sql.end(); }
+});

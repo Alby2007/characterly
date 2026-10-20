@@ -763,6 +763,17 @@ export function startTagSweep(deps: OpsDeps): { stop: () => void } {
 // deleted scam never enters the memory pipeline or spends a credit.
 
 const INVITE_RE = /(?:discord\.gg\/|discord(?:app)?\.com\/invites?\/)/i;
+// Capturing variant for extracting the code — /g is required for matchAll.
+const INVITE_CODE_RE = /(?:discord\.gg\/|discord(?:app)?\.com\/invites?\/)([\w-]+)/gi;
+// The house's own invite code — a member re-sharing it is growth, not
+// phishing. Any other code in the same message still trips the rule.
+// Read lazily (not at module load) so tests can set config.houseInviteUrl.
+function houseInviteCode(): string | null {
+  const m = config.houseInviteUrl
+    ? /(?:discord\.gg\/|discord(?:app)?\.com\/invites?\/)([\w-]+)/i.exec(config.houseInviteUrl)
+    : null;
+  return m?.[1]?.toLowerCase() ?? null;
+}
 const LINK_RE = /https?:\/\/[^\s<>"']+/i;
 const SCAM_PATTERNS: Array<{ rule: string; re: RegExp }> = [
   { rule: "nitro scam", re: /\b(?:free|claim|redeem|won|win)\b[^.\n]{0,30}\bnitro\b|\bnitro\b[^.\n]{0,30}\b(?:free|claim|redeem|giveaway)\b/i },
@@ -812,8 +823,14 @@ export async function automodMessage(message: AutomodMessage, deps: OpsDeps): Pr
     return true;
   };
 
-  // Invite links — the fastest phishing vector on a community server.
-  if (INVITE_RE.test(message.content)) return act("invite link");
+  // Invite links — the fastest phishing vector on a community server. The
+  // house's own invite gets a pass; a post bundling it with any other code
+  // (or an unparseable link) is still a violation.
+  if (INVITE_RE.test(message.content)) {
+    const codes = [...message.content.matchAll(INVITE_CODE_RE)].map(m => m[1].toLowerCase());
+    const houseCode = houseInviteCode();
+    if (!houseCode || !codes.length || codes.some(c => c !== houseCode)) return act("invite link");
+  }
   // Scam classes — same defensive-regex style as safety.ts's listing blocklist.
   for (const { rule, re } of SCAM_PATTERNS) {
     if (re.test(message.content)) return act(rule, 10 * 60_000);

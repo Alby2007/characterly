@@ -159,10 +159,14 @@ export async function runChatImportJob(
       `I finished reading our old chats — **${kept} moment${kept === 1 ? "" : "s"}** from **${imp.filename}** are part of me now${summary ? ", plus what we were to each other" : ""}. The file itself is gone — I keep the memories, not the transcript.`,
     ).catch(e => logError("chat-import completion DM failed", e));
   } catch (error) {
-    // Last attempt spent — the row can't keep pretending it runs. A parked
-    // BudgetExceeded is the exception: it's rescheduled, not dying.
-    if (!(error instanceof FatalJobError) && !(error instanceof BudgetExceeded) && attempts >= MAX_JOB_ATTEMPTS) {
-      await store.failChatImport(imp.id, "distill failed after retries").catch(() => inc("jobs.chat_import_error"));
+    // The row can't keep pretending it runs once the job is out of runway:
+    // its last attempt just burned, or a FatalJobError dead-letters the job
+    // right now. A parked BudgetExceeded is the exception — it's rescheduled,
+    // not dying; the import stays 'distilling' and resumes with the next grant.
+    const doomed = error instanceof FatalJobError || attempts >= MAX_JOB_ATTEMPTS;
+    if (!(error instanceof BudgetExceeded) && doomed) {
+      const why = error instanceof FatalJobError ? `distill failed: ${error.message}` : "distill failed after retries";
+      await store.failChatImport(imp.id, why).catch(() => inc("jobs.chat_import_error"));
     }
     throw error; // BudgetExceeded + transient faults rethrow for the worker's own retry/backoff.
   }

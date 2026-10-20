@@ -1569,6 +1569,36 @@ test("chargeOnboardingTurn: free under the cap and on BYOK, 2 tokens past it, re
   assert.deepEqual(spends, [2, 2]);
 });
 
+test("onboarding preset: a paid turn that fails after charging refunds the spend", async () => {
+  const refunds: Array<{ id: string; n: number; reason: string; purchased: number }> = [];
+  const draft = {
+    onboardingState: "onboarding",
+    onboardingTurns: config.onboardingFreeTurns, // past the free tier → hosted charges
+    name: "", voicePersona: "", coreTraits: [], ownerDynamic: "", backstory: "", avatarUrl: null,
+  };
+  const store = {
+    getCompanionByOwner: async () => draft,
+    spendCredits: async () => ({ ok: true, balance: 0, purchased: 1 }),
+    refundCredits: async (id: string, n: number, reason: string, purchased = 0) => {
+      refunds.push({ id, n, reason, purchased });
+      return { ok: true };
+    },
+    upsertCompanionOnboarding: async () => { throw new Error("never reached"); },
+  } as unknown as MemoryStore;
+  const brain = { runOnboardingTurn: async () => { throw new Error("provider down"); } } as unknown as Brain;
+  const ix = {
+    customId: "onboard:preset:co_conspirator:u-x",
+    user: { id: "u-x", username: "X" },
+    reply: async () => {},
+    update: async () => {},
+  };
+  await assert.rejects(
+    () => handleMemoryButton(ix as unknown as ButtonInteraction, store, async () => brain, undefined, () => true),
+    /provider down/,
+  );
+  assert.deepEqual(refunds, [{ id: "u-x", n: 2, reason: "onboarding_turn_refund", purchased: 1 }]);
+});
+
 // ── Self-serve marketplace deploy (v63) ──────────────────────────────────────
 
 function marketplaceInteraction(sub: string, userId = "u-user") {

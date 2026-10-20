@@ -301,7 +301,7 @@ One row per detected server incident.
 | `occurred_at` | TEXT | Timestamp of the first message in the event |
 | `closed_at` | TEXT | ISO-8601 when the event window was closed (null = still open) |
 | `reference_count` | INTEGER | Number of times the event was referenced after closing |
-| `classifications` | INTEGER | Re-classification pass counter (v18) — each discard-verdict pass bumps it; `>= 3` stops re-scoring so a stuck candidate can't burn an LLM call on every future reference |
+| `classifications` | INTEGER | Classification attempt counter (v18) — bumps on every spend, success or failure; `>= 3` stops re-scoring so a stuck candidate can't burn an LLM call on every future reference/maintenance pass |
 | `created_at` | TEXT | ISO-8601 |
 | `updated_at` | TEXT | ISO-8601 |
 
@@ -803,6 +803,8 @@ Star ratings on a listing's card (v37) — one row per `(listing_id, rater_user_
 | `created_at` / `updated_at` | TIMESTAMPTZ | `updated_at` moves on re-rate |
 
 **RLS:** enabled, zero policies.
+
+**View:** `listing_rating_stats` (v64, `security_invoker`) — `listing_id, avg(stars)::float8 AS avg, count(*)::int4 AS rating_count GROUP BY listing_id`. The site shelf reads this instead of raw rows so the index page's rating lookup stays one row per rated listing regardless of table size. The column is `rating_count`, not `count` — PostgREST treats bare `count` in `select` as its legacy count function, not a column.
 
 ---
 

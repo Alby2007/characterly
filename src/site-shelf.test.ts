@@ -258,11 +258,15 @@ test("fetch helpers degrade to empty/null on failure — the shelf never 500s", 
   assert.deepEqual(await fetchActiveListings({}), []);
 });
 
-test("fetchRatingStats aggregates per listing", async () => {
+test("fetchRatingStats reads the GROUP BY view — one row per listing, not per rating", async () => {
+  let seenUrl = "";
   await withFetch(
-    async () => new Response(JSON.stringify([
-      { listing_id: 1, stars: 5 }, { listing_id: 1, stars: 3 }, { listing_id: 2, stars: 4 },
-    ])),
+    async (input) => {
+      seenUrl = String(input);
+      return new Response(JSON.stringify([
+        { listing_id: 1, avg: 4, rating_count: 2 }, { listing_id: 2, avg: 4, rating_count: 1 },
+      ]));
+    },
     async () => {
       const m = await fetchRatingStats(ENV);
       assert.deepEqual(m.get(1), { avg: 4, count: 2 });
@@ -270,4 +274,25 @@ test("fetchRatingStats aggregates per listing", async () => {
       assert.equal(m.get(99), undefined);
     },
   );
+  assert.ok(seenUrl.includes("/rest/v1/listing_rating_stats"), seenUrl);
+  assert.ok(!seenUrl.includes("/rest/v1/listing_ratings"), "raw rating rows must stay off the wire");
+});
+
+test("fetchListingRating maps the view row; no row or null avg → unrated", async () => {
+  let seenUrl = "";
+  await withFetch(
+    async (input) => {
+      seenUrl = String(input);
+      return new Response(JSON.stringify([{ avg: 4.5, rating_count: 3 }]));
+    },
+    async () => { assert.deepEqual(await fetchListingRating(ENV, 7), { avg: 4.5, count: 3 }); },
+  );
+  assert.ok(seenUrl.includes("listing_rating_stats"), seenUrl);
+  assert.ok(seenUrl.includes("listing_id=eq.7"), seenUrl);
+  for (const body of ["[]", JSON.stringify([{ avg: null, rating_count: 0 }])]) {
+    await withFetch(
+      async () => new Response(body),
+      async () => { assert.deepEqual(await fetchListingRating(ENV, 7), { avg: 0, count: 0 }); },
+    );
+  }
 });

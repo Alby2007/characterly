@@ -23,6 +23,12 @@ const MAX_LLM_CANDIDATES = 3;
 /** Max messages from an open event sent to the LLM for context. */
 const LLM_CONTEXT_MESSAGES = 5;
 
+/** Cluster prompt budget: the first N + last M archived messages of an event.
+ *  A busy channel can attach hundreds inside the 4h open window — classify
+ *  needs the arc (opening + resolution), not the whole archive. */
+const CLASSIFY_HEAD_MESSAGES = 10;
+const CLASSIFY_TAIL_MESSAGES = 30;
+
 /**
  * Patterns that indicate a message is explicitly referencing a past occurrence.
  * A match is a positive signal for "reference" rather than "new".
@@ -246,10 +252,11 @@ export class EventPipeline {
     // more re-reads of the same cluster.
     if (ev.classifications >= 3) return false;
 
-    // Re-classify using current cluster data
+    // Re-classify using current cluster data. classifyCounted records the
+    // spent attempt even when the call throws — a poisonous cluster can't be
+    // repurchased on every future reference forever.
     const cluster = await buildCluster(ev, memoryStore);
-    const classification = await brain.classifyEvent(cluster);
-    await eventStore.noteClassification(guildId, eventId);
+    const classification = await this.classifyCounted(eventStore, guildId, eventId, cluster, brain);
     const { score, tier } = calculateSignificance({
       distinctParticipants: ev.participants.length,
       messageCount: ev.messageIds.length,
@@ -299,8 +306,7 @@ export class EventPipeline {
         const cluster = await buildCluster(ev, memoryStore);
         let classification;
         try {
-          classification = await brain.classifyEvent(cluster);
-          await eventStore.noteClassification(guildId, ev.id);
+          classification = await this.classifyCounted(eventStore, guildId, ev.id, cluster, brain);
         } catch (err) {
           if (err instanceof BudgetExceeded) throw err; // daily cap — the caller's per-guild loop handles it
           logError(`  [classifyEvent error] event ${ev.id}:`, err);
@@ -329,6 +335,31 @@ export class EventPipeline {
 
     return { closed, promoted, discarded };
   }
+
+  /**
+   * classifyEvent + noteClassification as one operation: the attempt is spent
+   * whether the call returns or throws — counting successes alone let a
+   * cluster that always fails stay in the work list forever. A BudgetExceeded
+   * refusal never reached the provider, so it doesn't consume a pass.
+   */
+  private async classifyCounted(
+    eventStore: EventStore,
+    guildId: string,
+    eventId: number,
+    cluster: Parameters<Brain["classifyEvent"]>[0],
+    brain: Brain
+  ): Promise<Awaited<ReturnType<Brain["classifyEvent"]>>> {
+    let out;
+    try {
+      out = await brain.classifyEvent(cluster);
+    } catch (err) {
+      if (err instanceof BudgetExceeded) throw err;
+      await eventStore.noteClassification(guildId, eventId);
+      throw err;
+    }
+    await eventStore.noteClassification(guildId, eventId);
+    return out;
+  }
 }
 
 // ── Cluster builder helper ────────────────────────────────────────────────────
@@ -340,15 +371,23 @@ async function buildCluster(
   messages: Array<{ authorName: string; content: string; createdAt: string }>;
   participants: string[];
   memoryCount: number;
+  /** Total attached messages — may exceed messages.length (head+tail cap). */
+  messageCount: number;
 }> {
   // Read back the raw messages that belong to this event. If the archive has
   // been purged by retention this returns fewer (or zero) messages — the LLM
-  // classification still runs on whatever remains.
-  const context = await memoryStore.messagesByIds(ev.guildId, ev.messageIds);
+  // classification still runs on whatever remains. Cap the sample head+tail:
+  // every row lands in the prompt at ~400 chars, so an unbounded cluster is
+  // an unbounded (and repeatedly repurchased, on failure) prompt.
+  const ids = ev.messageIds.length <= CLASSIFY_HEAD_MESSAGES + CLASSIFY_TAIL_MESSAGES
+    ? ev.messageIds
+    : [...ev.messageIds.slice(0, CLASSIFY_HEAD_MESSAGES), ...ev.messageIds.slice(-CLASSIFY_TAIL_MESSAGES)];
+  const context = await memoryStore.messagesByIds(ev.guildId, ids);
 
   return {
     messages: context,
     participants: ev.participants.map(p => p.userName),
     memoryCount: ev.memoryIds.length,
+    messageCount: ev.messageIds.length,
   };
 }

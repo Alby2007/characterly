@@ -5937,6 +5937,31 @@ export const migrations: Migration[] = [
       await sql`ALTER TABLE guild_deployments DROP COLUMN IF EXISTS login_channel_id`;
     },
   },
+  {
+    // v64: server-side rating aggregates. The site shelf previously SELECTed
+    // every listing_ratings row and averaged in JS — one row per listing here
+    // keeps the index query bounded as ratings grow. A view (not a PostgREST
+    // aggregate) because db-aggregates-enabled is not guaranteed on; the
+    // security_invoker flag keeps base-table RLS semantics for non-service
+    // roles. Column is `rating_count`, not `count` — PostgREST treats bare
+    // `count` in select as its legacy count function, not a column.
+    version: 64,
+    name: "v64_listing_rating_stats_view",
+    up: async (sql) => {
+      await sql`
+        CREATE OR REPLACE VIEW listing_rating_stats
+        WITH (security_invoker = true) AS
+        SELECT listing_id,
+               avg(stars)::float8 AS avg,
+               count(*)::int4     AS rating_count
+        FROM listing_ratings
+        GROUP BY listing_id
+      `;
+    },
+    down: async (sql) => {
+      await sql`DROP VIEW IF EXISTS listing_rating_stats`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import type { MemoryStore, Memory } from "./database.js";
+import type { BehavioralPattern, MemoryStore, Memory, MergedEdge } from "./database.js";
 import type { EventStore } from "./events.js";
-import type { DossierSection, Member, TimelineData } from "./types.js";
+import type { DossierSection, Member, StoredEvent, TimelineData } from "./types.js";
 
 // ── Dossier input gathering ──────────────────────────────────────────────────
 // Each section gathers its own inputs and hashes them; buildProfiles only calls
@@ -14,9 +14,24 @@ export type DossierInput = {
 };
 
 /** Precomputed per-member context shared across sections (caller computes once
- * per guild run — e.g. the interaction graph over all archived messages). */
+ * per guild run — e.g. the interaction graph over all archived messages). The
+ * `pre*` fields carry buildProfiles' guild-wide prefetches so the gather runs
+ * zero queries; leave them unset and each read falls back to its per-member
+ * store call — a partial bundle is fine, fields fall back independently. */
 export type DossierContext = {
   interactions?: Array<{ otherId: string; count: number }>;
+  /** Active memories (allActiveMemories semantics — story_fact excluded). */
+  preActive?: Memory[];
+  /** Raw candidate page (candidateMemoriesFor semantics — pre-confidence filter). */
+  preCandidates?: Memory[];
+  prePatterns?: BehavioralPattern[];
+  preEdges?: MergedEdge[];
+  preEvents?: StoredEvent[];
+  /** Superset name map — must cover every edge/interaction/observation otherId. */
+  preNames?: Map<string, string>;
+  preSamples?: Array<{ content: string; createdAt: string }>;
+  preObservations?: Awaited<ReturnType<MemoryStore["relationshipObservationsFor"]>>;
+  preClaims?: Awaited<ReturnType<MemoryStore["thirdPartyClaims"]>>;
 };
 
 function hashInput(payload: unknown): string {
@@ -55,14 +70,14 @@ export async function gatherDossierInputs(
 ): Promise<Map<DossierSection, DossierInput>> {
   const out = new Map<DossierSection, DossierInput>();
 
-  const active = await memoryStore.allActiveMemories(guildId, member.userId);
-  const candidates = (await memoryStore.listMemories(guildId, member.userId, { status: "candidate" })).memories
+  const active = ctx.preActive ?? await memoryStore.allActiveMemories(guildId, member.userId);
+  const candidates = (ctx.preCandidates ?? (await memoryStore.listMemories(guildId, member.userId, { status: "candidate" })).memories)
     .filter(m => m.confidence >= 0.5);
   const sourced = [...active.map(m => toSourced(m, true)), ...candidates.map(m => toSourced(m, false))];
 
   // voice — raw message sample + deterministic style stats (ground truth data)
   if (member.messageCount >= 20) {
-    const sample = await memoryStore.sampleMessages(guildId, member.userId);
+    const sample = ctx.preSamples ?? await memoryStore.sampleMessages(guildId, member.userId);
     if (sample.length >= 10) {
       const messages = sample.map(s => s.content.slice(0, 200));
       const payload = { stats: voiceStats(messages), samples: messages.slice(0, 40) };
@@ -78,12 +93,12 @@ export async function gatherDossierInputs(
   }
 
   // temperament — memories + behavioral patterns + relationship edges
-  const patterns = await memoryStore.patterns(guildId, member.userId);
+  const patterns = ctx.prePatterns ?? await memoryStore.patterns(guildId, member.userId);
   // mergedEdges collapses A→B and B→A into one counterparty view so
   // bidirectionally-observed pairs aren't fragmented across two directed edges.
-  const edges = await memoryStore.mergedEdges(guildId, member.userId);
+  const edges = ctx.preEdges ?? await memoryStore.mergedEdges(guildId, member.userId);
   const interactionIds = (ctx.interactions ?? []).slice(0, 5).map(i => i.otherId);
-  const names = await memoryStore.displayNamesFor(guildId, [...edges.slice(0, 8).map(e => e.otherId), ...interactionIds]);
+  const names = ctx.preNames ?? await memoryStore.displayNamesFor(guildId, [...edges.slice(0, 8).map(e => e.otherId), ...interactionIds]);
   const edgeViews = [] as Array<{ name: string; summary: string; natures: string[]; valence: number | null; observations: number; trend: string | null; behavioral: number; inferred: boolean }>;
   for (const e of edges.slice(0, 8)) {
     edgeViews.push({ name: names.get(e.otherId)!, summary: e.summary, natures: e.natures, valence: e.valence, observations: e.observationCount, trend: e.trend, behavioral: e.behavioralCount, inferred: e.inferred });
@@ -111,8 +126,8 @@ export async function gatherDossierInputs(
     interactionViews.push({ name: names.get(i.otherId)!, addressedCount: i.count });
   }
   if (edgeViews.length || interactionViews.length) {
-    const observations = await memoryStore.relationshipObservationsFor(guildId, member.userId);
-    const obsNames = await memoryStore.displayNamesFor(guildId, observations.slice(0, 25).map(o => o.otherId));
+    const observations = ctx.preObservations ?? await memoryStore.relationshipObservationsFor(guildId, member.userId);
+    const obsNames = ctx.preNames ?? await memoryStore.displayNamesFor(guildId, observations.slice(0, 25).map(o => o.otherId));
     const obsViews = [] as Array<{ name: string; nature: string; valence: number | null; reason: string; direction: string; source: string }>;
     for (const o of observations.slice(0, 25)) {
       obsViews.push({ name: obsNames.get(o.otherId)!, nature: o.nature, valence: o.valence, reason: o.reason, direction: o.direction, source: o.source });
@@ -122,7 +137,7 @@ export async function gatherDossierInputs(
   }
 
   // reputation — claims about this member asserted by other people
-  const claims = await memoryStore.thirdPartyClaims(guildId, member.userId);
+  const claims = ctx.preClaims ?? await memoryStore.thirdPartyClaims(guildId, member.userId);
   if (claims.length) {
     const payload = {
       items: claims.slice(0, 15).map(c => ({
@@ -134,7 +149,7 @@ export async function gatherDossierInputs(
   }
 
   // timeline — deterministic, no LLM
-  const events = (await eventStore.listEvents(guildId, { subjectUserId: member.userId, tier: "event" })).events
+  const events = [...(ctx.preEvents ?? (await eventStore.listEvents(guildId, { subjectUserId: member.userId, tier: "event" })).events)]
     .sort((a, b) => b.significance - a.significance).slice(0, 10);
   if (events.length) {
     const data: TimelineData = {
