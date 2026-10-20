@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Brain, type LlmClient } from "./brain.js";
 import { gatherServerDigestForDm } from "./cross-context.js";
-import { promptInline, promptName, sanitizeBlock, sanitizeJsonValue, wrapUntrusted } from "./prompt-safety.js";
+import { promptInline, promptName, sanitizeBlock, sanitizeJsonValue, sanitizeStoredName, wrapUntrusted } from "./prompt-safety.js";
 import { makeStore, makeTestSql } from "./test-helpers.js";
 import type { Companion, MessageEvent } from "./types.js";
 
@@ -320,6 +320,48 @@ test("upsertMember: a name made entirely of invisible chars falls back to 'membe
     await store.upsertMember("g1", "u2", "​‌‍", new Date());
     const member = await store.getMember("g1", "u2");
     assert.deepEqual(member!.knownNames, ["member"]);
+  } finally { await sql.end(); }
+});
+
+test("sanitizeStoredName: Discord mention syntax can never ride a stored name into a message", () => {
+  // Every ping form needs a literal "@" — stripping it is airtight, and the
+  // <123>/<#id> husks are tidied so nothing mention-shaped is left.
+  for (const hostile of [
+    "<@123456>", "<@!123456>", "<@&123456>", "<#123456>",
+    "@everyone", "@here", "@@everyone", "@ everyone",
+  ]) {
+    const out = sanitizeStoredName(hostile);
+    assert.ok(!out.includes("@"), `"${hostile}" left an @ in "${out}"`);
+    assert.ok(!/<[!#&]?\d+>/.test(out), `"${hostile}" left a husk in "${out}"`);
+  }
+  assert.equal(sanitizeStoredName("<@123456>"), "");
+  assert.equal(sanitizeStoredName("@everyone"), "everyone"); // inert text
+  assert.equal(sanitizeStoredName("Sam <@&42> the Mod"), "Sam the Mod");
+  // Legitimate names are untouched — only "@" and mention husks go.
+  assert.equal(sanitizeStoredName("Sam & Max"), "Sam & Max");
+  assert.equal(sanitizeStoredName("C-3PO"), "C-3PO");
+});
+
+test("listing names: a mention-shaped name is neutralized at storage on every write path", dbTest, async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const spec = {
+      name: "<@&42> @everyone", tagline: "t", voicePersona: "v",
+      coreTraits: [], ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+    };
+    const created = await store.createListing("u-pinger", spec);
+    assert.equal(created.ok, true);
+    if (created.ok) {
+      assert.ok(!created.listing.name.includes("@"), `listing name kept an @: ${created.listing.name}`);
+      assert.ok(!/<[!#&]?\d+>/.test(created.listing.name));
+      // The version snapshot must carry the same neutralized name.
+      const versions = await sql`SELECT persona_json->>'name' AS n FROM companion_persona_versions WHERE listing_id = ${created.listing.id}`;
+      assert.ok(!String(versions[0].n).includes("@"));
+      // And the edit path can't reintroduce one.
+      const updated = await store.updateListing(created.listing.id, "u-pinger", { ...spec, name: "<@123456>" });
+      assert.ok(updated && !updated.name.includes("@") && !/<[!#&]?\d+>/.test(updated.name));
+    }
   } finally { await sql.end(); }
 });
 

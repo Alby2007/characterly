@@ -767,12 +767,14 @@ const INVITE_RE = /(?:discord\.gg\/|discord(?:app)?\.com\/invites?\/)/i;
 const INVITE_CODE_RE = /(?:discord\.gg\/|discord(?:app)?\.com\/invites?\/)([\w-]+)/gi;
 // The house's own invite code — a member re-sharing it is growth, not
 // phishing. Any other code in the same message still trips the rule.
+// Invite codes are case-sensitive, so the comparison is exact — a foreign
+// invite whose code differs only by case is NOT the house's invite.
 // Read lazily (not at module load) so tests can set config.houseInviteUrl.
 function houseInviteCode(): string | null {
   const m = config.houseInviteUrl
     ? /(?:discord\.gg\/|discord(?:app)?\.com\/invites?\/)([\w-]+)/i.exec(config.houseInviteUrl)
     : null;
-  return m?.[1]?.toLowerCase() ?? null;
+  return m?.[1] ?? null;
 }
 const LINK_RE = /https?:\/\/[^\s<>"']+/i;
 const SCAM_PATTERNS: Array<{ rule: string; re: RegExp }> = [
@@ -827,7 +829,7 @@ export async function automodMessage(message: AutomodMessage, deps: OpsDeps): Pr
   // house's own invite gets a pass; a post bundling it with any other code
   // (or an unparseable link) is still a violation.
   if (INVITE_RE.test(message.content)) {
-    const codes = [...message.content.matchAll(INVITE_CODE_RE)].map(m => m[1].toLowerCase());
+    const codes = [...message.content.matchAll(INVITE_CODE_RE)].map(m => m[1]);
     const houseCode = houseInviteCode();
     if (!houseCode || !codes.length || codes.some(c => c !== houseCode)) return act("invite link");
   }

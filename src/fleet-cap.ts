@@ -55,7 +55,12 @@ export function computeFleetBonus(premiumCount: number, cfg: FleetCapConfig): nu
   return Math.max(0, Math.min(raw, Math.floor(ceiling)));
 }
 
-type FleetStore = Pick<MemoryStore, "premiumAccountCount" | "hostedUsageToday">;
+type FleetStore = Pick<MemoryStore, "premiumAccountCount" | "hostedUsageToday"> & {
+  /** Durable day-ratchet — optional so a minimal store decays to the
+   *  in-memory ratchet (pre-v65 behavior) instead of failing. */
+  fleetCapHighWater?: (day: string) => Promise<number | null>;
+  setFleetCapHighWater?: (day: string, cap: number) => Promise<void>;
+};
 
 // 60s matches the settings/account cache precedent — webhook-driven plan
 // flips land within a minute, fresh enough for a daily budget.
@@ -69,8 +74,11 @@ function utcDay(now: number): string {
  *  single-flight refresh, and ratcheted per UTC day: the cap may grow intraday
  *  as subs arrive, but a mid-day drop (cancellations) holds until the day
  *  boundary — the guild_usage counter resets on the same UTC day, so the cap
- *  never shrinks below spend already committed. In-memory only: the premium
- *  count IS the durable state, so a restart recomputes the same value.
+ *  never shrinks below spend already committed. The ratchet is persisted to
+ *  fleet_cap_state: a mid-day restart on a day the cap shrank must not
+ *  re-anchor below the morning's committed spend (that froze the fleet until
+ *  midnight when the store was in-memory). Persistence failures degrade to
+ *  the in-memory ratchet — never below it.
  *  getEffective never throws — a failure falls back to the base cap. */
 export function createFleetCap(opts: {
   store: FleetStore;
@@ -101,8 +109,26 @@ export function createFleetCap(opts: {
     const bonus = computeFleetBonus(premiumCount, cfg);
     const computed = base <= 0 ? base : base + bonus;
     const day = utcDay(now());
-    if (!highWater || highWater.day !== day) highWater = { day, cap: computed };
-    else if (computed > highWater.cap) highWater.cap = computed;
+    if (!highWater || highWater.day !== day) {
+      // Process start or UTC day flip — seed from durable state. A restart
+      // mid-day restores the morning's ratcheted cap instead of re-anchoring
+      // at the current (possibly lower) computed value.
+      const persisted = store.fleetCapHighWater
+        ? await store.fleetCapHighWater(day).catch(error => {
+            inc("fleet.cap_state_error");
+            logError("fleet cap high-water read failed — seeding ratchet empty", error);
+            return null;
+          })
+        : null;
+      highWater = { day, cap: persisted ?? 0 };
+    }
+    if (computed > highWater.cap) {
+      highWater.cap = computed;
+      await store.setFleetCapHighWater?.(day, computed).catch(error => {
+        inc("fleet.cap_state_error");
+        logError("fleet cap high-water persist failed — ratchet is in-memory until next restart", error);
+      });
+    }
     const effective = Math.max(computed, highWater.cap);
     const usedToday = await store.hostedUsageToday().catch(() => 0);
     return { base, bonus, computed, effective, premiumCount, usedToday, maxBonus: Math.floor(cfg.maxBonusCalls) };
@@ -132,7 +158,18 @@ export function createFleetCap(opts: {
         return cache?.breakdown.effective ?? base;
       }
     },
-    current: () => cache?.breakdown.effective ?? base,
+    current: () => {
+      // Sync consumers (extractDeps) can't await — but a read that never
+      // triggers a refresh would pin a stale value for the process's life,
+      // so a stale read kicks a background refresh for the next caller.
+      if (!cache || now() - cache.at >= REFRESH_MS) {
+        void refresh().catch(error => {
+          inc("fleet.cap_recompute_error");
+          logError("fleet cap lazy refresh failed", error);
+        });
+      }
+      return cache?.breakdown.effective ?? base;
+    },
     describe: async () => {
       try {
         return await refresh();

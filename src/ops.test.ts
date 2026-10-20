@@ -619,6 +619,23 @@ test("automod: the house's own invite is exempt; bundling a foreign code still t
   } finally { config.houseInviteUrl = undefined; }
 });
 
+test("automod: a case-variant of the house invite code is NOT the house invite", async () => {
+  // Discord invite codes are case-sensitive — "OUR-HOUSE" is a different
+  // invite than "our-house", so the exemption must compare exactly.
+  config.houseInviteUrl = "https://discord.gg/OurHouse";
+  try {
+    const deps = makeDeps();
+    const exact = makeMsg({ content: "https://discord.gg/OurHouse" });
+    assert.equal(await automodMessage(exact, deps), false, "exact house code survives");
+    assert.equal(exact.deleted, false);
+
+    resetOpsState();
+    const variant = makeMsg({ content: "https://discord.gg/OURHOUSE" });
+    assert.equal(await automodMessage(variant, deps), true, "case-variant is a foreign invite");
+    assert.equal(variant.deleted, true);
+  } finally { config.houseInviteUrl = undefined; }
+});
+
 test("automod: scam classes delete + 10m timeout", async () => {
   const deps = makeDeps();
   for (const content of [

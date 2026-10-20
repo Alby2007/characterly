@@ -78,14 +78,23 @@ export function isReservedName(name: string): boolean {
   return RESERVED_NAMES.has(name.trim().toLowerCase());
 }
 
-/** Storage-side name hygiene: strips invisible/format chars and collapses
- * whitespace before a name is persisted, so known_names, alias candidates,
- * and companion names can't smuggle zero-width or control characters into
- * the database. Deliberately does NOT substitute reserved names — the store
- * keeps the member's real name and promptName() neutralizes reserved tokens
- * at use; reserved-name rejection is a write-path decision (learnAlias). */
+/** Storage-side name hygiene: strips invisible/format chars, neutralizes
+ * Discord mention syntax, and collapses whitespace before a name is
+ * persisted, so known_names, alias candidates, and companion names can't
+ * smuggle zero-width chars, control chars, or ping payloads into the
+ * database. Every ping form needs a literal `@` (@everyone, @here, <@id>,
+ * <@!id>, <@&id>) — removing the character entirely is airtight where a
+ * pattern match can be gamed ("@@everyone"). The bare <id>/<#id> husks that
+ * remain render as inert text but are stripped anyway for legibility.
+ * Deliberately does NOT substitute reserved names — the store keeps the
+ * member's real name and promptName() neutralizes reserved tokens at use;
+ * reserved-name rejection is a write-path decision (learnAlias). */
 export function sanitizeStoredName(name: string | null | undefined, maxLen = 80): string {
-  const s = stripInvisible(String(name ?? "")).replace(WS, " ").trim();
+  const s = stripInvisible(String(name ?? ""))
+    .replace(/@/g, "")
+    .replace(/<[!#&]?\d{1,25}>/g, "")
+    .replace(WS, " ")
+    .trim();
   return s.length > maxLen ? s.slice(0, maxLen).trimEnd() : s;
 }
 

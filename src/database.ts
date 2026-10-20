@@ -3203,6 +3203,7 @@ export class MemoryStore {
     spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
     opts: { forumThreadId?: string | null; maxListings?: number; maxDailyPublish?: number } = {},
   ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "cap" | "daily_cap" }> {
+    spec = { ...spec, name: sanitizeStoredName(spec.name, 64) || "Companion" };
     const persona = {
       name: spec.name, tagline: spec.tagline, voicePersona: spec.voicePersona,
       coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
@@ -3299,6 +3300,7 @@ export class MemoryStore {
     spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
     opts: { maxListings?: number; maxDailyPublish?: number; status?: "active" | "unlisted"; personaSource?: string; importMeta?: Record<string, unknown> | null } = {},
   ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "cap" | "daily_cap" }> {
+    spec = { ...spec, name: sanitizeStoredName(spec.name, 64) || "Companion" };
     const status = opts.status ?? "active";
     return this.sql.begin(async sql => {
       if (opts.maxListings != null || opts.maxDailyPublish != null) {
@@ -3419,6 +3421,7 @@ export class MemoryStore {
     creatorUserId: string,
     spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
   ): Promise<CompanionListing | null> {
+    spec = { ...spec, name: sanitizeStoredName(spec.name, 64) || "Companion" };
     const rows = await this.sql<Array<any>>`
       UPDATE companion_listings SET
         name = ${spec.name}, tagline = ${spec.tagline}, voice_persona = ${spec.voicePersona},
@@ -3550,6 +3553,7 @@ export class MemoryStore {
     maxListings: number,
     maxDailyPublish?: number,
   ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "not_found" | "not_unlisted" | "cap" | "moderated" | "daily_cap" }> {
+    spec = { ...spec, name: sanitizeStoredName(spec.name, 64) || "Companion" };
     const res = (await this.sql.begin(async sql => {
       await sql`SELECT pg_advisory_xact_lock(hashtext(${`listing:${creatorUserId}`}))`;
       const rows = await sql<Array<any>>`
@@ -5281,5 +5285,7 @@ export class MemoryStore {
   purchaseCredits(...a: Parameters<CreditStore["purchaseCredits"]>) { return this.credits.purchaseCredits(...a); }
   hostedUsageToday() { return this.credits.hostedUsageToday(); }
   premiumAccountCount() { return this.credits.premiumAccountCount(); }
+  fleetCapHighWater(day: string) { return this.credits.fleetCapHighWater(day); }
+  setFleetCapHighWater(day: string, cap: number) { return this.credits.setFleetCapHighWater(day, cap); }
   userBotSettings(...a: Parameters<CreditStore["userBotSettings"]>) { return this.credits.userBotSettings(...a); }
 }

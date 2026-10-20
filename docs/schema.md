@@ -245,6 +245,19 @@ Per-guild daily LLM-call counters (v17) — the `meteredClient` seam charges her
 
 ---
 
+### `fleet_cap_state`
+
+Persisted day-ratchet for the revenue-aware fleet cap (v65, `src/fleet-cap.ts`). The effective cap may grow intraday but never shrinks below the day's high-water; that mark must survive restarts, otherwise a mid-day redeploy on a day the premium count dropped would re-anchor the cap below `hosted:global` usage already committed and freeze every hosted call until UTC midnight.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `day` | DATE PK | UTC day — the ratchet re-seeds at the boundary |
+| `highwater` | INTEGER | Highest computed cap seen that day |
+
+Writes are monotonic (`ON CONFLICT … GREATEST`) and only happen when the cap ratchets up; the writer prunes rows older than a week.
+
+---
+
 ### `guild_keys`
 
 Encrypted LLM API keys (BYOK), written by `/companion key`, `/setup`, or the onboarding **Paste API Key** modal. Keyed by scope (`dm:<userId>` for a user's personal key, or `<guildId>`). Lives in a dedicated table so export/purge paths never casually touch ciphertext.
@@ -925,3 +938,6 @@ Version tracking for the migration system.
 | 60 | `v60_token_buckets_exact_clawback` | `web_profiles.purchased_balance` (persistent pack/bonus slice of `credit_balance`; backfilled from net unrefunded purchases), `credit_ledger.payment_intent` + index, `grant_bonus` ledger kind (launch-bonus rows reclassified), `grant_pack(…, p_payment_intent, p_kind)` and `clawback_pack(…, p_payment_intent, p_amount, p_amount_refunded, p_charged_at)` — exact-PI match (pre-v60 packs by grant time), prorated + cumulative partial refunds, subscription refunds never claw packs |
 | 61 | `v61_sweep_indexes` | partial indexes `messages_untriaged (created_at) WHERE triage_result IS NULL` and `messages_pending_extract (guild_id) WHERE triage_result IN ('durable','regex','queued')` — back `dmScopesNeedingSweep` so the 15-min sweep visits only DM scopes with work |
 | 62 | `v62_analytics` | `analytics_events` (pseudonymous funnel events, `NOT EXISTS analytics_opt_out` gate), `metrics_daily` (durable `inc()` rollup), `user_bot_settings.analytics_opt_out` — all RLS deny-all, bot-owned |
+| 63 | `v63_self_serve_deployments` | `guild_deployments.grant_kind` (`ops` vs `self-serve`) + `login_channel_id` — partner `/marketplace deploy` self-service |
+| 64 | `v64_listing_rating_stats_view` | `listing_rating_stats` view (`security_invoker`) — server-side `GROUP BY` rating aggregates for the site shelf |
+| 65 | `v65_fleet_cap_state` | `fleet_cap_state` — persisted fleet-cap day-ratchet (`day` PK, `highwater`) so a restart can't re-anchor the cap below committed spend |

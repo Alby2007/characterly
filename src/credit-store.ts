@@ -243,6 +243,29 @@ export class CreditStore {
     return Number(rows[0]?.n ?? 0);
   }
 
+  /** Persisted day-ratchet for the fleet cap (src/fleet-cap.ts). The ratchet
+   *  must survive restarts: a mid-day redeploy on a day the cap shrank would
+   *  otherwise re-anchor below spend already committed against the morning's
+   *  higher cap and freeze hosted calls until UTC midnight. Returns null when
+   *  no row exists for the day (process start before the first ratchet). */
+  async fleetCapHighWater(day: string): Promise<number | null> {
+    const rows = await this.sql<Array<{ highwater: number | string }>>`
+      SELECT highwater FROM fleet_cap_state WHERE day = ${day}::date
+    `;
+    return rows[0] ? Number(rows[0].highwater) : null;
+  }
+
+  /** Upsert the day's high-water — GREATEST keeps the write monotonic even if
+   *  a delayed caller lands an older value. Prunes past a week; the rows are
+   *  forensic-only once the UTC day rolls. */
+  async setFleetCapHighWater(day: string, cap: number): Promise<void> {
+    await this.sql`
+      INSERT INTO fleet_cap_state (day, highwater) VALUES (${day}::date, ${cap})
+      ON CONFLICT (day) DO UPDATE SET highwater = GREATEST(fleet_cap_state.highwater, EXCLUDED.highwater)
+    `;
+    await this.sql`DELETE FROM fleet_cap_state WHERE day < ${day}::date - INTERVAL '7 days'`;
+  }
+
   /** Per-user bot toggles — the site writes via upsert_my_settings; defaults
    * cover users who never open the settings page. */
   private botSettingsCache = new Map<string, { value: { c2cEnabled: boolean; lowCreditAlerts: boolean }; at: number }>();

@@ -5962,6 +5962,27 @@ export const migrations: Migration[] = [
       await sql`DROP VIEW IF EXISTS listing_rating_stats`;
     },
   },
+  {
+    // v65: persisted fleet-cap day-ratchet. The cap's intraday high-water was
+    // in-memory — a restart on the same UTC day re-anchored it to the current
+    // (possibly lower) computed cap, dropping the effective cap below
+    // hosted:global usage already committed against the morning's value and
+    // freezing every hosted call until midnight. One row per day; the writer
+    // keeps a week of history for /status forensics.
+    version: 65,
+    name: "v65_fleet_cap_state",
+    up: async (sql) => {
+      await sql`
+        CREATE TABLE IF NOT EXISTS fleet_cap_state (
+          day        DATE PRIMARY KEY,
+          highwater  INTEGER NOT NULL
+        )
+      `;
+    },
+    down: async (sql) => {
+      await sql`DROP TABLE IF EXISTS fleet_cap_state`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

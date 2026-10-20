@@ -52,16 +52,26 @@ test("computeFleetBonus: non-positive inputs or config yield zero bonus", () => 
 
 // ── createFleetCap — cache, ratchet, failure paths ───────────────────────────
 
-function fakeStore(count: { n: number; used?: number; throws?: boolean }) {
+function fakeStore(count: { n: number; used?: number; throws?: boolean; stateThrows?: boolean }) {
   const state = { calls: 0 };
+  const persisted = new Map<string, number>();
   return {
     state,
+    persisted,
     premiumAccountCount: async () => {
       state.calls++;
       if (count.throws) throw new Error("db down");
       return count.n;
     },
     hostedUsageToday: async () => count.used ?? 0,
+    fleetCapHighWater: async (day: string) => {
+      if (count.stateThrows) throw new Error("state down");
+      return persisted.get(day) ?? null;
+    },
+    setFleetCapHighWater: async (day: string, cap: number) => {
+      if (count.stateThrows) throw new Error("state down");
+      persisted.set(day, cap);
+    },
   };
 }
 
@@ -157,6 +167,50 @@ test("current() returns base before the first refresh, effective after", async (
   assert.equal(cap.current(), 31_000);
 });
 
+test("current() kicks a background refresh when stale — sync-only consumers don't pin base forever", async () => {
+  const store = fakeStore({ n: 50 });
+  const nowRef = { t: Date.UTC(2025, 0, 15, 12) };
+  const cap = makeCap(store, nowRef);
+  assert.equal(cap.current(), 20_000, "pre-refresh still reads base synchronously");
+  assert.equal(store.state.calls, 1, "the stale read kicked a refresh");
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(cap.current(), 31_000, "the kicked refresh populated the cache");
+});
+
+test("ratchet persists across restarts — a mid-day redeploy can't drop the cap below committed spend", async () => {
+  const count = { n: 50 };
+  const store = fakeStore(count);
+  const nowRef = { t: Date.UTC(2025, 0, 15, 12) };
+
+  // Morning: subs fund the boosted cap and the ratchet lands in the store.
+  const morning = makeCap(store, nowRef);
+  assert.equal(await morning.getEffective(), 31_000);
+  assert.equal(store.persisted.get("2025-01-15"), 31_000);
+
+  // Afternoon: cancellations land AND the process restarts. Pre-fix this
+  // re-anchored the ratchet at the lower computed cap — the exact freeze.
+  count.n = 10;
+  nowRef.t += 3 * 3_600_000;
+  const restarted = makeCap(store, nowRef);
+  assert.equal(await restarted.getEffective(), 31_000, "restart must restore the day's ratchet");
+
+  // Next UTC day re-seeds from the live count — the persisted mark is day-keyed.
+  nowRef.t = Date.UTC(2025, 0, 16, 0, 1);
+  assert.equal(await restarted.getEffective(), 22_200);
+});
+
+test("high-water persistence failures degrade to the in-memory ratchet, never crash", async () => {
+  const count = { n: 50, stateThrows: true };
+  const store = fakeStore(count);
+  const nowRef = { t: Date.UTC(2025, 0, 15, 12) };
+  const cap = makeCap(store, nowRef);
+  assert.equal(await cap.getEffective(), 31_000);
+
+  count.n = 10;
+  nowRef.t += 61_000;
+  assert.equal(await cap.getEffective(), 31_000, "in-memory ratchet still holds within the process");
+});
+
 test("describe() reports the full breakdown", async () => {
   const store = fakeStore({ n: 50, used: 12_340 });
   const nowRef = { t: Date.UTC(2025, 0, 15, 12) };
@@ -227,6 +281,31 @@ test("premiumAccountCount returns 0 when the credits schema is absent", dbTest, 
     // unsupported and the count short-circuits — the provider then sees 0
     // subs and the cap stays at base.
     assert.equal(await store.premiumAccountCount(), 0);
+  } finally {
+    await sql.end();
+  }
+});
+
+test("fleet_cap_state round-trips: day-keyed read, monotonic upsert, week prune", dbTest, async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    assert.equal(await store.fleetCapHighWater("2025-01-15"), null);
+    await store.setFleetCapHighWater("2025-01-15", 31_000);
+    assert.equal(await store.fleetCapHighWater("2025-01-15"), 31_000);
+
+    // GREATEST keeps the mark monotonic — a stale writer can't lower it.
+    await store.setFleetCapHighWater("2025-01-15", 20_000);
+    assert.equal(await store.fleetCapHighWater("2025-01-15"), 31_000);
+
+    // Day-keyed: tomorrow reads nothing.
+    assert.equal(await store.fleetCapHighWater("2025-01-16"), null);
+
+    // The writer prunes rows older than a week relative to the written day.
+    await sql`INSERT INTO fleet_cap_state (day, highwater) VALUES ('2025-01-01', 99)`;
+    await store.setFleetCapHighWater("2025-01-15", 32_000);
+    const old = await sql<Array<{ n: number }>>`SELECT count(*)::int AS n FROM fleet_cap_state WHERE day = '2025-01-01'`;
+    assert.equal(Number(old[0].n), 0);
   } finally {
     await sql.end();
   }
