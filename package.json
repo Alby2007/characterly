@@ -23,7 +23,8 @@
     "ops:contest-sweep": "tsx scripts/contest-sweep.mjs",
     "ops:build-profiles": "tsx scripts/build-profiles.mjs",
     "ops:backfill-relationships": "tsx scripts/backfill-relationships.mjs",
-    "ops:purge-nonopted": "tsx scripts/purge-nonopted.mjs"
+    "ops:purge-nonopted": "tsx scripts/purge-nonopted.mjs",
+    "ops:seo": "tsx scripts/seo-report.mjs"
   },
   "dependencies": {
     "discord.js": "^14.21.0",
