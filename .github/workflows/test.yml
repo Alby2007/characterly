@@ -43,6 +43,29 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/asb_test
 
+  # The website has its own package.json/lockfile: audit its installed tree,
+  # run its security-regression tests (redirect/allowlist rules) and prove the
+  # Astro build before a push can ship it.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - working-directory: web
+        run: npm ci
+      - working-directory: web
+        run: npm audit --audit-level=high
+      - working-directory: web
+        run: npm run check
+      - working-directory: web
+        run: npm test
+      - working-directory: web
+        run: npm run build
+
   # Red builds never reach the server — deploy only runs on green pushes to main.
   # `environment: production` lets the operator attach required reviewers in
   # repo settings so a push alone can't ship without approval.

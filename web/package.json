@@ -7,7 +7,9 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro build && wrangler dev",
+    "check": "astro check",
     "test": "tsx --test src/**/*.test.ts",
+    "redteam": "tsx test/redteam/run.ts",
     "deploy": "astro build && wrangler deploy",
     "deploy:preview": "CLOUDFLARE_ENV=preview astro build && CLOUDFLARE_ENV=preview wrangler deploy"
   },
@@ -18,6 +20,7 @@
     "astro": "7.4.1"
   },
   "devDependencies": {
+    "@astrojs/check": "^0.9.11",
     "tsx": "4.23.15",
     "typescript": "5.9.3",
     "wrangler": "4.151.3"
