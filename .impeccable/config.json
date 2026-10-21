@@ -1,0 +1,53 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "flat-type-hierarchy",
+        "value": "*",
+        "files": [
+          "website/index.html"
+        ],
+        "createdAt": "2026-10-21T09:36:30.475Z",
+        "reason": "critique 2026-10-21: static scan can't see Vite-loaded styles.css; computed h1 55.6px / h2 43.3px / h3 30.1px / body 17px"
+      },
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "website/src/styles.css"
+        ],
+        "createdAt": "2026-10-21T09:36:30.649Z",
+        "reason": "L504 .embed is a replica of a Discord embed in a framed product figure; the 3px left colour bar is Discord's own embed anatomy (DESIGN.md: product figures)"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/*.html"
+        ],
+        "createdAt": "2026-10-21T09:53:55.434Z",
+        "reason": "throwaway first-viewport sketches for the direction round; placeholder system fonts for a world replacing DESIGN.md; skeleton renders sub-22px text as bars"
+      },
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/*.html"
+        ],
+        "createdAt": "2026-10-21T09:53:55.614Z",
+        "reason": "throwaway first-viewport sketches for the direction round; placeholder system fonts for a world replacing DESIGN.md; skeleton renders sub-22px text as bars"
+      },
+      {
+        "rule": "cream-palette",
+        "value": "*",
+        "files": [
+          ".impeccable/mocks/decision/*.html"
+        ],
+        "createdAt": "2026-10-21T10:14:57.934Z",
+        "reason": "unchosen direction-round sketches (card, provenance); chosen Archive world uses a cool pale field, not cream"
+      }
+    ]
+  }
+}

@@ -1,0 +1,461 @@
+---
+// Landing. On-demand (not prerendered) so the shelf strip shows live listings;
+// the edge caches it for five minutes. Direction contract:
+// .impeccable/surfaces/web-src-pages-index-astro.md
+import Base from "../layouts/Base.astro";
+import Archive from "../components/Archive.astro";
+import Icon from "../components/Icon.astro";
+import { SITE_ORIGIN, PLANS, PACKS } from "../lib/config";
+import { FAQ, faqJsonLd } from "../lib/faq";
+import { getCatalog, SHELF_CACHE, ratingLabel, initial } from "../lib/shelf";
+import { SEED_LISTINGS } from "../../../src/seed-personas.ts";
+
+export const prerender = false;
+Astro.response.headers.set("cache-control", SHELF_CACHE);
+
+const wren = SEED_LISTINGS.find(s => s.name === "Wren")!;
+const { listings, ratings } = await getCatalog();
+const strip = listings.slice(0, 6);
+const wrenListing = listings.find(l => l.name === "Wren");
+const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashboard?welcome=1");
+// Greeting: *stage directions* render as italics, the rest as speech.
+const greeting = wren.greeting.split(/(\*[^*]+\*)/g).filter(Boolean)
+  .map(part => part.startsWith("*") ? { act: true, text: part.slice(1, -1) } : { act: false, text: part.replace(/^\s*—\s*/, "") });
+
+const jsonLd = [
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      { "@type": "Organization", "@id": `${SITE_ORIGIN}/#org`, name: "Characterly", url: `${SITE_ORIGIN}/`, logo: `${SITE_ORIGIN}/favicon.svg`,
+        description: "AI companions in Discord that remember you, in your DMs and in your servers." },
+      { "@type": "WebSite", "@id": `${SITE_ORIGIN}/#site`, url: `${SITE_ORIGIN}/`, name: "Characterly", publisher: { "@id": `${SITE_ORIGIN}/#org` } },
+      { "@type": "SoftwareApplication", name: "Characterly", applicationCategory: "EntertainmentApplication", operatingSystem: "Discord", url: `${SITE_ORIGIN}/`,
+        description: "AI companions that live in Discord: adopt a character off the community shelf, import a character card, or awaken your own. They remember you, and you can read, edit or wipe what they keep.",
+        offers: [
+          { "@type": "Offer", name: "Free", price: "0", priceCurrency: "USD", description: `${PLANS.free.dailyTokens} hosted tokens a day, one awakened companion, one adopted character` },
+          { "@type": "Offer", name: "Premium", price: PLANS.premium.monthly, priceCurrency: "USD", description: `${PLANS.premium.dailyTokens} hosted tokens a day, live memory, web tools, unlimited adoptions` },
+        ] },
+    ],
+  },
+  faqJsonLd(),
+];
+---
+<Base
+  title="Characterly · AI characters that remember you, in Discord"
+  description="AI companions in Discord that remember you, in your DMs and in your servers. Adopt a character off the community shelf, import a character card you already have, or awaken your own."
+  path="/"
+  jsonLd={jsonLd}
+>
+  <!-- ── First viewport: one character, her archive, one action ─────────── -->
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <figure class="portrait">
+        <img src="/art/wren-archive.jpg" width="848" height="1264" alt="Wren, a companion from the Characterly shelf, holding a mug of tea and smiling." fetchpriority="high" />
+      </figure>
+      <h1 class="hook">They remember you.</h1>
+      <div class="hero-copy">
+        <p class="hero-sub">In your DMs, and in every server you bring them to.</p>
+
+        <Archive
+          id="wren"
+          name="Wren"
+          sub={["Adopted · yours", "Remembers you since 3 Oct"]}
+          tabs={["Profile", "What she remembers", "First hello"]}
+          initial={1}
+          example
+          class="hero-archive"
+        >
+          <dl slot="tab-0" class="profile">
+            <div><dt>Who she is</dt><dd>{wren.tagline}</dd></div>
+            <div><dt>Traits</dt><dd class="traits">{wren.coreTraits.map(t => <span class="tag">{t}</span>)}</dd></div>
+            <div><dt>With you</dt><dd>{wren.ownerDynamic}</dd></div>
+          </dl>
+          <ul slot="tab-1" class="entries">
+            <li class="entry"><span class="scope scope-dm">Your DMs</span><span class="entry-text">First 10k on Sunday. Ask how it went.</span><span class="entry-mark"><Icon name="pin" size={16} />Pinned</span></li>
+            <li class="entry"><span class="scope scope-srv">#book-club</span><span class="entry-text">Hates spoilers. Halfway through the finale.</span><span class="entry-mark"></span></li>
+            <li class="entry"><span class="scope scope-dm">Your DMs</span><span class="entry-text">Started the new job at the bakery.</span><span class="entry-mark"><Icon name="edit" size={16} />Edited by you</span></li>
+            <li class="entry is-forgotten"><span class="scope scope-dm">Your DMs</span><span class="entry-text">Her old flatmate's name.</span><span class="entry-mark"><Icon name="forget" size={16} />Forgotten</span></li>
+          </ul>
+          <blockquote slot="tab-2" class="hello">
+            {greeting.map(p => p.act ? <em>{p.text}</em> : <span>{p.text}</span>)}
+          </blockquote>
+        </Archive>
+
+        <div class="hero-actions">
+          <a class="btn btn-go btn-lg" href={discordStart} data-primary-cta data-beacon="discord_signin_click"><Icon name="discord" size={20} />Continue with Discord</a>
+          <a class="link" href="/characters">Browse the shelf</a>
+          <a class="link" href="#bring">Bring your character</a>
+        </div>
+        <p class="hero-note muted small">Sign in with Discord, then join the Characterly server. Free to start, no API key.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── How it works: the real sequence, so numbered ────────────────────── -->
+  <section class="section" id="how">
+    <div class="wrap">
+      <h2 class="how-title">Three steps, about two minutes.</h2>
+      <ol class="steps">
+        <li><span class="step-n">1</span><div><h3>Continue with Discord</h3><p>Your Characterly account is your Discord account. No password, nothing to set up.</p></div></li>
+        <li><span class="step-n">2</span><div><h3>Join the server</h3><p>The shelf, and your private thread with each character, live in the Characterly server.</p></div></li>
+        <li><span class="step-n">3</span><div><h3>Adopt, import or awaken</h3><p>Take a character off the shelf, bring a card you already have, or DM the bot to awaken one nobody else has.</p></div></li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ── Claim 1: memory you can read ─────────────────────────────────────── -->
+  <section class="section" id="memory">
+    <div class="wrap memory-grid">
+      <div class="section-head">
+        <h2>Memory you can actually read.</h2>
+        <p class="lede">Every character keeps an archive of what you've told them. You can open it any time, on your dashboard or with <code>/memory list</code>, and fix anything that's wrong.</p>
+        <p class="lede">Memories about you only form if you opt in. Roleplay stays fiction and never becomes a fact about the real you.</p>
+      </div>
+      <figure class="anatomy" aria-labelledby="anatomy-cap">
+        <p class="example-tag anatomy-tag">Example</p>
+        <div class="anatomy-entry">
+          <span class="scope scope-dm">Your DMs</span>
+          <span class="anatomy-text">First 10k on Sunday. Ask how it went.</span>
+        </div>
+        <ul class="anatomy-notes">
+          <li><span class="scope scope-dm">Your DMs</span><p><strong>Where it came from.</strong> Blue means you said it privately. Pink means she heard it in a server channel.</p></li>
+          <li><span class="mark-chip"><Icon name="pin" size={16} />Pin</span><p><strong>Keep it.</strong> Pinned memories never fade.</p></li>
+          <li><span class="mark-chip"><Icon name="edit" size={16} />Edit</span><p><strong>Fix it.</strong> Got it slightly wrong? Rewrite it, and she uses your version.</p></li>
+          <li><span class="mark-chip"><Icon name="forget" size={16} />Forget</span><p><strong>Remove it.</strong> Gone from her memory, permanently.</p></li>
+        </ul>
+        <figcaption id="anatomy-cap" class="sr-only">How a memory entry works: where it came from, and pin, edit or forget.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ── Claim 2: the same character in two places ───────────────────────── -->
+  <section class="section" id="servers">
+    <div class="wrap">
+      <div class="section-head">
+        <h2>The same character, in your DMs and your servers.</h2>
+        <p class="lede">Summon a character into your own server and they arrive with their own name and face. What you tell them privately shapes how they treat you there, and is never repeated in front of anyone else.</p>
+      </div>
+      <div class="lanes">
+        <div class="lane lane-dm">
+          <p class="lane-label"><span class="scope scope-dm">Your DMs</span>Example · just the two of you</p>
+          <ol class="talk">
+            <li><b>You</b><p>don't tell anyone, but I applied for the bakery job</p></li>
+            <li class="them"><b>Wren</b><p>My lips are sealed. When do you hear back?</p></li>
+          </ol>
+        </div>
+        <div class="lane lane-srv">
+          <p class="lane-label"><span class="scope scope-srv">#book-club</span>Example · everyone can see this</p>
+          <ol class="talk">
+            <li><b>Sam</b><p>Wren, what's Alice been up to lately?</p></li>
+            <li class="them"><b>Wren</b><p>Ask her yourself! She's been busy, and she's earned a good book.</p></li>
+          </ol>
+        </div>
+      </div>
+      <p class="lanes-foot muted">And it works the other way: back in your DMs, Wren can tell you what happened in the servers she's been in.</p>
+    </div>
+  </section>
+
+  <!-- ── Claim 3: bring what you have ─────────────────────────────────────── -->
+  <section class="section" id="bring">
+    <div class="wrap bring-grid">
+      <div class="section-head">
+        <h2>Bring the character you already have.</h2>
+        <p class="lede">Characterly reads standard character cards, the same <code>.png</code> and <code>.json</code> files the community already shares. Add a <code>.jsonl</code> chat export and your history comes too, so they remember you from the first hello.</p>
+        <dl class="facts">
+          <div><dt>Cards</dt><dd><code>chara_card_v2</code>, <code>ccv3</code> and v1 cards, up to 8 MB</dd></div>
+          <div><dt>Chat exports</dt><dd>Tavern-style <code>.jsonl</code>, oobabooga <code>.json</code> and more</dd></div>
+          <div><dt>Privacy</dt><dd>Imports stay private to you unless you choose to publish</dd></div>
+        </dl>
+        <p class="bring-actions"><a class="link" href="/guides/import-character-cards">How to import a character card <Icon name="arrow" size={16} /></a></p>
+      </div>
+      <div class="bring-visual" aria-hidden="true">
+        <div class="file"><Icon name="upload" size={22} /><span><b>wren.png</b><small>character card · 412 KB</small></span></div>
+        <div class="bring-arrow"><Icon name="arrow" size={28} /></div>
+        <div class="archive mini">
+          <div class="archive-head"><p class="archive-name">Wren</p><p class="archive-sub"><span>Example import</span><span>Private to you</span></p></div>
+          <ul class="entries mini-entries">
+            <li class="entry is-new"><span class="scope scope-kind">From history</span><span class="entry-text">Always asks about the garden.</span><span></span></li>
+            <li class="entry is-new"><span class="scope scope-kind">From history</span><span class="entry-text">Promised to read her favourite book.</span><span></span></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── The shelf: live listings only ────────────────────────────────────── -->
+  <section class="section" id="shelf">
+    <div class="wrap">
+      <div class="shelf-head">
+        <div class="section-head">
+          <h2>On the shelf right now.</h2>
+          <p class="lede">Characters made and published by the community. Adopt one and you get your own version, with its own memory of you.</p>
+        </div>
+        {listings.length > 0 && <a class="btn" href="/characters">See all {listings.length} characters<Icon name="arrow" size={18} /></a>}
+      </div>
+      {strip.length > 0 ? (
+        <ul class="strip">
+          {strip.map(l => (
+            <li>
+              <a class="strip-card" href={`/characters/${l.id}`}>
+                {l.avatarUrl
+                  ? <img src={l.avatarUrl} alt="" loading="lazy" width="320" height="320" />
+                  : <span class="strip-ph" aria-hidden="true">{initial(l.name)}</span>}
+                <span class="strip-name">{l.name}</span>
+                <span class="strip-tag">{l.tagline}</span>
+                {ratingLabel(ratings.get(l.id)) && <span class="strip-meta">{ratingLabel(ratings.get(l.id))}</span>}
+              </a>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p class="muted">The shelf is between restocks. <a class="link" href="/characters">Check the shelf</a></p>
+      )}
+    </div>
+  </section>
+
+  <!-- ── Pricing ──────────────────────────────────────────────────────────── -->
+  <section class="section" id="pricing">
+    <div class="wrap">
+      <div class="section-head">
+        <h2>Free to start. Premium to stay up late.</h2>
+        <p class="lede">Chat runs on our hosted models, so there's nothing to configure. A conversation spends tokens: one for what you say, one for the reply.</p>
+      </div>
+      <div class="plans">
+        <section class="plan" aria-labelledby="plan-free">
+          <h3 id="plan-free">Free</h3>
+          <p class="price">$0</p>
+          <ul>
+            <li>{PLANS.free.dailyTokens} tokens a day, about fifteen exchanges</li>
+            <li>Your awakened companion and one adopted character</li>
+            <li>Publish up to two characters to the shelf</li>
+            <li>Memory and journal update every hour</li>
+          </ul>
+          <a class="btn" href={discordStart} data-beacon="discord_signin_click">Start free</a>
+        </section>
+        <section class="plan plan-premium" aria-labelledby="plan-premium">
+          <h3 id="plan-premium">Premium</h3>
+          <p class="price">${PLANS.premium.monthly}<small>/month</small></p>
+          <p class="muted small">or ${PLANS.premium.yearly}/year, two months free</p>
+          <ul>
+            <li>{PLANS.premium.dailyTokens} tokens a day</li>
+            <li>Unlimited adoptions and shelf listings</li>
+            <li>Memory and journal update as you talk</li>
+            <li>They can look things up mid-reply</li>
+            <li>First in line when it's busy</li>
+          </ul>
+          <a class="btn btn-go" href="/account?next=%2Fdashboard%23billing">Go Premium</a>
+        </section>
+      </div>
+      <div class="plan-notes muted small">
+        <p>Premium members can top up with token packs: {PACKS.map((p, i) => <>{i > 0 && " · "}<b>{p.tokens.toLocaleString("en-US")}</b> for ${p.price}</>)}. Purchased tokens never expire and stay yours if Premium ends.</p>
+        <p>Running your own provider key? It's unlimited. Connect it in Discord with <code>/companion key</code>.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Privacy and safety, stated plainly ───────────────────────────────── -->
+  <section class="section" id="privacy">
+    <div class="wrap">
+      <div class="section-head">
+        <h2>It remembers because you let it.</h2>
+      </div>
+      <ul class="plain-list">
+        <li><h3>Opt-in for anything personal</h3><p>Memories and profiles only form for people who've agreed. Everyone else is a name in a log, nothing more.</p></li>
+        <li><h3>DMs stay in the DM</h3><p>Private conversations shape how your companion treats you. They're never stated in a server, and nobody else can look them up.</p></li>
+        <li><h3>Deleting means deleted</h3><p><code>/opt-out</code> removes everything derived about you. Remove the bot from a server and everything from that server goes with it.</p></li>
+        <li><h3>Off until an admin turns it on</h3><p>In a new server the bot does nothing until an admin enables it. No messages are archived before that.</p></li>
+        <li><h3>A safe shelf</h3><p>Every listing and every reply from an adopted character is screened, and reports go to human review.</p></li>
+        <li><h3>Help when it matters</h3><p>If a companion sees signs you're struggling, it breaks character to point you toward real crisis lines.</p></li>
+      </ul>
+      <p class="policy-links"><a class="link" href="/privacy">Privacy Policy</a><a class="link" href="/safety">Safety</a><a class="link" href="/security">Security</a><a class="link" href="/terms">Terms</a></p>
+    </div>
+  </section>
+
+  <!-- ── FAQ ──────────────────────────────────────────────────────────────── -->
+  <section class="section" id="faq">
+    <div class="wrap faq-grid">
+      <h2>Questions.</h2>
+      <div class="faq">
+        {FAQ.map(g => (
+          <section aria-label={g.title}>
+            <h3 class="caps faq-group">{g.title}</h3>
+            {g.items.map(f => (
+              <details>
+                <summary>{f.q}<Icon name="plus" size={20} /></summary>
+                <p set:html={f.html} />
+              </details>
+            ))}
+          </section>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <section class="section closing">
+    <div class="wrap"><div class="closing-inner">
+      <h2>Your first character is a few minutes away.</h2>
+      <a class="btn btn-go btn-lg" href={discordStart} data-primary-cta data-beacon="discord_signin_click"><Icon name="discord" size={20} />Continue with Discord</a>
+      {wrenListing && <a class="link" href={`/characters/${wrenListing.id}`}>Or meet Wren first</a>}
+    </div></div>
+  </section>
+</Base>
+
+<style>
+  /* Hero: Wren stands on the open field; her archive sits beside her. */
+  .hero { overflow: hidden; }
+  .hero-grid { display: grid; grid-template-columns: minmax(0, 0.74fr) minmax(0, 1fr); grid-template-rows: auto 1fr; column-gap: 40px; align-items: end; min-height: calc(100svh - var(--nav-h)); }
+  /* The hook is the largest type on the site and sits over Wren's headroom,
+     the way the chosen sketch set it; her hair starts below it. */
+  .hook { grid-column: 1 / -1; grid-row: 1; position: relative; z-index: 1; padding-top: 28px; font-size: clamp(48px, 6.4vw, 92px); white-space: nowrap; }
+  .portrait { grid-column: 1; grid-row: 1 / span 2; align-self: end; margin: 0 -20px 0 -40px; }
+  .portrait img { width: 100%; height: auto; max-height: calc(100svh - var(--nav-h) - 8px); object-fit: contain; object-position: bottom center;
+    /* The art ends mid-thigh: let her fade into the field instead of a hard cut. */
+    -webkit-mask-image: linear-gradient(to bottom, #000 82%, transparent); mask-image: linear-gradient(to bottom, #000 82%, transparent); }
+  .hero-copy { grid-column: 2; grid-row: 2; align-self: start; padding: 18px 0 40px; }
+  .hero-sub { margin-top: 0; font-size: clamp(19px, 1.6vw, 23px); line-height: 1.35; font-weight: 650; color: var(--ink-2); max-width: 34ch; }
+  .hero-copy :global(.hero-archive) { margin-top: 26px; }
+  .hero-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 24px; margin-top: 26px; }
+  .hero-note { margin-top: 10px; }
+
+  .profile { display: grid; gap: 0; }
+  .profile > div { display: grid; grid-template-columns: 130px 1fr; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+  .profile > div:last-child { border-bottom: 0; }
+  .profile dt { font-size: 13px; font-weight: 750; color: var(--ink-3); padding-top: 3px; }
+  .profile dd { margin: 0; font-size: 17px; font-weight: 550; }
+  .traits { display: flex; flex-wrap: wrap; gap: 6px; }
+  .hello { padding: 16px 0 4px; font-size: 18px; line-height: 1.55; }
+  .hello em { color: var(--ink-3); }
+  .hello span { font-weight: 600; }
+
+  /* How it works */
+  .how-title { font-size: clamp(26px, 2.6vw, 36px); max-width: 22ch; }
+  .steps { list-style: none; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px; margin-top: 36px; border-top: 2px solid var(--ink); padding-top: 28px; }
+  .steps li { display: grid; grid-template-columns: auto 1fr; gap: 16px; }
+  .step-n { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; background: var(--ink); color: #fff; font-weight: 850; font-variation-settings: var(--wide); }
+  .steps p { margin-top: 6px; color: var(--ink-2); }
+
+  /* Memory anatomy */
+  .memory-grid { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 56px; align-items: start; }
+  .anatomy { position: relative; margin: 0; border-top: 2px solid var(--ink); padding-top: 18px; }
+  /* Corner tag on the figure's own rule, like the hero archive. */
+  .anatomy-tag { position: absolute; top: 14px; right: 0; }
+  .anatomy-entry { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 18px; padding: 14px 0 24px; border-bottom: 1px solid var(--line-strong); }
+  .anatomy-text { font-variation-settings: "wdth" 112; font-weight: 800; font-size: clamp(22px, 2.3vw, 30px); letter-spacing: -0.01em; line-height: 1.15; }
+  .anatomy-notes { list-style: none; display: grid; gap: 0; }
+  .anatomy-notes li { display: grid; grid-template-columns: 112px 1fr; gap: 18px; align-items: start; padding: 16px 0; border-bottom: 1px solid var(--line); }
+  .anatomy-notes li:last-child { border-bottom: 0; padding-bottom: 0; }
+  .anatomy-notes p { color: var(--ink-2); }
+  .anatomy-notes strong { color: var(--ink); }
+  .mark-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 750; padding: 4px 0; }
+
+  /* Two lanes: the vault rule, shown */
+  .lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 0 56px; border-top: 2px solid var(--ink); }
+  .lane { padding: 22px 0 0; }
+  .lane-srv { border-left: 1px solid var(--line-strong); padding-left: 56px; margin-left: -28px; }
+  .lane-label { display: flex; align-items: center; gap: 12px; font-size: 14px; font-weight: 700; color: var(--ink-3); }
+  .talk { list-style: none; display: grid; gap: 16px; margin-top: 22px; }
+  .talk b { font-size: 14px; font-weight: 800; }
+  .talk p { margin-top: 2px; font-size: 17px; }
+  .talk .them b { color: var(--dm); }
+  .lane-srv .talk .them b { color: var(--srv); }
+  .lanes-foot { margin-top: 18px; }
+
+  /* Bring */
+  .bring-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 56px; align-items: center; }
+  .facts { display: grid; margin-top: 26px; border-top: 1px solid var(--line-strong); }
+  .facts > div { display: grid; grid-template-columns: 130px 1fr; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .facts dt { font-weight: 750; font-size: 14.5px; }
+  .facts dd { margin: 0; color: var(--ink-2); }
+  .bring-actions { margin-top: 16px; }
+  .bring-visual { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 18px; }
+  .file { display: flex; align-items: center; gap: 12px; padding: 16px 18px; background: var(--panel); border: 1.5px dashed var(--line-strong); border-radius: var(--radius-s); }
+  .file span { display: grid; }
+  .file small { color: var(--ink-3); font-size: 13px; }
+  .bring-arrow { color: var(--ink-3); }
+  .mini .archive-head { padding: 20px 22px 6px; }
+  .mini .archive-name { font-size: 34px; }
+  .mini-entries { padding: 0 22px 14px; }
+  .mini-entries .entry { grid-template-columns: 1fr; gap: 6px; }
+  .mini-entries .scope { justify-self: start; }
+  .mini-entries .entry-text { font-size: 15.5px; }
+  .mini-entries .entry:nth-child(2) { animation-delay: 0.12s; }
+
+  /* Shelf strip: real listings, packed */
+  .shelf-head { display: flex; align-items: end; justify-content: space-between; gap: 24px; flex-wrap: wrap; margin-bottom: 32px; }
+  .shelf-head .section-head { margin-bottom: 0; }
+  .strip { list-style: none; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 16px; }
+  .strip-card { display: grid; gap: 4px; text-decoration: none; }
+  .strip-card img, .strip-ph { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: var(--radius-s); background: var(--field-deep); }
+  .strip-ph { display: grid; place-items: center; font-variation-settings: var(--wide); font-weight: 850; font-size: 48px; color: var(--ink-3); }
+  .strip-name { margin-top: 8px; font-weight: 800; font-size: 17px; }
+  .strip-tag { color: var(--ink-2); font-size: 14.5px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .strip-meta { font-size: 13px; font-weight: 700; color: var(--ink-3); }
+  .strip-card:hover .strip-name { text-decoration: underline; }
+
+  /* Pricing */
+  .plans { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; max-width: 980px; }
+  .plan { display: flex; flex-direction: column; border-top: 2px solid var(--line-strong); padding-top: 22px; }
+  .plan-premium { border-top: 4px solid var(--ink); padding-top: 20px; }
+  .plan h3 { font-size: 22px; }
+  .price { margin-top: 10px; font-variation-settings: var(--wide); font-weight: 850; font-size: 48px; letter-spacing: -0.02em; line-height: 1; }
+  .price small { font-size: 17px; font-weight: 650; font-variation-settings: var(--narrow); letter-spacing: 0; color: var(--ink-3); }
+  .plan ul { list-style: none; margin: 22px 0 28px; display: grid; gap: 0; flex: 1; }
+  .plan li { padding: 10px 0; border-top: 1px solid var(--line); }
+  .plan .btn { align-self: flex-start; }
+  .plan-notes { display: grid; gap: 8px; margin-top: 22px; max-width: 920px; }
+
+  /* Privacy */
+  .plain-list { list-style: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 56px; border-top: 2px solid var(--ink); }
+  .plain-list li { padding: 22px 0; border-bottom: 1px solid var(--line); }
+  .plain-list p { margin-top: 6px; color: var(--ink-2); max-width: 52ch; }
+  .policy-links { display: flex; flex-wrap: wrap; gap: 4px 24px; margin-top: 20px; }
+
+  /* FAQ */
+  .faq-grid { display: grid; grid-template-columns: minmax(0, 0.6fr) minmax(0, 1.4fr); gap: 56px; }
+  .faq-group { margin: 28px 0 6px; color: var(--ink-3); }
+  .faq section:first-child .faq-group { margin-top: 0; }
+  .faq details { border-bottom: 1px solid var(--line); }
+  .faq summary { list-style: none; cursor: pointer; display: flex; justify-content: space-between; gap: 18px; padding: 16px 0; font-size: 18px; font-weight: 700; }
+  .faq summary::-webkit-details-marker { display: none; }
+  .faq summary :global(svg) { flex: none; color: var(--ink-3); transition: transform 0.2s var(--ease); }
+  .faq details[open] summary :global(svg) { transform: rotate(45deg); }
+  .faq details p { padding: 0 0 18px; color: var(--ink-2); max-width: 66ch; }
+  .faq details p :global(a) { font-weight: 700; }
+
+  /* Closing */
+  .closing-inner { display: flex; flex-wrap: wrap; align-items: center; gap: 20px 28px; padding-top: 40px; border-top: 2px solid var(--ink); }
+  .closing h2 { font-size: clamp(30px, 3.4vw, 48px); max-width: 18ch; flex: 1 1 420px; }
+
+  @media (max-width: 1100px) {
+    .hero-grid { grid-template-columns: minmax(0, 0.7fr) minmax(0, 1fr); gap: 24px; }
+    .strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
+  @media (max-width: 860px) {
+    /* Phones: headline, then Wren (head and shoulders), then her archive. */
+    .hero-grid { grid-template-columns: 1fr; min-height: 0; gap: 0; padding-top: 24px; padding-bottom: 8px; }
+    .hero-copy { display: contents; }
+    .hook { order: 1; grid-column: auto; grid-row: auto; white-space: normal; padding-top: 0; font-size: clamp(44px, 12vw, 64px); }
+    .hero-sub { order: 2; margin-top: 12px; }
+    .hero-actions { order: 3; margin-top: 20px; }
+    .hero-note { order: 4; }
+    .portrait { order: 5; grid-column: auto; grid-row: auto; margin: 20px auto 0; width: min(100%, 340px); height: 330px; overflow: hidden; }
+    .portrait img { max-height: none; object-position: top center; }
+    .hero-copy :global(.hero-archive) { order: 6; margin-top: 0; }
+    .steps, .memory-grid, .lanes, .bring-grid, .plans, .plain-list, .faq-grid { grid-template-columns: 1fr; }
+    .lane-srv { border-left: 0; padding-left: 0; margin-left: 0; border-top: 1px solid var(--line-strong); margin-top: 22px; }
+    .plans { gap: 32px; }
+    .steps { gap: 22px; }
+    .bring-visual { grid-template-columns: 1fr; justify-items: start; }
+    .bring-arrow { transform: rotate(90deg); }
+    .memory-grid, .bring-grid, .faq-grid { gap: 28px; }
+  }
+  @media (max-width: 600px) {
+    .portrait { height: 290px; }
+    .anatomy { padding: 22px; }
+    .anatomy-notes li { grid-template-columns: 1fr; gap: 6px; }
+    .anatomy-notes .scope { justify-self: start; }
+    .profile > div, .facts > div { grid-template-columns: 1fr; gap: 4px; }
+    .strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .hero-actions .btn { width: 100%; }
+  }
+</style>

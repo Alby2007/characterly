@@ -1,0 +1,9 @@
+# Static assets that skip the worker (hashed bundles, art, icons). HTML gets
+# the full policy from src/worker.ts; keep the two in step.
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+
+/_astro/*
+  Cache-Control: public, max-age=31536000, immutable

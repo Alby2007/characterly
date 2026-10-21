@@ -1,0 +1,16 @@
+---
+import Base from "../layouts/Base.astro";
+export const prerender = true;
+---
+<Base title="Page not found · Characterly" description="That page doesn't exist." noindex>
+  <section class="wrap lost">
+    <h1>Nothing here.</h1>
+    <p class="lede">That page doesn't exist, or it moved. The characters are where you left them.</p>
+    <p class="row"><a class="btn" href="/characters">Browse the shelf</a><a class="link" href="/">Back to the start</a></p>
+  </section>
+</Base>
+
+<style>
+  .lost { padding-top: 96px; display: grid; gap: 20px; justify-items: start; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 24px; }
+</style>

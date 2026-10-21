@@ -320,6 +320,8 @@ p .text-link { display: inline; font-size: inherit; padding-bottom: 1px; white-s
 }
 .hero-lede strong { color: var(--paper); font-weight: 500; }
 .hero-ctas { display: flex; align-items: center; gap: 26px; flex-wrap: wrap; }
+.hero-import { margin-top: 26px; font-size: 15.5px; color: var(--paper-2); }
+.hero-import + .hero-meta { margin-top: 22px; }
 .hero-meta {
   display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 34px;
   font-family: var(--mono); font-size: 12px; letter-spacing: 0.04em; color: var(--paper-3);

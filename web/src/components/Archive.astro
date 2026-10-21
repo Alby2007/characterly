@@ -1,0 +1,46 @@
+---
+// The archive panel: a companion's name, a fact line, and tabbed sections.
+// Tab panels come from named slots "tab-0", "tab-1", … in `tabs` order.
+// Without JavaScript every panel renders open under its own heading; the tab
+// script upgrades it into a real tablist (archive-tabs.ts).
+interface Props {
+  id: string;
+  name: string;
+  sub?: string[];
+  tabs: string[];
+  initial?: number;
+  example?: boolean;
+  headingLevel?: "h1" | "h2";
+  class?: string;
+}
+const { id, name, sub = [], tabs, initial = 0, example = false, headingLevel = "h2", class: cls } = Astro.props;
+const H = headingLevel;
+const slotHtml = await Promise.all(tabs.map((_, i) => Astro.slots.render(`tab-${i}`)));
+---
+<section class:list={["archive", cls]} data-archive aria-labelledby={`${id}-name`}>
+  <div class="archive-head">
+    <H class="archive-name" id={`${id}-name`}>{name}</H>
+    {example && <p class="example-tag corner-tag">Example</p>}
+    {sub.length > 0 && <p class="archive-sub">{sub.map(s => <span>{s}</span>)}</p>}
+  </div>
+  <div class="tabs" role="tablist" aria-label={`${name}'s archive`} hidden data-tablist>
+    {tabs.map((t, i) => (
+      <button class="tab" type="button" role="tab" id={`${id}-tab-${i}`} aria-controls={`${id}-panel-${i}`} aria-selected={i === initial ? "true" : "false"} tabindex={i === initial ? 0 : -1}>{t}</button>
+    ))}
+    <span class="tab-ink" aria-hidden="true"></span>
+  </div>
+  {tabs.map((t, i) => (
+    <div class="tab-panel" role="tabpanel" id={`${id}-panel-${i}`} aria-labelledby={`${id}-tab-${i}`} data-initial={i === initial ? "" : undefined}>
+      <h3 class="tab-fallback-title" data-fallback-title>{t}</h3>
+      <Fragment set:html={slotHtml[i]} />
+    </div>
+  ))}
+</section>
+
+<style>
+  .tab-fallback-title { font-size: 13px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3); margin: 18px 0 4px; }
+</style>
+
+<script>
+  import "../scripts/archive-tabs";
+</script>

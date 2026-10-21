@@ -1,0 +1,19 @@
+---
+// Rendered (via Astro.rewrite) for unknown or delisted listing ids, with a real
+// 404 status so gone listings drop out of search instead of lingering.
+import Base from "../../layouts/Base.astro";
+
+export const prerender = false;
+Astro.response.status = 404;
+---
+<Base title="Off the shelf · Characterly" description="This character isn't on the shelf. It may have been delisted or taken down." path="/characters" noindex>
+  <section class="wrap gone">
+    <h1>Off the shelf.</h1>
+    <p class="lede">This character isn't listed any more. It may have been delisted or taken down. The rest of the shelf is still open.</p>
+    <p><a class="btn" href="/characters">Browse the shelf</a></p>
+  </section>
+</Base>
+
+<style>
+  .gone { padding-top: 96px; display: grid; gap: 20px; justify-items: start; }
+</style>

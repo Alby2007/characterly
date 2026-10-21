@@ -1,0 +1,36 @@
+{
+  // Same worker name and domains as the old Vite site — cutover is a deploy.
+  "name": "characterly-website",
+  "main": "./src/worker.ts",
+  "compatibility_date": "2026-10-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    // Page and API routes run the worker first, so page_view fires and the
+    // security headers land on HTML. Hashed build assets and art skip the
+    // worker (public/_headers covers their headers).
+    "run_worker_first": [
+      "/", "/characters", "/characters/*", "/guides/*", "/account", "/dashboard",
+      "/terms", "/privacy", "/security", "/safety", "/sitemap.xml",
+      "/discord/events", "/avatar", "/avatar/gc", "/track"
+    ],
+    "not_found_handling": "404-page"
+  },
+  // First-party analytics: event name, path, referer host. No IPs or cookies.
+  "analytics_engine_datasets": [{ "binding": "ANALYTICS", "dataset": "characterly_site" }],
+  // Secrets (wrangler secret put): DISCORD_APP_PUBLIC_KEY, SUPABASE_URL,
+  // SUPABASE_SERVICE_ROLE_KEY, AVATAR_UPLOAD_SECRET.
+  // Preview: separate Worker on workers.dev. No analytics binding (bindings
+  // don't inherit into envs), so preview traffic never lands in production
+  // numbers, and no canonical redirect, or it would bounce to characterly.app.
+  // Build and deploy with CLOUDFLARE_ENV=preview.
+  "env": {
+    "preview": {
+      "name": "characterly-website-preview",
+      "workers_dev": true,
+      "vars": { "CANONICAL_REDIRECT": "off" }
+    }
+  }
+}

@@ -1,0 +1,136 @@
+---
+// /characters/<id>: one indexable archive page per published listing.
+// Unknown or delisted ids get a real 404 so they drop out of the index.
+// Product JSON-LD with a $0 offer; aggregateRating only with a real count.
+import Base from "../../layouts/Base.astro";
+import Archive from "../../components/Archive.astro";
+import Icon from "../../components/Icon.astro";
+import { SITE_ORIGIN } from "../../lib/config";
+import { getListingPage, SHELF_CACHE, ratingLabel, addsLabel, initial } from "../../lib/shelf";
+
+export const prerender = false;
+
+const raw = Astro.params.id ?? "";
+const id = /^\d+$/.test(raw) ? Number(raw) : NaN;
+const page = Number.isInteger(id) && id > 0 ? await getListingPage(id) : null;
+if (!page) {
+  return Astro.rewrite("/characters/not-found");
+}
+Astro.response.headers.set("cache-control", SHELF_CACHE);
+
+const { listing: l, rating, related, ratings } = page;
+const canonical = `${SITE_ORIGIN}/characters/${l.id}`;
+const traitLine = l.coreTraits.length ? ` Traits: ${l.coreTraits.slice(0, 5).join(", ")}.` : "";
+const description = `${l.tagline ? `${l.tagline}.` : `${l.name} is a community AI character on the Characterly shelf.`}${traitLine} Adopt ${l.name} into a private Discord thread, and they remember you from the first hello.`;
+const r = ratingLabel(rating);
+const product: Record<string, unknown> = {
+  "@context": "https://schema.org", "@type": "Product",
+  name: l.name, description, url: canonical,
+  ...(l.avatarUrl ? { image: l.avatarUrl } : {}),
+  brand: { "@type": "Organization", name: "Characterly community" },
+  offers: { "@type": "Offer", price: "0", priceCurrency: "USD", availability: "https://schema.org/InStock", url: canonical },
+  ...(rating.count > 0 ? { aggregateRating: { "@type": "AggregateRating", ratingValue: rating.avg.toFixed(1), ratingCount: rating.count } } : {}),
+};
+const crumbs = {
+  "@context": "https://schema.org", "@type": "BreadcrumbList",
+  itemListElement: [
+    { "@type": "ListItem", position: 1, name: "Home", item: `${SITE_ORIGIN}/` },
+    { "@type": "ListItem", position: 2, name: "The shelf", item: `${SITE_ORIGIN}/characters` },
+    { "@type": "ListItem", position: 3, name: l.name },
+  ],
+};
+const tabs = ["Profile", ...(l.voicePersona ? ["Who they are"] : []), ...(l.backstory ? ["Backstory"] : []), ...(l.greeting ? ["First hello"] : [])];
+const slotOf = (label: string) => `tab-${tabs.indexOf(label)}`;
+// Greeting: *stage directions* italic, the rest speech. Text only; Astro escapes it.
+const greeting = l.greeting.split(/(\*[^*]+\*)/g).filter(Boolean)
+  .map(p => p.startsWith("*") && p.endsWith("*") && p.length > 2 ? { act: true, text: p.slice(1, -1) } : { act: false, text: p });
+const paras = (s: string) => s.split(/\n+/).map(t => t.trim()).filter(Boolean);
+const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashboard?welcome=1");
+---
+<Base title={`${l.name}, an AI character for Discord · Characterly`} description={description} path={`/characters/${l.id}`} ogImage={l.avatarUrl} jsonLd={[product, crumbs]} current="/characters">
+  <div class="wrap">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="/">Home</a><span aria-hidden="true">/</span><a href="/characters">The shelf</a><span aria-hidden="true">/</span><span aria-current="page">{l.name}</span></nav>
+  </div>
+  <section class="wrap char-grid">
+    <figure class="char-portrait">
+      {l.avatarUrl
+        ? <img src={l.avatarUrl} alt={`${l.name}'s portrait`} width="640" height="640" fetchpriority="high" />
+        : <span class="char-ph" aria-hidden="true">{initial(l.name)}</span>}
+    </figure>
+    <div>
+      <Archive id="char" name={l.name} headingLevel="h1" sub={[...(r ? [r] : []), addsLabel(l.addCount), "by a community creator"]} tabs={tabs}>
+        <div slot={slotOf("Profile")} class="profile">
+          {l.tagline && <p class="tagline">{l.tagline}</p>}
+          {l.coreTraits.length > 0 && <div class="row"><span class="k">Traits</span><span class="traits">{l.coreTraits.slice(0, 6).map(t => <span class="tag">{t}</span>)}</span></div>}
+          {l.creatorTags.length > 0 && <div class="row"><span class="k">Shelf tags</span><span class="traits">{l.creatorTags.slice(0, 4).map(t => <span class="tag">{t}</span>)}</span></div>}
+        </div>
+        {l.voicePersona && <div slot={slotOf("Who they are")} class="prose">{paras(l.voicePersona).map(p => <p>{p}</p>)}</div>}
+        {l.backstory && <div slot={slotOf("Backstory")} class="prose">{paras(l.backstory).map(p => <p>{p}</p>)}</div>}
+        {l.greeting && <blockquote slot={slotOf("First hello")} class="hello">{greeting.map(p => p.act ? <em>{p.text}</em> : <span>{p.text}</span>)}</blockquote>}
+      </Archive>
+      <div class="meet">
+        <a class="btn btn-go btn-lg" href={discordStart} data-meet data-beacon="discord_signin_click"><Icon name="discord" size={20} />Meet {l.name} in Discord</a>
+        <p class="muted small">Adopting is free. {l.name} opens a private thread with you in the Characterly server, and remembers you from the first hello.</p>
+      </div>
+    </div>
+  </section>
+
+  {related.length > 0 && (
+    <section class="wrap section related" aria-labelledby="related-h">
+      <h2 id="related-h">More like {l.name}</h2>
+      <ul class="rel">
+        {related.map(o => {
+          const rr = ratingLabel(ratings.get(o.id));
+          return (
+            <li>
+              <a class="rel-card" href={`/characters/${o.id}`}>
+                {o.avatarUrl ? <img src={o.avatarUrl} alt="" loading="lazy" width="200" height="200" /> : <span class="rel-ph" aria-hidden="true">{initial(o.name)}</span>}
+                <span class="rel-name">{o.name}</span>
+                {o.tagline && <span class="rel-tag">{o.tagline}</span>}
+                <span class="rel-meta">{rr ? <>{rr} · </> : null}{addsLabel(o.addCount)}</span>
+              </a>
+            </li>
+          );
+        })}
+      </ul>
+      <p><a class="link" href="/characters">Back to the shelf</a></p>
+    </section>
+  )}
+</Base>
+
+<style>
+  .crumbs { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 28px; font-size: 14.5px; font-weight: 650; color: var(--ink-3); }
+  .crumbs a { color: var(--ink-2); }
+  .char-grid { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr); gap: 40px; align-items: start; padding-top: 24px; }
+  .char-portrait { margin: 0; position: sticky; top: calc(var(--nav-h) + 20px); }
+  .char-portrait img, .char-ph { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: var(--radius); background: var(--field-deep); }
+  .char-ph { display: grid; place-items: center; font-variation-settings: var(--wide); font-weight: 850; font-size: 160px; color: var(--ink-3); }
+  .tagline { font-size: 21px; font-weight: 650; line-height: 1.35; padding: 16px 0; border-bottom: 1px solid var(--line); }
+  .row { display: grid; grid-template-columns: 120px 1fr; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+  .row:last-child { border-bottom: 0; }
+  .k { font-size: 13px; font-weight: 750; color: var(--ink-3); padding-top: 4px; }
+  .traits { display: flex; flex-wrap: wrap; gap: 6px; }
+  .prose { display: grid; gap: 12px; padding: 16px 0 4px; font-size: 17px; max-width: 64ch; }
+  .hello { padding: 16px 0 4px; font-size: 18px; line-height: 1.55; }
+  .hello em { color: var(--ink-3); }
+  .hello span { font-weight: 600; }
+  .char-grid > div { min-width: 0; }
+  .meet { margin-top: 24px; display: grid; gap: 10px; justify-items: start; }
+  .meet .btn { white-space: normal; text-align: left; max-width: 100%; }
+  .meet p { max-width: 52ch; }
+  .related h2 { font-size: clamp(26px, 2.6vw, 36px); margin-bottom: 24px; }
+  .rel { list-style: none; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; margin-bottom: 24px; }
+  .rel-card { display: grid; gap: 3px; text-decoration: none; }
+  .rel-card img, .rel-ph { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: var(--radius-s); background: var(--field-deep); }
+  .rel-ph { display: grid; place-items: center; font-variation-settings: var(--wide); font-weight: 850; font-size: 48px; color: var(--ink-3); }
+  .rel-name { margin-top: 8px; font-weight: 800; }
+  .rel-card:hover .rel-name { text-decoration: underline; }
+  .rel-tag { font-size: 14.5px; color: var(--ink-2); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .rel-meta { font-size: 13px; font-weight: 700; color: var(--ink-3); }
+  @media (max-width: 860px) {
+    .char-grid { grid-template-columns: 1fr; gap: 20px; }
+    .char-portrait { position: static; max-width: 360px; }
+    .rel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 600px) { .row { grid-template-columns: 1fr; gap: 6px; } }
+</style>

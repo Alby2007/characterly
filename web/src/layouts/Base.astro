@@ -1,0 +1,142 @@
+---
+import "../styles/global.css";
+import Mark from "../components/Mark.astro";
+import Icon from "../components/Icon.astro";
+import { SITE_ORIGIN, LINKS } from "../lib/config";
+import { jsonLd as ld } from "../lib/ldjson";
+
+interface Props {
+  title: string;
+  description: string;
+  /** Canonical path, e.g. "/characters". Omit on noindex pages. */
+  path?: string;
+  ogImage?: string | null;
+  ogType?: string;
+  noindex?: boolean;
+  jsonLd?: unknown[];
+  /** "site": full nav. "app": signed-in back office (dashboard). "focus": brand only (auth). */
+  chrome?: "site" | "app" | "focus";
+  current?: string;
+}
+const { title, description, path, ogImage, ogType = "website", noindex = false, jsonLd = [], chrome = "site", current } = Astro.props;
+const canonical = path ? `${SITE_ORIGIN}${path === "/" ? "/" : path}` : null;
+const image = ogImage ?? `${SITE_ORIGIN}/og.png`;
+const navLinks = [
+  { href: "/characters", label: "The shelf" },
+  { href: "/#how", label: "How it works" },
+  { href: "/#pricing", label: "Pricing" },
+  { href: "/safety", label: "Safety" },
+];
+// Primary path: Discord sign-in → dashboard first-run guide. /account starts
+// the OAuth hop itself, so marketing pages never load the Supabase client.
+const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashboard?welcome=1");
+---
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{title}</title>
+  <meta name="description" content={description} />
+  <meta name="theme-color" content="#ebeefd" />
+  {noindex && <meta name="robots" content="noindex" />}
+  {canonical && <link rel="canonical" href={canonical} />}
+  <meta property="og:title" content={title} />
+  <meta property="og:description" content={description} />
+  <meta property="og:type" content={ogType} />
+  <meta property="og:site_name" content="Characterly" />
+  {canonical && <meta property="og:url" content={canonical} />}
+  <meta property="og:image" content={image} />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content={title} />
+  <meta name="twitter:description" content={description} />
+  <meta name="twitter:image" content={image} />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <slot name="head" />
+  {jsonLd.map(d => <script type="application/ld+json" set:html={ld(d)} />)}
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="nav" data-nav>
+    <div class="wrap nav-inner">
+      <a class="brand" href="/" aria-label="Characterly home"><Mark /><span>Characterly</span></a>
+      {chrome === "site" && (
+        <>
+          <nav class="nav-links" aria-label="Main">
+            {navLinks.map(l => <a href={l.href} aria-current={current === l.href ? "page" : undefined}>{l.label}</a>)}
+          </nav>
+          <div class="nav-end">
+            <div class="nav-account" data-account-slot><a href="/account">Sign in</a></div>
+            <a class="btn btn-go btn-sm" href={discordStart} data-primary-cta data-beacon="discord_signin_click">
+              <Icon name="discord" size={18} />Continue with Discord
+            </a>
+          </div>
+          <button class="menu-btn" type="button" aria-expanded="false" aria-controls="menu" data-menu-btn>
+            <span class="sr-only">Open menu</span><Icon name="menu" size={22} />
+          </button>
+        </>
+      )}
+      {chrome === "app" && (
+        <div class="nav-end nav-app">
+          <a class="btn btn-sm" href={LINKS.discord} target="_blank" rel="noopener noreferrer"><Icon name="discord" size={18} /><span class="nav-app-label">Open Discord</span></a>
+          <button class="link-btn link small" type="button" data-signout>Sign out</button>
+        </div>
+      )}
+    </div>
+    {chrome === "site" && (
+      <div class="menu" id="menu" hidden>
+        {navLinks.map(l => <a href={l.href}>{l.label}</a>)}
+        <a href="/account" data-account-mobile>Sign in</a>
+        <a class="btn btn-go" href={discordStart} data-primary-cta data-beacon="discord_signin_click"><Icon name="discord" size={18} />Continue with Discord</a>
+      </div>
+    )}
+  </header>
+
+  <main id="main">
+    <slot />
+  </main>
+
+  {chrome !== "focus" && (
+    <footer class="foot">
+      <div class="wrap foot-inner">
+        <div>
+          <a class="brand" href="/"><Mark /><span>Characterly</span></a>
+          <p class="foot-note">Characters that remember you, in your Discord DMs and your servers.</p>
+        </div>
+        <nav aria-labelledby="f-product">
+          <h2 id="f-product">Product</h2>
+          <ul>
+            <li><a href="/characters">The shelf</a></li>
+            <li><a href="/guides/import-character-cards">Import a character card</a></li>
+            <li><a href="/#pricing">Pricing</a></li>
+            <li><a href="/dashboard">Your dashboard</a></li>
+          </ul>
+        </nav>
+        <nav aria-labelledby="f-discord">
+          <h2 id="f-discord">Discord</h2>
+          <ul>
+            <li><a href={LINKS.discord} target="_blank" rel="noopener noreferrer">Join the Characterly server</a></li>
+            <li><a href={LINKS.addToDiscord} target="_blank" rel="noopener noreferrer">Add the bot to your server</a></li>
+          </ul>
+        </nav>
+        <nav aria-labelledby="f-house">
+          <h2 id="f-house">Policies</h2>
+          <ul>
+            <li><a href="/terms">Terms of Service</a></li>
+            <li><a href="/privacy">Privacy Policy</a></li>
+            <li><a href="/security">Security</a></li>
+            <li><a href="/safety">Safety</a></li>
+          </ul>
+        </nav>
+      </div>
+    </footer>
+  )}
+
+  <script>
+    import "../scripts/nav";
+  </script>
+  <slot name="scripts" />
+</body>
+</html>

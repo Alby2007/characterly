@@ -1,0 +1,100 @@
+---
+// Sign in / create account. Discord first: it is the account, and it links
+// the Discord identity in the same step. Email remains for people who want it
+// (they link Discord later with a /link code).
+import Base from "../layouts/Base.astro";
+import Icon from "../components/Icon.astro";
+export const prerender = true;
+---
+<Base title="Sign in · Characterly" description="Sign in to Characterly with Discord or email." noindex chrome="focus">
+  <section class="wrap auth">
+    <div class="auth-card" data-auth>
+      <h1 id="auth-title">Sign in</h1>
+      <p class="auth-sub" id="auth-sub">Use your Discord account. It's the fastest way in, and it links your companions to your account straight away.</p>
+
+      <div id="discord-block">
+        <button class="btn btn-go btn-lg full" id="btn-discord" type="button"><Icon name="discord" size={20} /><span>Continue with Discord</span></button>
+        <p class="muted small fine">By continuing you agree to the <a href="/terms">Terms of Service</a> and <a href="/privacy">Privacy Policy</a>.</p>
+      </div>
+
+      <div class="or" id="or-divider"><span>or use email</span></div>
+
+      <div class="email-tabs" id="tab-bar" role="tablist" aria-label="Email options">
+        <button class="etab" type="button" role="tab" aria-selected="true" data-tab="signin" id="t-signin" aria-controls="form-signin">Sign in</button>
+        <button class="etab" type="button" role="tab" aria-selected="false" data-tab="signup" id="t-signup" aria-controls="form-signup" tabindex="-1">Create account</button>
+        <button class="etab" type="button" role="tab" aria-selected="false" data-tab="magic" id="t-magic" aria-controls="form-magic" tabindex="-1">Email me a link</button>
+      </div>
+
+      <form id="form-signin" class="form" role="tabpanel" aria-labelledby="t-signin" novalidate>
+        <label class="field"><span>Email</span><input class="input" type="email" name="email" autocomplete="email" required /></label>
+        <label class="field"><span>Password</span><input class="input" type="password" name="password" autocomplete="current-password" required /></label>
+        <button class="btn full" type="submit">Sign in</button>
+        <button class="link-btn link small" type="button" id="forgot-link">Forgot your password?</button>
+      </form>
+
+      <form id="form-signup" class="form" role="tabpanel" aria-labelledby="t-signup" hidden novalidate>
+        <label class="field"><span>Display name <span class="muted">(optional)</span></span><input class="input" type="text" name="display_name" autocomplete="nickname" maxlength="48" /></label>
+        <label class="field"><span>Email</span><input class="input" type="email" name="email" autocomplete="email" required /></label>
+        <label class="field"><span>Password <span class="muted">(8 or more characters)</span></span><input class="input" type="password" name="password" autocomplete="new-password" required minlength="8" /></label>
+        <label class="check"><input type="checkbox" name="tos" /><span>I agree to the <a href="/terms" target="_blank" rel="noopener noreferrer">Terms of Service</a> and <a href="/privacy" target="_blank" rel="noopener noreferrer">Privacy Policy</a>.</span></label>
+        <button class="btn full" type="submit">Create account</button>
+      </form>
+
+      <form id="form-magic" class="form" role="tabpanel" aria-labelledby="t-magic" hidden novalidate>
+        <label class="field"><span>Email</span><input class="input" type="email" name="email" autocomplete="email" required /></label>
+        <button class="btn full" type="submit">Email me a sign-in link</button>
+      </form>
+
+      <form id="form-forgot" class="form" hidden novalidate>
+        <label class="field"><span>Email</span><input class="input" type="email" name="email" autocomplete="email" required /></label>
+        <button class="btn full" type="submit">Send reset link</button>
+        <button class="link-btn link small" type="button" id="back-to-signin">Back to sign in</button>
+      </form>
+
+      <form id="form-recovery" class="form" hidden novalidate>
+        <label class="field"><span>New password <span class="muted">(8 or more characters)</span></span><input class="input" type="password" name="password" autocomplete="new-password" required minlength="8" /></label>
+        <button class="btn btn-go full" type="submit">Set new password</button>
+      </form>
+
+      <div class="notice" id="auth-notice" role="status" hidden>
+        <p class="notice-title"><Icon name="check" size={20} /><span>Check your inbox</span></p>
+        <p id="notice-text"></p>
+        <p class="notice-actions">
+          <button class="link-btn link small" type="button" id="notice-resend" hidden>Resend the email</button>
+          <button class="link-btn link small" type="button" id="notice-back">Back to sign in</button>
+        </p>
+      </div>
+
+      <div class="msg" id="form-error" role="alert" hidden></div>
+    </div>
+    <p class="back muted small"><a href="/">Back to Characterly</a></p>
+  </section>
+</Base>
+
+<style>
+  .auth { display: grid; justify-items: center; padding-top: clamp(24px, 6vh, 64px); padding-bottom: 64px; }
+  .auth-card { width: 100%; max-width: 460px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 36px; box-shadow: 0 30px 60px -40px rgba(20, 24, 58, 0.45); }
+  .auth-card h1 { font-size: 40px; }
+  .auth-sub { margin-top: 12px; color: var(--ink-2); }
+  #discord-block { margin-top: 26px; }
+  .full { width: 100%; }
+  .fine { margin-top: 10px; }
+  .or { display: flex; align-items: center; gap: 12px; margin: 28px 0 18px; font-size: 13.5px; font-weight: 700; color: var(--ink-3); }
+  .or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .email-tabs { display: flex; gap: 4px; padding: 4px; background: var(--field); border-radius: 10px; }
+  .etab { flex: 1; min-height: 40px; border: 0; background: none; border-radius: 7px; font-size: 14px; font-weight: 700; color: var(--ink-3); cursor: pointer; }
+  .etab[aria-selected="true"] { background: var(--panel); color: var(--ink); box-shadow: 0 1px 3px rgba(20, 24, 58, 0.15); }
+  .form { display: grid; gap: 16px; margin-top: 20px; }
+  .form .link-btn { justify-self: center; }
+  .notice { margin-top: 8px; display: grid; gap: 10px; }
+  .notice-title { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 20px; color: var(--ok); }
+  .notice p:not(.notice-title) { color: var(--ink-2); }
+  .notice-actions { display: flex; gap: 20px; flex-wrap: wrap; }
+  .back { margin-top: 20px; }
+  .back a { font-weight: 650; }
+  @media (max-width: 600px) { .auth-card { padding: 26px 20px; } }
+</style>
+
+<script>
+  import "../scripts/account";
+</script>

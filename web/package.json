@@ -1,0 +1,25 @@
+{
+  "name": "characterly-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro build && wrangler dev",
+    "test": "tsx --test src/**/*.test.ts",
+    "deploy": "astro build && wrangler deploy",
+    "deploy:preview": "CLOUDFLARE_ENV=preview astro build && CLOUDFLARE_ENV=preview wrangler deploy"
+  },
+  "dependencies": {
+    "@astrojs/cloudflare": "14.4.1",
+    "@fontsource-variable/archivo": "5.3.0",
+    "@supabase/supabase-js": "2.118.0",
+    "astro": "7.4.1"
+  },
+  "devDependencies": {
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "wrangler": "4.151.3"
+  }
+}

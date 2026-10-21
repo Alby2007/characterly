@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=1440">
+<title>Character Archive sketch</title>
+<style>
+  :root{--field:#f2f5ff;--ink:#14183a;--blue:#3d5bff;--gold:#ffb020;--pink:#ff5c8a}
+  *{box-sizing:border-box;margin:0}
+  body{width:1440px;height:900px;overflow:hidden;background:var(--field);color:var(--ink);font-family:"Segoe UI",system-ui,sans-serif}
+  nav{display:flex;align-items:center;gap:30px;padding:22px 56px;font-weight:600;font-size:15px}
+  nav .brand{font-size:24px;font-weight:800;margin-right:auto}
+  nav .cta{background:var(--ink);color:#fff;padding:10px 18px;border-radius:6px}
+  .portrait{position:absolute;left:96px;top:110px;width:520px;height:790px;background:linear-gradient(180deg,#c9d3ff,#8fa2ff);border-radius:260px 260px 0 0}
+  .portrait::after{content:"";position:absolute;left:110px;top:90px;width:300px;height:300px;border-radius:50%;background:#e8ecff}
+  .hook{position:absolute;left:96px;top:120px;width:560px}
+  .hook h1{font-size:96px;line-height:.92;font-weight:900;letter-spacing:-.03em;color:var(--ink);mix-blend-mode:multiply}
+  .panel{position:absolute;left:700px;top:110px;width:660px}
+  .name{font-size:64px;font-weight:900;letter-spacing:-.02em}
+  .meta{display:flex;gap:16px;align-items:center;margin-top:6px;font-size:16px;font-weight:600}
+  .bond{display:flex;align-items:center;gap:10px}
+  .bar{width:200px;height:10px;background:#d8defa;border-radius:5px;overflow:hidden}
+  .bar i{display:block;width:62%;height:100%;background:var(--blue)}
+  .tabs{display:flex;gap:28px;margin-top:30px;font-size:17px;font-weight:700;border-bottom:2px solid #d8defa}
+  .tabs span{padding-bottom:12px}
+  .tabs .on{border-bottom:4px solid var(--blue);margin-bottom:-2px}
+  .entry{display:grid;grid-template-columns:110px 1fr 70px;gap:16px;align-items:center;padding:16px 0;border-bottom:1px solid #d8defa;font-size:20px}
+  .src{font-size:12px;font-weight:800;letter-spacing:.1em;padding:4px 8px;border-radius:4px;text-align:center}
+  .dm{background:var(--blue);color:#fff}.srv{background:var(--pink);color:#fff}
+  .mark{font-size:14px;font-weight:700;color:#5a628f;text-align:right}
+  .gone{text-decoration:line-through;color:#8a91b8}
+  .actions{display:flex;gap:16px;margin-top:30px;align-items:center}
+  .go{font-size:22px;font-weight:800;background:var(--gold);color:var(--ink);padding:22px 34px;border-radius:8px;text-decoration:none}
+  .sec{font-size:20px;font-weight:700;color:var(--ink);text-decoration:underline;text-underline-offset:6px}
+  .example{position:absolute;right:56px;top:84px;font-size:13px;font-weight:800;letter-spacing:.12em;color:#5a628f}
+</style></head><body>
+<nav><span class="brand">Characterly</span><span>The shelf</span><span>How it works</span><span>Pricing</span><span>Sign in</span><span class="cta">Continue with Discord</span></nav>
+<div class="portrait"></div>
+<div class="hook"><h1>They remember you.</h1></div>
+<span class="example">EXAMPLE ARCHIVE</span>
+<div class="panel">
+  <div class="name">Nyx</div>
+  <div class="meta"><span>Adopted · yours</span><span class="bond">Bond 4 <span class="bar"><i></i></span></span></div>
+  <div class="tabs"><span>Profile</span><span class="on">What Nyx remembers</span><span>First hello</span></div>
+  <div class="entry"><span class="src dm">YOUR DMS</span><span>Alice runs her first 10k on Sunday</span><span class="mark">★ pinned</span></div>
+  <div class="entry"><span class="src srv">#GENERAL</span><span>Hates spoilers for the finale</span><span class="mark"></span></div>
+  <div class="entry"><span class="src dm">YOUR DMS</span><span>"Terrified is just caring with legs"</span><span class="mark">✎ edited</span></div>
+  <div class="entry"><span class="src dm">YOUR DMS</span><span class="gone">Old flatmate's name</span><span class="mark">✕ forgotten</span></div>
+  <div class="actions"><a class="go" href="#">Continue with Discord →</a><a class="sec" href="#">Browse the shelf</a><a class="sec" href="#">Bring your character</a></div>
+</div>
+</body></html>

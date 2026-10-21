@@ -1,0 +1,62 @@
+---
+// /terms, /privacy, /security, /safety. Rendered at build time from the repo's
+// .md files: editing TERMS.md updates /terms on the next deploy, and the pages
+// work without JavaScript.
+import Base from "../layouts/Base.astro";
+import { DOCS, renderDoc, type DocSlug } from "../lib/legal";
+
+export const prerender = true;
+export function getStaticPaths() {
+  return (Object.keys(DOCS) as DocSlug[]).map(doc => ({ params: { doc } }));
+}
+const slug = Astro.params.doc as DocSlug;
+const meta = DOCS[slug];
+const { title, updated, sections, html } = renderDoc(meta.md);
+const order = Object.keys(DOCS) as DocSlug[];
+const next = order[(order.indexOf(slug) + 1) % order.length];
+const plainTitle = title.replace(/<[^>]+>/g, "");
+---
+<Base title={`${plainTitle} · Characterly`} description={meta.description} path={`/${slug}`} current={slug === "safety" ? "/safety" : undefined}>
+  <div class="wrap doc">
+    <nav class="doc-tabs" aria-label="Policies">
+      {order.map(d => <a href={`/${d}`} aria-current={d === slug ? "page" : undefined}>{DOCS[d].label}</a>)}
+    </nav>
+    <div class="doc-grid">
+      <aside class="toc" aria-labelledby="toc-h">
+        <p class="caps" id="toc-h">On this page</p>
+        <ol>{sections.map(s => <li><a href={`#${s.id}`} set:html={s.name} /></li>)}</ol>
+      </aside>
+      <article class="doc-body">
+        <h1 set:html={title} />
+        {updated && <p class="stamp muted">Last updated {updated}</p>}
+        <div class="prose" set:html={html} />
+        <p class="next"><a class="link" href={`/${next}`}>Next: {DOCS[next].label}</a></p>
+      </article>
+    </div>
+  </div>
+</Base>
+
+<style>
+  .doc-tabs { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 32px; }
+  .doc-tabs a { padding: 8px 14px; border-radius: 999px; font-size: 14.5px; font-weight: 700; text-decoration: none; color: var(--ink-2); border: 1.5px solid var(--line-strong); background: var(--panel); }
+  .doc-tabs a[aria-current="page"] { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .doc-grid { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 56px; padding-top: 40px; }
+  .toc { position: sticky; top: calc(var(--nav-h) + 24px); align-self: start; max-height: calc(100vh - var(--nav-h) - 48px); overflow: auto; }
+  .toc ol { list-style: none; margin-top: 12px; display: grid; gap: 2px; counter-reset: s; }
+  .toc a { display: block; padding: 6px 0; font-size: 14.5px; color: var(--ink-2); text-decoration: none; line-height: 1.35; }
+  .toc a:hover { color: var(--ink); text-decoration: underline; }
+  .doc-body { max-width: 72ch; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 44px 48px; }
+  .doc-body h1 { font-size: clamp(34px, 4vw, 52px); }
+  .stamp { margin-top: 12px; font-size: 14.5px; }
+  .prose { margin-top: 28px; }
+  .prose :global(h2) { font-size: 24px; letter-spacing: -0.01em; line-height: 1.15; margin: 40px 0 12px; padding-top: 20px; border-top: 1px solid var(--line); font-variation-settings: "wdth" 112; }
+  .prose :global(p), .prose :global(ul) { margin-top: 14px; color: #262b52; }
+  .prose :global(ul) { padding-left: 1.2em; display: grid; gap: 6px; }
+  .prose :global(a) { font-weight: 650; }
+  .next { margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--line); }
+  @media (max-width: 960px) {
+    .doc-grid { grid-template-columns: 1fr; gap: 24px; }
+    .toc { position: static; max-height: none; }
+  }
+  @media (max-width: 600px) { .doc-body { padding: 28px 20px; } }
+</style>

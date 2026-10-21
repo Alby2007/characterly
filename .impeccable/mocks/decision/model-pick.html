@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=1440">
+<title>Visual Novel sketch</title>
+<style>
+  *{box-sizing:border-box;margin:0}
+  body{width:1440px;height:900px;overflow:hidden;font-family:"Trebuchet MS",sans-serif;color:#30276e;
+    background:linear-gradient(180deg,#bfe6ff 0%,#f4efff 55%,#ffd3e8 100%)}
+  nav{position:absolute;top:0;left:0;right:0;display:flex;gap:32px;align-items:center;padding:24px 48px;font-weight:700;font-size:15px}
+  nav .brand{font-size:24px;margin-right:auto}
+  .save{position:absolute;top:96px;right:48px;width:360px}
+  .save h2{font-size:14px;letter-spacing:.16em;text-transform:uppercase;margin-bottom:10px}
+  .slot{background:#fff;border:2px solid #30276e;border-radius:10px;padding:12px 14px;margin-bottom:10px;font-size:15px}
+  .slot b{display:block;font-size:12px;color:#ff79b4;letter-spacing:.1em}
+  .sprite{position:absolute;left:420px;top:90px;width:420px;height:600px;background:#ff79b4;border-radius:200px 200px 40px 40px;opacity:.9}
+  .title{position:absolute;left:48px;top:120px;width:380px}
+  .title h1{font-size:76px;line-height:.95;letter-spacing:-.02em}
+  .box{position:absolute;left:48px;right:48px;bottom:40px;height:230px;background:rgba(48,39,110,.88);color:#fff;border-radius:18px;padding:28px 36px}
+  .speaker{position:absolute;top:-22px;left:36px;background:#ff79b4;color:#fff;font-weight:900;padding:8px 20px;border-radius:10px;font-size:22px}
+  .box p{font-size:30px;line-height:1.35;max-width:820px}
+  .choices{position:absolute;right:36px;top:28px;display:flex;flex-direction:column;gap:12px;width:400px}
+  .choices a{background:#fff;color:#30276e;text-decoration:none;font-weight:900;font-size:22px;padding:16px 20px;border-radius:12px;border:3px solid #7fd3ff}
+  .choices a:first-child{background:#7fd3ff}
+</style></head><body>
+<nav><span class="brand">Characterly</span><span>How it works</span><span>The shelf</span><span>Pricing</span><span>Sign in</span></nav>
+<div class="title"><h1>They remember you.</h1></div>
+<div class="sprite"></div>
+<div class="save"><h2>Nyx's save slots</h2>
+  <div class="slot"><b>SLOT 03 · YOUR DMS</b>Alice runs her first 10k Sunday</div>
+  <div class="slot"><b>SLOT 02 · #GENERAL</b>hates finale spoilers</div>
+  <div class="slot"><b>SLOT 01 · FIRST MEETING</b>said hi, unsure how this works</div>
+</div>
+<div class="box"><span class="speaker">Nyx</span>
+  <p>I live in Discord. I remember what you tell me, I keep it out of group chats, and I'll follow you into your servers.</p>
+  <div class="choices"><a href="#">▶ Continue with Discord</a><a href="#">Browse the shelf</a><a href="#">Bring my character</a></div>
+</div>
+</body></html>

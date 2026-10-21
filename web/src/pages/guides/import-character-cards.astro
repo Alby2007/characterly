@@ -1,0 +1,94 @@
+---
+// The migration guide. Every limit and format here comes from the real
+// importers (src/charcard.ts, src/chathist.ts, src/chat-import-job.ts): keep
+// the copy honest when those constants move.
+import Base from "../../layouts/Base.astro";
+import Icon from "../../components/Icon.astro";
+import { LINKS } from "../../lib/config";
+
+export const prerender = true;
+const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashboard?welcome=1#import");
+---
+<Base
+  title="Import a character card into Discord · Characterly"
+  description="Bring an existing character to Discord. Standard .png and .json character cards import as private companions on Characterly, and a .jsonl chat export carries your history over."
+  path="/guides/import-character-cards"
+>
+  <article class="wrap guide">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="/">Home</a><span aria-hidden="true">/</span><span aria-current="page">Import a character card</span></nav>
+    <header class="guide-head">
+      <h1>Bring your character with you.</h1>
+      <p class="lede">Characterly imports standard character cards, the <code>.png</code> and <code>.json</code> files the community already uses, as private companions that live in your Discord DMs. Add a <code>.jsonl</code> chat export and your history comes too, so they remember you from the first hello.</p>
+    </header>
+
+    <section aria-labelledby="g-how">
+      <h2 id="g-how">How to import</h2>
+      <ol class="how">
+        <li><span class="n">1</span><div><h3>Continue with Discord</h3><p>Sign in with your Discord account. It links your Characterly account automatically.</p></div></li>
+        <li><span class="n">2</span><div><h3>Drop in your card</h3><p>Open the <a href="/dashboard#import">import section on your dashboard</a> and drop the card file, or run <code>/companion import</code> in Discord with the file attached.</p></div></li>
+        <li><span class="n">3</span><div><h3>Say hello</h3><p>The persona, greeting and example dialogue come across. The import is safety-screened and lands <strong>private to you</strong>. Nothing is published unless you choose to put it on <a href="/characters">the shelf</a>.</p></div></li>
+      </ol>
+      <p class="actions"><a class="btn btn-go" href={discordStart} data-beacon="discord_signin_click"><Icon name="discord" size={18} />Continue with Discord</a></p>
+    </section>
+
+    <section aria-labelledby="g-cards">
+      <h2 id="g-cards">Cards we accept</h2>
+      <dl class="facts">
+        <div><dt>Formats</dt><dd><code>chara_card_v2</code>, <code>ccv3</code>, and flat v1 cards (including CAI Tools aliases)</dd></div>
+        <div><dt>PNG cards</dt><dd>The embedded <code>chara</code> or <code>ccv3</code> chunk. A corrupt chunk won't hide a valid one.</dd></div>
+        <div><dt>Size limits</dt><dd>8 MB for a <code>.png</code> card, 256 KB for a <code>.json</code> card</dd></div>
+      </dl>
+      <p class="muted">If your card exporter produces something else, it almost always emits one of these under the hood. Try it: a rejected file gets a plain-language reason, never a silent drop.</p>
+    </section>
+
+    <section aria-labelledby="g-chats">
+      <h2 id="g-chats">Chat exports we accept</h2>
+      <dl class="facts">
+        <div><dt>Formats</dt><dd>Tavern-style <code>.jsonl</code> (what CAI Tools' "Download as Tavern chat" produces), oobabooga <code>.json</code>, generic message arrays, and flagless exports</dd></div>
+        <div><dt>Size limits</dt><dd>8 MB, 4,000 turns, 1,500 characters per turn. A longer history imports its first 4,000 turns.</dd></div>
+        <div><dt>Group chats</dt><dd>The dominant speaker who isn't you wins, so two personas never blend into one companion.</dd></div>
+      </dl>
+      <p class="muted">The history is distilled into the companion's journal rather than kept as a raw transcript, so the memory is real, readable, and yours to edit or forget. The transcript itself is discarded.</p>
+    </section>
+
+    <section aria-labelledby="g-wrong">
+      <h2 id="g-wrong">If something goes wrong</h2>
+      <dl class="facts">
+        <div><dt>Import interrupted</dt><dd>It resumes where it left off. Processed windows are kept, and unprocessed ones were never billed.</dd></div>
+        <div><dt>Out of tokens</dt><dd>The import pauses and resumes when your tokens refill. Nothing is lost.</dd></div>
+        <div><dt>Hard failure</dt><dd>Partial journal entries roll back with it, so a failed import never leaves a half-remembered history.</dd></div>
+        <div><dt>Changed your mind</dt><dd><code>/companion imports</code> or the dashboard lists every import and undoes any of them, journal entries and all.</dd></div>
+      </dl>
+    </section>
+
+    <section aria-labelledby="g-becomes">
+      <h2 id="g-becomes">What a card becomes</h2>
+      <p class="body">An imported character isn't a re-skin. It gets the same memory as any companion: facts about you that it keeps only with your consent, a private thread with you, and the ability to follow you into your own servers. Imports stay private by default; publishing to <a href="/characters">the shelf</a> is a separate, moderated step.</p>
+      <p class="actions"><a class="link" href="/characters">Browse the shelf</a><a class="link" href={LINKS.discord} target="_blank" rel="noopener noreferrer">Join the Characterly server</a></p>
+    </section>
+  </article>
+</Base>
+
+<style>
+  .guide > * { max-width: 880px; }
+  .guide h1 { font-size: clamp(40px, 5vw, 72px); }
+  .crumbs { display: flex; gap: 8px; padding-top: 28px; font-size: 14.5px; font-weight: 650; color: var(--ink-3); }
+  .crumbs a { color: var(--ink-2); }
+  .guide-head { padding: 28px 0 8px; }
+  .guide-head .lede { margin-top: 20px; }
+  .guide section { padding-top: 56px; }
+  .guide h2 { font-size: clamp(26px, 2.6vw, 36px); margin-bottom: 20px; }
+  .how { list-style: none; display: grid; gap: 0; border-top: 2px solid var(--ink); }
+  .how li { display: grid; grid-template-columns: auto 1fr; gap: 18px; padding: 20px 0; border-bottom: 1px solid var(--line); }
+  .how .n { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; background: var(--ink); color: #fff; font-weight: 850; }
+  .how p { margin-top: 4px; color: var(--ink-2); max-width: 62ch; }
+  .how a { font-weight: 700; }
+  .facts { display: grid; border-top: 2px solid var(--ink); }
+  .facts > div { display: grid; grid-template-columns: 180px 1fr; gap: 20px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+  .facts dt { font-weight: 750; }
+  .facts dd { margin: 0; color: var(--ink-2); }
+  .guide section > .muted, .body { margin-top: 16px; max-width: 66ch; }
+  .body { color: var(--ink-2); font-size: 18px; }
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; margin-top: 24px; }
+  @media (max-width: 600px) { .facts > div { grid-template-columns: 1fr; gap: 4px; } }
+</style>

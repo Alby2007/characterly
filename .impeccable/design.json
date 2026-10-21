@@ -1,0 +1,163 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-21T00:00:00Z",
+  "title": "Design System: Characterly",
+  "extensions": {
+    "colorMeta": {
+      "field":       { "role": "neutral",   "displayName": "Archive Field", "tonalRamp": ["oklch(18% 0.03 278)","oklch(30% 0.03 278)","oklch(45% 0.03 278)","oklch(60% 0.03 278)","oklch(75% 0.03 278)","oklch(86% 0.025 278)","oklch(91% 0.022 278)","oklch(95.3% 0.02 278)"] },
+      "field-deep":  { "role": "neutral",   "displayName": "Deep Field" },
+      "panel":       { "role": "neutral",   "displayName": "Archive White" },
+      "ink":         { "role": "neutral",   "displayName": "Night Navy Ink", "tonalRamp": ["oklch(15% 0.06 275)","oklch(22% 0.07 275)","oklch(32% 0.07 275)","oklch(44% 0.06 275)","oklch(56% 0.05 275)","oklch(70% 0.04 275)","oklch(84% 0.03 275)","oklch(95% 0.015 275)"] },
+      "ink-2":       { "role": "neutral",   "displayName": "Ink Second" },
+      "ink-3":       { "role": "neutral",   "displayName": "Ink Third" },
+      "line":        { "role": "neutral",   "displayName": "Hairline" },
+      "line-strong": { "role": "neutral",   "displayName": "Strong Hairline" },
+      "dm":          { "role": "secondary", "displayName": "Private Blue", "tonalRamp": ["oklch(22% 0.1 268)","oklch(32% 0.15 268)","oklch(42% 0.2 268)","oklch(52% 0.23 268)","oklch(64% 0.17 268)","oklch(76% 0.11 268)","oklch(87% 0.06 268)","oklch(94% 0.03 268)"] },
+      "dm-tint":     { "role": "secondary", "displayName": "Private Blue Tint" },
+      "srv":         { "role": "tertiary",  "displayName": "Server Pink", "tonalRamp": ["oklch(22% 0.08 8)","oklch(32% 0.13 8)","oklch(44% 0.18 8)","oklch(55% 0.21 8)","oklch(66% 0.17 8)","oklch(77% 0.11 8)","oklch(88% 0.06 8)","oklch(95% 0.03 8)"] },
+      "srv-tint":    { "role": "tertiary",  "displayName": "Server Pink Tint" },
+      "go":          { "role": "primary",   "displayName": "Discord-Hour Gold", "tonalRamp": ["oklch(22% 0.05 75)","oklch(35% 0.08 75)","oklch(50% 0.11 75)","oklch(66% 0.15 75)","oklch(82% 0.17 75)","oklch(86% 0.14 78)","oklch(91% 0.09 80)","oklch(96% 0.04 82)"] },
+      "go-hi":       { "role": "primary",   "displayName": "Lit Gold" },
+      "go-ink":      { "role": "primary",   "displayName": "Gold Shadow Ink" },
+      "danger":      { "role": "neutral",   "displayName": "Danger" },
+      "danger-tint": { "role": "neutral",   "displayName": "Danger Tint" },
+      "ok":          { "role": "neutral",   "displayName": "Ok Green" },
+      "ok-tint":     { "role": "neutral",   "displayName": "Ok Tint" }
+    },
+    "typographyMeta": {
+      "display":  { "displayName": "Display", "purpose": "Page h1 and the landing hook. Wide (wdth 125), black (850)." },
+      "headline": { "displayName": "Headline", "purpose": "Section h2s; scaled down per surface but always wide and black." },
+      "name":     { "displayName": "Archive Name", "purpose": "The companion's name in the archive head; prices and balances share this voice." },
+      "title":    { "displayName": "Title", "purpose": "h3s, plan names, card titles at normal width." },
+      "body":     { "displayName": "Body", "purpose": "Reading and UI text at wdth 100 with tabular numerals." },
+      "label":    { "displayName": "Label", "purpose": "Uppercase list and footer heads; never an eyebrow above a headline." },
+      "scope":    { "displayName": "Scope Tag", "purpose": "YOUR DMS / #CHANNEL / kind tags on memory entries." }
+    },
+    "shadows": [
+      { "name": "archive-lift", "value": "0 30px 60px -40px rgba(20, 24, 58, 0.45)", "purpose": "The archive panel and the sign-in card." },
+      { "name": "modal-lift", "value": "0 40px 80px -30px rgba(20, 24, 58, 0.5)", "purpose": "Native dialog over a rgba(20, 24, 58, 0.45) backdrop." },
+      { "name": "gold-glow", "value": "0 8px 20px -10px rgba(201, 135, 0, 0.85)", "purpose": "Primary gold button; 0 3px 10px -6px on press." },
+      { "name": "segment-lift", "value": "0 1px 3px rgba(20, 24, 58, 0.15)", "purpose": "Selected option of a segmented control." }
+    ],
+    "motion": [
+      { "name": "ease", "value": "cubic-bezier(0.2, 0.8, 0.2, 1)", "purpose": "Shared easing for every transition and keyframe." },
+      { "name": "control", "value": "0.18s", "purpose": "Button and link colour, border and press transitions." },
+      { "name": "tab-ink-slide", "value": "transform 0.28s, width 0.28s", "purpose": "Ink bar slides to the selected archive tab." },
+      { "name": "panel-settle", "value": "0.32s from opacity 0, translateX(10px)", "purpose": "Tab panel settles in on selection." },
+      { "name": "entry-unlock", "value": "0.5s from opacity 0, translateY(8px)", "purpose": "A new memory entry unlocks into the list; staggered 0.12s." },
+      { "name": "forget", "value": "2px line-through, then remove", "purpose": "Forgotten entry is struck through and marked, then the list reloads without it." },
+      { "name": "reduced-motion", "value": "animation: none; transition: none", "purpose": "All motion is off under prefers-reduced-motion." }
+    ],
+    "breakpoints": [
+      { "name": "hero", "value": "1100px" },
+      { "name": "nav", "value": "960px" },
+      { "name": "stack", "value": "860px" },
+      { "name": "narrow", "value": "600px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one gold action per view.",
+      "html": "<button class=\"ds-btn ds-btn-go\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M19.6 5.3A16.6 16.6 0 0015.5 4l-.5 1a15.3 15.3 0 00-6 0l-.5-1a16.6 16.6 0 00-4.1 1.3C1.8 9.2 1.1 13 1.4 16.7a16.8 16.8 0 005 2.5l1.1-1.7a10.8 10.8 0 01-1.7-.8l.4-.3a11.9 11.9 0 0011.6 0l.4.3c-.5.3-1.1.6-1.7.8l1.1 1.7a16.7 16.7 0 005-2.5c.4-4.3-.7-8-3.1-11.4zM8.7 14.5c-1 0-1.8-.9-1.8-2s.8-2 1.8-2 1.8.9 1.8 2-.8 2-1.8 2zm6.6 0c-1 0-1.8-.9-1.8-2s.8-2 1.8-2 1.8.9 1.8 2-.8 2-1.8 2z\"/></svg>Continue with Discord</button>",
+      "css": ".ds-btn { display: inline-flex; align-items: center; justify-content: center; gap: 10px; min-height: 48px; padding: 12px 22px; font-family: 'Archivo Variable', Archivo, system-ui, sans-serif; font-variation-settings: 'wdth' 100; font-size: 16px; font-weight: 750; line-height: 1.1; border-radius: 8px; border: 2px solid #14183a; background: #ffffff; color: #14183a; cursor: pointer; transition: background 0.18s, border-color 0.18s, transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.18s; } .ds-btn:active { transform: translateY(1px); } .ds-btn:focus-visible { outline: 3px solid #3450f0; outline-offset: 2px; } .ds-btn-go { background: #ffb21e; border-color: #ffb21e; color: #241500; box-shadow: 0 8px 20px -10px rgba(201, 135, 0, 0.85); } .ds-btn-go:hover { background: #ffc34f; border-color: #ffc34f; } .ds-btn-go:active { box-shadow: 0 3px 10px -6px rgba(201, 135, 0, 0.85); }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Every non-primary action: white with a 2px ink stroke.",
+      "html": "<button class=\"ds-btn-sec\">Start free</button>",
+      "css": ".ds-btn-sec { display: inline-flex; align-items: center; min-height: 48px; padding: 12px 22px; font-family: 'Archivo Variable', Archivo, system-ui, sans-serif; font-size: 16px; font-weight: 750; border-radius: 8px; border: 2px solid #14183a; background: #ffffff; color: #14183a; cursor: pointer; transition: background 0.18s, transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1); } .ds-btn-sec:hover { background: #dfe3f6; } .ds-btn-sec:active { transform: translateY(1px); } .ds-btn-sec:focus-visible { outline: 3px solid #3450f0; outline-offset: 2px; }"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Labelled field; focus turns the stroke Private Blue with a tint halo.",
+      "html": "<label class=\"ds-field\"><span>Email</span><input class=\"ds-input\" type=\"email\" placeholder=\"you@example.com\"></label>",
+      "css": ".ds-field { display: grid; gap: 7px; font-family: 'Archivo Variable', Archivo, system-ui, sans-serif; } .ds-field > span { font-size: 14px; font-weight: 700; color: #454d78; } .ds-input { width: 100%; min-height: 48px; padding: 11px 14px; font: inherit; font-size: 16px; color: #14183a; background: #ffffff; border: 1.5px solid #b9c1e4; border-radius: 8px; transition: border-color 0.15s, box-shadow 0.15s; } .ds-input:hover { border-color: #5c638c; } .ds-input:focus { outline: none; border-color: #3450f0; box-shadow: 0 0 0 3px #e2e7ff; } .ds-input::placeholder { color: #8a90b2; }"
+    },
+    {
+      "name": "Navigation",
+      "kind": "nav",
+      "refersTo": "nav",
+      "description": "Sticky field-washed bar: wide brand, ink-underlined links, one gold action.",
+      "html": "<nav class=\"ds-nav\"><a class=\"ds-brand\" href=\"#\"><svg viewBox=\"0 0 64 64\" width=\"30\" height=\"30\" aria-hidden=\"true\"><rect width=\"64\" height=\"64\" rx=\"16\" fill=\"#14183a\"/><path d=\"M27.3 18.6A14 14 0 1 0 43 37.5A12 12 0 0 1 27.3 18.6Z\" fill=\"#ffffff\"/><path d=\"M43 13.5l1.5 5.2 5.2 1.5-5.2 1.5L43 26.9l-1.5-5.2-5.2-1.5 5.2-1.5z\" fill=\"#ffb21e\"/></svg>Characterly</a><div class=\"ds-nav-links\"><a href=\"#\" aria-current=\"page\">The shelf</a><a href=\"#\">How it works</a><a href=\"#\">Pricing</a></div><a class=\"ds-nav-go\" href=\"#\">Continue with Discord</a></nav>",
+      "css": ".ds-nav { display: flex; align-items: center; gap: 28px; height: 72px; padding: 0 32px; background: color-mix(in srgb, #ebeefd 92%, transparent); border-bottom: 1px solid #d8ddf2; font-family: 'Archivo Variable', Archivo, system-ui, sans-serif; color: #14183a; } .ds-brand { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; color: inherit; font-variation-settings: 'wdth' 125; font-weight: 850; font-size: 21px; letter-spacing: -0.02em; } .ds-nav-links { display: flex; gap: 22px; } .ds-nav-links a { font-size: 15px; font-weight: 650; color: #454d78; text-decoration: none; padding: 6px 0; border-bottom: 2px solid transparent; } .ds-nav-links a:hover, .ds-nav-links a[aria-current='page'] { color: #14183a; border-bottom-color: #14183a; } .ds-nav-go { margin-left: auto; display: inline-flex; align-items: center; min-height: 40px; padding: 8px 16px; border-radius: 8px; background: #ffb21e; color: #241500; font-size: 14.5px; font-weight: 750; text-decoration: none; } .ds-nav-go:hover { background: #ffc34f; } .ds-nav a:focus-visible { outline: 3px solid #3450f0; outline-offset: 2px; }"
+    },
+    {
+      "name": "Scope Tags",
+      "kind": "chip",
+      "refersTo": "scope-dm",
+      "description": "Provenance of a memory: blue = DMs, pink = server, field = kind.",
+      "html": "<span class=\"ds-scope ds-scope-dm\">Your DMs</span> <span class=\"ds-scope ds-scope-srv\">#book-club</span> <span class=\"ds-scope ds-scope-kind\">From history</span>",
+      "css": ".ds-scope { display: inline-flex; align-items: center; padding: 4px 8px; border-radius: 6px; font-family: 'Archivo Variable', Archivo, system-ui, sans-serif; font-variation-settings: 'wdth' 110; font-size: 11.5px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; color: #ffffff; } .ds-scope-dm { background: #3450f0; } .ds-scope-srv { background: #cf1f5e; } .ds-scope-kind { background: #dfe3f6; color: #454d78; }"
+    },
+    {
+      "name": "Tag and Filter",
+      "kind": "chip",
+      "refersTo": "tag",
+      "description": "Quiet trait tags and shelf filters; the selected filter fills with ink.",
+      "html": "<span class=\"ds-tag\">cozy</span> <button class=\"ds-filter\" aria-pressed=\"true\">All <span>15</span></button> <button class=\"ds-filter\" aria-pressed=\"false\">Fantasy <span>4</span></button>",
+      "css": ".ds-tag { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 999px; font-family: 'Archivo Variable', Archivo, system-ui, sans-serif; font-size: 13px; font-weight: 650; background: #dfe3f6; color: #454d78; } .ds-filter { min-height: 40px; padding: 6px 14px; border-radius: 999px; border: 1.5px solid #b9c1e4; background: #ffffff; cursor: pointer; font-family: 'Archivo Variable', Archivo, system-ui, sans-serif; font-size: 14.5px; font-weight: 700; color: #454d78; } .ds-filter span { color: #5c638c; font-weight: 600; margin-left: 4px; } .ds-filter:hover { border-color: #5c638c; } .ds-filter[aria-pressed='true'] { background: #14183a; border-color: #14183a; color: #ffffff; } .ds-filter[aria-pressed='true'] span { color: #c8cdf0; } .ds-filter:focus-visible { outline: 3px solid #3450f0; outline-offset: 2px; }"
+    },
+    {
+      "name": "Archive Panel",
+      "kind": "card",
+      "refersTo": "archive-panel",
+      "description": "Signature: name, fact line, sliding-ink tabs, ruled memory entries with scope and marks; Example as a corner tag.",
+      "html": "<section class=\"ds-archive\"><div class=\"ds-archive-head\"><h2 class=\"ds-archive-name\">Wren</h2><p class=\"ds-corner-tag\">Example</p><p class=\"ds-archive-sub\"><span>Adopted · yours</span><span>Remembers you since 3 Oct</span></p></div><div class=\"ds-tabs\" role=\"tablist\"><button class=\"ds-tab\" role=\"tab\" aria-selected=\"false\">Profile</button><button class=\"ds-tab\" role=\"tab\" aria-selected=\"true\">What she remembers</button><button class=\"ds-tab\" role=\"tab\" aria-selected=\"false\">First hello</button><span class=\"ds-tab-ink\"></span></div><ul class=\"ds-entries\"><li class=\"ds-entry\"><span class=\"ds-scope ds-scope-dm\">Your DMs</span><span class=\"ds-entry-text\">First 10k on Sunday. Ask how it went.</span><span class=\"ds-mark\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 3l2.6 5.6 6 .7-4.5 4.1 1.2 6L12 16.4 6.7 19.4l1.2-6L3.4 9.3l6-.7z\"/></svg>Pinned</span></li><li class=\"ds-entry\"><span class=\"ds-scope ds-scope-srv\">#book-club</span><span class=\"ds-entry-text\">Hates spoilers. Halfway through the finale.</span><span></span></li><li class=\"ds-entry\"><span class=\"ds-scope ds-scope-dm\">Your DMs</span><span class=\"ds-entry-text\">Started the new job at the bakery.</span><span class=\"ds-mark\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 20h4L19 9l-4-4L4 16v4zM14 6l4 4\"/></svg>Edited by you</span></li><li class=\"ds-entry is-forgotten\"><span class=\"ds-scope ds-scope-dm\">Your DMs</span><span class=\"ds-entry-text\">Her old flatmate's name.</span><span class=\"ds-mark\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M6 6l12 12M18 6L6 18\"/></svg>Forgotten</span></li></ul></section>",
+      "css": ".ds-archive { font-family: 'Archivo Variable', Archivo, system-ui, sans-serif; font-variation-settings: 'wdth' 100; font-variant-numeric: tabular-nums; color: #14183a; background: #ffffff; border: 1px solid #d8ddf2; border-radius: 14px; box-shadow: 0 30px 60px -40px rgba(20, 24, 58, 0.45); max-width: 620px; } .ds-archive-head { position: relative; padding: 26px 28px 0; } .ds-archive-name { margin: 0; font-variation-settings: 'wdth' 125; font-weight: 850; font-size: 52px; letter-spacing: -0.025em; line-height: 0.95; } .ds-corner-tag { position: absolute; top: 18px; right: 22px; margin: 0; font-size: 11.5px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; color: #5c638c; } .ds-archive-sub { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 10px 0 0; font-size: 14.5px; font-weight: 650; color: #454d78; } .ds-tabs { position: relative; display: flex; gap: 26px; margin-top: 22px; padding: 0 28px; border-bottom: 1px solid #d8ddf2; } .ds-tab { position: relative; padding: 0 0 13px; border: 0; background: none; cursor: pointer; font: inherit; font-size: 15px; font-weight: 700; color: #5c638c; } .ds-tab[aria-selected='true'] { color: #14183a; box-shadow: inset 0 -3px 0 #14183a; } .ds-tab:hover { color: #14183a; } .ds-tab:focus-visible { outline: 3px solid #3450f0; outline-offset: 2px; } .ds-tab-ink { display: none; } .ds-entries { list-style: none; margin: 0; padding: 8px 28px 24px; } .ds-entry { display: grid; grid-template-columns: 112px minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 14px 0; border-bottom: 1px solid #d8ddf2; animation: ds-unlock 0.5s cubic-bezier(0.2, 0.8, 0.2, 1); } .ds-entry:last-child { border-bottom: 0; } .ds-entry-text { font-size: 17px; font-weight: 550; line-height: 1.35; } .ds-mark { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; color: #5c638c; white-space: nowrap; } .ds-entry.is-forgotten .ds-entry-text { text-decoration: line-through; text-decoration-thickness: 2px; color: #5c638c; } .ds-scope { display: inline-flex; justify-content: center; padding: 4px 8px; border-radius: 6px; font-variation-settings: 'wdth' 110; font-size: 11.5px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #ffffff; } .ds-scope-dm { background: #3450f0; } .ds-scope-srv { background: #cf1f5e; } @keyframes ds-unlock { from { opacity: 0; transform: translateY(8px); } } @media (prefers-reduced-motion: reduce) { .ds-entry { animation: none; } }"
+    },
+    {
+      "name": "Ruled Section",
+      "kind": "custom",
+      "refersTo": "section-rule",
+      "description": "Grouping without boxes: a 2px ink rule opens the group, hairlines split rows with a fixed key column.",
+      "html": "<dl class=\"ds-facts\"><div><dt>Cards</dt><dd>chara_card_v2, .png and v1 cards, up to 8 MB</dd></div><div><dt>Chat exports</dt><dd>Tavern-style .jsonl and more</dd></div><div><dt>Privacy</dt><dd>Imports stay private unless you choose to publish</dd></div></dl>",
+      "css": ".ds-facts { margin: 0; display: grid; border-top: 2px solid #14183a; font-family: 'Archivo Variable', Archivo, system-ui, sans-serif; color: #14183a; } .ds-facts > div { display: grid; grid-template-columns: 130px 1fr; gap: 16px; padding: 14px 0; border-bottom: 1px solid #d8ddf2; } .ds-facts dt { font-weight: 750; font-size: 14.5px; } .ds-facts dd { margin: 0; color: #454d78; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Character Archive",
+    "overview": "Every companion has an archive page that fills in as they get to know you: the character-archive screen of a gacha game, with every gacha mechanic removed. The page is a pale, cool field sampled from the hero art's own ground, so an illustrated character stands directly on the page instead of inside a frame. Beside them sits one white archive panel: a name set huge and wide, a line of real facts, tabs, and a ruled list of memory entries, each tagged with where it was heard and marked with what you did to it.\n\nThe system is light, open and typographic. One variable family (Archivo) does all the work, swinging from expanded black for hooks, names and prices to normal width for UI and reading. Hierarchy comes from rules, not containers: a 2px ink rule opens a section, 1px hairlines separate rows, and the only filled surfaces are the white archive panel and the field itself. Colour is semantic before it is decorative. Blue means private to your DMs, pink means heard in a server, gold means the one thing to do next.\n\nLight theme only (`color-scheme: light`). Motion is small and functional: the tab ink slides, the panel settles, a new entry unlocks, a forgotten one is struck through before it goes. All of it switches off under reduced motion.",
+    "keyCharacteristics": [
+      "Pale cool field with characters standing on it, never boxed.",
+      "One white archive panel with one hairline and a soft, low shadow.",
+      "Expanded black display type (wdth 125, weight 850) against normal-width UI type; tabular numerals everywhere.",
+      "Scope colour as data: blue = DMs, pink = server, nothing else wears them.",
+      "Gold appears once per view, on the primary action.",
+      "Rules (2px ink, 1px hairline) carry grouping; no nested cards."
+    ],
+    "rules": [
+      { "name": "The Scope Is Data Rule", "body": "Private Blue appears only on DM-scoped data and Server Pink only on server-heard data (focus treatment excepted for blue). Never use either for decoration, links or emphasis; the visitor reads them as provenance.", "section": "colors" },
+      { "name": "The One Gold Rule", "body": "Each view has at most one gold element: the primary action (or the badge that names it). Secondary actions are white with a 2px ink stroke or plain underlined links.", "section": "colors" },
+      { "name": "The Two Widths Rule", "body": "Width 125 is for hooks, names, prices and big numerals only; everything a user reads at length or clicks is width 100. Do not set UI controls wide.", "section": "typography" },
+      { "name": "The No Eyebrow Rule", "body": "Uppercase labels head lists and footer columns or tag data. They never sit above a headline as a kicker. \"Example\" is a corner tag on its panel or figure, or inline meta, never an eyebrow over the name.", "section": "typography" },
+      { "name": "The Soft Shadow Rule", "body": "Every shadow is blurred with a negative spread and tinted navy (or gold for the action). No hard offset shadows, no stacked elevations.", "section": "elevation" },
+      { "name": "The Rules Not Boxes Rule", "body": "Group with a 2px ink rule at the top and 1px hairlines between rows. The white panel is the only container; do not nest bordered boxes inside it or tile content into cards.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do stand illustrated characters directly on the field (#ebeefd) and fade crops into it with a mask.",
+      "Do tag every remembered fact with its scope: blue for DMs, pink for server.",
+      "Do keep one gold action per view and make everything else ink-stroked or a link.",
+      "Do separate sections with a 2px ink rule and rows with 1px hairlines.",
+      "Do set hooks, names and prices at wdth 125 / 850 and everything else at wdth 100, with tabular numerals.",
+      "Do pair every mark icon with a word, drawn from the single 2px-stroke icon set.",
+      "Do strike through, then remove, when something is forgotten.",
+      "Do turn off every animation and transition under prefers-reduced-motion."
+    ],
+    "donts": [
+      "Don't use blue or pink for decoration, links or emphasis.",
+      "Don't put a second gold element in a view.",
+      "Don't nest bordered boxes inside panels or tile content into card grids.",
+      "Don't place uppercase labels above headlines as eyebrows; \"Example\" goes in the corner or inline.",
+      "Don't use hard offset shadows; every shadow is blurred and navy- or gold-tinted.",
+      "Don't add a dark theme or candlelit/parchment surfaces.",
+      "Don't use glyph or emoji icons for marks."
+    ]
+  }
+}

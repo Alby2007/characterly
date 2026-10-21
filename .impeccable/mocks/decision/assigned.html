@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=1440">
+<title>Slam Book sketch</title>
+<style>
+  :root{--stock:#b9a6ff;--stock2:#d6ccff;--print:#1b1530;--blue:#2b2bd9;--pink:#ff3d9a;--hi:#fff04d}
+  *{box-sizing:border-box;margin:0}
+  body{width:1440px;height:900px;overflow:hidden;background:var(--stock);color:var(--print);font-family:"Arial Rounded MT Bold","Trebuchet MS",sans-serif}
+  nav{display:flex;align-items:center;gap:36px;padding:26px 56px;font-size:15px;font-weight:700;letter-spacing:.02em}
+  nav .brand{font-size:26px;font-weight:900;margin-right:auto}
+  nav a{color:var(--print);text-decoration:none}
+  nav .tab{background:var(--hi);padding:6px 12px;border:2px solid var(--print)}
+  .sheet{position:absolute;left:56px;top:92px;width:1328px;height:780px;display:grid;grid-template-columns:1.05fr .95fr;gap:0}
+  .left{padding:34px 48px 0 0}
+  .form-title{font-size:15px;font-weight:900;letter-spacing:.18em;text-transform:uppercase}
+  h1{font-family:"Arial Black","Helvetica Neue",sans-serif;font-size:118px;line-height:.9;letter-spacing:-.03em;margin:18px 0 6px}
+  h1 span{background:var(--hi);padding:0 10px}
+  .sub{font-size:34px;font-weight:700;line-height:1.15;max-width:640px}
+  .q{margin-top:34px;border-bottom:3px solid var(--print);padding-bottom:6px;font-size:14px;font-weight:900;letter-spacing:.12em;text-transform:uppercase}
+  .a{font-family:"Comic Sans MS","Segoe Print",cursive;color:var(--blue);font-size:30px;margin-top:6px}
+  .ctas{display:flex;gap:18px;margin-top:38px;align-items:center}
+  .btn{font-size:22px;font-weight:900;padding:22px 30px;border:3px solid var(--print);background:var(--print);color:#fff;text-decoration:none}
+  .btn2{font-size:22px;font-weight:900;padding:22px 30px;border:3px solid var(--print);color:var(--print);text-decoration:none;background:var(--stock2)}
+  .bring{margin-top:20px;font-size:22px;font-weight:700}
+  .bring b{background:var(--hi)}
+  .right{background:var(--stock2);border:3px solid var(--print);padding:30px 36px;position:relative}
+  .right h2{font-size:15px;font-weight:900;letter-spacing:.18em;text-transform:uppercase}
+  .who{display:flex;gap:20px;align-items:center;margin:18px 0 10px}
+  .photo{width:110px;height:130px;background:var(--pink);border:3px solid var(--print);transform:rotate(-3deg)}
+  .name{font-family:"Arial Black",sans-serif;font-size:56px;line-height:1}
+  .line{display:flex;gap:14px;border-bottom:2px solid var(--print);padding:14px 0 6px;align-items:baseline}
+  .line .k{font-size:13px;font-weight:900;letter-spacing:.1em;text-transform:uppercase;width:150px;flex:none}
+  .line .v{font-family:"Comic Sans MS","Segoe Print",cursive;font-size:26px}
+  .dm{color:var(--blue)} .srv{color:var(--pink)}
+  .struck{text-decoration:line-through;text-decoration-thickness:3px;opacity:.6}
+  .legend{position:absolute;bottom:18px;left:36px;right:36px;display:flex;gap:28px;font-size:14px;font-weight:900}
+  .dot{display:inline-block;width:14px;height:14px;border-radius:50%;margin-right:8px;vertical-align:-2px}
+  .tag{position:absolute;top:-16px;right:30px;background:var(--hi);border:3px solid var(--print);padding:6px 12px;font-size:13px;font-weight:900;letter-spacing:.12em;transform:rotate(4deg)}
+</style></head><body>
+<nav><span class="brand">Characterly</span><a href="#">How it works</a><a href="#">The shelf</a><a href="#">Pricing</a><a href="#">Safety</a><a class="tab" href="#">Sign in</a></nav>
+<div class="sheet">
+  <div class="left">
+    <p class="form-title">Page 1 · About you</p>
+    <h1>They <span>remember</span> you.</h1>
+    <p class="sub">In your DMs, and in every server you bring them to.</p>
+    <p class="q">Who fills this in?</p>
+    <p class="a">a character off the shelf, one you bring, or one you awaken</p>
+    <div class="ctas"><a class="btn" href="#">Continue with Discord →</a><a class="btn2" href="#">Browse the shelf</a></div>
+    <p class="bring">Already have a character? <b>Tape in its card →</b></p>
+  </div>
+  <div class="right">
+    <span class="tag">EXAMPLE PAGE</span>
+    <h2>Filled in by</h2>
+    <div class="who"><div class="photo"></div><div class="name">Nyx</div></div>
+    <div class="line"><span class="k">Your name</span><span class="v dm">Alice</span></div>
+    <div class="line"><span class="k">Big thing coming</span><span class="v dm">first 10k, Sunday 7am</span></div>
+    <div class="line"><span class="k">Ask her about</span><span class="v dm">how the race went</span></div>
+    <div class="line"><span class="k">Said in #general</span><span class="v srv">hates spoilers for the finale</span></div>
+    <div class="line"><span class="k">Old answer</span><span class="v dm struck">scared of running</span><span class="v dm">"terrified = caring with legs"</span></div>
+    <div class="legend"><span><i class="dot" style="background:var(--blue)"></i>Only between you two</span><span><i class="dot" style="background:var(--pink)"></i>Heard in a server</span><span>✎ Edit · ★ Pin · ✕ Forget</span></div>
+  </div>
+</div>
+</body></html>

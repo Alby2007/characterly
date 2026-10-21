@@ -71,10 +71,15 @@ Deno.serve(async (request) => {
 
   const { data: profile, error: pErr } = await sb
     .from("web_profiles")
-    .select("id, plan, stripe_customer_id")
+    .select("id, plan, stripe_customer_id, discord_user_id")
     .eq("id", user.id)
     .maybeSingle();
   if (pErr || !profile) return json({ error: "no profile" }, 400);
+
+  // Premium and tokens follow web_profiles.discord_user_id, so a purchase on an
+  // unlinked account would land nowhere the bot can see. The dashboard locks
+  // billing until Discord is linked; this is the server-side half.
+  if (!profile.discord_user_id) return json({ error: "link Discord first" }, 409);
 
   const premium = profile.plan === "premium";
   if (p.needsPremium && !premium) return json({ error: "token packs require Premium" }, 403);

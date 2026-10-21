@@ -1,0 +1,357 @@
+---
+// The back office. Prerendered shell; scripts/dashboard.ts fills it for the
+// signed-in user. Every section has loading, locked (Discord not linked),
+// empty, error and success states. Behaviour ported from website/dashboard.*.
+import Base from "../layouts/Base.astro";
+import Icon from "../components/Icon.astro";
+import { LINKS, PLANS, PACKS } from "../lib/config";
+export const prerender = true;
+---
+<Base title="Your dashboard · Characterly" description="Your Characterly account: memory, imports, tokens and billing." noindex chrome="app">
+  <div class="wrap dash" data-dash aria-busy="true">
+    <header class="dash-head">
+      <h1><span id="dash-greeting">Hello</span>, <span id="dash-name" class="name">there</span>.</h1>
+      <p class="lede">Your characters live in Discord. This is where you see what they remember, bring new ones in, and manage your account.</p>
+    </header>
+
+    <!-- First run: three real steps, each with a done state. -->
+    <section class="guide" id="guide" aria-labelledby="guide-h" hidden>
+      <h2 id="guide-h">Get set up</h2>
+      <ol class="guide-steps">
+        <li id="step-link"><span class="dot" aria-hidden="true"><Icon name="check" size={16} /></span>
+          <div><h3>Link Discord</h3><p class="muted small" data-pending>Connects your account to your characters.</p><p class="muted small" data-done hidden>Linked.</p></div>
+          <button class="btn btn-go btn-sm" type="button" data-link-discord data-pending><Icon name="discord" size={16} />Link Discord</button>
+        </li>
+        <li id="step-join"><span class="dot" aria-hidden="true"><Icon name="check" size={16} /></span>
+          <div><h3>Join the Characterly server</h3><p class="muted small">The shelf and your private threads live there.</p></div>
+          <a class="btn btn-sm" href={LINKS.discord} target="_blank" rel="noopener noreferrer" id="join-server"><Icon name="discord" size={16} />Join the server</a>
+        </li>
+        <li id="step-char"><span class="dot" aria-hidden="true"><Icon name="check" size={16} /></span>
+          <div><h3>Adopt or import a character</h3><p class="muted small" data-pending>Pick one in <code>#characters</code>, or bring a card below.</p><p class="muted small" data-done hidden>You have a character. Say hi in Discord.</p></div>
+          <a class="btn btn-sm" href="#import" data-pending>Import a card</a>
+        </li>
+      </ol>
+    </section>
+
+    <div class="dash-grid">
+      <div class="dash-main">
+        <!-- Memory: the heart of the product, first. -->
+        <section class="archive mem" id="memory" aria-labelledby="memory-h">
+          <div class="archive-head mem-head">
+            <div>
+              <h2 class="archive-name" id="memory-h"><span id="mem-name">Your characters</span></h2>
+              <p class="archive-sub"><span>What they remember about you</span></p>
+            </div>
+            <label class="mem-pick" id="mem-pick" hidden><span class="sr-only">Character</span><select class="select" id="mem-companion"></select></label>
+          </div>
+          <p class="mem-intro muted small">The facts each character keeps from your DMs, their private journal, and the running recap of your story. Pin what should never fade, fix what's wrong, forget what shouldn't be there.</p>
+          <div class="tabs" role="tablist" aria-label="Memory sections" id="mem-tabs" hidden>
+            <button class="tab" type="button" role="tab" aria-selected="true" id="mt-0" aria-controls="mem-memories-panel">Memories <span class="count" id="mem-count"></span></button>
+            <button class="tab" type="button" role="tab" aria-selected="false" id="mt-1" aria-controls="mem-journal-panel" tabindex="-1">Journal <span class="count" id="journal-count"></span></button>
+            <button class="tab" type="button" role="tab" aria-selected="false" id="mt-2" aria-controls="mem-story-panel" tabindex="-1">Story so far</button>
+            <span class="tab-ink" aria-hidden="true"></span>
+          </div>
+          <div id="mem-lists" hidden>
+            <div class="tab-panel" role="tabpanel" id="mem-memories-panel" aria-labelledby="mt-0"><ul class="entries" id="mem-memories"></ul></div>
+            <div class="tab-panel" role="tabpanel" id="mem-journal-panel" aria-labelledby="mt-1" hidden><ul class="entries" id="mem-journal"></ul></div>
+            <div class="tab-panel" role="tabpanel" id="mem-story-panel" aria-labelledby="mt-2" hidden><div id="mem-summaries"></div></div>
+          </div>
+          <p class="state" id="memory-loading">Loading what they remember…</p>
+          <div class="state locked" id="memory-locked" hidden><Icon name="lock" size={18} /><p>Link Discord to see what your characters remember about you.</p><button class="btn btn-sm" type="button" data-link-discord>Link Discord</button></div>
+          <div class="msg mem-msg" id="memory-msg" role="alert" hidden></div>
+        </section>
+
+        <!-- Import -->
+        <section class="panel" id="import" aria-labelledby="import-h">
+          <h2 id="import-h">Bring a character in</h2>
+          <p class="muted">A character card from another platform, a <code>.png</code> card or <code>.json</code> export, becomes a companion in your Discord DMs, private to you unless you publish it.</p>
+          <div id="import-body" hidden>
+            <div class="drop" id="import-drop" role="button" tabindex="0" aria-label="Choose a character card file, or drop one here">
+              <input type="file" id="import-file" accept=".png,.json,image/png,application/json" hidden />
+              <Icon name="upload" size={24} />
+              <p class="drop-title">Drop a character card here</p>
+              <p class="muted small">or click to choose. <code>.png</code> or <code>.json</code>, up to 8 MB</p>
+            </div>
+            <div class="preview" id="import-preview" hidden>
+              <img class="preview-thumb" id="import-thumb" alt="" hidden />
+              <div class="preview-fields">
+                <h3 id="import-name"></h3>
+                <p class="muted" id="import-voice"></p>
+                <p class="small" id="import-traits" hidden></p>
+                <p class="small muted" id="import-creator" hidden></p>
+              </div>
+              <div class="preview-actions">
+                <button class="btn btn-go" id="import-confirm" type="button">Bring them in</button>
+                <button class="link-btn link small" id="import-cancel" type="button">Choose another file</button>
+              </div>
+              <p class="muted small">The card's claimed creator and a content hash are recorded for moderation.</p>
+            </div>
+            <div class="msg" id="import-msg" role="alert" hidden></div>
+            <div class="msg ok" id="import-done" role="status" hidden></div>
+          </div>
+          <div class="state locked" id="import-locked" hidden><Icon name="lock" size={18} /><p>Link Discord to import a character. Companions live in your DMs.</p><button class="btn btn-sm" type="button" data-link-discord>Link Discord</button></div>
+
+          <h3 class="sub-h">Bring a chat history</h3>
+          <p class="muted">An exported conversation, a <code>.jsonl</code> transcript or supported <code>.json</code> export. The character reads through, keeps the moments that mattered as private memories, and the transcript itself is discarded.</p>
+          <div id="hist-body" hidden>
+            <div class="drop" id="hist-drop" role="button" tabindex="0" aria-label="Choose a chat export file, or drop one here">
+              <input type="file" id="hist-file" accept=".jsonl,.txt,.json,application/json,text/plain" hidden />
+              <Icon name="upload" size={24} />
+              <p class="drop-title">Drop a chat export here</p>
+              <p class="muted small">or click to choose. <code>.jsonl</code> or <code>.json</code>, up to 8 MB</p>
+            </div>
+            <div class="preview" id="hist-preview" hidden>
+              <div class="preview-fields">
+                <h3 id="hist-title"></h3>
+                <p class="muted" id="hist-detail"></p>
+                <p class="small" id="hist-others" hidden></p>
+                <label class="field hist-field"><span>These memories belong to</span><select class="select" id="hist-companion"></select></label>
+              </div>
+              <div class="preview-actions">
+                <button class="btn btn-go" id="hist-confirm" type="button">Keep these memories</button>
+                <button class="link-btn link small" id="hist-cancel" type="button">Choose another file</button>
+              </div>
+              <p class="muted small">It runs in the background: the transcript is read in windows, journaled, then discarded.</p>
+            </div>
+            <div class="msg" id="hist-msg" role="alert" hidden></div>
+            <div class="msg ok" id="hist-done" role="status" hidden></div>
+            <div class="hist-list" id="hist-status-list" hidden></div>
+          </div>
+          <div class="state locked" id="hist-locked" hidden><Icon name="lock" size={18} /><p>Link Discord to import a chat history.</p></div>
+        </section>
+      </div>
+
+      <aside class="dash-side panel-flat" aria-label="Account">
+        <!-- Tokens -->
+        <section class="side-sec" aria-labelledby="tokens-h">
+          <div class="panel-head"><h2 id="tokens-h">Tokens</h2><span class="badge" id="tokens-plan">Free</span></div>
+          <div id="tokens-body" hidden>
+            <p class="balance"><span id="tokens-balance">—</span><small>tokens left</small></p>
+            <p class="small muted" id="tokens-split" hidden></p>
+            <p class="small muted" id="tokens-grant"></p>
+            <ul class="ledger" id="tokens-ledger" aria-label="Recent activity"></ul>
+          </div>
+          <p class="muted small">Your message costs one token, the reply costs one. Free refills to {PLANS.free.dailyTokens} each day.</p>
+          <div class="state locked" id="tokens-locked" hidden><Icon name="lock" size={18} /><p>Link Discord to get your daily tokens.</p></div>
+        </section>
+
+        <!-- Settings -->
+        <section class="side-sec" aria-labelledby="botset-h">
+          <h2 id="botset-h">Companion settings</h2>
+          <div id="botset-controls" hidden>
+            <label class="toggle-row"><input type="checkbox" id="set-c2c" role="switch" /><span><strong>Reply to other companions</strong><small>When off, your companion stays quiet when other companions talk in servers. Those turns spend your tokens, so this is your spend control.</small></span></label>
+            <label class="toggle-row"><input type="checkbox" id="set-alerts" role="switch" /><span><strong>Low-token alerts</strong><small>One Discord DM a day when your balance runs low.</small></span></label>
+            <p class="small muted" id="byok-status"></p>
+          </div>
+          <div class="state locked" id="botset-locked" hidden><Icon name="lock" size={18} /><p>Link Discord to manage these.</p></div>
+          <div class="msg" id="botset-msg" role="alert" hidden></div>
+        </section>
+
+        <!-- Billing -->
+        <section class="side-sec" id="billing" aria-labelledby="billing-h">
+          <div class="panel-head"><h2 id="billing-h">Billing</h2><span class="badge" id="billing-plan">Free</span></div>
+          <div id="billing-body" hidden>
+            <p class="muted small">Premium: {PLANS.premium.dailyTokens} tokens a day, memory that updates as you talk, web lookups, and unlimited adoptions.</p>
+            <div class="buy">
+              <button class="btn btn-go" id="btn-subscribe" type="button">Go Premium · ${PLANS.premium.monthly}/month</button>
+              <button class="btn btn-sm" id="btn-subscribe-yearly" type="button">or ${PLANS.premium.yearly}/year, two months free</button>
+            </div>
+            <h3 class="sub-h small-h">Token packs</h3>
+            <div class="packs">
+              {PACKS.map(p => <button class="btn btn-sm" id={`btn-${p.product.replace("_", "-")}`} data-product={p.product} type="button">{p.tokens.toLocaleString("en-US")} · ${p.price}</button>)}
+            </div>
+            <p class="small muted" id="pack-note" hidden>Token packs are for Premium members. Purchased tokens never expire, and stay yours if Premium ends.</p>
+            <p class="small muted" id="billing-note">Payments open in Stripe's secure checkout. Manage or cancel any time from your Stripe receipt email.</p>
+            <div class="msg" id="billing-msg" role="alert" hidden></div>
+          </div>
+          <div class="state locked" id="billing-locked" hidden><Icon name="lock" size={18} /><p>Link Discord before buying, so Premium and tokens land on the right account.</p><button class="btn btn-sm" type="button" data-link-discord>Link Discord</button></div>
+        </section>
+
+        <!-- Account -->
+        <section class="side-sec" aria-labelledby="account-h">
+          <h2 id="account-h">Account</h2>
+          <div class="who">
+            <span class="chip-av big" id="profile-avatar">?</span>
+            <div><p class="who-email" id="profile-email">…</p><p class="small muted" id="profile-since"></p></div>
+          </div>
+          <form id="form-name" class="inline" novalidate>
+            <label class="field"><span>Display name</span><input class="input" type="text" name="display_name" maxlength="48" id="input-name" /></label>
+            <button class="btn btn-sm" type="submit">Save</button>
+          </form>
+          <div class="msg" id="profile-error" role="alert" hidden></div>
+
+          <h3 class="sub-h small-h">Discord <span class="badge" id="discord-badge">Not linked</span></h3>
+          <div class="msg" id="discord-error" role="alert" hidden></div>
+          <div id="discord-linked" hidden>
+            <div class="who"><span class="chip-av big" id="discord-avatar">D</span><div><p class="who-email" id="discord-name"></p><p class="small muted" id="discord-sub"></p></div></div>
+            <button class="btn btn-sm" id="btn-unlink-discord" type="button" hidden>Unlink Discord</button>
+            <p class="small muted" id="discord-unlink-note" hidden>Discord is your only way to sign in. Set a password below first, or unlinking would lock you out.</p>
+          </div>
+          <div id="discord-unlinked">
+            <button class="btn btn-go btn-sm" type="button" data-link-discord><Icon name="discord" size={16} />Link with Discord</button>
+            <form id="form-link-code" class="inline" novalidate>
+              <label class="field"><span>Or enter a link code</span><input class="input" type="text" id="input-link-code" maxlength="12" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX" /></label>
+              <button class="btn btn-sm" type="submit">Claim</button>
+            </form>
+            <div class="msg" id="link-code-msg" role="alert" hidden></div>
+            <p class="small muted">Run <code>/link</code> in Discord to get a code. Only you see the reply.</p>
+          </div>
+
+          <h3 class="sub-h small-h">Password</h3>
+          <form id="form-password" class="stack" novalidate>
+            <label class="field"><span>New password (8 or more characters)</span><input class="input" type="password" name="password" autocomplete="new-password" minlength="8" /></label>
+            <label class="field"><span>Confirm new password</span><input class="input" type="password" name="confirm" autocomplete="new-password" minlength="8" /></label>
+            <button class="btn btn-sm" type="submit">Change password</button>
+          </form>
+          <div class="msg" id="security-msg" role="alert" hidden></div>
+
+          <h3 class="sub-h small-h">Delete account</h3>
+          <p class="small muted">Permanently deletes this web account. Your companions and anything stored in Discord are separate: use <code>/opt-out</code> there to remove those.</p>
+          <button class="btn btn-sm btn-danger" id="btn-delete" type="button">Delete account</button>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+  <dialog class="modal" id="consent-gate" aria-labelledby="cg-h">
+    <h2 id="cg-h">Before you continue</h2>
+    <p>Read the <a href="/terms" target="_blank" rel="noopener noreferrer">Terms of Service</a> and <a href="/privacy" target="_blank" rel="noopener noreferrer">Privacy Policy</a>, then confirm you agree.</p>
+    <div class="msg" id="consent-error" role="alert" hidden></div>
+    <div class="modal-actions">
+      <button class="btn" id="consent-signout" type="button">Sign out</button>
+      <button class="btn btn-go" id="consent-accept" type="button">I agree, continue</button>
+    </div>
+  </dialog>
+
+  <dialog class="modal" id="delete-modal" aria-labelledby="del-h">
+    <h2 id="del-h">Delete your account?</h2>
+    <p>This can't be undone. Type <strong>DELETE</strong> to confirm.</p>
+    <input class="input del-input" type="text" id="delete-confirm" autocomplete="off" spellcheck="false" placeholder="DELETE" aria-label="Type DELETE to confirm" />
+    <div class="msg" id="delete-error" role="alert" hidden></div>
+    <div class="modal-actions">
+      <button class="btn" id="delete-cancel" type="button">Keep my account</button>
+      <button class="btn btn-danger" id="delete-do" type="button" disabled>Delete forever</button>
+    </div>
+  </dialog>
+</Base>
+
+<style>
+  .dash { padding-top: 40px; }
+  .dash-head h1 { font-size: clamp(36px, 4.4vw, 60px); }
+  .dash-head .lede { margin-top: 14px; }
+
+  .guide { margin-top: 32px; border-top: 2px solid var(--ink); padding-top: 18px; }
+  .guide h2 { font-size: 26px; }
+  .guide-steps { list-style: none; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; margin-top: 18px; }
+  .guide-steps li { display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; gap: 6px 12px; align-content: start; }
+  .guide-steps .btn { grid-column: 2; justify-self: start; margin-top: 6px; }
+  .guide-steps h3 { font-size: 17px; }
+  .dot { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; border: 2px solid var(--line-strong); color: transparent; }
+  .guide-steps li[data-done] .dot { background: var(--ok); border-color: var(--ok); color: #fff; }
+  .guide-steps li[data-done] h3 { color: var(--ink-3); }
+
+  .dash-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 24px; margin-top: 32px; align-items: start; }
+  .dash-main, .dash-side { display: grid; gap: 24px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px 26px; }
+  /* The back office: one flat panel, sections split by hairlines. */
+  .panel-flat { gap: 0; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+  .side-sec { padding: 24px 26px; border-top: 1px solid var(--line); }
+  .side-sec:first-child { border-top: 0; }
+  .side-sec h2 { font-size: 22px; letter-spacing: -0.015em; }
+  .side-sec > p { margin-top: 10px; }
+  .panel h2 { font-size: 24px; letter-spacing: -0.015em; }
+  .panel > p { margin-top: 10px; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .sub-h { margin-top: 30px; padding-top: 22px; border-top: 1px solid var(--line); font-size: 19px; }
+  .small-h { font-size: 16px; display: flex; align-items: center; gap: 10px; }
+  .state { margin-top: 16px; color: var(--ink-3); font-size: 15px; }
+  .locked { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 14px 16px; background: var(--field); border-radius: var(--radius-s); color: var(--ink-2); }
+  .locked p { flex: 1 1 200px; margin: 0; }
+
+  /* Memory archive */
+  .mem-head { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 14px 20px; }
+  .mem-pick { min-width: 220px; }
+  .mem-intro { padding: 10px 28px 0; max-width: 70ch; }
+  .mem .tabs { margin-top: 16px; }
+  .count { font-weight: 650; color: var(--ink-3); margin-left: 2px; }
+  .mem .state, .mem-msg { margin: 16px 28px 24px; }
+  .mem :global(.entry) { grid-template-columns: 104px minmax(0, 1fr); align-items: start; }
+  .mem :global(.entry-body) { display: grid; gap: 8px; }
+  .mem :global(.entry-actions) { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+  .mem :global(.act) { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 0; border: 0; background: none; cursor: pointer; font-size: 13.5px; font-weight: 700; color: var(--ink-3); }
+  .mem :global(.act:hover) { color: var(--ink); }
+  .mem :global(.act-forget:hover) { color: var(--danger); }
+  .mem :global(.act svg) { width: 15px; height: 15px; }
+  .mem :global(.entry-flags) { display: flex; gap: 6px; flex-wrap: wrap; }
+  .mem :global(.flag) { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; font-weight: 750; color: var(--ink-2); }
+  .mem :global(.flag svg) { width: 14px; height: 14px; }
+  .mem :global(.flag-warn) { color: var(--danger); }
+  .mem :global(.entry-old) { text-decoration: line-through; text-decoration-thickness: 2px; color: var(--ink-3); font-size: 15px; }
+  .mem :global(.empty-row) { padding: 18px 0; color: var(--ink-3); }
+  .mem :global(.story) { display: grid; gap: 10px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+  .mem :global(.story-foot) { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+
+  /* Import */
+  .drop { margin-top: 16px; display: grid; justify-items: center; gap: 4px; padding: 28px 20px; text-align: center; border: 2px dashed var(--line-strong); border-radius: var(--radius); background: var(--field); cursor: pointer; transition: border-color 0.15s, background 0.15s; color: var(--ink-2); }
+  .drop:hover, .drop:global(.over) { border-color: var(--dm); background: var(--dm-tint); }
+  .drop-title { font-weight: 800; color: var(--ink); }
+  .preview { margin-top: 16px; display: grid; grid-template-columns: auto 1fr; gap: 14px 18px; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); }
+  .preview-thumb { width: 96px; height: 96px; object-fit: cover; border-radius: var(--radius-s); }
+  .preview-fields { display: grid; gap: 6px; grid-column: 2; }
+  .preview-fields h3 { font-size: 22px; }
+  .preview-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .preview > .small { grid-column: 1 / -1; }
+  .hist-field { margin-top: 8px; }
+  .hist-list { margin-top: 16px; display: grid; }
+  .hist-list :global(.hist-status-row) { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14.5px; }
+  .hist-list :global(.hist-file) { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hist-list :global(.hist-state) { color: var(--ink-3); }
+  .hist-list :global(.hist-failed) { color: var(--danger); }
+  .hist-list :global(.hist-done) { color: var(--ok); }
+  .hist-list :global(.hist-undo) { border: 0; background: none; font-weight: 700; color: var(--ink-2); cursor: pointer; text-decoration: underline; min-height: 32px; }
+
+  /* Side */
+  .balance { display: flex; align-items: baseline; gap: 10px; margin-top: 12px; }
+  .balance span { font-variation-settings: var(--wide); font-weight: 850; font-size: 52px; letter-spacing: -0.02em; line-height: 1; }
+  .balance small { font-weight: 650; color: var(--ink-3); }
+  .ledger { list-style: none; margin-top: 14px; }
+  .ledger :global(li) { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; color: var(--ink-2); }
+  .ledger :global(.pos) { color: var(--ok); font-weight: 750; }
+  .ledger :global(.neg) { color: var(--ink-3); }
+  .toggle-row { display: grid; grid-template-columns: auto 1fr; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .toggle-row input { width: 22px; height: 22px; margin: 2px 0 0; accent-color: var(--dm); }
+  .toggle-row strong { display: block; font-size: 15.5px; }
+  .toggle-row small { display: block; margin-top: 3px; color: var(--ink-3); font-size: 13.5px; line-height: 1.45; }
+  #byok-status { margin-top: 12px; }
+  .buy { display: grid; gap: 8px; margin-top: 16px; justify-items: start; }
+  .packs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  #billing-body > p { margin-top: 10px; }
+  .who { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+  .chip-av.big { width: 44px; height: 44px; font-size: 18px; overflow: hidden; flex: none; }
+  .chip-av.big :global(img) { width: 100%; height: 100%; object-fit: cover; }
+  .who-email { font-weight: 700; overflow-wrap: anywhere; }
+  .inline { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: end; margin-top: 16px; }
+  .inline .btn { min-height: 48px; }
+  .stack { display: grid; gap: 12px; margin-top: 12px; justify-items: start; }
+  .stack .field { width: 100%; }
+  #discord-unlinked > .btn { margin-top: 12px; }
+  #discord-linked .btn { margin-top: 12px; }
+  .del-input { margin-top: 16px; }
+
+  @media (max-width: 1000px) {
+    .dash-grid { grid-template-columns: 1fr; }
+    .guide-steps { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 600px) {
+    .mem-intro { padding: 10px 20px 0; }
+    .mem .state, .mem-msg { margin: 16px 20px 20px; }
+    .mem :global(.entry) { grid-template-columns: 1fr; }
+    .panel, .side-sec { padding: 20px; }
+    .preview { grid-template-columns: 1fr; }
+    .preview-fields { grid-column: 1; }
+  }
+</style>
+
+<script>
+  import "../scripts/dashboard";
+</script>

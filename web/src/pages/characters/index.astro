@@ -1,0 +1,132 @@
+---
+// /characters: the public shelf, server-rendered from live listings.
+// Contract (from the old worker): active listings only, every user-authored
+// field escaped (Astro escapes all {expressions}), never a 500 on a database
+// failure, ItemList JSON-LD, five-minute edge cache.
+import Base from "../../layouts/Base.astro";
+import Icon from "../../components/Icon.astro";
+import { SITE_ORIGIN, LINKS } from "../../lib/config";
+import { getCatalog, SHELF_CACHE, ratingLabel, addsLabel, initial } from "../../lib/shelf";
+
+export const prerender = false;
+Astro.response.headers.set("cache-control", SHELF_CACHE);
+
+const { listings, ratings } = await getCatalog();
+// Filter chips: the creator tags actually in use, most common first.
+const tagCounts = new Map<string, number>();
+for (const l of listings) for (const t of l.creatorTags) tagCounts.set(t, (tagCounts.get(t) ?? 0) + 1);
+const tags = [...tagCounts.entries()].sort((a, b) => b[1] - a[1]).map(([t]) => t).slice(0, 12);
+
+const itemList = {
+  "@context": "https://schema.org", "@type": "ItemList",
+  itemListElement: listings.map((l, i) => ({ "@type": "ListItem", position: i + 1, url: `${SITE_ORIGIN}/characters/${l.id}`, name: l.name })),
+};
+const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashboard?welcome=1");
+---
+<Base
+  title="The shelf: AI characters for Discord · Characterly"
+  description="Browse community-made AI characters for Discord. Adopt one into a private thread, and it remembers you and follows you into your servers."
+  path="/characters"
+  jsonLd={[itemList]}
+  current="/characters"
+>
+  <section class="wrap shelf-top">
+    <div class="section-head">
+      <h1>The shelf.</h1>
+      <p class="lede">Characters made and published by the community. Adopt one in the Characterly server and you get your own version, with its own memory of you, in a private thread.</p>
+    </div>
+    <div class="shelf-actions">
+      <a class="btn btn-go" href={discordStart} data-beacon="discord_signin_click"><Icon name="discord" size={18} />Continue with Discord</a>
+      <a class="link" href="/guides/import-character-cards">Bring your own character</a>
+    </div>
+  </section>
+
+  <section class="wrap" aria-label="Characters">
+    {tags.length > 1 && (
+      <div class="filters" role="group" aria-label="Filter by tag" hidden data-filters>
+        <button type="button" class="filter" aria-pressed="true" data-tag="">All <span>{listings.length}</span></button>
+        {tags.map(t => <button type="button" class="filter" aria-pressed="false" data-tag={t}>{t} <span>{tagCounts.get(t)}</span></button>)}
+      </div>
+    )}
+    {listings.length > 0 ? (
+      <ul class="collection" data-collection>
+        {listings.map(l => {
+          const r = ratingLabel(ratings.get(l.id));
+          return (
+            <li data-tags={JSON.stringify(l.creatorTags)}>
+              <a class="char" href={`/characters/${l.id}`}>
+                <span class="char-art">
+                  {l.avatarUrl
+                    ? <img src={l.avatarUrl} alt="" loading="lazy" width="400" height="400" />
+                    : <span class="char-ph" aria-hidden="true">{initial(l.name)}</span>}
+                </span>
+                <span class="char-name">{l.name}</span>
+                {l.tagline && <span class="char-tag">{l.tagline}</span>}
+                <span class="char-meta">{r ? <>{r} · </> : null}{addsLabel(l.addCount)}</span>
+              </a>
+            </li>
+          );
+        })}
+      </ul>
+    ) : (
+      <div class="empty">
+        <h2>Nothing on the shelf yet.</h2>
+        <p class="lede">New characters land here as soon as they're published. You can bring one you already have in the meantime.</p>
+        <p class="empty-actions"><a class="btn" href="/guides/import-character-cards">Import a character card</a><a class="link" href={LINKS.discord} target="_blank" rel="noopener noreferrer">Visit the server</a></p>
+      </div>
+    )}
+    <p class="filter-empty muted" hidden data-filter-empty>No characters with that tag right now.</p>
+  </section>
+</Base>
+
+<style>
+  .shelf-top { display: flex; align-items: end; justify-content: space-between; gap: 24px 48px; flex-wrap: wrap; padding-top: 56px; padding-bottom: 32px; }
+  .shelf-top .section-head { margin-bottom: 0; }
+  .shelf-actions { display: flex; align-items: center; gap: 8px 22px; flex-wrap: wrap; }
+  .filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 28px; }
+  .filter { min-height: 40px; padding: 6px 14px; border-radius: 999px; border: 1.5px solid var(--line-strong); background: var(--panel); cursor: pointer; font-size: 14.5px; font-weight: 700; color: var(--ink-2); }
+  .filter span { color: var(--ink-3); font-weight: 600; margin-left: 4px; }
+  .filter[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .filter[aria-pressed="true"] span { color: #c8cdf0; }
+  .collection { list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 32px 20px; }
+  .char { display: grid; gap: 3px; text-decoration: none; }
+  .char-art { display: block; aspect-ratio: 1; border-radius: var(--radius); overflow: hidden; background: var(--field-deep); }
+  .char-art img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.35s var(--ease); }
+  .char:hover .char-art img { transform: scale(1.04); }
+  .char-ph { display: grid; place-items: center; height: 100%; font-variation-settings: var(--wide); font-weight: 850; font-size: 64px; color: var(--ink-3); }
+  .char-name { margin-top: 10px; font-variation-settings: "wdth" 112; font-weight: 800; font-size: 19px; letter-spacing: -0.01em; }
+  .char:hover .char-name { text-decoration: underline; }
+  .char-tag { color: var(--ink-2); font-size: 15px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .char-meta { font-size: 13px; font-weight: 700; color: var(--ink-3); margin-top: 2px; }
+  .empty { max-width: 640px; padding: 40px 0; }
+  .empty .lede { margin-top: 14px; }
+  .empty-actions { display: flex; align-items: center; gap: 10px 22px; flex-wrap: wrap; margin-top: 22px; }
+  @media (max-width: 600px) {
+    .shelf-top { padding-top: 32px; }
+    .collection { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 14px; }
+    .char-name { font-size: 17px; }
+  }
+</style>
+
+<script>
+  // Progressive tag filter: without JS the whole shelf is listed.
+  const bar = document.querySelector<HTMLElement>("[data-filters]");
+  const items = [...document.querySelectorAll<HTMLElement>("[data-collection] > li")];
+  const none = document.querySelector<HTMLElement>("[data-filter-empty]");
+  if (bar && items.length) {
+    bar.hidden = false;
+    bar.addEventListener("click", e => {
+      const btn = (e.target as Element).closest<HTMLButtonElement>("[data-tag]");
+      if (!btn) return;
+      const tag = btn.dataset.tag ?? "";
+      for (const b of bar.querySelectorAll("[data-tag]")) b.setAttribute("aria-pressed", String(b === btn));
+      let shown = 0;
+      for (const li of items) {
+        const match = !tag || (JSON.parse(li.dataset.tags ?? "[]") as string[]).includes(tag);
+        li.hidden = !match;
+        if (match) shown++;
+      }
+      if (none) none.hidden = shown > 0;
+    });
+  }
+</script>
