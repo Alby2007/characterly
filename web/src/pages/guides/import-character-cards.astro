@@ -4,15 +4,29 @@
 // the copy honest when those constants move.
 import Base from "../../layouts/Base.astro";
 import Icon from "../../components/Icon.astro";
-import { LINKS } from "../../lib/config";
+import { LINKS, SITE_ORIGIN } from "../../lib/config";
 
 export const prerender = true;
 const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashboard?welcome=1#import");
+
+// Steps mirror the visible "How to import" list — the markup must describe
+// the same content or it's structured-data spam.
+const howTo = {
+  "@context": "https://schema.org", "@type": "HowTo",
+  name: "How to import a character card into Discord",
+  description: "Import a standard .png or .json character card as a private companion on Characterly, with an optional .jsonl chat export carrying your history over.",
+  step: [
+    { "@type": "HowToStep", position: 1, name: "Continue with Discord", text: "Sign in with your Discord account. It links your Characterly account automatically.", url: `${SITE_ORIGIN}/account` },
+    { "@type": "HowToStep", position: 2, name: "Drop in your card", text: "Open the import section on your dashboard and drop the card file, or run /companion import in Discord with the file attached.", url: `${SITE_ORIGIN}/dashboard#import` },
+    { "@type": "HowToStep", position: 3, name: "Say hello", text: "The persona, greeting and example dialogue come across. The import is safety-screened and lands private to you." },
+  ],
+};
 ---
 <Base
   title="Import a character card into Discord · Characterly"
   description="Bring an existing character to Discord. Standard .png and .json character cards import as private companions on Characterly, and a .jsonl chat export carries your history over."
   path="/guides/import-character-cards"
+  jsonLd={[howTo]}
 >
   <article class="wrap guide">
     <nav class="crumbs" aria-label="Breadcrumb"><a href="/">Home</a><span aria-hidden="true">/</span><span aria-current="page">Import a character card</span></nav>

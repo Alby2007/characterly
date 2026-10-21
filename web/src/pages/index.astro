@@ -13,7 +13,9 @@ import { SEED_LISTINGS } from "../../../src/seed-personas.ts";
 export const prerender = false;
 Astro.response.headers.set("cache-control", SHELF_CACHE);
 
-const wren = SEED_LISTINGS.find(s => s.name === "Wren")!;
+// The hero is built around Wren; if the seed roster ever renames her, fall
+// back to the first listing rather than 500 the landing page.
+const wren = SEED_LISTINGS.find(s => s.name === "Wren") ?? SEED_LISTINGS[0]!;
 const { listings, ratings } = await getCatalog();
 const strip = listings.slice(0, 6);
 const wrenListing = listings.find(l => l.name === "Wren");
@@ -26,7 +28,7 @@ const jsonLd = [
   {
     "@context": "https://schema.org",
     "@graph": [
-      { "@type": "Organization", "@id": `${SITE_ORIGIN}/#org`, name: "Characterly", url: `${SITE_ORIGIN}/`, logo: `${SITE_ORIGIN}/favicon.svg`,
+      { "@type": "Organization", "@id": `${SITE_ORIGIN}/#org`, name: "Characterly", url: `${SITE_ORIGIN}/`, logo: `${SITE_ORIGIN}/apple-touch-icon.png`,
         description: "AI companions in Discord that remember you, in your DMs and in your servers." },
       { "@type": "WebSite", "@id": `${SITE_ORIGIN}/#site`, url: `${SITE_ORIGIN}/`, name: "Characterly", publisher: { "@id": `${SITE_ORIGIN}/#org` } },
       { "@type": "SoftwareApplication", name: "Characterly", applicationCategory: "EntertainmentApplication", operatingSystem: "Discord", url: `${SITE_ORIGIN}/`,
@@ -42,7 +44,7 @@ const jsonLd = [
 ---
 <Base
   title="Characterly · AI characters that remember you, in Discord"
-  description="AI companions in Discord that remember you, in your DMs and in your servers. Adopt a character off the community shelf, import a character card you already have, or awaken your own."
+  description="AI companions in Discord that remember you — in your DMs and your servers. Adopt one off the shelf, import a card, or awaken your own."
   path="/"
   jsonLd={jsonLd}
 >
@@ -50,7 +52,16 @@ const jsonLd = [
   <section class="hero">
     <div class="wrap hero-grid">
       <figure class="portrait">
-        <img src="/art/wren-archive.jpg" width="848" height="1264" alt="Wren, a companion from the Characterly shelf, holding a mug of tea and smiling." fetchpriority="high" />
+        <picture>
+          <source
+            type="image/webp"
+            srcset="/art/wren-archive-424.webp 424w, /art/wren-archive-640.webp 640w, /art/wren-archive-848.webp 848w"
+            sizes="(max-width: 1100px) 340px, 500px" />
+          <img src="/art/wren-archive-848.jpg"
+            srcset="/art/wren-archive-424.jpg 424w, /art/wren-archive-640.jpg 640w, /art/wren-archive-848.jpg 848w"
+            sizes="(max-width: 1100px) 340px, 500px"
+            width="848" height="1264" alt="Wren, a companion from the Characterly shelf, holding a mug of tea and smiling." fetchpriority="high" />
+        </picture>
       </figure>
       <h1 class="hook">They remember you.</h1>
       <div class="hero-copy">
@@ -368,6 +379,7 @@ const jsonLd = [
   .facts dd { margin: 0; color: var(--ink-2); }
   .bring-actions { margin-top: 16px; }
   .bring-visual { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 18px; }
+  .bring-visual .archive { min-width: 0; }
   .file { display: flex; align-items: center; gap: 12px; padding: 16px 18px; background: var(--panel); border: 1.5px dashed var(--line-strong); border-radius: var(--radius-s); }
   .file span { display: grid; }
   .file small { color: var(--ink-3); font-size: 13px; }
@@ -429,6 +441,10 @@ const jsonLd = [
   @media (max-width: 1100px) {
     .hero-grid { grid-template-columns: minmax(0, 0.7fr) minmax(0, 1fr); gap: 24px; }
     .strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    /* A half-column can't hold the file → card row — tell it downwards:
+       the upload chip, the arrow turned down, the card below it. */
+    .bring-visual { grid-template-columns: 1fr; justify-items: start; }
+    .bring-arrow { transform: rotate(90deg); }
   }
   @media (max-width: 860px) {
     /* Phones: headline, then Wren (head and shoulders), then her archive. */
@@ -445,8 +461,6 @@ const jsonLd = [
     .lane-srv { border-left: 0; padding-left: 0; margin-left: 0; border-top: 1px solid var(--line-strong); margin-top: 22px; }
     .plans { gap: 32px; }
     .steps { gap: 22px; }
-    .bring-visual { grid-template-columns: 1fr; justify-items: start; }
-    .bring-arrow { transform: rotate(90deg); }
     .memory-grid, .bring-grid, .faq-grid { gap: 28px; }
   }
   @media (max-width: 600px) {

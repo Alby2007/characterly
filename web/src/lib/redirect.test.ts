@@ -36,5 +36,8 @@ test("worker: /track allowlist is exactly the funnel events", async () => {
 test("worker: API paths are exempt from the canonical redirect", async () => {
   const fs = await import("node:fs");
   const src = fs.readFileSync(new URL("../worker.ts", import.meta.url), "utf8");
-  assert.ok(src.includes('if (!api && env.CANONICAL_REDIRECT !== "off" && url.hostname !== CANONICAL_HOST'));
+  assert.ok(src.includes('!api && env.CANONICAL_REDIRECT !== "off"'), "api paths must skip the redirect block");
+  // Trailing-slash collapse is part of canonicalization — /characters/ must
+  // not sit beside /characters as a duplicate URL.
+  assert.ok(src.includes("url.pathname.replace(/\\/+$/, \"\")"), "trailing slashes must 301 to the clean path");
 });

@@ -11,6 +11,8 @@ interface Props {
   /** Canonical path, e.g. "/characters". Omit on noindex pages. */
   path?: string;
   ogImage?: string | null;
+  /** Alt text for the social image — name the thing pictured. */
+  ogImageAlt?: string;
   ogType?: string;
   noindex?: boolean;
   jsonLd?: unknown[];
@@ -18,9 +20,12 @@ interface Props {
   chrome?: "site" | "app" | "focus";
   current?: string;
 }
-const { title, description, path, ogImage, ogType = "website", noindex = false, jsonLd = [], chrome = "site", current } = Astro.props;
+const { title, description, path, ogImage, ogImageAlt, ogType = "website", noindex = false, jsonLd = [], chrome = "site", current } = Astro.props;
 const canonical = path ? `${SITE_ORIGIN}${path === "/" ? "/" : path}` : null;
 const image = ogImage ?? `${SITE_ORIGIN}/og.png`;
+// og.png is a fixed 1200×630 card — declare its size so unfurlers skip the
+// probe fetch. Listing avatars are whatever shape the uploader sent.
+const isDefaultCard = image === `${SITE_ORIGIN}/og.png`;
 const navLinks = [
   { href: "/characters", label: "The shelf" },
   { href: "/#how", label: "How it works" },
@@ -45,12 +50,17 @@ const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashb
   <meta property="og:description" content={description} />
   <meta property="og:type" content={ogType} />
   <meta property="og:site_name" content="Characterly" />
+  <meta property="og:locale" content="en_US" />
   {canonical && <meta property="og:url" content={canonical} />}
   <meta property="og:image" content={image} />
+  {isDefaultCard && <meta property="og:image:width" content="1200" />}
+  {isDefaultCard && <meta property="og:image:height" content="630" />}
+  <meta property="og:image:alt" content={ogImageAlt ?? "Characterly — AI characters in Discord that remember you"} />
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content={title} />
   <meta name="twitter:description" content={description} />
   <meta name="twitter:image" content={image} />
+  <meta name="twitter:image:alt" content={ogImageAlt ?? "Characterly — AI characters in Discord that remember you"} />
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <slot name="head" />
