@@ -13,3 +13,12 @@ keys/
 website/dist/
 website/.cloudflare/
 supabase/.temp/
+
+# Agent tooling (local installs — not project code)
+.claude/
+.codex/
+.agents/
+.impeccable/
+.github/agents/
+.github/hooks/
+.github/skills/
