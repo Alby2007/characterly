@@ -1,9 +1,14 @@
-# Static assets that skip the worker (hashed bundles, art, icons). HTML gets
-# the full policy from src/worker.ts; keep the two in step.
+# Static assets that skip the worker (hashed bundles, art, icons — and the
+# prerendered 404.html the assets binding serves for unmatched paths). Pages
+# rendered through the worker get the same policy from src/worker.ts
+# (SECURITY_HEADERS); keep the two in step. CSP on non-document responses is
+# inert, so one /* block is safe.
 /*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
   Strict-Transport-Security: max-age=31536000; includeSubDomains
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
 
 /_astro/*
   Cache-Control: public, max-age=31536000, immutable

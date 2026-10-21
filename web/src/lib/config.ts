@@ -20,8 +20,10 @@ export const TERMS_VERSION = 1;
 
 // The publishable key is public by design; row-level security enforces access.
 // The service-role key never appears in client code.
-export const SUPABASE_URL = "https://tfukkoektmsrolykliop.supabase.co";
-export const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_996kFzgS7sTm4u2FQmOTBw_FXca4Dyd";
+// PUBLIC_* envs override at build/dev time — used by the red-team harness to
+// point the whole client stack at its mock Supabase (and usable for staging).
+export const SUPABASE_URL = import.meta.env?.PUBLIC_SUPABASE_URL ?? "https://tfukkoektmsrolykliop.supabase.co";
+export const SUPABASE_PUBLISHABLE_KEY = import.meta.env?.PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? "sb_publishable_996kFzgS7sTm4u2FQmOTBw_FXca4Dyd";
 
 // Plans and prices, mirrored from the Stripe catalog (supabase/functions/
 // create-checkout + stripe-webhook, docs/operations.md → Billing). Every page
