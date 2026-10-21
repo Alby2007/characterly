@@ -2,6 +2,7 @@ import os from "node:os";
 import v8 from "node:v8";
 import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, ForumLayoutType, GuildOnboardingMode, GuildOnboardingPromptType, ModalBuilder, PermissionFlagsBits, TextInputBuilder, TextInputStyle, type ButtonInteraction, type ChatInputCommandInteraction, type GuildOnboardingEditOptions, type ModalSubmitInteraction } from "discord.js";
 import { config } from "./config.js";
+import { linkSteps } from "./copy.js";
 import { inc } from "./metrics.js";
 import { logError, redactSecrets } from "./secrets.js";
 import { checkListingFields, checkMessageContent } from "./safety.js";
@@ -449,7 +450,7 @@ function buildVerifyCard() {
       .setTitle("Verify your Characterly account")
       .setDescription(
         "This server is members-only past this point — link your free Characterly account to unlock it.\n\n" +
-        "**How:** create an account at " + config.siteUrl + ", run `/link` in the bot's DMs, then click below.\n" +
+        "**How:** " + linkSteps() + ", then click below.\n" +
         "_Just joined? Accept the rules first — the button unlocks once you have._\n" +
         "_Verifying asks you to accept our Terms & Privacy Policy._",
       )
@@ -527,7 +528,7 @@ export async function handleHouseButton(interaction: ButtonInteraction): Promise
   // personal key; consent records against discord_user_id (account_id null).
   if (!account && !(await deps.store.getGuildKey(`dm:${interaction.user.id}`).catch(() => null))) {
     return interaction.reply({
-      content: `No linked Characterly account found — create one free at ${config.siteUrl}, run \`/link\` in the bot's DMs, then click **Verify** again.`,
+      content: `No linked Characterly account found — ${linkSteps()}, then click **Verify** again.`,
       ephemeral: true,
     });
   }

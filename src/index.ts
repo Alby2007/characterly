@@ -1,6 +1,7 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client, Events, GatewayIntentBits, Options, Partials, type Guild, type Message, type MessageReplyOptions, type OmitPartialGroupDMChannel } from "discord.js";
 import OpenAI from "openai";
 import { config } from "./config.js";
+import { linkSteps } from "./copy.js";
 import { sql } from "./db.js";
 import { MemoryStore, type Memory } from "./database.js";
 import { createBrainResolver, guardedLlmFetch } from "./brains.js";
@@ -216,7 +217,7 @@ function linkPromptDue(key: string): boolean {
   linkPromptedAt.set(key, Date.now());
   return true;
 }
-const LINK_PROMPT = `To use Characterly's hosted features, create a free account at ${config.siteUrl} and run \`/link\` here to connect it to your Discord — it takes about a minute.${config.houseInviteUrl ? ` Then join the community server: ${config.houseInviteUrl}` : ""}`;
+const LINK_PROMPT = `To use Characterly's hosted features, ${linkSteps()} — it takes about a minute.${config.houseInviteUrl ? ` Then join the community server: ${config.houseInviteUrl}` : ""}`;
 // Discord renders <t:sec:R> as "in 4 hours" in the viewer's timezone — the
 // daily token/cap reset is always the next UTC midnight.
 const dailyResetTag = () => `<t:${Math.floor(new Date().setUTCHours(24, 0, 0, 0) / 1000)}:R>`;

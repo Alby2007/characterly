@@ -10,6 +10,7 @@ import { runProfileBuild, PROFILE_BUILD_COOLDOWN_MS } from "./profile-build.js";
 import { inc, metricsSnapshot } from "./metrics.js";
 import type { ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, GuildDeployment, MessageEvent } from "./types.js";
 import { config } from "./config.js";
+import { linkSteps } from "./copy.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
 import { TurnLedger } from "./turn-billing.js";
 import { handleOpsCommand, handleHouseButton, handleTicketButton, isHouse, isMarketplaceThread, getOpsDeps, ensureAdopteeThread, ensureAdopteeThreadsForUser, setAdopteeThreadLocked, adopteeManagePayload, deployedGuildIds, deploymentFor, deployMarketplace, removeDeployment, houseAdopteesPressure } from "./ops.js";
@@ -1384,7 +1385,7 @@ async function handleMarketplaceCommand(interaction: ChatInputCommandInteraction
       const account = await store.accountForDiscordUser(interaction.user.id).catch(() => null);
       if (!account) {
         return interaction.reply({
-          content: `Deploying the marketplace needs a linked Characterly account — create one free at ${config.siteUrl} and run \`/link\` here first, then \`/marketplace deploy\` again.`,
+          content: `Deploying the marketplace needs a linked Characterly account — ${linkSteps()}, then \`/marketplace deploy\` again.`,
           ephemeral: true,
         });
       }
@@ -1445,7 +1446,8 @@ async function cmdLink(c: SlashCtx): Promise<unknown> {
     content:
       `**Link code:** \`${code}\`\n\n` +
       `Enter it on your Characterly account page: ${config.siteUrl}/dashboard\n` +
-      `It expires in 10 minutes and only you can see this message.`
+      `It expires in 10 minutes and only you can see this message.\n\n` +
+      `_Tip: signing in at ${config.siteUrl}/account with **Continue with Discord** links instantly — no code._`
   });
 }
 
@@ -1733,7 +1735,7 @@ async function cmdCompanion(c: SlashCtx): Promise<unknown> {
       typeof store.getGuildKey === "function" ? store.getGuildKey(dmScope) : Promise.resolve(null),
     ]);
     const byokNote = keyRow ? "\nYour personal AI key is connected — chats don't spend tokens anyway." : "";
-    if (!account) return interaction.reply({ content: `No hosted account yet — create one at ${config.siteUrl} and run \`/link\` here to start getting daily hosted tokens.` + byokNote, ephemeral: true });
+    if (!account) return interaction.reply({ content: `No hosted account yet — ${linkSteps()} to start getting daily hosted tokens.` + byokNote, ephemeral: true });
     const refill = account.plan === "premium" ? config.premiumDailyCredits : config.freeDailyCredits;
     const tail = account.plan === "premium"
       ? `Manage billing & packs: ${config.siteUrl}/dashboard`
@@ -1803,7 +1805,7 @@ async function cmdCompanion(c: SlashCtx): Promise<unknown> {
               name: "Tokens",
               value: account
                 ? `**${account.creditBalance.toLocaleString()}** on the **${account.plan}** plan — refreshes daily, next refill ${dailyResetTag()}.${account.plan === "free" && !keyRow ? ` Premium: 150/day + live memory, web lookups, first in line — ${config.siteUrl}/dashboard#billing` : ` Details: ${config.siteUrl}/dashboard`}`
-                : `Not linked — create an account at ${config.siteUrl} and run \`/link\` to get hosted tokens`,
+                : `Not linked — ${linkSteps()} to get hosted tokens`,
               inline: false,
             }]
           : []),
@@ -2058,7 +2060,7 @@ async function cmdCompanion(c: SlashCtx): Promise<unknown> {
     const account = await store.accountForDiscordUser(interaction.user.id).catch(() => null);
     if (!account) {
       return interaction.reply({
-        content: `Publishing requires a linked Characterly account — create one at ${config.siteUrl} and run \`/link\` first.`,
+        content: `Publishing requires a linked Characterly account — ${linkSteps()}.`,
         ephemeral: true,
       });
     }
@@ -2085,7 +2087,7 @@ async function cmdCompanion(c: SlashCtx): Promise<unknown> {
     const account = await store.accountForDiscordUser(interaction.user.id).catch(() => null);
     if (!account) {
       return interaction.reply({
-        content: `Creating marketplace characters requires a linked Characterly account — create one at ${config.siteUrl} and run \`/link\` first.`,
+        content: `Creating marketplace characters requires a linked Characterly account — ${linkSteps()}.`,
         ephemeral: true,
       });
     }
@@ -2125,7 +2127,7 @@ async function cmdCompanion(c: SlashCtx): Promise<unknown> {
     const account = await store.accountForDiscordUser(interaction.user.id).catch(() => null);
     if (!account) {
       return interaction.reply({
-        content: `Relisting requires a linked Characterly account — create one at ${config.siteUrl} and run \`/link\` first.`,
+        content: `Relisting requires a linked Characterly account — ${linkSteps()}.`,
         ephemeral: true,
       });
     }
@@ -2836,8 +2838,7 @@ export async function handleMemoryCommand(interaction: ChatInputCommandInteracti
       return interaction.reply({
         ephemeral: true,
         content:
-          `This action needs a linked Characterly account — create one free at ${config.siteUrl} ` +
-          `and run \`/link\` here to connect it. Takes about a minute.`,
+          `This action needs a linked Characterly account — ${linkSteps()}. Takes about a minute.`,
       });
     }
   }
@@ -2964,7 +2965,7 @@ export async function handleCompanionModal(
     const userId = interaction.user.id;
     const account = await store.accountForDiscordUser(userId).catch(() => null);
     if (!account) {
-      return interaction.reply({ content: `Creating marketplace characters requires a linked account — create one at ${config.siteUrl} and run \`/link\`.`, ephemeral: true });
+      return interaction.reply({ content: `Creating marketplace characters requires a linked account — ${linkSteps()}.`, ephemeral: true });
     }
     const channel = await interaction.client.channels.fetch(config.marketplaceChannelId!).catch(() => null);
     if (!channel || channel.type !== ChannelType.GuildForum) {
@@ -3029,7 +3030,7 @@ export async function handleCompanionModal(
     }
     const account = await store.accountForDiscordUser(userId).catch(() => null);
     if (!account) {
-      return interaction.reply({ content: `Publishing requires a linked account — create one at ${config.siteUrl} and run \`/link\`.`, ephemeral: true });
+      return interaction.reply({ content: `Publishing requires a linked account — ${linkSteps()}.`, ephemeral: true });
     }
     // An unlisted→active flip is a new public listing — same daily gate as
     // the awakened publish path (also covers the creator ban).
@@ -3113,7 +3114,7 @@ export async function handleCompanionModal(
     }
     const account = await store.accountForDiscordUser(userId).catch(() => null);
     if (!account) {
-      return interaction.reply({ content: `Publishing requires a linked account — create one at ${config.siteUrl} and run \`/link\`.`, ephemeral: true });
+      return interaction.reply({ content: `Publishing requires a linked account — ${linkSteps()}.`, ephemeral: true });
     }
     const channel = await interaction.client.channels.fetch(config.marketplaceChannelId!).catch(() => null);
     if (!channel || channel.type !== ChannelType.GuildForum) {
@@ -3610,7 +3611,7 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
       }
       const account = await store.accountForDiscordUser(userId).catch(() => null);
       if (!account) {
-        return interaction.reply({ content: `Publishing requires a linked Characterly account — create one at ${config.siteUrl} and run \`/link\` first.`, ephemeral: true });
+        return interaction.reply({ content: `Publishing requires a linked Characterly account — ${linkSteps()}.`, ephemeral: true });
       }
       const listing = await store.listingForCompanion(companion.id);
       const gateError = await publishGateError(store, userId, !listing);
@@ -3629,7 +3630,7 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
     }
     const account = await store.accountForDiscordUser(userId).catch(() => null);
     if (!account) {
-      return interaction.reply({ content: `Publishing requires a linked Characterly account — create one at ${config.siteUrl} and run \`/link\` first.`, ephemeral: true });
+      return interaction.reply({ content: `Publishing requires a linked Characterly account — ${linkSteps()}.`, ephemeral: true });
     }
     // Publishing an import produces a NEW public listing — the daily cap
     // applies just like a fresh awakened publish (publishGateError also
@@ -3926,7 +3927,7 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
         ephemeral: true,
         content: config.houseVerifyChannelId
           ? `You need to **log in** to adopt companions — press **Verify** in <#${config.houseVerifyChannelId}> to link your free Characterly account, then hit **Add** again.`
-          : `You need to **log in** to adopt companions — create a free account at ${config.siteUrl} and run \`/link\` in my DMs, then hit **Add** again.`,
+          : `You need to **log in** to adopt companions — ${linkSteps()}, then hit **Add** again.`,
       });
     }
     // In-house adoptions require Member — adoptee threads live here where
@@ -4202,7 +4203,7 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
     const account = await store.accountForDiscordUser(userId).catch(() => null);
     if (!account) {
       return interaction.reply({
-        content: `Relisting requires a linked account — create one at ${config.siteUrl} and run \`/link\`.`,
+        content: `Relisting requires a linked account — ${linkSteps()}.`,
         ephemeral: true,
       });
     }
@@ -4277,8 +4278,8 @@ async function handleOnboardButtons(interaction: ButtonInteraction, store: Memor
     if (!account && !ownKey) {
       return interaction.reply({
         content:
-          `This needs a linked Characterly account — create one free at ${config.siteUrl} ` +
-          `and run \`/link\` here, or connect your own key with **Paste API Key**.`,
+          `This needs a linked Characterly account — ${linkSteps()}, ` +
+          `or connect your own key with **Paste API Key**.`,
         ephemeral: true,
       });
     }
