@@ -370,8 +370,9 @@ export async function handleHouseMemberAdd(member: MemberLike, deps: OpsDeps): P
   // though they can't interact, so "read rules → verify" lands when it matters.
   void deps.store.trackEvent(member.user.id, "house_join", member.guild.id);
   if (await onboardMember(member, deps, { welcome: !raidHot })) welcomed.add(member.user.id);
-  // Deferred adoptee threads — adopters who joined the house AFTER adopting
-  // elsewhere (import paths) get their private threads opened on arrival.
+  // Adopters who joined the house AFTER adopting elsewhere (import paths)
+  // get their already-met threads re-opened on arrival — never-met
+  // adoptions stay threadless until their Meet click by design.
   await ensureAdopteeThreadsForUser(member.user.id, deps, { guildId: null }).catch(e => {
     inc("ops.adoptee_thread_error"); logError("member-add adoptee ensure failed", e);
   });
@@ -391,7 +392,7 @@ export async function handleHouseMemberUpdate(
   // uncached partial can't greet an existing member.
   if (oldMember.pending === true && newMember.pending === false) {
     if (!welcomed.has(newMember.user.id) && await onboardMember(newMember, deps)) welcomed.add(newMember.user.id);
-    // Screening just cleared — retry deferred adoptee threads in case the
+    // Screening just cleared — retry adoptee thread reattaches in case the
     // pending member couldn't be added to a private thread at join.
     await ensureAdopteeThreadsForUser(newMember.user.id, deps, { guildId: null }).catch(e => {
       inc("ops.adoptee_thread_error"); logError("member-update adoptee ensure failed", e);
@@ -1125,6 +1126,7 @@ async function greetAdopteeInThread(
 export type EnsureAdopteeThreadResult =
   | { thread: TicketThreadLike; greeted: boolean; created: boolean }
   | { needsInvite: true }
+  | { deferred: true }
   | { failed: true };
 
 /** The pinned manage row every adoptee thread carries — one Danger Drop
@@ -1194,9 +1196,20 @@ export async function ensureAdopteeThread(
     /** Where the Add was clicked — overrides adoption.chatGuildId so the
      *  intent survives even if the thread create fails afterwards. */
     targetGuildId?: string | null;
+    /** Explicit chat intent (the Meet surfaces). Without it, an adoption
+     *  that never got its greeting is left threadless — healers must not
+     *  materialize a room nobody asked to enter. */
+    allowCreate?: boolean;
   },
 ): Promise<EnsureAdopteeThreadResult> {
   const { adoption, companion } = ctx;
+  // Deferred creation: a never-introduced adoption with no thread is
+  // intentionally roomless — every active-thread slot is precious. Once
+  // introduced, a missing thread is just a deleted surface and rebuilds
+  // normally below; a live thread reattaches regardless of either flag.
+  if (!adoption.chatThreadId && !adoption.dmIntroducedAt && !ctx.allowCreate) {
+    return { deferred: true };
+  }
   const houseId = config.houseGuildId ?? null;
   let targetId = ctx.targetGuildId !== undefined
     ? (ctx.targetGuildId ?? houseId)
@@ -1307,7 +1320,10 @@ async function createAdopteeThread(
     name,
     type: ChannelType.PrivateThread,
     invitable: false,
-    autoArchiveDuration: 10080,
+    // 3 days by default (env pinned to Discord's 60/1440/4320/10080 set) —
+    // auto-archive is the recycler for the guild's ~1,000 active-thread
+    // slots; a lapsed adopter's next post unarchives the thread anyway.
+    autoArchiveDuration: config.adopteeThreadArchiveMinutes,
   }).catch(e => { inc("ops.adoptee_thread_error"); logError("adoptee thread create failed", e); return null; });
   if (!thread) return { failed: true };
   const added = await thread.members?.add(adoption.userId).then(() => true).catch(() => false) ?? false;
@@ -1370,6 +1386,9 @@ export async function setAdopteeThreadLocked(
 export async function ensureAdopteeThreadsForUser(userId: string, deps: OpsDeps, opts: { guildId?: string | null } = {}): Promise<void> {
   const rows = await deps.store.activeAdoptionsForUser(userId, opts.guildId).catch(() => []);
   for (const row of rows) {
+    // Deferred adoptions stay threadless until intent — the ensure paths
+    // heal threads that once existed, they don't pre-build unmet ones.
+    if (!row.adoption.chatThreadId && !row.adoption.dmIntroducedAt) continue;
     await ensureAdopteeThread(deps, row).catch(e => {
       inc("ops.adoptee_thread_error"); logError("ensure adoptee thread failed", e);
     });
@@ -1762,42 +1781,49 @@ export async function syncDeployments(deps: OpsDeps): Promise<void> {
 }
 
 // ── Floodgate ────────────────────────────────────────────────────────────────
-// Discord caps a guild at ~1,000 ACTIVE threads (any kind — archived ones
-// don't count). The house spends them under #adoptees. The gauge watches
-// that count on this sweep: at HOUSE_THREAD_WARN a pinned card in #adoptees
-// starts diverting users to self-serve deployments; below HOUSE_THREAD_CLEAR
-// it comes down. The band between is hysteresis — the 5-minute sweep can't
-// flap the card off and on around a wobbling count.
+// Discord caps a guild at ~1,000 ACTIVE threads — every kind shares one pool
+// (archived ones don't count): #adoptees children, tickets, forum posts.
+// The gauge reads both signals on this sweep: the house's #adoptees count at
+// HOUSE_THREAD_WARN, or the guild-wide total at HOUSE_GUILD_THREAD_WARN,
+// posts+pins a card in #adoptees diverting users to self-serve deployments;
+// it only comes down once BOTH counts drop below their CLEAR thresholds.
+// The bands between are hysteresis — the 5-minute sweep can't flap the card
+// off and on around a wobbling count.
 
 const PRESSURE_CARD_MARKER = "Char.ly floodgate";
 
-const pressureState = { active: false, count: null as number | null };
+const pressureState = { active: false, count: null as number | null, guildTotal: null as number | null };
 /** Last swept pressure state — the adopt reply reads this instead of
- *  re-fetching threads per interaction (the sweep is the sole writer). */
-export function houseAdopteesPressure(): { active: boolean; count: number | null } {
+ *  re-fetching threads per interaction (the sweep is the sole writer).
+ *  `count` is #adoptees children; `guildTotal` is every active thread in the
+ *  house — the number that actually approaches Discord's ceiling. */
+export function houseAdopteesPressure(): { active: boolean; count: number | null; guildTotal: number | null } {
   return { ...pressureState };
 }
 
-async function countHouseAdopteeThreads(deps: OpsDeps): Promise<number | null> {
+async function countHouseThreads(deps: OpsDeps): Promise<{ adoptees: number; total: number } | null> {
   if (!config.houseGuildId || !config.houseAdopteesChannelId) return null;
   const guild = await deps.fetchGuild(config.houseGuildId).catch(() => null);
   if (!guild?.channels.fetchActiveThreads) return null;
   const res = await guild.channels.fetchActiveThreads()
     .catch(e => { logError("house active threads fetch failed", e); return null; });
   if (!res) return null;
-  let n = 0;
+  let adoptees = 0;
+  let total = 0;
   for (const entry of res.threads as Iterable<ThreadLike | [unknown, ThreadLike]>) {
     const t = Array.isArray(entry) ? entry[1] : entry;
-    if (t.parentId === config.houseAdopteesChannelId) n += 1;
+    total += 1;
+    if (t.parentId === config.houseAdopteesChannelId) adoptees += 1;
   }
-  return n;
+  return { adoptees, total };
 }
 
 async function ensureAdopteePressureCard(deps: OpsDeps): Promise<void> {
   if (!config.houseAdopteesChannelId || !deps.botId) return;
-  const count = await countHouseAdopteeThreads(deps);
-  pressureState.count = count;
-  if (count === null) return; // fetch failed — don't touch the card on stale data
+  const counts = await countHouseThreads(deps);
+  pressureState.count = counts?.adoptees ?? null;
+  pressureState.guildTotal = counts?.total ?? null;
+  if (!counts) return; // fetch failed — don't touch the card on stale data
   const ch = await deps.fetchChannel(config.houseAdopteesChannelId).catch(() => null);
   if (!ch?.send) return;
   const recent = await ch.messages?.fetch({ limit: 20 }).catch(() => null);
@@ -1808,12 +1834,14 @@ async function ensureAdopteePressureCard(deps: OpsDeps): Promise<void> {
       if (m.author?.id === deps.botId && m.content?.includes(PRESSURE_CARD_MARKER)) mine.push(m);
     }
   }
-  if (count < config.houseThreadClearCount) {
+  if (counts.adoptees < config.houseThreadClearCount && counts.total < config.houseGuildThreadClearCount) {
     pressureState.active = false;
     for (const m of mine) await m.delete?.().catch(() => {});
     return;
   }
-  if (count >= config.houseThreadWarnCount) pressureState.active = true;
+  if (counts.adoptees >= config.houseThreadWarnCount || counts.total >= config.houseGuildThreadWarnCount) {
+    pressureState.active = true;
+  }
   if (!pressureState.active) return; // inside the band, inactive — leave it
   // Active: exactly one marked card should stand.
   for (const m of mine.slice(1)) await m.delete?.().catch(() => {});
@@ -1821,7 +1849,7 @@ async function ensureAdopteePressureCard(deps: OpsDeps): Promise<void> {
   const sent = await ch.send({
     content:
       "**The house is filling up — run your own shelf.**\n" +
-      "Discord caps a server at ~1,000 live private threads, and this channel is getting close. You can host your own Characterly instead — it takes about five minutes.\n\n" +
+      "Discord caps a server at ~1,000 live threads, and this one is getting close. You can host your own Characterly instead — it takes about five minutes.\n\n" +
       "**1.** Create a Discord server (just you works)\n" +
       "**2.** Add Characterly to it — button below\n" +
       "**3.** Enable **Community** in Server Settings (the shelf needs a forum)\n" +
@@ -2935,7 +2963,7 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
           `**Deployment \`${guildId}\`** — status \`${row.status}\` · grant \`${row.grantKind}\`\n` +
           `forum ${row.marketplaceChannelId ? `<#${row.marketplaceChannelId}>` : "—"} · adoptees ${row.adopteesChannelId ? `<#${row.adopteesChannelId}>` : "—"} · log-in ${row.loginChannelId ? `<#${row.loginChannelId}>` : "—"} · category ${row.categoryId ? `<#${row.categoryId}>` : "—"}\n` +
           `posts: ${Object.entries(counts).map(([s, n]) => `${s}=${n}`).join(" ") || "none"}${row.lastError ? `\nlast error: ${row.lastError}` : ""}` +
-          (isHouse(guildId) && pressure.count !== null ? `\nfloodgate: ${pressure.active ? "**ACTIVE**" : "inactive"} — ${pressure.count} active #adoptees threads (warn ${config.houseThreadWarnCount} / clear ${config.houseThreadClearCount})` : ""),
+          (isHouse(guildId) && pressure.count !== null ? `\nfloodgate: ${pressure.active ? "**ACTIVE**" : "inactive"} — ${pressure.count} #adoptees · ${pressure.guildTotal} guild-wide (warn ${config.houseThreadWarnCount}/${config.houseGuildThreadWarnCount} · clear ${config.houseThreadClearCount}/${config.houseGuildThreadClearCount})` : ""),
       });
     }
 

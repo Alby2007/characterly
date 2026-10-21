@@ -1878,11 +1878,14 @@ test("isAdopteeThread: env-id parent matches; name fallback catches pre-env chan
 
 test("ensureAdopteeThread: creates a named private thread, adds the adopter, greets, stamps", async () => {
   const { deps, thread, created, stamped, introduced } = adopteeDeps();
-  const res = await ensureAdopteeThread(deps, adopteeFixture() as never);
+  // allowCreate = the Meet surfaces' chat intent — healers pass nothing.
+  const res = await ensureAdopteeThread(deps, adopteeFixture({ allowCreate: true }) as never);
   assert.ok("thread" in res && res.created);
   assert.equal(created.length, 1);
   assert.equal(created[0].type, 12); // ChannelType.PrivateThread
   assert.equal(created[0].invitable, false);
+  // 3-day auto-archive — the recycler for the guild's ~1,000 active slots.
+  assert.equal(created[0].autoArchiveDuration, 4320);
   assert.equal(created[0].name, "Wren");
   assert.deepEqual(thread.addedMembers, ["u-adopter"]);
   assert.deepEqual(stamped, [[7, "t-new"]]);
@@ -1899,10 +1902,31 @@ test("ensureAdopteeThread: creates a named private thread, adds the adopter, gre
 
 test("ensureAdopteeThread: non-members get needsInvite — no thread created", async () => {
   const { deps, created, stamped } = adopteeDeps({ member: null });
-  const res = await ensureAdopteeThread(deps, adopteeFixture() as never);
+  const res = await ensureAdopteeThread(deps, adopteeFixture({ allowCreate: true }) as never);
   assert.deepEqual(res, { needsInvite: true });
   assert.equal(created.length, 0);
   assert.equal(stamped.length, 0);
+});
+
+test("ensureAdopteeThread: never-met adoptions defer — only explicit chat intent creates", async () => {
+  const { deps, created, stamped } = adopteeDeps();
+  // Deferred creation: a fresh adoption (no thread, never introduced) without
+  // allowCreate defers instead of spending a thread slot. This guard is what
+  // keeps healers (backfill, member-join, roster sweeps) from silently
+  // materializing rooms for adopt-and-bounce users.
+  const deferred = await ensureAdopteeThread(deps, adopteeFixture() as never);
+  assert.deepEqual(deferred, { deferred: true });
+  assert.equal(created.length, 0);
+  assert.equal(stamped.length, 0);
+
+  // An introduced adoption missing its thread (deleted) rebuilds without
+  // allowCreate — the room once existed and the adopter already met them.
+  const met = adopteeFixture({
+    adoption: { ...adopteeFixture().adoption, dmIntroducedAt: "2024-01-01T00:00:00Z" },
+  });
+  const rebuilt = await ensureAdopteeThread(deps, met as never);
+  assert.ok("thread" in rebuilt && rebuilt.created, "met adopter's missing thread is rebuilt");
+  assert.equal(created.length, 1);
 });
 
 test("ensureAdopteeThread: existing chat_thread_id short-circuits; reopen unlocks+unarchives", async () => {
@@ -1931,7 +1955,7 @@ test("ensureAdopteeThread: existing chat_thread_id short-circuits; reopen unlock
 test("ensureAdopteeThread: member-add failure tears the thread down and fails", async () => {
   const thread = makeAdopteeThread("t-bad", { addFails: true });
   const { deps, stamped } = adopteeDeps({ thread });
-  const res = await ensureAdopteeThread(deps, adopteeFixture() as never);
+  const res = await ensureAdopteeThread(deps, adopteeFixture({ allowCreate: true }) as never);
   assert.deepEqual(res, { failed: true });
   assert.equal(thread.locked, true);
   assert.equal(thread.archived, true);
@@ -1969,7 +1993,7 @@ test("ensureAdopteeThread: a dead partner deployment relocates the adoption to t
   // The adoption is homed in a partner guild that no longer has a live
   // deployment (revoked/purged) — ensure must collapse it to the house and
   // build the thread there instead of failing or re-homing dead.
-  const fixture = adopteeFixture();
+  const fixture = adopteeFixture({ allowCreate: true });
   (fixture.adoption as unknown as { chatGuildId: string | null }).chatGuildId = "g-partner";
   const res = await ensureAdopteeThread(deps, fixture as never);
   assert.ok("thread" in res && res.created, "house thread created after relocation");
@@ -1983,9 +2007,12 @@ test("ensureAdopteeThread: a dead partner deployment relocates the adoption to t
 test("backfillAdopteeThreads: creates threads for members, skips non-members", async () => {
   const created: Array<Record<string, unknown>> = [];
   const stamped: Array<[number, string]> = [];
+  // Missing = once existed — introduced rows whose thread is now gone.
+  // Deferred (never-met) adoptions are filtered by the query's
+  // dm_introduced_at predicate AND refused by ensure's allowCreate guard.
   const missing = [
-    { ...adopteeFixture(), adoption: { ...adopteeFixture().adoption, id: 7 } },
-    { ...adopteeFixture(), adoption: { ...adopteeFixture().adoption, id: 8, userId: "u-gone" } },
+    { ...adopteeFixture(), adoption: { ...adopteeFixture().adoption, id: 7, dmIntroducedAt: "2024-01-01T00:00:00Z" } },
+    { ...adopteeFixture(), adoption: { ...adopteeFixture().adoption, id: 8, userId: "u-gone", dmIntroducedAt: "2024-01-01T00:00:00Z" } },
   ];
   const thread = makeAdopteeThread("t-bf");
   const { deps } = adopteeDeps({ thread, created, stamped, missingRows: missing });
@@ -1996,11 +2023,12 @@ test("backfillAdopteeThreads: creates threads for members, skips non-members", a
   assert.deepEqual(stamped, [[7, "t-bf"]]);
 });
 
-test("house member add: deferred adoptees get their threads on join", async () => {
+test("house member add: met adoptees missing threads get them rebuilt on join", async () => {
   const created: Array<Record<string, unknown>> = [];
   const stamped: Array<[number, string]> = [];
   const thread = makeAdopteeThread("t-join");
-  const missing = [{ ...adopteeFixture(), username: "Joiner" }];
+  // Once-met adoption whose thread is gone — the join hook rebuilds it.
+  const missing = [{ ...adopteeFixture({ adoption: { ...adopteeFixture().adoption, dmIntroducedAt: "2024-01-01T00:00:00Z" } }), username: "Joiner" }];
   const { deps } = adopteeDeps({ thread, created, stamped });
   (deps.store as { activeAdoptionsForUser(uid: string): Promise<unknown[]> })
     .activeAdoptionsForUser = async uid => uid === "u-adopter" ? missing : [];
@@ -2008,6 +2036,19 @@ test("house member add: deferred adoptees get their threads on join", async () =
   await handleHouseMemberAdd(m, deps);
   assert.equal(created.length, 1);
   assert.deepEqual(stamped, [[7, "t-join"]]);
+});
+
+test("house member add: deferred (never-met) adoptees stay threadless on join", async () => {
+  const created: Array<Record<string, unknown>> = [];
+  const thread = makeAdopteeThread("t-join");
+  // Deferred creation: an adoption adopted but never met has no thread and
+  // keeps none after a join — only the Meet click spends the thread slot.
+  const unmet = [{ ...adopteeFixture(), username: "Joiner" }];
+  const { deps } = adopteeDeps({ thread, created });
+  (deps.store as { activeAdoptionsForUser(uid: string): Promise<unknown[]> })
+    .activeAdoptionsForUser = async uid => uid === "u-adopter" ? unmet : [];
+  await handleHouseMemberAdd(makeMember({ id: "u-adopter" }), deps);
+  assert.equal(created.length, 0, "join must not materialize a deferred room");
 });
 
 test("house member add: rejoining adopters are re-added to their live thread", async () => {
@@ -2268,10 +2309,10 @@ function adopteesChannelCapture() {
   return { ch, sent, msgs, deleted };
 }
 
-function houseGuildWithThreads(n: number) {
+function houseGuildWithThreads(n: number, foreign = 1) {
   const threads = new Map<string, { id: string; parentId: string }>();
   for (let i = 0; i < n; i++) threads.set(`t-${i}`, { id: `t-${i}`, parentId: "c-adoptees" });
-  threads.set("t-elsewhere", { id: "t-elsewhere", parentId: "c-other" }); // not ours
+  for (let i = 0; i < foreign; i++) threads.set(`t-elsewhere-${i}`, { id: `t-elsewhere-${i}`, parentId: "c-other" }); // not ours
   return {
     id: HOUSE,
     channels: {
@@ -2282,13 +2323,13 @@ function houseGuildWithThreads(n: number) {
   };
 }
 
-function pressureDeps(n: number, adoptees: ReturnType<typeof adopteesChannelCapture>) {
+function pressureDeps(n: number, adoptees: ReturnType<typeof adopteesChannelCapture>, foreign = 1) {
   const { deps } = adopteeDeps({ channels: { "c-adoptees": adoptees.ch } });
   (deps.store as any).deployments = async () => [];
   (deps.store as any).backfillListingPosts = async () => {};
   (deps.store as any).resetListingPostsForGuild = async () => {};
   (deps.store as any).missingListingPosts = async () => [];
-  deps.fetchGuild = async () => houseGuildWithThreads(n) as never;
+  deps.fetchGuild = async () => houseGuildWithThreads(n, foreign) as never;
   deps.botInviteUrl = "https://discord.com/oauth2/authorize?client_id=x";
   const saved = config.marketDeployEnabled;
   config.marketDeployEnabled = true;
@@ -2327,4 +2368,37 @@ test("floodgate: in-band counts hold the card (hysteresis); below clear it comes
   assert.equal(houseAdopteesPressure().active, false, "below clear the latch releases");
   assert.equal(adoptees.deleted.length, 1, "the marked card is removed");
   assert.equal(adoptees.msgs.length, 0);
+});
+
+test("floodgate: guild-wide total trips the card even when #adoptees is quiet", async () => {
+  const adoptees = adopteesChannelCapture();
+  const saved = { w: config.houseGuildThreadWarnCount, c: config.houseGuildThreadClearCount };
+  config.houseGuildThreadWarnCount = 6;
+  config.houseGuildThreadClearCount = 3;
+  try {
+    // Settle the shared latch first — pressureState is module-level.
+    const reset = pressureDeps(0, adoptees, 0);
+    try { await syncDeployments(reset.deps); } finally { reset.restore(); }
+    assert.equal(houseAdopteesPressure().active, false);
+    // 2 adoptee threads + 4 foreign = 6 guild-wide ≥ warn — tickets and forum
+    // posts count toward the shared ceiling even though they aren't ours.
+    const { deps, restore } = pressureDeps(2, adoptees, 4);
+    try { await syncDeployments(deps); } finally { restore(); }
+    assert.equal(houseAdopteesPressure().active, true);
+    assert.equal(houseAdopteesPressure().count, 2);
+    assert.equal(houseAdopteesPressure().guildTotal, 6);
+    assert.equal(adoptees.sent.length, 1, "the card posts on guild pressure alone");
+    // Adoptees drop to zero but the guild total stays over clear — the card
+    // holds: the shared pool is still near the wall.
+    const stillHot = pressureDeps(0, adoptees, 4);
+    try { await syncDeployments(stillHot.deps); } finally { stillHot.restore(); }
+    assert.equal(houseAdopteesPressure().active, true, "guild-side pressure holds the latch");
+    const cooled = pressureDeps(0, adoptees, 1);
+    try { await syncDeployments(cooled.deps); } finally { cooled.restore(); }
+    assert.equal(houseAdopteesPressure().active, false, "both signals under clear releases");
+    assert.ok(adoptees.deleted.length >= 1, "the marked card is removed");
+  } finally {
+    config.houseGuildThreadWarnCount = saved.w;
+    config.houseGuildThreadClearCount = saved.c;
+  }
 });

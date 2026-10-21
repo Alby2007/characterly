@@ -4250,6 +4250,9 @@ export class MemoryStore {
       JOIN companions c ON c.id = a.companion_id
       LEFT JOIN companion_listings l ON l.id = a.listing_id
       WHERE a.dropped_at IS NULL AND a.chat_thread_id IS NULL
+        -- Deferred creation: a never-introduced adoption is intentionally
+        -- threadless until its Meet click — "missing" means once existed.
+        AND a.dm_introduced_at IS NOT NULL
         -- Clones of banned listings are frozen — no thread to greet into.
         AND (l.id IS NULL OR l.status <> 'banned')
       ORDER BY a.adopted_at ASC LIMIT ${limit}
@@ -4326,7 +4329,12 @@ export class MemoryStore {
   async adoptListing(
     userId: string,
     listingId: number,
-    opts: { maxSlots: number; maxDaily?: number },
+    /** chatGuildId: the guild the Add was clicked in (NULL = house) — stamped
+     *  at adopt time now that thread creation defers to the Meet click, so
+     *  the eventual thread homes where the adoption happened. On revive it
+     *  updates only chat_guild_id — a preserved chat_thread_id/history must
+     *  survive, matching today's adopt-time reattach semantics. */
+    opts: { maxSlots: number; maxDaily?: number; chatGuildId?: string | null },
   ): Promise<
     | { ok: true; companion: Companion; adoption: CompanionAdoption; reused: boolean; revived: boolean }
     | { ok: false; reason: "not_found" | "delisted" | "own_listing" | "cap" | "cooldown" | "daily_cap"; cooldownUntil?: string }
@@ -4401,7 +4409,8 @@ export class MemoryStore {
           WHERE id = ${companionId}
         `;
         await sql`
-          UPDATE companion_adoptions SET dropped_at = NULL, cooldown_until = NULL, adopted_at = NOW()
+          UPDATE companion_adoptions SET dropped_at = NULL, cooldown_until = NULL, adopted_at = NOW(),
+            chat_guild_id = ${opts.chatGuildId ?? null}
           WHERE id = ${existing.id}
         `;
       } else {
@@ -4417,8 +4426,8 @@ export class MemoryStore {
         `;
         companionId = Number(compRows[0].id);
         await sql`
-          INSERT INTO companion_adoptions (user_id, listing_id, companion_id, adopted_at)
-          VALUES (${userId}, ${listingId}, ${companionId}, NOW())
+          INSERT INTO companion_adoptions (user_id, listing_id, companion_id, adopted_at, chat_guild_id)
+          VALUES (${userId}, ${listingId}, ${companionId}, NOW(), ${opts.chatGuildId ?? null})
         `;
         // Only a fresh adoption counts — re-adopts resume an existing
         // relationship and must not inflate the listing's "adopted by" stat.

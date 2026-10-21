@@ -988,7 +988,19 @@ test("DM lane: awakening owns DMs; adopted companions get private #adoptees thre
     };
   };
   try {
-    // market:talk on the adoptee — opens the private thread, greets as the
+    // market:add — the adoption lands DEFERRED: no thread is created at the
+    // click; the reply points at the Meet button instead of a channel link.
+    const add = ix(`market:add:${listing.id}`);
+    await handleMemoryButton(add.interaction, store);
+    assert.match(add.box.replied?.content ?? "", /has joined your companions/);
+    assert.match(add.box.replied?.content ?? "", /Meet/);
+    assert.match(add.box.replied?.content ?? "", /\/companion summon/);
+    assert.doesNotMatch(add.box.replied?.content ?? "", /<#t-wren>|answer your DMs|in your DMs/i);
+    assert.ok(JSON.stringify(add.box.replied?.components ?? []).includes(`market:talk:${adopted.id}`), "the Meet button is the pointer");
+    assert.ok(JSON.stringify(add.box.replied?.components ?? []).includes("onboard:start"), "awaken nudge offered while unawakened");
+    assert.equal(createdThreads.length, 0, "adopt never creates — Meet does");
+
+    // market:talk — the Meet click — opens the private thread, greets as the
     // companion, and points the clicker at it. No DM pick is involved.
     const talk = ix(`market:talk:${adopted.id}`);
     await handleMemoryButton(talk.interaction, store);
@@ -1008,17 +1020,6 @@ test("DM lane: awakening owns DMs; adopted companions get private #adoptees thre
     assert.match(woke.box.replied?.content ?? "", /lives in my DMs/i);
     assert.equal(createdThreads.length, 1, "the awakened bond has no adoptee thread");
 
-    // market:add — adopt lands the thread pointer + the summon hint; an
-    // unawakened adopter still gets the awaken affordance, and copy never
-    // claims the adoptee answers DMs.
-    const add = ix(`market:add:${listing.id}`);
-    await handleMemoryButton(add.interaction, store);
-    assert.match(add.box.replied?.content ?? "", /<#t-wren>/);
-    assert.match(add.box.replied?.content ?? "", /\/companion summon/);
-    assert.doesNotMatch(add.box.replied?.content ?? "", /answer your DMs|in your DMs/i);
-    assert.ok(add.box.replied?.components?.length, "awaken nudge offered while unawakened");
-    assert.equal(createdThreads.length, 1, "existing chat_thread_id short-circuits");
-
     // Re-clicking a listing they already hold (reused, not revived) names the
     // existing bond and offers the Drop escape hatch — no fake re-adopt copy.
     const storeDup = {
@@ -1029,6 +1030,7 @@ test("DM lane: awakening owns DMs; adopted companions get private #adoptees thre
     await handleMemoryButton(again.interaction, storeDup);
     assert.match(again.box.replied?.content ?? "", /already in your companions/);
     assert.ok(JSON.stringify(again.box.replied?.components ?? []).includes("market:drop:"), "drop button offered on re-click");
+    assert.ok(JSON.stringify(again.box.replied?.components ?? []).includes("market:talk:"), "the Open button rides the re-click");
   } finally {
     config.houseAdopteesChannelId = savedAdoptees;
     config.houseGuildId = savedHouse;

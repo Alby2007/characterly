@@ -970,23 +970,34 @@ function companionAction(interaction: { options: { getSubcommand?(required?: boo
  *  private #adoptees thread and lands the greeting. Returns a UI-ready mention
  *  or the fallback the caller should show. */
 async function adopteeThreadResult(
-  args: { adoption: CompanionAdoption; companion: Companion; listing: { id: number; greeting: string } | null; username: string; reopen?: boolean; targetGuildId?: string | null },
-): Promise<{ thread?: string; needsInvite?: true; failed?: true }> {
+  args: { adoption: CompanionAdoption; companion: Companion; listing: { id: number; greeting: string } | null; username: string; reopen?: boolean; targetGuildId?: string | null; allowCreate?: boolean },
+): Promise<{ thread?: string; needsInvite?: true; deferred?: true; failed?: true }> {
   const deps = getOpsDeps();
   if (!deps) return { failed: true };
   const hit = await ensureAdopteeThread(deps, args).catch(() => ({ failed: true as const }));
   if ("thread" in hit) return { thread: `<#${hit.thread.id}>` };
+  if ("deferred" in hit) return { deferred: true };
   return "needsInvite" in hit ? { needsInvite: true } : { failed: true };
+}
+
+/** The button that opens an adoptee's private room — or creates it (with
+ *  the greeting) when the adoption is still deferred. `market:talk` is the
+ *  lazy-create surface; label says the honest thing for the state. */
+function meetButton(companion: Companion, met: boolean): ButtonBuilder {
+  return new ButtonBuilder()
+    .setCustomId(`market:talk:${companion.id}`)
+    .setLabel(`${met ? "Open" : "Meet"} ${companion.name || "companion"}`.slice(0, 80))
+    .setStyle(ButtonStyle.Success);
 }
 
 /** Where this adoption's thread lives, for copy — known thread mention, or a
  *  generic pointer when creation failed or the user hasn't joined yet. */
-function adoptPointerCopy(t: { thread?: string; needsInvite?: true; needsVerify?: boolean }): string {
+function adoptPointerCopy(t: { thread?: string; needsInvite?: true; deferred?: true; needsVerify?: boolean }): string {
   return t.thread
     ? ` they're waiting for you in ${t.thread}${t.needsVerify ? ` — verify in ${verifyRef()} to chat` : ""}.`
     : t.needsInvite
       ? ` join the Characterly server to meet them${houseInviteRef() ? ` — ${houseInviteRef()}` : ""}${config.houseMemberRoleId ? ` — then verify in ${verifyRef()} to chat` : ""}`
-      : ` I'll open your private thread under #adoptees shortly.`;
+      : ` couldn't open your private room just now — try again in a moment, or \`/companion homes\` to manage them.`;
 }
 
 export async function summonPickedCompanion(interaction: ChatInputCommandInteraction | ButtonInteraction, companion: Companion, store: MemoryStore) {
@@ -1020,10 +1031,11 @@ export async function summonPickedCompanion(interaction: ChatInputCommandInterac
     const adoption = await store.adoptionForCompanion(companion.id);
     if (adoption && !adoption.dmIntroducedAt) {
       const msg =
-        `**${companion.name}** hasn't met you yet — find your private thread under #adoptees in the Characterly server (join it first if you haven't) and say hello. ` +
+        `**${companion.name}** hasn't met you yet — meet them below to open your private room (join the Characterly server first if you haven't). ` +
         `After that first introduction you can summon them into servers.`;
-      if (isButton) return (interaction as ButtonInteraction).update({ content: msg, components: [] });
-      return interaction.reply({ content: msg, ephemeral: true });
+      const rows = [new ActionRowBuilder<ButtonBuilder>().addComponents(meetButton(companion, false))];
+      if (isButton) return (interaction as ButtonInteraction).update({ content: msg, components: rows });
+      return interaction.reply({ content: msg, components: rows, ephemeral: true });
     }
   }
   await store.summonCompanion(interaction.guildId, companion.id, interaction.user.id, interaction.user.username);
@@ -1976,19 +1988,18 @@ async function cmdCompanion(c: SlashCtx): Promise<unknown> {
     if (dupe) {
       const account = await store.accountForDiscordUser(interaction.user.id).catch(() => null);
       const maxSlots = !store.creditsSupported || account?.plan === "premium" ? 1_000_000 : config.freeAdoptionSlots;
-      const res = await store.adoptListing(interaction.user.id, dupe.id, { maxSlots, maxDaily: config.marketAdoptDailyCap });
+      const res = await store.adoptListing(interaction.user.id, dupe.id, { maxSlots, maxDaily: config.marketAdoptDailyCap, chatGuildId: interaction.guildId && !isHouse(interaction.guildId) ? interaction.guildId : null });
       if (!res.ok) {
         const msg = res.reason === "cap"
           ? `Your roster is full — drop a companion with \`/companion drop\` (or go Premium) to bring **${dupe.name}** back.`
           : "You've already imported this card, and it can't rejoin your roster right now — try again later.";
         return interaction.reply({ content: msg, ephemeral: true });
       }
-      const t = res.adoption
-        ? await adopteeThreadResult({ adoption: res.adoption, companion: res.companion, listing: dupe, username: interaction.user.username, reopen: true, targetGuildId: interaction.guildId })
-        : {};
+      const met = !!(res.adoption.chatThreadId || res.adoption.dmIntroducedAt);
       return interaction.reply({
         ephemeral: true,
-        content: `You've already imported this card — **${escapeMarkdown(res.companion.name)}** is ${res.revived ? "back on your roster" : "already with you"}.${adoptPointerCopy({ ...t, needsVerify: needsVerify(interaction) })}`,
+        content: `You've already imported this card — **${escapeMarkdown(res.companion.name)}** is ${res.revived ? "back on your roster" : "already with you"} — tap **${met ? "Open" : "Meet"}** below for your private room${needsVerify(interaction) ? ` — verify in ${verifyRef()} first` : ""}.`,
+        components: [new ActionRowBuilder<ButtonBuilder>().addComponents(meetButton(res.companion, met))],
       });
     }
     const meta = cardImportMeta(parsed.card, { filename: file.name ?? "card", sha256, importedVia: "discord" });
@@ -2168,11 +2179,15 @@ async function cmdCompanion(c: SlashCtx): Promise<unknown> {
     const adopted = active.filter(c => c.kind === "adopted");
     const lines: string[] = [];
     if (awakened) lines.push(`• **${awakened.name}** — your permanent companion, in my DMs.`);
+    const unmet: Companion[] = [];
     for (const c of adopted.slice(0, 10)) {
       const ad = await store.adoptionForCompanion(c.id).catch(() => null);
+      if (ad && !ad.chatThreadId && !ad.dmIntroducedAt) unmet.push(c);
       lines.push(ad?.chatThreadId
         ? `• **${c.name}** — <#${ad.chatThreadId}>`
-        : `• **${c.name}** — join the Characterly server to open your thread${houseInviteRef() ? `: ${houseInviteRef()}` : ""}${config.houseMemberRoleId ? ` — then verify in ${verifyRef()} to chat` : ""}`);
+        : ad && !ad.dmIntroducedAt
+          ? `• **${c.name}** — not met yet — tap **Meet** below to open your private room`
+          : `• **${c.name}** — join the Characterly server to open your thread${houseInviteRef() ? `: ${houseInviteRef()}` : ""}${config.houseMemberRoleId ? ` — then verify in ${verifyRef()} to chat` : ""}`);
     }
     // No adoptees yet — the roster is the natural place to upsell the shelf,
     // which lives in the house.
@@ -2182,6 +2197,12 @@ async function cmdCompanion(c: SlashCtx): Promise<unknown> {
     // Adopted-only users can't reach awakening through the DM chat path —
     // surface the affordance here so the permanent bond stays discoverable.
     const rows: ActionRowBuilder<ButtonBuilder>[] = [];
+    // Deferred adoptions meet here — one Meet button per unmet adoptee.
+    if (unmet.length) {
+      rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+        ...unmet.slice(0, 5).map(c => meetButton(c, false)),
+      ));
+    }
     if (!awakened) {
       rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder().setCustomId("onboard:start").setLabel("Awaken your own companion").setStyle(ButtonStyle.Primary),
@@ -3506,7 +3527,7 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
     if (!created.ok) {
       return interaction.update({ content: "Couldn't save the import — try again in a moment.", components: [] });
     }
-    const res = await store.adoptListing(userId, created.listing.id, { maxSlots, maxDaily: config.marketAdoptDailyCap });
+    const res = await store.adoptListing(userId, created.listing.id, { maxSlots, maxDaily: config.marketAdoptDailyCap, chatGuildId: interaction.guildId && !isHouse(interaction.guildId) ? interaction.guildId : null });
     if (!res.ok) {
       // Adoption failed → the private row is orphaned; clean it up so a
       // retry isn't told "already imported".
@@ -3518,15 +3539,13 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
           : "Couldn't bring that character in — try again in a moment.";
       return interaction.update({ content: msg, components: [] });
     }
-    const t = res.adoption
-      ? await adopteeThreadResult({ adoption: res.adoption, companion: res.companion, listing: created.listing, username: interaction.user.username, reopen: true, targetGuildId: interaction.guildId })
-      : {};
+    const met = !!(res.adoption.chatThreadId || res.adoption.dmIntroducedAt);
     inc("market.imported");
     return interaction.update({
       content:
-        `**${res.companion.name}** is here —${adoptPointerCopy({ ...t, needsVerify: needsVerify(interaction) })}` +
+        `**${res.companion.name}** is here — tap **${met ? "Open" : "Meet"}** below for your private room${needsVerify(interaction) ? ` — verify in ${verifyRef()} first` : ""}.` +
         `\n\n*Imported personas stay private — publishing to the marketplace is a separate choice (\`/companion publish\`).*`,
-      components: [],
+      components: [new ActionRowBuilder<ButtonBuilder>().addComponents(meetButton(res.companion, met))],
     });
   }
 
@@ -3962,7 +3981,7 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
     const maxSlots = !store.creditsSupported || account?.plan === "premium"
       ? Number.MAX_SAFE_INTEGER
       : config.freeAdoptionSlots;
-    const res = await store.adoptListing(userId, id, { maxSlots, maxDaily: config.marketAdoptDailyCap });
+    const res = await store.adoptListing(userId, id, { maxSlots, maxDaily: config.marketAdoptDailyCap, chatGuildId: interaction.guildId && !isHouse(interaction.guildId) ? interaction.guildId : null });
     if (!res.ok) {
       const msg =
         res.reason === "cap" ? `Free accounts can have ${config.freeAdoptionSlots} active adoption${config.freeAdoptionSlots === 1 ? "" : "s"} — drop one first, or go Premium for unlimited: ${config.siteUrl}/dashboard#billing`
@@ -3972,11 +3991,6 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
         : "That listing is no longer available.";
       return interaction.reply({ content: msg, ephemeral: true });
     }
-    const t = await adopteeThreadResult({
-      adoption: res.adoption, companion: res.companion, listing,
-      username: interaction.user.username, reopen: true,
-      targetGuildId: interaction.guildId,
-    });
     inc("market.adopted");
     // A user who only ever adopts never sees the DM onboarding path — keep
     // the permanent awakened bond discoverable.
@@ -3986,11 +4000,20 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
     // re-adopt — offer the escape hatch right there instead of pointing
     // them at a buried slash action.
     const alreadyHave = res.reused && !res.revived;
-    const rows = hasAwakened
-      ? []
-      : [new ActionRowBuilder<ButtonBuilder>().addComponents(
-          new ButtonBuilder().setCustomId("onboard:start").setLabel("Awaken your own companion").setStyle(ButtonStyle.Primary),
-        )];
+    // Deferred creation: no thread is spawned at adopt time — the private
+    // room + greeting materialize on the Meet click (market:talk), so
+    // adopt-and-bounce users never hold a guild thread slot. met = the bond
+    // already got its introduction (re-adopts/re-clicks) — the button opens
+    // their existing room instead of creating one.
+    const met = !!(res.adoption.chatThreadId || res.adoption.dmIntroducedAt);
+    const rows: ActionRowBuilder<ButtonBuilder>[] = [
+      new ActionRowBuilder<ButtonBuilder>().addComponents(meetButton(res.companion, met)),
+    ];
+    if (!hasAwakened) {
+      rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId("onboard:start").setLabel("Awaken your own companion").setStyle(ButtonStyle.Primary),
+      ));
+    }
     if (alreadyHave) {
       rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
@@ -3999,11 +4022,15 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
           .setStyle(ButtonStyle.Danger),
       ));
     }
+    const verifyClause = needsVerify(interaction) ? ` — verify in ${verifyRef()} first` : "";
+    const meetCopy = met
+      ? ` tap **Open** below for your private room${verifyClause}.`
+      : ` tap **Meet** below — they'll introduce themselves in your new private room${verifyClause}.`;
     return interaction.reply({
       ephemeral: true,
       content: alreadyHave
-        ? `**${res.companion.name}** is already in your companions${adoptPointerCopy(t)} — done with them? Drop below.`
-        : `**${res.companion.name}** has joined your companions${res.reused ? " (re-adopted — your history with them continues)" : ""} —${adoptPointerCopy(t)}` +
+        ? `**${res.companion.name}** is already in your companions —${meetCopy} Done with them? Drop below.`
+        : `**${res.companion.name}** has joined your companions${res.reused ? " (re-adopted — your history with them continues)" : ""} —${meetCopy}` +
           " Once they've said hello there, `/companion summon` works in other servers too." +
           (hasAwakened ? "" : " Awaken a permanent companion of your own — that's the bond that stays yours forever, in my DMs.") +
           (houseAdopteesPressure().active ? " The house's adoptee threads are filling up — you can host your own shelf instead: create a server, add Characterly, run `/marketplace deploy`." : ""),
@@ -4108,7 +4135,11 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
     const listing = companion.adoptedFromListingId
       ? await store.listingById(companion.adoptedFromListingId).catch(() => null)
       : null;
-    const t = await adopteeThreadResult({ adoption, companion, listing, username: interaction.user.username });
+    // The Meet surface: this click IS the chat intent that materializes a
+    // deferred adoptee thread (allowCreate) — adopt-and-bounce rows never
+    // get this far, so they never hold a guild thread slot.
+    const t = await adopteeThreadResult({ adoption, companion, listing, username: interaction.user.username, allowCreate: true });
+    if (t.thread) inc("market.meet");
     return interaction.update({
       content: `**${companion.name}** —${adoptPointerCopy({ ...t, needsVerify: needsVerify(interaction) })}`,
       components: [],

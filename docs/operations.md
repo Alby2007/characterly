@@ -219,16 +219,21 @@ can't be resurrected by the deployer.
 - `/ops deploystatus <guild_id>` — row status + grant kind, all channel ids (shelf/adoptees/log-in/category), mirror post counts, last error. For the house it also prints **floodgate state** — latched or not, live thread count, warn/clear thresholds.
 - `/ops deployrevoke <guild_id>` — flips the row to `disabled`, archives every live mirror post, seals + rehomes hosted adoptee threads, clears leftover command registration.
 
-**The floodgate.** The house's ~1,000 active-thread ceiling is spent under
-`#adoptees`. The deployment sweep counts live threads there; at
-`HOUSE_THREAD_WARN` (default **700**) a pinned card in `#adoptees` starts
-diverting users to self-serve deployments; below `HOUSE_THREAD_CLEAR`
-(**600**) it comes down — the band is deliberate hysteresis. Adoption
-confirmations carry a one-line pointer while latched. It only *diverts new
-clicks*: existing threads never auto-migrate out of the house. If the card
-is missing while latched, the sweep re-posts it — check
-`houseAdopteesPressure()` via `/ops deploystatus` on the house, or the
-`ops.pressure_error` metric if posting is failing.
+**The floodgate.** The house's ~1,000 active-thread ceiling is shared
+guild-wide — `#adoptees` children, support tickets, and forum posts all
+count. The deployment sweep reads both signals; at `HOUSE_THREAD_WARN`
+(default **700** adoptee threads) *or* `HOUSE_GUILD_THREAD_WARN` (default
+**850** guild-wide) a pinned card in `#adoptees` starts diverting users to
+self-serve deployments; it comes down once *both* drop below
+`HOUSE_THREAD_CLEAR` (**600**) and `HOUSE_GUILD_THREAD_CLEAR` (**750**) —
+the bands are deliberate hysteresis. Adoption confirmations carry a
+one-line pointer while latched. It only *diverts new clicks*: existing
+threads never auto-migrate out of the house. Idle adoptee threads recycle
+out of the pool via `ADOPTEE_THREAD_ARCHIVE_MINUTES` (default 3 days —
+Discord-valid values only). If the card is missing while latched, the
+sweep re-posts it — check `houseAdopteesPressure()` via `/ops deploystatus`
+on the house (prints both counts), or the `ops.pressure_error` metric if
+posting is failing.
 
 Expected emergency flow: count climbs → card appears → users create servers,
 enable Community (required — forums need it; the deploy refusal teaches it),

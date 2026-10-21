@@ -118,6 +118,18 @@ const env = z.object({
   MARKET_ADOPT_DAILY_CAP: z.coerce.number().int().min(1).default(20),
   HOUSE_THREAD_WARN: z.coerce.number().int().min(1).default(700),
   HOUSE_THREAD_CLEAR: z.coerce.number().int().min(1).default(600),
+  // The ~1,000 active-thread ceiling is guild-WIDE — tickets and forum posts
+  // count too — so the floodgate also watches the house's total, not just
+  // #adoptees children. Warn/clear sit under the ceiling with margin.
+  HOUSE_GUILD_THREAD_WARN: z.coerce.number().int().min(1).default(850),
+  HOUSE_GUILD_THREAD_CLEAR: z.coerce.number().int().min(1).default(750),
+  // Adoptee-thread inactivity archive — Discord accepts only 60/1440/4320/
+  // 10080 minutes. 3d recycles the guild's active-thread slots ~2× faster
+  // than the 7d max; an archived thread unarchives when the adopter posts,
+  // so the only cost is sidebar visibility for lapsed users.
+  ADOPTEE_THREAD_ARCHIVE_MINUTES: z.coerce.number().pipe(
+    z.union([z.literal(60), z.literal(1440), z.literal(4320), z.literal(10080)]),
+  ).default(4320),
   // Curated forum tags — the bot-managed badges on listing threads. Names are
   // fixed constants in ops.ts; these are the thresholds that earn them.
   MARKET_NEW_TAG_DAYS: z.coerce.number().int().min(1).default(7),
@@ -286,11 +298,16 @@ export const config = {
   houseAnnounceChannelId: env.HOUSE_ANNOUNCE_CHANNEL_ID,
   houseVerifyChannelId: env.HOUSE_VERIFY_CHANNEL_ID,
   houseAdopteesChannelId: env.HOUSE_ADOPTEES_CHANNEL_ID,
-  // Floodgate thresholds — active threads under #adoptees. Warn posts the
+  // Floodgate thresholds — active threads under #adoptees AND guild-wide
+  // (the ~1000 ceiling counts tickets/forum posts too). Warn posts the
   // "host your own" card; the gap to clear is hysteresis so it doesn't flap.
-  // Discord's real ceiling is ~1000 active threads per guild.
   houseThreadWarnCount: env.HOUSE_THREAD_WARN,
   houseThreadClearCount: env.HOUSE_THREAD_CLEAR,
+  houseGuildThreadWarnCount: env.HOUSE_GUILD_THREAD_WARN,
+  houseGuildThreadClearCount: env.HOUSE_GUILD_THREAD_CLEAR,
+  // Inactivity window after which adoptee threads auto-archive out of the
+  // active pool. 3d default — validated to Discord's allowed minute set.
+  adopteeThreadArchiveMinutes: env.ADOPTEE_THREAD_ARCHIVE_MINUTES,
   houseInviteUrl: env.HOUSE_INVITE_URL,
   opsChannelId: env.OPS_CHANNEL_ID ?? env.MARKETPLACE_MOD_CHANNEL_ID,
   opsUserIds: (env.OPS_USER_IDS ?? "").split(",").map(s => s.trim()).filter(Boolean),

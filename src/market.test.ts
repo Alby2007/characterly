@@ -1125,3 +1125,32 @@ test("adoptListing distinguishes fresh / still-active / revived", async () => {
   const back = await store.adoptListing("u-rv", l.id, { maxSlots: 5 });
   assert.ok(back.ok && back.reused && back.revived, "re-adopt after a drop is a revive");
 });
+
+test("adoptListing stamps chat_guild_id at adopt; revive rehomes but keeps the old thread", async () => {
+  const { store } = await freshStore();
+  const c = await awakenedCompanion(store, "u-hg-c", "HG");
+  const l = await makeListing(store, "u-hg-c", c.id, "HG");
+
+  // House click → NULL guild (the house convention).
+  const house = await store.adoptListing("u-hg", l.id, { maxSlots: 5 });
+  assert.ok(house.ok);
+  if (house.ok) assert.equal(house.adoption.chatGuildId, null, "house adoption stays NULL");
+
+  // Partner click → the adoption is homed there at write time. Deferred
+  // creation means createAdopteeThread can no longer be the first stamper.
+  const partner = await store.adoptListing("u-hg2", l.id, { maxSlots: 5, chatGuildId: "g-partner" });
+  assert.ok(partner.ok);
+  if (partner.ok) assert.equal(partner.adoption.chatGuildId, "g-partner");
+
+  // Give it a once-met past — thread id + intro survive the drop — then a
+  // house-side re-adopt must rehome the guild WITHOUT touching the thread.
+  await sql`UPDATE companion_adoptions SET chat_thread_id = 't-old', chat_channel_id = 'c-old', dm_introduced_at = NOW() WHERE id = ${partner.ok ? partner.adoption.id : -1}`;
+  await store.dropAdoption("u-hg2", partner.ok ? partner.companion.id : -1, -1);
+  const back = await store.adoptListing("u-hg2", l.id, { maxSlots: 5, chatGuildId: null });
+  assert.ok(back.ok && back.revived);
+  if (back.ok) {
+    assert.equal(back.adoption.chatGuildId, null, "house re-click rehomes the adoption");
+    assert.equal(back.adoption.chatThreadId, "t-old", "the historical thread survives re-adoption");
+    assert.equal(back.adoption.chatChannelId, "c-old");
+  }
+});

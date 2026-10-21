@@ -1205,12 +1205,16 @@ async function handleDmMessage(
       const adopted = (await store.listCompanionsForUser(userId).catch(() => [] as Companion[]))
         .filter(c => c.kind === "adopted" && c.onboardingState === "active");
       if (adopted.length) {
-        // Materialize any missing threads first so the links listed below
-        // are real — joins and screening can defer creation.
+        // Reattach any existing threads first so the links below are real —
+        // never-introduced adoptions stay deferred until their Meet click.
         if (opsDeps) await ensureAdopteeThreadsForUser(userId, opsDeps).catch(e => { inc("ops.adoptee_thread_error"); logError(`adoptee thread ensure failed for u:${userId}`, e); });
         const lines = (await Promise.all(adopted.slice(0, 10).map(async c => {
           const ad = await store.adoptionForCompanion(c.id).catch(() => null);
-          return ad?.chatThreadId ? `• **${c.name}** — <#${ad.chatThreadId}>` : `• **${c.name}**`;
+          return ad?.chatThreadId
+            ? `• **${c.name}** — <#${ad.chatThreadId}>`
+            : ad && !ad.dmIntroducedAt
+              ? `• **${c.name}** — not met yet — \`/companion homes\` opens their room`
+              : `• **${c.name}**`;
         }))).join("\n");
         const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
           new ButtonBuilder().setCustomId("onboard:start").setLabel("Awaken your own companion").setStyle(ButtonStyle.Primary),

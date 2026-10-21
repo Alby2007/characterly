@@ -62,9 +62,9 @@ filename, `sha256` of the source bytes) on both rows.
 
 **Private by default.** An import creates a `status='unlisted'` listing plus an
 adopted clone owned by the importer — invisible to marketplace queries and live
-listing caps, adoptable only by its creator. Like every adoption it gets its
-own private `#adoptees` thread (created at confirm for house members —
-non-members get the server invite and the thread materializes on join); the
+listing caps, adoptable only by its creator. Like every adoption its private
+`#adoptees` thread materializes on first chat intent (the **Meet** button on
+the confirm reply — see *Adopting* below); the
 awakened companion is never touched. Discord: preview → confirm. Website:
 the dashboard's "Import a character" plate parses the file client-side, shows a
 preview, uploads an extracted PNG avatar to the `card-avatars` bucket, and
@@ -304,17 +304,28 @@ Forum card → **Add** → `store.adoptListing` in one transaction:
 - **Clone** — a `kind='adopted'` companions row is inserted owned by the
   adopter, plus the `companion_adoptions` row. Re-adopting the same listing
   reuses the same clone, so the relationship and memories continue.
-- **Thread creation** — the adoption opens (or, on re-adopt, reopens) a
-  named private thread under `#adoptees` in the hub server and the companion
-  posts the listing `greeting` there as their first message. `chat_thread_id`
-  on `companion_adoptions` is the registry; `dm_introduced_at` stamps **only
-  on a successful greeting send** — it's what unlocks server summoning.
-  Adopters who aren't house members get the server invite instead of a
-  silent deferral; `handleHouseMemberAdd` and the periodic
-  `backfillAdopteeThreads` sweep materialize the thread on join.
+- **Deferred thread creation** — adopting does *not* spawn a thread. The
+  confirm reply carries a **Meet** button (`market:talk`) instead of a thread
+  link; the click is the first chat intent that materializes the named
+  private thread under `#adoptees` and posts the listing `greeting` there
+  (`ensureAdopteeThread` with `allowCreate`). An adopt-and-bounce user never
+  spends a guild active-thread slot — under the ~1,000 active-threads
+  budget, slots are reserved for people who actually engage. The
+  `chat_thread_id`/`dm_introduced_at` pair is the state machine:
+  `NULL`/`NULL` = deferred (never met — healers skip it deliberately);
+  a live `chat_thread_id` = the room exists; `NULL` + `dm_introduced_at` set
+  = the room once existed (deleted) and rebuilds on touch. On re-adopt the
+  preserved `chat_thread_id` reopens so the history continues.
+  `ensureAdopteeThread` without `allowCreate` returns `{deferred}` for the
+  first state — that's the guard keeping `ensureAdopteeThreadsForUser`,
+  member-join, and the periodic `backfillAdopteeThreads` sweep (which also
+  filters on `dm_introduced_at IS NOT NULL`) from silently re-creating rooms
+  nobody entered. Adopters who click Meet without being house members get
+  the `needsInvite` invite copy — the thread materializes on join via the
+  same healers, which can then add them.
 - **Introduction gate** — adopted companions can't be server-summoned until
-  `dm_introduced_at` is set; an early summon attempt gets an ephemeral warning
-  pointing at the thread.
+  `dm_introduced_at` is set; an early summon attempt gets an ephemeral
+  "hasn't met you yet" reply carrying the Meet button.
 - `getCompanionByOwner` stays awakened-only, so onboarding, avatar edits, and
   the permanent-lock semantics are untouched. `resolveDmCompanion` is
   awakened-only too — the DM lane belongs to the permanent bond, full stop
@@ -338,9 +349,10 @@ the one exception to the house's private-thread bypass (`isAdopteeThread` +
 `companionThreadForChannel`); support-ticket threads still bypass entirely.
 
 Roster commands: `homes` (where each companion lives — DM link vs thread
-links, plus a Drop button per adoptee), `drop` (picker → `market:drop`),
-`summon`/`dismiss` (pickers when >1), `card`, `status`. `market:talk`
-buttons open/create the thread.
+links vs "not met yet" Meet rows, plus a Drop button per adoptee), `drop`
+(picker → `market:drop`), `summon`/`dismiss` (pickers when >1), `card`,
+`status`. `market:talk` buttons are the Meet surface — they open or create
+the thread.
 
 ## Dropping & cooldown
 
@@ -465,9 +477,11 @@ the publish; the deployment-sync sweep retries them and backfills listings a
 deployment missed. Ratings, edits, creator tag picks, delists and bans all
 propagate across mirrors (`archiveListingPosts` locks+archives the lot).
 
-**Adoption placement.** Add clicked in a partner guild homes the private
-thread *there* (`chat_guild_id = that guild`), behind an ephemeral confirm
-disclosing that the partner's admins can read private threads. If the user
+**Adoption placement.** Add clicked in a partner guild homes the *adoption*
+there — `adoptListing` stamps `chat_guild_id = that guild` at write time
+(behind an ephemeral confirm disclosing that the partner's admins can read
+private threads) — so the thread that eventually materializes on the Meet
+click opens under *that* guild's `#adoptees`. If the user
 leaves the guild, the deployment dies, or the channel is deleted, the next
 touch relocates the adoption to the house (`chat_guild_id → NULL`) and
 rebuilds — memories are `dm:<user>`-scoped so nothing is lost but the old
@@ -483,16 +497,29 @@ otherwise route those messages into the normal guild memory pipeline).
 adoption locations homed there — orphaned adoptions relocate lazily.
 
 **The floodgate (v63).** The house spends its ~1,000 active-thread budget
-under `#adoptees`. The deployment sweep counts live threads parented there
-and keeps a pinned card in the channel while pressure is high: at
-`HOUSE_THREAD_WARN` (default **700**) the card posts+pins — it teaches the
-self-serve path (create a server → add the bot → `/marketplace deploy`,
-with an install-link button) — and below `HOUSE_THREAD_CLEAR` (default
-**600**) it's removed. The band between is hysteresis so the sweep can't
-flap the card. While pressure is latched, adopt confirmations append a
-one-line pointer to hosting your own shelf. Existing house threads never
-drain automatically — the gate diverts *new* adoption clicks only; each
-adoption's thread stays homed where it was clicked until that host dies.
+under `#adoptees` — but the ceiling is guild-wide: tickets and forum posts
+count too. The deployment sweep tracks both signals — live threads parented
+to `#adoptees` AND the house's total active threads — and keeps a pinned
+card in the channel while pressure is high: at `HOUSE_THREAD_WARN` (default
+**700**) *or* `HOUSE_GUILD_THREAD_WARN` (default **850**) the card
+posts+pins — it teaches the self-serve path (create a server → add the bot
+→ `/marketplace deploy`, with an install-link button) — and it's removed
+only once *both* counts drop below `HOUSE_THREAD_CLEAR` (default **600**)
+and `HOUSE_GUILD_THREAD_CLEAR` (default **750**). The bands are hysteresis
+so the sweep can't flap the card. While pressure is latched, adopt
+confirmations append a one-line pointer to hosting your own shelf.
+Existing house threads never drain automatically — the gate diverts *new*
+adoption clicks only; each adoption's thread stays homed where it was
+clicked until that host dies.
+
+**Slot recycling.** Two levers keep the pool churning. First, deferred
+creation: an adoption only spends a slot once the adopter clicks Meet —
+adopt-and-bounce users hold nothing. Second, adoptee threads auto-archive
+after `ADOPTEE_THREAD_ARCHIVE_MINUTES` of inactivity (default **4320** = 3
+days — Discord only accepts 60/1440/4320/10080). Archived threads stop
+counting toward the ceiling and unarchive when the adopter posts again, so
+the archive window is the pool's main churn dial: shorter recycles slots
+faster at the cost of sidebar visibility for lapsed adopters.
 
 `MARKET_DEPLOY_ENABLED` gates grant/deploy/sync — the floodgate rides the
 same sweep, so the switch also gates it. Setting it requests the privileged
@@ -507,7 +534,10 @@ or login fails (same caveat as `HOUSE_GUILD_ID`).
 | `MARKETPLACE_CHANNEL_ID` | unset → publishing disabled | Forum channel in the hub server |
 | `MARKET_DEPLOY_ENABLED` | unset → partner deployments off | Master switch for `/ops deploygrant`, `/marketplace deploy`, the deployment sync sweep, and the floodgate gauge |
 | `HOUSE_THREAD_WARN` | 700 | Active #adoptees threads at which the floodgate card posts |
-| `HOUSE_THREAD_CLEAR` | 600 | Count below which the floodgate card is removed (hysteresis band) |
+| `HOUSE_THREAD_CLEAR` | 600 | #adoptees count below which the card may come down (hysteresis band) |
+| `HOUSE_GUILD_THREAD_WARN` | 850 | Guild-wide active threads (tickets/forum posts count too) that also trips the card |
+| `HOUSE_GUILD_THREAD_CLEAR` | 750 | Guild-wide count the card needs to see before clearing |
+| `ADOPTEE_THREAD_ARCHIVE_MINUTES` | 4320 | Adoptee-thread inactivity auto-archive — Discord-valid values only (60/1440/4320/10080) |
 | `MARKETPLACE_MOD_CHANNEL_ID` | unset | Text channel pinged on reports (with mod action buttons) |
 | `MARKETPLACE_MOD_ROLE_IDS` | unset → ManageGuild | Comma-separated role ids allowed to act on report pings |
 | `FREE_ADOPTION_SLOTS` | 1 | Active adoptions per free account |
