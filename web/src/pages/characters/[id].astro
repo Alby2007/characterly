@@ -1,6 +1,8 @@
 ---
 // /characters/<id>: one indexable archive page per published listing.
-// Unknown or delisted ids get a real 404 so they drop out of the index.
+// Unknown or delisted ids get a real 404 so they drop out of the index —
+// but an upstream read failure gets a 503, not a 404, so a transient outage
+// can't masquerade as a delist to crawlers.
 // Product JSON-LD with a $0 offer; aggregateRating only with a real count.
 import Base from "../../layouts/Base.astro";
 import Archive from "../../components/Archive.astro";
@@ -12,13 +14,13 @@ export const prerender = false;
 
 const raw = Astro.params.id ?? "";
 const id = /^\d+$/.test(raw) ? Number(raw) : NaN;
-const page = Number.isInteger(id) && id > 0 ? await getListingPage(id) : null;
-if (!page) {
-  return Astro.rewrite("/characters/not-found");
+const res = Number.isInteger(id) && id > 0 ? await getListingPage(id) : { kind: "miss" as const };
+if (res.kind !== "hit") {
+  return Astro.rewrite(res.kind === "error" ? "/unavailable" : "/characters/not-found");
 }
 Astro.response.headers.set("cache-control", SHELF_CACHE);
 
-const { listing: l, rating, related, ratings } = page;
+const { listing: l, rating, related, ratings } = res.data;
 const canonical = `${SITE_ORIGIN}/characters/${l.id}`;
 const traitLine = l.coreTraits.length ? ` Traits: ${l.coreTraits.slice(0, 5).join(", ")}.` : "";
 const description = `${l.tagline ? `${l.tagline}.` : `${l.name} is a community AI character on the Characterly shelf.`}${traitLine} Adopt ${l.name} into a private Discord thread, and they remember you from the first hello.`;
@@ -47,7 +49,7 @@ const greeting = l.greeting.split(/(\*[^*]+\*)/g).filter(Boolean)
 const paras = (s: string) => s.split(/\n+/).map(t => t.trim()).filter(Boolean);
 const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashboard?welcome=1");
 ---
-<Base title={`${l.name}, an AI character for Discord · Characterly`} description={description} path={`/characters/${l.id}`} ogImage={l.avatarUrl} jsonLd={[product, crumbs]} current="/characters">
+<Base title={`${l.name}, an AI character for Discord · Characterly`} description={description} path={`/characters/${l.id}`} ogType="product" ogImage={l.avatarUrl} ogImageAlt={`${l.name}'s portrait`} jsonLd={[product, crumbs]} current="/characters">
   <div class="wrap">
     <nav class="crumbs" aria-label="Breadcrumb"><a href="/">Home</a><span aria-hidden="true">/</span><a href="/characters">The shelf</a><span aria-hidden="true">/</span><span aria-current="page">{l.name}</span></nav>
   </div>

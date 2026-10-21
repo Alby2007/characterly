@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   esc, sitemapXml, listingIndexPage, listingPage, notFoundPage,
-  fetchActiveListings, fetchListing, fetchListingRating, fetchRatingStats,
+  fetchActiveListings, fetchListing, lookupListing, fetchListingRating, fetchRatingStats,
   relatedListings, importGuidePage,
   SITE_ORIGIN, type ShelfListing,
 } from "./site-shelf.js";
@@ -238,6 +238,39 @@ test("fetchListing returns null for a delisted/unknown id (the row never arrives
   // A non-integer/absurd id never reaches the network at all.
   assert.equal(await fetchListing(ENV, -1), null);
   assert.equal(await fetchListing(ENV, NaN), null);
+});
+
+test("lookupListing separates 'row absent' from 'upstream broken' — 404 vs 503", async () => {
+  // hit
+  await withFetch(
+    async () => new Response(JSON.stringify([{ id: 8, name: "N" }])),
+    async () => {
+      const r = await lookupListing(ENV, 8);
+      assert.equal(r.kind, "hit");
+      if (r.kind === "hit") assert.equal(r.listing.id, 8);
+    },
+  );
+  // miss: empty row set, or a malformed id that never reaches the network
+  await withFetch(
+    async () => new Response("[]"),
+    async () => { assert.equal((await lookupListing(ENV, 404)).kind, "miss"); },
+  );
+  assert.equal((await lookupListing(ENV, -1)).kind, "miss");
+  // error: HTTP failure, network failure, undecodable body, missing env — none
+  // of these may masquerade as "gone" on a crawler-facing page.
+  await withFetch(
+    async () => new Response("boom", { status: 500 }),
+    async () => { assert.equal((await lookupListing(ENV, 1)).kind, "error"); },
+  );
+  await withFetch(
+    async () => { throw new Error("network down"); },
+    async () => { assert.equal((await lookupListing(ENV, 1)).kind, "error"); },
+  );
+  await withFetch(
+    async () => new Response("not json"),
+    async () => { assert.equal((await lookupListing(ENV, 1)).kind, "error"); },
+  );
+  assert.equal((await lookupListing({}, 1)).kind, "error");
 });
 
 test("fetch helpers degrade to empty/null on failure — the shelf never 500s", async () => {

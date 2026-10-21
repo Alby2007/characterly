@@ -41,7 +41,4 @@ The worker keeps the name `characterly-website`, so `npm run deploy` replaces th
 
    Then retire `website/` and the HTML templates in `src/site-shelf.ts`, and update `docs/website.md`.
 
-## Outstanding assets
 
-- `public/og.png` is missing, so social previews point at a file that doesn't exist yet. It needs a 1200×630 image from the Wren art.
-- `public/apple-touch-icon.png` is the old dark icon. It needs regenerating from `public/favicon.svg`.

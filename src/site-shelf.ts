@@ -65,11 +65,18 @@ function restBase(env: ShelfEnv): { base: string; headers: Record<string, string
   };
 }
 
+/** avatar_url renders into <img src>, og:image and JSON-LD on first-party
+ *  pages. javascript:/data:/blob: schemes are inert markup-wise under CSP but
+ *  junk for unfurlers — and a future sink could forget the constraint. Only
+ *  http(s) and same-origin absolute paths render. */
+const safeAvatarUrl = (u: string | null): string | null =>
+  u != null && (/^https?:\/\//i.test(u) || /^\/(?!\/)/.test(u)) ? u : null;
+
 const toListing = (r: RawListing): ShelfListing => ({
   id: r.id, name: r.name ?? "", tagline: r.tagline ?? "", voicePersona: r.voice_persona ?? "",
   coreTraits: r.core_traits ?? [], creatorTags: r.creator_tags ?? [],
   backstory: r.backstory ?? "", greeting: r.greeting ?? "",
-  avatarUrl: r.avatar_url ?? null, addCount: r.add_count ?? 0, updatedAt: r.updated_at ?? "",
+  avatarUrl: safeAvatarUrl(r.avatar_url), addCount: r.add_count ?? 0, updatedAt: r.updated_at ?? "",
 });
 
 /** Published listings, most-adopted first. Only status='active' — delisted,
@@ -85,13 +92,29 @@ export async function fetchActiveListings(env: ShelfEnv): Promise<ShelfListing[]
   return Array.isArray(rows) ? rows.map(toListing) : [];
 }
 
-export async function fetchListing(env: ShelfEnv, id: number): Promise<ShelfListing | null> {
+/** fetchListing with the absent-vs-broken split intact. A crawler-facing
+ *  detail page needs a real "row absent" to serve a real 404 — upstream
+ *  failures must answer 503 instead, or a PostgREST blip reads as a delist
+ *  and live pages drop out of the index during an outage. */
+export type ListingLookup =
+  | { kind: "hit"; listing: ShelfListing }
+  | { kind: "miss" }
+  | { kind: "error" };
+
+export async function lookupListing(env: ShelfEnv, id: number): Promise<ListingLookup> {
+  if (!Number.isInteger(id) || id <= 0) return { kind: "miss" };
   const rest = restBase(env);
-  if (!rest || !Number.isInteger(id) || id <= 0) return null;
+  if (!rest) return { kind: "error" };
   const res = await fetch(`${rest.base}/rest/v1/companion_listings?select=${LISTING_SELECT}&status=eq.active&id=eq.${id}&limit=1`, { headers: rest.headers }).catch(() => null);
-  if (!res?.ok) return null;
-  const rows = (await res.json().catch(() => [])) as RawListing[];
-  return rows[0] ? toListing(rows[0]) : null;
+  if (!res?.ok) return { kind: "error" };
+  const rows = (await res.json().catch(() => null)) as RawListing[] | null;
+  if (!Array.isArray(rows)) return { kind: "error" };
+  return rows[0] ? { kind: "hit", listing: toListing(rows[0]) } : { kind: "miss" };
+}
+
+export async function fetchListing(env: ShelfEnv, id: number): Promise<ShelfListing | null> {
+  const r = await lookupListing(env, id);
+  return r.kind === "hit" ? r.listing : null;
 }
 
 export async function fetchListingRating(env: ShelfEnv, listingId: number): Promise<ShelfRating> {

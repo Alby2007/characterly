@@ -25,12 +25,13 @@
   // Preview: separate Worker on workers.dev. No analytics binding (bindings
   // don't inherit into envs), so preview traffic never lands in production
   // numbers, and no canonical redirect, or it would bounce to characterly.app.
+  // NOINDEX stamps X-Robots-Tag so the preview can never enter the index.
   // Build and deploy with CLOUDFLARE_ENV=preview.
   "env": {
     "preview": {
       "name": "characterly-website-preview",
       "workers_dev": true,
-      "vars": { "CANONICAL_REDIRECT": "off" }
+      "vars": { "CANONICAL_REDIRECT": "off", "NOINDEX": "1" }
     }
   }
 }

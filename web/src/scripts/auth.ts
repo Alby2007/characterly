@@ -108,7 +108,7 @@ const discordOpts = (next?: string) => ({
 // passes "/dashboard?welcome=1" so the first-run guide opens.
 export const signInWithDiscord = (next?: string) => supabase.auth.signInWithOAuth(discordOpts(next));
 // Attach Discord to the currently signed-in account (no new session).
-export const linkDiscord = () => supabase.auth.linkIdentity(discordOpts(window.location.pathname));
+export const linkDiscord = () => supabase.auth.linkIdentity(discordOpts(window.location.pathname + window.location.search));
 // Supabase refuses to drop a user's last identity.
 export const unlinkDiscord = (identity: any) => supabase.auth.unlinkIdentity(identity);
 // Clear a code-claimed link (no auth identity exists to unlink).

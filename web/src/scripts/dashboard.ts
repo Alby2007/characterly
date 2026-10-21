@@ -23,6 +23,8 @@ const goHome = async () => { try { await signOut(); } finally { location.href = 
 
 const user = await requireAuth();
 if (!user) throw new Error("redirecting");
+// Hoisted functions don't keep the `user` narrowing; a const id does.
+const userId = user.id;
 
 // Clickwrap: Discord and magic-link signups never see the email form's
 // checkbox, so acceptance is captured here. Sign-out is the only other exit.
@@ -64,7 +66,12 @@ deleteBtn.addEventListener("click", async () => {
 });
 
 // ── Profile ────────────────────────────────────────────────────────────────
-let profile: Profile | null = await withTimeout(getProfile(user.id), 8000).catch(() => null);
+// profileFailed distinguishes "the read failed" from "no profile row": only
+// the former shows the load error, so a transient failure never masquerades
+// as an unlinked account.
+let profile: Profile | null = null;
+let profileFailed = false;
+try { profile = await withTimeout(getProfile(userId), 8000); } catch { profileFailed = true; }
 const fallbackName = () => profile?.display_name || user.user_metadata?.display_name || (user.email ?? "").split("@")[0] || "there";
 const hour = new Date().getHours();
 $("#dash-greeting").textContent = hour < 5 ? "Up late" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
@@ -114,6 +121,9 @@ for (const b of $$<HTMLButtonElement>("[data-link-discord]")) {
 }
 
 const linked = () => Boolean(profile?.discord_user_id);
+// We hold no profile data at all and the read failed: hide the sections
+// rather than show a false "not linked" state. A stale profile beats none.
+const profileUnknown = () => profileFailed && !profile;
 const setAvatar = (slot: HTMLElement, url: unknown, name: string) => {
   slot.replaceChildren();
   if (typeof url === "string" && url.startsWith("https://")) {
@@ -230,10 +240,11 @@ function renderBilling() {
   const plan = $("#billing-plan");
   plan.textContent = premium ? "Premium" : "Free";
   plan.className = premium ? "badge badge-go" : "badge";
-  // Perks follow the Discord link, so buying needs one.
-  $("#billing-body").hidden = !linked();
-  $("#billing-locked").hidden = linked();
-  if (!linked()) return;
+  // Perks follow the Discord link, so buying needs one. On a failed profile
+  // read, show neither body nor the false "link Discord" prompt.
+  $("#billing-body").hidden = !linked() || profileUnknown();
+  $("#billing-locked").hidden = linked() || profileUnknown();
+  if (!linked() || profileUnknown()) return;
   const sub = $<HTMLButtonElement>("#btn-subscribe");
   sub.disabled = premium;
   sub.textContent = premium ? "Premium is active" : `Go Premium · $${PLANS.premium.monthly}/month`;
@@ -261,13 +272,13 @@ function renderGrantLine() {
 }
 
 async function renderTokens() {
-  $("#tokens-body").hidden = !linked();
-  $("#tokens-locked").hidden = linked();
+  $("#tokens-body").hidden = !linked() || profileUnknown();
+  $("#tokens-locked").hidden = linked() || profileUnknown();
   const premium = profile?.plan === "premium";
   const plan = $("#tokens-plan");
   plan.textContent = premium ? "Premium" : "Free";
   plan.className = premium ? "badge badge-go" : "badge";
-  if (!linked()) return;
+  if (!linked() || profileUnknown()) return;
   const total = Number(profile?.credit_balance ?? 0);
   const purchased = Math.min(Math.max(Number(profile?.purchased_balance ?? 0), 0), Math.max(total, 0));
   $("#tokens-balance").textContent = total.toLocaleString();
@@ -295,8 +306,8 @@ async function renderTokens() {
 async function renderBotSettings() {
   const { data: s } = await getBotSettings().then(r => r, () => ({ data: null })) as any;
   const ok = Boolean(s?.linked ?? linked());
-  $("#botset-controls").hidden = !ok;
-  $("#botset-locked").hidden = ok;
+  $("#botset-controls").hidden = !ok || profileUnknown();
+  $("#botset-locked").hidden = ok || profileUnknown();
   if (!ok) return;
   $<HTMLInputElement>("#set-c2c").checked = s?.c2c_enabled !== false;
   $<HTMLInputElement>("#set-alerts").checked = s?.low_credit_alerts !== false;
@@ -343,7 +354,8 @@ function renderGuide() {
 }
 
 async function refreshAll() {
-  profile = await getProfile(user.id).catch(() => profile);
+  try { profile = await getProfile(userId); profileFailed = false; } catch { profileFailed = true; }
+  $("#dash-load-error").hidden = !profileFailed;
   await guard(renderDiscordCard());
   renderBilling();
   await guard(renderTokens());
@@ -352,9 +364,12 @@ async function refreshAll() {
 }
 
 await refreshAll();
-initImportCard({ linked: linked(), uid: user.id });
-initImportHistory({ linked: linked(), uid: user.id });
-initMemories({ linked: linked() });
+// On a failed profile read the sections still attempt their own RPCs, which
+// either succeed (transient profile error) or surface their own honest error.
+const linkedOrRetry = linked() || profileUnknown();
+initImportCard({ linked: linkedOrRetry, uid: userId });
+initImportHistory({ linked: linkedOrRetry, uid: userId });
+initMemories({ linked: linkedOrRetry });
 if (linked()) {
   myCompanions().then(({ data }: any) => { hasCharacter = Array.isArray(data) && data.length > 0; renderGuide(); }, () => {});
 }

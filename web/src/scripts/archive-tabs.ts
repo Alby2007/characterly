@@ -32,7 +32,7 @@ for (const root of document.querySelectorAll<HTMLElement>("[data-archive]")) {
   };
 
   const start = Math.max(0, panels.findIndex(p => p.hasAttribute("data-initial")));
-  tabs.forEach((t, j) => { panels[j].hidden = j !== start; });
+  tabs.forEach((_t, j) => { panels[j].hidden = j !== start; });
   // Wait for the webfont before measuring the ink bar.
   document.fonts?.ready.then(() => place(tabs[tabs.findIndex(t => t.tabIndex === 0)] ?? tabs[0]));
   place(tabs[start]);

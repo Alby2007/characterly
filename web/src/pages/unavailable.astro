@@ -1,0 +1,22 @@
+---
+// Rendered (via Astro.rewrite) when an upstream read fails mid-request: a
+// real 503 with Retry-After so a transient outage reads as "come back later"
+// to crawlers — never as "this page is gone".
+import Base from "../layouts/Base.astro";
+
+export const prerender = false;
+Astro.response.status = 503;
+Astro.response.headers.set("retry-after", "60");
+Astro.response.headers.set("cache-control", "no-store");
+---
+<Base title="Back in a moment · Characterly" description="Characterly is briefly unavailable. Refresh in a moment." noindex>
+  <section class="wrap gone">
+    <h1>Back in a moment.</h1>
+    <p class="lede">Something on our side hiccuped — this isn't a dead link. Refresh, and it should be right there.</p>
+    <p><a class="btn" href="/">Back to characterly.app</a></p>
+  </section>
+</Base>
+
+<style>
+  .gone { padding-top: 96px; display: grid; gap: 20px; justify-items: start; }
+</style>

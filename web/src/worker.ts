@@ -21,6 +21,8 @@ interface WorkerEnv {
   AVATAR_UPLOAD_SECRET?: string;
   /** "off" on the preview Worker (wrangler.jsonc env.preview). */
   CANONICAL_REDIRECT?: string;
+  /** "1" on the preview Worker: every response gets X-Robots-Tag: noindex. */
+  NOINDEX?: string;
   ANALYTICS?: { writeDataPoint(d: { indexes?: string[]; blobs?: string[]; doubles?: number[] }): void };
 }
 
@@ -61,24 +63,43 @@ export const SECURITY_HEADERS: Record<string, string> = {
 const CANONICAL_HOST = "characterly.app";
 const isLocalHost = (h: string) => h.startsWith("localhost") || h.startsWith("127.") || h === "[::1]";
 
+/** Stamp the security headers on any response — pages and API both. `noindex`
+ *  marks the preview Worker so it can never enter the index as a duplicate. */
+const withSecurity = (res: Response, noindex = false): Response => {
+  const out = new Response(res.body, res);
+  for (const [k, v] of Object.entries(SECURITY_HEADERS)) {
+    // Astro's dev server injects inline scripts; the policy is production-only.
+    if (import.meta.env.DEV && k === "content-security-policy") continue;
+    out.headers.set(k, v);
+  }
+  if (noindex) out.headers.set("x-robots-tag", "noindex");
+  return out;
+};
+
 export default {
   async fetch(request: Request, env: WorkerEnv, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const api = API_PATHS.has(url.pathname);
 
-    // One canonical host for pages. FIX: API paths are exempt — a 301 turns a
-    // POST into a GET, which silently broke webhooks sent to www/workers.dev.
-    if (!api && env.CANONICAL_REDIRECT !== "off" && url.hostname !== CANONICAL_HOST && !isLocalHost(url.hostname)) {
-      return Response.redirect(`https://${CANONICAL_HOST}${url.pathname}${url.search}`, 301);
+    // One canonical host AND one canonical path shape for pages — a trailing
+    // slash is a duplicate URL, so both fix in a single hop. FIX: API paths
+    // are exempt — a 301 turns a POST into a GET, which silently broke
+    // webhooks sent to www/workers.dev.
+    const hostMismatch = url.hostname !== CANONICAL_HOST && !isLocalHost(url.hostname);
+    const cleanPath = url.pathname.length > 1 ? url.pathname.replace(/\/+$/, "") : url.pathname;
+    if (!api && env.CANONICAL_REDIRECT !== "off" && (hostMismatch || cleanPath !== url.pathname)) {
+      const origin = hostMismatch ? `https://${CANONICAL_HOST}` : url.origin;
+      return Response.redirect(`${origin}${cleanPath}${url.search}`, 301);
     }
 
+    const noindex = env.NOINDEX === "1";
     if (url.pathname === EVENTS_PATH) {
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      return handleDiscordEvent(request, env);
+      if (request.method !== "POST") return withSecurity(new Response("method not allowed", { status: 405 }), noindex);
+      return withSecurity(await handleDiscordEvent(request, env), noindex);
     }
-    if (url.pathname === AVATAR_PATH && request.method === "PUT") return handleAvatarUpload(request, env);
-    if (url.pathname === AVATAR_GC_PATH && request.method === "POST") return handleAvatarGc(request, env);
-    if (url.pathname === TRACK_PATH && request.method === "POST") return handleTrack(request, env);
+    if (url.pathname === AVATAR_PATH && request.method === "PUT") return withSecurity(await handleAvatarUpload(request, env), noindex);
+    if (url.pathname === AVATAR_GC_PATH && request.method === "POST") return withSecurity(await handleAvatarGc(request, env), noindex);
+    if (url.pathname === TRACK_PATH && request.method === "POST") return withSecurity(await handleTrack(request, env), noindex);
 
     const res = await handle(request, env as never, ctx);
 
@@ -89,13 +110,7 @@ export default {
       try { refHost = new URL(request.headers.get("referer") ?? "").hostname; } catch { /* none */ }
       trackAe(env, "page_view", [url.pathname, refHost], [res.status]);
     }
-    const out = new Response(res.body, res);
-    for (const [k, v] of Object.entries(SECURITY_HEADERS)) {
-      // Astro's dev server injects inline scripts; the policy is production-only.
-      if (import.meta.env.DEV && k === "content-security-policy") continue;
-      out.headers.set(k, v);
-    }
-    return out;
+    return withSecurity(res, noindex);
   },
 };
 
@@ -145,6 +160,18 @@ function ensureAvatarBucket(base: string, auth: Record<string, string>): Promise
   return bucketReady;
 }
 
+/** Magic bytes → the real image family, or null. Caller compares against the
+ *  declared content-type; "jpg" covers both jpeg/jpg spellings. */
+function sniffedImageType(body: ArrayBuffer): "png" | "jpg" | "webp" | "gif" | null {
+  const b = new Uint8Array(body);
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return "png";
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "jpg";
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46
+    && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return "webp"; // RIFF…WEBP
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return "gif"; // GIF8
+  return null;
+}
+
 /** The bot re-hosts companion images so avatar_url values outlive Discord CDN
  *  signatures and hotlink rot. */
 async function handleAvatarUpload(request: Request, env: WorkerEnv): Promise<Response> {
@@ -156,6 +183,12 @@ async function handleAvatarUpload(request: Request, env: WorkerEnv): Promise<Res
   if (!m) return new Response("png/jpeg/webp/gif only", { status: 415 });
   const body = await request.arrayBuffer();
   if (!body.byteLength || body.byteLength > AVATAR_MAX_BYTES) return new Response("invalid size", { status: 413 });
+  // The declared type is self-reported; the magic bytes are the truth. A
+  // mismatched body (HTML labelled image/png) must not land in public storage.
+  const sniffed = sniffedImageType(body);
+  if (!sniffed || (sniffed === "jpg" ? m[1] !== "jpeg" && m[1] !== "jpg" : sniffed !== m[1])) {
+    return new Response("content-type doesn't match the file", { status: 415 });
+  }
   const base = env.SUPABASE_URL?.replace(/\/+$/, "");
   if (!base || !env.SUPABASE_SERVICE_ROLE_KEY) return new Response("storage unconfigured", { status: 500 });
   const auth = { apikey: env.SUPABASE_SERVICE_ROLE_KEY, authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}` };
@@ -249,7 +282,9 @@ async function handleDiscordEvent(request: Request, env: WorkerEnv): Promise<Res
   }
   const action = parseDiscordEvent(body);
   if (action.kind === "install") {
-    const res = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/record_app_install`, {
+    const base = env.SUPABASE_URL?.replace(/\/+$/, "");
+    if (!base || !env.SUPABASE_SERVICE_ROLE_KEY) return new Response("upstream unconfigured", { status: 500 });
+    const res = await fetch(`${base}/rest/v1/rpc/record_app_install`, {
       method: "POST",
       headers: {
         apikey: env.SUPABASE_SERVICE_ROLE_KEY ?? "",
