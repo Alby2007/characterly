@@ -8,8 +8,8 @@
 // backstories, greetings and traits are user-authored. Publish-time screening
 // is not a substitute for output encoding on a first-party domain.
 
-/** Server invite — mirrors website/src/config.js LINKS.discord. Keep in sync
- *  (this module is plain TS, not a vite page, so it can't import the site
+/** Server invite — mirrors web/src/lib/config.ts LINKS.discord. Keep in sync
+ *  (this module is plain TS, not an Astro page, so it can't import the site
  *  config). */
 export const DISCORD_INVITE = "https://discord.gg/tNGCeaTPtC";
 export const SITE_ORIGIN = "https://characterly.app";

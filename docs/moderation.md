@@ -152,13 +152,20 @@ listing-report one:
   messages exit the pipeline entirely — no archive, no memory extraction,
   no companion replies, no summon notices (`isMarketplaceThread`: thread
   parent == `MARKETPLACE_CHANNEL_ID`).
-- **Report message** (message context-menu command) only fires inside
-  marketplace threads. Category picker → `comment_reports` row (unique per
-  `(message, reporter)`) → mod ping with the quoted excerpt
-  (`allowedMentions.parse: []` — the quote can't ping), jump link, and
-  **Keep / Delete comment / Timeout author (10m)** buttons, gated to the
-  same mod check. The Timeout target resolves from the stored row, not the
-  button's author id.
+- **Report message** (message context-menu command) fires in marketplace
+  threads *and* anywhere else in the house — a member being harassed in a
+  regular channel gets the same flag path listing comments get. Both lanes
+  land in `comment_reports` (unique per `(message, reporter)`); house
+  reports carry `listing_id NULL`. Category picker (`house:reportcat` in
+  the house, `market:commentcat` on a listing) → quoted-excerpt relay with
+  mention parsing suppressed except the author/reporter pings we emit →
+  **Keep / Delete / Timeout author (10m)** buttons. Marketplace reports
+  ping `MARKETPLACE_MOD_CHANNEL_ID` (`market:modmsg:*`, gated to
+  `MARKETPLACE_MOD_ROLE_IDS`); house reports relay to the ops channel
+  (`OPS_CHANNEL_ID ?? MARKETPLACE_MOD_CHANNEL_ID`) as `house:modmsg:*`,
+  gated on ManageMessages/ManageGuild. The Timeout target always resolves
+  from the stored row, not the forgeable button id, and every house
+  resolution (Keep included) writes a `mod_actions` ledger row.
 - **Daily cap is shared** with listing reports — one `report:<userId>`
   budget across both lanes, enforced inside the transaction.
 - **Staff pick** (message context-menu command, mods only) toggles the

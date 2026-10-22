@@ -26,8 +26,8 @@
 ## Partner deployments (multi-server marketplace, v59)
 
 - `guild_deployments` = per-server registry (house synthesized from env); `listing_posts` = the mirror map (nullable `thread_id` — failed rows use NULL, never `""`); `companion_adoptions.chat_guild_id` homes adoptee threads (NULL = house, lazy relocation back when the host dies).
-- `MARKET_DEPLOY_ENABLED=1` is the master switch — off refuses `/ops deploygrant`, `/marketplace deploy`, and the sync sweep. `/marketplace` is guild-scoped, registered only in granted servers.
-- Flow: `/ops deploygrant <guild_id>` → partner admin runs `/marketplace deploy` (requires Community mode + bot perms) → idempotent category/`#characters` forum/`#adoptees` layout → catalog backfill. `/ops deploystatus|deployrevoke` inspect/undo.
+- `MARKET_DEPLOY_ENABLED=1` is the master switch — off refuses `/ops deploygrant`, `/marketplace deploy`, and the sync sweep. `/marketplace` is globally registered (ManageGuild gates visibility).
+- Flow: **self-serve (v63)** — a guild admin with a linked account runs `/marketplace deploy` and is granted on the spot (`grant_kind='self'`); or ops path — `/ops deploygrant <guild_id>` → admin runs `/marketplace deploy` (requires Community mode + bot perms) → idempotent category/`#characters` forum/`#adoptees`/`#log-in` layout → catalog backfill. `/ops deploystatus|deployrevoke` inspect/undo; a `disabled` row can't be self-resurrected.
 - Everything fans out by tag NAME (ids differ per forum); delist/ban archive every mirror. Details: `docs/marketplace.md` → Partner deployments.
 
 ## Prompt hygiene (injection hardening)

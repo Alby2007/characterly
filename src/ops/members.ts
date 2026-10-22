@@ -146,7 +146,7 @@ const VERIFY_CUSTOM_ID = "house:verify";
 // documents: an acceptance is only valid for the version the user saw, and the
 // button customId carries it (house:consent:<v>) so the recorded version is
 // honest even if a stale ephemeral survives a doc update. URLs mirror
-// website/src/config.js LINKS — keep them in step.
+// web/src/lib/config.ts LINKS — keep them in step.
 export const TERMS_VERSION = 1;
 const CONSENT_CUSTOM_ID = "house:consent";
 

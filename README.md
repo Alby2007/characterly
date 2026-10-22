@@ -64,11 +64,11 @@ The marketplace is a Character.AI-style storefront living in a forum channel on 
 - Entries recall only in their origin scope (guild entries in that server, DM entries in the DM) and via the Vault subtext lane; consent-gated like extraction, covered by `/opt-out` and `/memory export`, and dormant-but-retained when a companion is dismissed.
 
 ### 9. Web Accounts, Website & Discord Linking
-- A Vite site (`website/`) hosts the landing page plus **Characterly accounts** (Supabase Auth: email/password, magic link, Discord OAuth) and an account dashboard — deployed as Cloudflare Workers Static Assets.
+- An Astro site (`web/`) on Cloudflare Workers hosts the landing page, a live SSR **character shelf** (`/characters`), **Characterly accounts** (Supabase Auth: email/password, magic link, Discord OAuth) and an account dashboard.
 - `web_profiles` links the "real-life" account to the Discord user via `discord_user_id` — written only by the `auth.identities` sync trigger (OAuth/`linkIdentity`) or the `claim_link_code` rpc behind `/link`; users can never write it directly. A Discord username/avatar snapshot rides the link so code-linked accounts render an avatar in the dashboard the same as OAuth ones.
 - **The dashboard** covers profile, Discord link/unlink, hosted **Tokens** (balance, plan, ledger), **Companion settings** (companion-to-companion replies, low-token alerts, BYOK status), **Billing** (Premium subscription + token packs through a Stripe Checkout edge function), character-card **import**, password change, and guarded **delete account**.
 - **Terms clickwrap** (`consent_events`, `TERMS_VERSION`): the signup checkbox and the Discord verify button both record acceptance — one acceptance covers web and bot.
-- Legal documents are hosted on the site at `/terms`, `/privacy`, `/security` — rendered from the repo's `TERMS.md`/`PRIVACY.md`/`SECURITY.md` at build time.
+- Legal documents are hosted on the site at `/terms`, `/privacy`, `/security`, `/safety` — prerendered from the repo's `*.md` files at build time.
 
 ### 10. Hosted Lane & Tokens (Credits)
 
@@ -189,7 +189,7 @@ cp .env.example .env   # fill in DISCORD_TOKEN, KEY_ENCRYPTION_SECRET, DATABASE_
 npm run dev            # or: npm run build && npm start
 ```
 
-Migrations (`v1`–`v61`) apply automatically on first boot — no manual SQL.
+Migrations (`v1`–`v66`) apply automatically on first boot — no manual SQL.
 
 ### Key Configuration
 
@@ -220,7 +220,7 @@ npm run check   # typecheck (tsc --noEmit, strict)
 npm test        # node:test suite — DB tests use TEST_DATABASE_URL
 ```
 
-Docs: [Architecture](docs/architecture.md) · [Marketplace](docs/marketplace.md) · [Moderation](docs/moderation.md) · [Database Schema](docs/schema.md) · [Event Pipeline](docs/event-pipeline.md) · [Configuration](docs/configuration.md) · [Website & Accounts](docs/website.md) · [Operations](docs/operations.md) · [Developer Guide](docs/development.md)
+Docs: [Index](docs/README.md) · [Architecture](docs/architecture.md) · [Marketplace](docs/marketplace.md) · [Moderation](docs/moderation.md) · [Security Model](docs/security-model.md) · [Database Schema](docs/schema.md) · [Event Pipeline](docs/event-pipeline.md) · [Configuration](docs/configuration.md) · [Website & Accounts](docs/website.md) · [Operations](docs/operations.md) · [Developer Guide](docs/development.md)
 
 ### Layout
 
@@ -241,7 +241,8 @@ src/
   embeddings.ts     # Opt-in OpenAI-compatible embeddings for semantic recall
   commands.ts       # Slash commands, onboarding cards/modals, interaction handlers
   attributes.ts / profiles.ts / dossier.ts / events.ts / jobs.ts / journal-job.ts / ...
-website/            # Vite site — landing + accounts/dashboard, deployed to Cloudflare Workers
+web/                # Astro site on Cloudflare Workers — landing, /characters shelf, accounts/dashboard
+archive/website/    # Legacy Vite site — kept for reference, superseded by web/
 scripts/            # Ops utilities (sweeps, backfills, verification, dead-letter requeue)
 supabase/           # Edge functions (create-checkout, stripe-webhook) + auth email templates
 ```

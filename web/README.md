@@ -1,8 +1,6 @@
 # Characterly website (Astro)
 
-The rebuilt site from `docs/frontend-spec.md`: one Astro app on Cloudflare Workers, replacing `website/` (Vite) and the worker-rendered shelf templates in `src/site-shelf.ts`. Visual world: "The Character Archive" (spec §2, direction contract in `.impeccable/surfaces/web-src-pages-index-astro.md`).
-
-**Status:** built and verified locally, **not deployed**. The live site is still `website/`.
+The site from `docs/frontend-spec.md`: one Astro app on Cloudflare Workers — **live at https://characterly.app** as the `characterly-website` worker. It replaced `website/` (Vite, now archived at `archive/website/`) and the worker-rendered shelf templates in `src/site-shelf.ts` (whose data layer these pages still import). Visual world: "The Character Archive" (spec §2, shipped tokens in `DESIGN.md`).
 
 ## Run it
 
@@ -28,17 +26,10 @@ Without `SUPABASE_SERVICE_ROLE_KEY` in `.dev.vars`, `npm run dev` shows the firs
 
 Shared with the bot (one source, tested there): `src/charcard.ts`, `src/chathist.ts`, `src/discord-events.ts`, `src/site-shelf.ts` data functions, `src/seed-personas.ts`.
 
-## Deploy and cutover
+## Deploy
 
-The worker keeps the name `characterly-website`, so `npm run deploy` replaces the old site. Before the first deploy:
+`npm run deploy` builds (`astro build`) and ships the `characterly-website` worker via `wrangler deploy` — it serves the apex directly, no cutover step needed (that's done). `CLOUDFLARE_ENV=preview npm run deploy` ships `characterly-website-preview`; add its `https://<host>/**` to the Supabase redirect allowlist if auth is exercised there (checkout still won't work — `create-checkout` CORS only allows `SITE_URL`).
 
-1. `wrangler secret put` for `DISCORD_APP_PUBLIC_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `AVATAR_UPLOAD_SECRET`. They are the same values as today.
-2. Deploy `supabase/functions/create-checkout` first. It now refuses checkout for accounts without a linked Discord (409 "link Discord first").
-3. Optional preview: deploy under another name and add its `https://<host>/**` to the Supabase redirect allowlist. Checkout won't work there, because `create-checkout` CORS only allows `SITE_URL`.
-4. After cutover, check:
-   - the Discord webhook and the bot's avatar calls against the apex;
-   - Analytics Engine `page_view` and `web_event`.
-
-   Then retire `website/` and the HTML templates in `src/site-shelf.ts`, and update `docs/website.md`.
+Worker secrets (set via `wrangler secret put` or the dashboard): `DISCORD_APP_PUBLIC_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `AVATAR_UPLOAD_SECRET`.
 
 

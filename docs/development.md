@@ -244,7 +244,7 @@ characterly/
 │   ├── db.ts                 # Shared postgres.js connection singleton
 │   ├── database.ts           # MemoryStore (Postgres: companions, journal, link codes, memories, edges)
 │   ├── events.ts             # EventStore (Postgres)
-│   ├── migrations.ts         # Versioned schema migrations (v1–v46)
+│   ├── migrations.ts         # Versioned schema migrations (v1–v66)
 │   ├── confidence.ts         # Deterministic confidence formulas
 │   ├── perception.ts         # Pre-filter regex, wake words, dismissals, tool cues
 │   ├── event-detection.ts    # EventPipeline — heuristic + LLM continuity
@@ -261,11 +261,27 @@ characterly/
 │   ├── dossier.ts            # Per-section dossier input gathering
 │   ├── profile-build.ts      # /profile-build per-user archive scan
 │   ├── guild-lifecycle.ts    # Join disclosure card, 1-click enable, two-step decline opt-out, kick-purge
-│   ├── ops.ts                # House ops (HOUSE_GUILD_ID): welcomes, verify gate, automod, layout, tag sweep, /ops console
+│   ├── ops.ts                # Thin barrel re-exporting the ops/ modules (keeps old import sites working)
+│   ├── ops/                  # House ops (HOUSE_GUILD_ID): members.ts welcomes/verify gate, automod.ts
+│   │                         #   automod + house message reports, layout.ts channel reconciliation,
+│   │                         #   tickets.ts, adoptees.ts (threads + floodgate), deploy.ts (partner
+│   │                         #   deployments), host.ts (watchdog + /ops console), shared.ts
+│   ├── install-greet.ts      # Install-greeting sweep (Discord Webhook Events → app_installs → onboard card)
 │   ├── marketplace.ts        # Listing card embed/components, forum thread posting, curated-tag names
 │   ├── safety.ts             # Listing/comment blocklists, self-harm triage, safe refusal, safety classifier client
 │   ├── seed-personas.ts      # Official marketplace seed roster (/ops seedmarket)
-│   ├── charcard.ts           # Character-card (.json/.png) parser shared with the website
+│   ├── charcard.ts           # Character-card (.json/.png) parser shared with web/
+│   ├── chathist.ts           # Chat-history (.jsonl/.json) transcript parser shared with web/
+│   ├── discord-events.ts     # Discord Webhook Events verify/handler shared with web/'s worker
+│   ├── avatars.ts            # Durable avatar uploads → web worker PUT /avatar → Supabase Storage
+│   ├── copy.ts               # Shared house copy (welcome/deny/verify-gate strings) for bot + web
+│   ├── credit-store.ts       # Token buckets: credit_balance vs purchased_balance, grant_pack/clawback
+│   ├── turn-billing.ts       # Per-turn charge/refund orchestration for hosted replies
+│   ├── fleet-cap.ts          # Revenue-aware hosted fleet cap (premium subs raise the daily ceiling)
+│   ├── prompt-safety.ts      # Injection hardening: promptInline/promptName/sanitizeBlock/wrapUntrusted
+│   ├── site-shelf.ts         # Marketplace shelf data layer shared with web/ (catalog, sitemap, labels)
+│   ├── summary-job.ts        # Worker handler for channel 'summary' jobs
+│   ├── cross-context.ts      # Cross-scope context (server→DM digest lane, edge consent)
 │   ├── embeddings.ts         # Opt-in embeddings client for semantic recall (EMBED_*)
 │   ├── commands.ts           # Slash commands, onboarding cards/modals, interaction handlers
 │   ├── speech-gate.ts        # Standalone speak/silence evaluator for tests
@@ -277,29 +293,35 @@ characterly/
 │   ├── metrics.ts            # In-process operational counters (/status)
 │   ├── retry.ts              # Shared LLM retry helper (rate-limit aware)
 │   ├── test-helpers.ts       # Shared Postgres test utilities (TEST_DATABASE_URL)
-│   └── *.test.ts             # 39 test files, co-located with source
-├── website/
-│   ├── index.html            # Landing page
-│   ├── account.html          # Sign in / sign up / magic link / recovery
-│   ├── dashboard.html        # Profile, Discord link card, tokens, companion settings, import, billing, password, account deletion
-│   ├── terms.html / privacy.html / security.html   # Legal pages (rendered from the repo's .md files)
-│   ├── 404.html              # Not-found page (Worker 404-page handling)
-│   ├── public/               # favicon.svg, mark.svg (brand mark), seal.svg (wax seal)
-│   ├── src/                  # base.js (shared entry), main.js, account.js, dashboard.js, auth.js, legal.js, import-card.js, config.js, supabase.js, styles.css
-│   ├── cloudflare.config.ts  # characterly-website Worker (static assets)
-│   └── vite.config.js        # Multi-page inputs + @cloudflare/vite-plugin
+│   └── *.test.ts             # 51 test files, co-located with source
+├── web/                      # Live site — Astro on Cloudflare Workers (@astrojs/cloudflare)
+│   ├── src/pages/            # index (SSR shelf strip), characters/ (SSR), [doc] legal pages
+│   │                         #   (prerendered from the root *.md), guides/, account, dashboard,
+│   │                         #   404, sitemap.xml
+│   ├── src/worker.ts         # Worker entry: /discord/events, /avatar(+gc), /track, host redirect,
+│   │                         #   CSP/security headers, Analytics Engine beacons
+│   ├── src/lib/              # config.ts (links/plans/Supabase public config), shelf.ts, legal.ts,
+│   │                         #   charcard.ts/chathist.ts re-exports, supabase client env
+│   ├── src/scripts/          # Browser code: auth.ts, account.ts, dashboard.ts, memories.ts,
+│   │                         #   import-card.ts, import-history.ts, nav.ts, archive-tabs.ts
+│   ├── src/styles/global.css # Design tokens + shared components
+│   └── wrangler.jsonc        # characterly-website (+ -preview); run_worker_first API lanes
+├── archive/website/          # Legacy Vite site — kept for reference, superseded by web/
 ├── .github/workflows/
 │   └── test.yml              # CI: check + tests on Postgres service; gated deploy to Oracle
 ├── scripts/                  # Operational one-shots (see table above)
 ├── docs/
 │   ├── architecture.md       # Module map, companions, journal, web accounts, data flow
-│   ├── schema.md             # Database schema reference (through v42)
+│   ├── schema.md             # Database schema reference (through v66)
 │   ├── event-pipeline.md     # Event detection explainer
 │   ├── configuration.md      # Env var + website config reference
 │   ├── marketplace.md        # Marketplace end-to-end: publish/adopt, ratings, comments, tags, moderation
 │   ├── moderation.md         # Marketplace content policy + enforcement spec
+│   ├── security-model.md     # Trust-boundary map — defenses per crossing, pointers to details
 │   ├── website.md            # Web stack: pages, Supabase Auth setup, linking, deploy
 │   ├── operations.md         # Runbook: deploys, VM/systemd, DB access, failure modes, secrets
+│   ├── frontend-spec.md      # The Astro rebuild spec (shipped; design rationale)
+│   ├── README.md             # Docs index — start-here paths by reader
 │   ├── development.md        # This file
 │   └── phase-*.md            # Historical phase reports (point-in-time, Sep 2026)
 ├── .env.example              # Template for environment variables
@@ -311,17 +333,18 @@ characterly/
 
 ## Website
 
-The site is a standalone Vite multi-page app — it has its own `package.json` and node_modules:
+The live site is an Astro app on Cloudflare Workers in `web/` — its own `package.json` and node_modules:
 
 ```bash
-cd website
+cd web
 npm install
-npm run dev      # http://localhost:5173
-npm run build    # production bundle → dist/
-npm run deploy   # cf deploy → Cloudflare Workers static assets
+npm run dev       # http://localhost:4321 (Astro dev — no worker rules/CSP)
+npm run preview   # production build under wrangler dev, real headers
+npm test          # worker rule + allowlist tests
+npm run deploy    # astro build + wrangler deploy → characterly-website
 ```
 
-`npm run deploy` uses the [cf CLI](https://developers.cloudflare.com/workers/ci-cd/) — `@cloudflare/vite-plugin` emits the Build Output Spec at build time and `cloudflare.config.ts` declares the `characterly-website` worker (assets-only, 404-page handling). First deploy requires `cf login` (or an API token). The publishable Supabase key in `src/config.js` is public by design — RLS enforces access. Discord OAuth must be configured in Supabase Auth (Discord provider client id/secret from the bot's Discord application, callback URL registered in the Discord developer portal) before `DISCORD_OAUTH_ENABLED` is flipped on.
+`npm run deploy` builds with `astro build` (`@astrojs/cloudflare` adapter) then `wrangler deploy`; `wrangler.jsonc` declares the `characterly-website` worker with `run_worker_first` API lanes (`/discord/events`, `/avatar`, `/avatar/gc`, `/track`). First deploy requires `wrangler login` (or an API token); `CLOUDFLARE_ENV=preview npm run deploy` ships `characterly-website-preview`. The publishable Supabase key in `src/lib/config.ts` is public by design — RLS enforces access. Discord OAuth must be configured in Supabase Auth (Discord provider client id/secret from the bot's Discord application, callback URL registered in the Discord developer portal). The legacy Vite site lives at `archive/website/` for reference only.
 
 ---
 
@@ -332,4 +355,4 @@ npm run deploy   # cf deploy → Cloudflare Workers static assets
 1. **test** — `npm ci`, `npm run check` (tsc), `npm run build` (prove the production artifact compiles), then `npm test` against a Postgres 16 service (`TEST_DATABASE_URL` pointed at the service container).
 2. **deploy** — only on green pushes to `main`, gated by `environment: production` (attach required reviewers in repo settings so a push alone can't ship). SSHes to the Oracle host and runs `cd ~/characterly && git pull --ff-only && npm ci && npm run build && npm prune --omit=dev && sudo systemctl restart characterly`. Required secrets: `ORACLE_SSH_KEY`, `ORACLE_HOST_KEY` (`ssh-keyscan` output — pinned host key, fails closed), `ORACLE_SSH_HOST` (`user@ip`).
 
-The website deploys separately — `npm run deploy` inside `website/` — and is not part of CI.
+The website deploys separately — `npm run deploy` inside `web/` — and is not part of CI.

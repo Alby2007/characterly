@@ -123,15 +123,20 @@ deliberate:
   marketplace staff — mods may not carry Member). Stored in
   `listing_ratings`.
 - **Comment reports** — right-click → **Apps → Report message** (a
-  `MESSAGE`-type context command) works only inside marketplace threads. It
-  opens the same category picker as listing reports (minus *stolen persona*),
-  writes a `comment_reports` row (deduped per `(message, reporter)`), and
-  pings `MARKETPLACE_MOD_CHANNEL_ID` with the quoted excerpt (mention-parsing
-  suppressed — a report can't be weaponized into a ping), the jump link, and
-  **Keep / Delete comment / Timeout author (10m)** buttons
-  (`market:modmsg:<action>:<channelId>:<messageId>:<authorId>`), gated to the
-  same `isMarketplaceMod` check. The author for Timeout resolves from the
-  stored report row, not the button id.
+  `MESSAGE`-type context command) works inside marketplace threads *and*
+  elsewhere in the house (same command, house lane — `house:reportcat` /
+  `house:modmsg`, relayed to the ops channel and gated on
+  ManageMessages/ManageGuild; house rows file into `comment_reports` with
+  `listing_id NULL` and their resolutions write `mod_actions`). On a
+  listing it opens the same category picker as listing reports (minus
+  *stolen persona*), writes a `comment_reports` row (deduped per
+  `(message, reporter)`), and pings `MARKETPLACE_MOD_CHANNEL_ID` with the
+  quoted excerpt (mention-parsing suppressed — a report can't be
+  weaponized into a ping), the jump link, and **Keep / Delete comment /
+  Timeout author (10m)** buttons
+  (`market:modmsg:<action>:<channelId>:<messageId>:<authorId>`), gated to
+  the same `isMarketplaceMod` check. The author for Timeout resolves from
+  the stored report row, not the button id.
 - **Moderation coverage** — house automod runs on every guild message
   *before* any other handling, so comments get the same invite-link, scam,
   mass-mention, burst-spam, and new-account-link rules as the rest of the

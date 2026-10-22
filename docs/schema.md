@@ -1,6 +1,6 @@
 # Database Schema
 
-Characterly stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts` (`v1`–`v28`).
+Characterly stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts` (`v1`–`v66`).
 
 **Supabase lockdown (v23+):** every `public`-schema table has `ENABLE ROW LEVEL SECURITY` with zero Data-API policies — deny-all for `anon`/`authenticated`, while the bot's `postgres` role bypasses RLS. The exceptions are the web-account tables (`web_profiles`, `link_codes`), which have their own policy/grant design documented below. All Supabase-specific DDL is conditional on the `auth` schema existing, so plain-Postgres test/local databases run every migration unchanged.
 
@@ -823,7 +823,7 @@ Star ratings on a listing's card (v37) — one row per `(listing_id, rater_user_
 
 ### `comment_reports`
 
-Message-scoped reports for comments inside listing threads (v37) — separate from `listing_reports` so a reported *comment* doesn't count toward the listing's auto-flag threshold. Dedupes per `(message_id, reporter_user_id)`; the reporter's daily budget is shared with `listing_reports` under the same `report:<userId>` advisory lock.
+Message-scoped reports for comments inside listing threads (v37) — separate from `listing_reports` so a reported *comment* doesn't count toward the listing's auto-flag threshold. Dedupes per `(message_id, reporter_user_id)`; the reporter's daily budget is shared with `listing_reports` under the same `report:<userId>` advisory lock. Since the house-report lane shipped, `listing_id NULL` rows are **house reports** — the same table serves both lanes (`market:commentcat` resolves the listing via `listingByThreadId`; `house:reportcat` files with no listing).
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -865,6 +865,62 @@ Audit log for marketplace moderation actions (v36) — one row per mod-button ac
 | `actor_user_id` | TEXT | Acting moderator's Discord id |
 | `action` | TEXT | `unflag` / `delist` / `ban` / `ban_creator` |
 | `note` | TEXT | Optional note/reason |
+| `created_at` | TIMESTAMPTZ | |
+
+**RLS:** enabled, zero policies.
+
+---
+
+### `guild_deployments`
+
+Partner-server marketplace registry (v59) — one row per server hosting a mirrored shelf + `#adoptees` surface. The house itself is synthesized from env at read time rather than stored.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `guild_id` | TEXT PK | Discord server id |
+| `status` | TEXT | `granted` → `active` → `disabled` — `disabled` is a hard wall the deployer can't re-serve around |
+| `marketplace_channel_id` / `adoptees_channel_id` / `category_id` | TEXT NULL | The deployed forum, adoptees, and category channel ids |
+| `login_channel_id` | TEXT NULL | The deployed `#log-in` signpost channel (v63) |
+| `grant_kind` | TEXT | `'ops'` (`/ops deploygrant`) vs `'self'` (self-serve `/marketplace deploy` by a linked-account admin) — v63 |
+| `deployed_by` / `deployed_at` | TEXT / TIMESTAMPTZ | Who ran the deploy and when |
+| `last_error` | TEXT | Last deploy/sync failure surfaced via `/ops deploystatus` |
+| `created_at` / `updated_at` | TIMESTAMPTZ | |
+
+**RLS:** enabled, zero policies.
+
+---
+
+### `listing_posts`
+
+Mirror map for partner deployments (v59) — one row per `(listing, guild)`: the house thread lives on `companion_listings.thread_id`, every other guild's card lives here.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `listing_id` | BIGINT | FK → `companion_listings.id ON DELETE CASCADE` (composite PK) |
+| `guild_id` | TEXT | Deployed guild (composite PK) |
+| `thread_id` | TEXT NULL | The mirror forum thread; NULL on a failed post (never `""`) |
+| `status` | TEXT | `live` / `failed` — the deployment-sync sweep retries `failed` rows |
+| `last_error` | TEXT | Last fan-out failure |
+| `created_at` / `updated_at` | TIMESTAMPTZ | |
+
+**RLS:** enabled, zero policies.
+
+---
+
+### `mod_actions`
+
+House moderation ledger (v66) — one row per staff action, feeding the repeat-offense ladder (escalating timeouts → kick). Written by `house:modmsg` report resolutions and automod escalations.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT PK | `GENERATED ALWAYS AS IDENTITY` |
+| `guild_id` | TEXT | |
+| `target_id` | TEXT | The member acted on — resolved from the stored report row, never the forgeable button id |
+| `actor` | TEXT | Acting staff member's Discord id |
+| `action` | TEXT | e.g. `report_keep`, delete, timeout, kick |
+| `rule` | TEXT NULL | The rule matched (for automod rows) |
+| `detail` | TEXT | Free-text context |
+| `message_id` / `channel_id` | TEXT NULL | The reported/offending message |
 | `created_at` | TIMESTAMPTZ | |
 
 **RLS:** enabled, zero policies.
@@ -934,10 +990,21 @@ Version tracking for the migration system.
 | 46 | `v46_quiet_channels` | `server_settings.quiet_channels TEXT[]` — companion silence without blindness: replies and system cards suppressed while archiving/extraction continue; threads inherit via `parentId` |
 | 47 | `v47_app_installs` | `app_installs` (install ledger for the welcome-DM sweep) + `record_app_install` security-definer RPC (service-role only — the website worker's webhook sink); rollback refuses while installs exist |
 | 48 | `v48_support_tickets` | `support_tickets` + partial unique index `one_open_per_user` — the house ticket system's ledger; rollback refuses while tickets exist |
+| 49 | `v49_install_event_ordering` | `app_installs.meta` + event-ordering guard — a redelivered `AUTHORIZED` older than a recorded `DEAUTHORIZED` no longer resurrects the row |
+| 50 | `v50_refund_clawback` | `credit_ledger.refunded_of` links refunds to their purchase; `clawback_pack` rpc debits the newest unrefunded pack under the account row lock (balance may go negative — a debt later grants pay off) |
+| 51 | `v51_chat_import_dedupe` | `chat_imports` sha256 dedupe moves to `ON CONFLICT DO NOTHING` — the unique constraint itself arbitrates concurrent same-file imports |
+| 52 | `v52_link_code_relink_guard` | `claim_link_code` refuses when the claimant account already holds a different `discord_user_id` — re-linking requires an explicit `unlink_discord()` first |
+| 53 | `v53_web_hardening` | `card-avatars` per-uid object-count cap (50) via a `storage.objects` insert trigger — bounds the bucket abuse path |
 | 54 | `v54_adoptee_threads` | `companion_adoptions.chat_thread_id` + partial index `adoptions_thread` — adoptee private-thread registry; drop→re-adopt reuses the same thread so history continues |
+| 55 | `v55_story_summaries` | `conversation_summaries` — rolling "story so far" recaps per (companion, scope, channel): `covered_until` watermark, `msgs_since` enqueue counter, `user_edited` authoritative-prior flag |
+| 56 | `v56_story_facts` | `memories.companion_id` + `kind='story_fact'` — roleplay beats scope to the companion that lived them; the 4-column memory unique constraint becomes an expression index (NULL folds to 0) |
+| 57 | `v57_user_memory_control` | `pinned` on `memories`/`companion_journal`; owner-scoped security-definer RPCs for the dashboard memory editor (`my_memory_overview`, `memory_pin`, `memory_update`, `memory_forget`, `journal_pin`, `journal_forget`, `story_summary_save`); digest restricted by `share_facts_with_companion_owners` |
+| 58 | `v58_memory_editor_hardening` | Memory-editor hardening: dead rows refuse edits, pinning promotes gated rows to active, empty story save = reset, `journal_pin` added, `my_memory_overview` drops superseded rows |
+| 59 | `v59_multi_server_marketplace` | Partner deployments: `guild_deployments`, `listing_posts`, `companion_listings.creator_tags`, `companion_adoptions.chat_guild_id`/`chat_channel_id` (NULL = house) |
 | 60 | `v60_token_buckets_exact_clawback` | `web_profiles.purchased_balance` (persistent pack/bonus slice of `credit_balance`; backfilled from net unrefunded purchases), `credit_ledger.payment_intent` + index, `grant_bonus` ledger kind (launch-bonus rows reclassified), `grant_pack(…, p_payment_intent, p_kind)` and `clawback_pack(…, p_payment_intent, p_amount, p_amount_refunded, p_charged_at)` — exact-PI match (pre-v60 packs by grant time), prorated + cumulative partial refunds, subscription refunds never claw packs |
 | 61 | `v61_sweep_indexes` | partial indexes `messages_untriaged (created_at) WHERE triage_result IS NULL` and `messages_pending_extract (guild_id) WHERE triage_result IN ('durable','regex','queued')` — back `dmScopesNeedingSweep` so the 15-min sweep visits only DM scopes with work |
 | 62 | `v62_analytics` | `analytics_events` (pseudonymous funnel events, `NOT EXISTS analytics_opt_out` gate), `metrics_daily` (durable `inc()` rollup), `user_bot_settings.analytics_opt_out` — all RLS deny-all, bot-owned |
 | 63 | `v63_self_serve_deployments` | `guild_deployments.grant_kind` (`ops` vs `self-serve`) + `login_channel_id` — partner `/marketplace deploy` self-service |
 | 64 | `v64_listing_rating_stats_view` | `listing_rating_stats` view (`security_invoker`) — server-side `GROUP BY` rating aggregates for the site shelf |
 | 65 | `v65_fleet_cap_state` | `fleet_cap_state` — persisted fleet-cap day-ratchet (`day` PK, `highwater`) so a restart can't re-anchor the cap below committed spend |
+| 66 | `v66_mod_actions_ticket_triage` | `mod_actions` ledger (house mod actions feed the repeat-offense ladder); `support_tickets` gains `category` (open-time picker), `last_staff_reply_at`, and `stale_notified_at` (unanswered-ticket nudge dedupe) |

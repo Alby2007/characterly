@@ -1,6 +1,6 @@
 # Characterly front end: rebuild spec
 
-Status: **implemented in `web/`, not deployed** (2026-10-21). Visual direction "The Character Archive" (§2); finish review: ship. Cutover steps: `web/README.md`.
+Status: **implemented in `web/` and live at https://characterly.app** (built 2026-10-21; cut over to the `characterly-website` worker since — the old Vite `website/` is archived at `archive/website/`). Visual direction "The Character Archive" (§2); shipped tokens/components are captured in `DESIGN.md`.
 
 ## 1. Context
 
@@ -85,7 +85,7 @@ DESIGN.md is rewritten at the end of the build from what actually shipped. It is
 
 ## 3. Stack and architecture
 
-**Framework:** Astro 5 with `@astrojs/cloudflare`, `output: "server"` and per-route `prerender`. It deploys as the existing `characterly-website` worker on the same domains.
+**Framework:** Astro with `@astrojs/cloudflare`, `output: "server"` and per-route `prerender` (built on Astro 7). It deploys as the existing `characterly-website` worker on the same domains.
 
 | Concern | Decision |
 |---|---|
@@ -96,11 +96,11 @@ DESIGN.md is rewritten at the end of the build from what actually shipped. It is
 | Worker endpoints | `POST /discord/events`, `PUT /avatar`, `POST /avatar/gc`, `POST /track` move to Astro API routes (`src/pages/discord/events.ts`, etc.) or a thin custom worker entry that hands everything else to Astro. Logic is ported verbatim from `website/worker.ts`, including the constant-time secret check and the `trackAe` blob layout. |
 | Middleware | Astro middleware owns: canonical-host 301 (**exempting API paths**, to fix the POST→GET bug), security headers, `page_view` analytics. |
 | CSP | Same policy, generated per response. If any inline script remains, its hash is computed at build time; prefer zero inline scripts. Add HSTS. |
-| Shared code from the bot repo | `src/charcard.ts`, `src/chathist.ts` and `src/discord-events.ts` stay single-source and are imported across the boundary, as today. Document this; don't fork it. `DISCORD_INVITE` and `LINKS` get one source (`web/src/config.ts`), and the bot's `site-shelf.ts` is retired. |
+| Shared code from the bot repo | `src/charcard.ts`, `src/chathist.ts` and `src/discord-events.ts` stay single-source and are imported across the boundary, as today. Document this; don't fork it. `DISCORD_INVITE` and `LINKS` get one source (`web/src/lib/config.ts`). As built, `src/site-shelf.ts` is **not** retired — its catalog/sitemap/label helpers remain the shelf's tested data layer (imported by `web/src/lib/shelf.ts`); only its HTML templates and `public/shelf.css` went away. |
 | Fonts and assets | Self-hosted woff2 under `web/public/fonts`. One token stylesheet shared by every route; no second stylesheet for the shelf. |
 | Analytics | Unchanged events and allowlist: `page_view`, `web_event` (`signup_start`, `signup_done`, `checkout_click`, `link_attempt`), `discord_event`, `avatar_upload`, `avatar_gc`. Add `discord_signin_click` to the allowlist for the new primary path. |
 
-**Directory:** `web/` alongside `website/` until cutover.
+**Directory:** `web/` (as built — `website/` was archived to `archive/website/` at cutover).
 - `web/astro.config.mjs`, `web/wrangler.jsonc` (or `cloudflare.config.ts` parity);
 - `web/src/pages/`, `web/src/layouts/Base.astro`, `web/src/components/`;
 - `web/src/lib/{supabase,auth,shelf,analytics,config}.ts`;
@@ -147,7 +147,7 @@ On the dashboard, the button becomes **Open Discord**.
   - character-card import.
   - Any demo content is labelled as an example. No invented ratings, handles or member counts.
 - **First viewport:**
-  - hook: "They remember you" plus the DMs-and-servers line (copy from the current working tree, `website/index.html`);
+  - hook: "They remember you" plus the DMs-and-servers line (copy from the old site, `archive/website/index.html`);
   - **Continue with Discord** as the primary action, with a line saying what happens next ("Sign in with Discord, then join the server");
   - **Browse the shelf** as the secondary action;
   - the "bring your character" import route visible.
@@ -252,7 +252,7 @@ On the dashboard, the button becomes **Open Discord**.
 5. Cut over by deploying `web/` as `characterly-website`.
    - Verify `/discord/events` (Discord Developer Portal webhook) and the bot's `SITE_URL` avatar calls against the apex.
    - Watch Analytics Engine `page_view` and `web_event`.
-6. Retire `website/`, `src/site-shelf.ts` HTML templates and `public/shelf.css`. Update `docs/website.md`, `docs/operations.md`, `AGENTS.md` and `website/README.md`.
+6. Retire `website/` → archived at `archive/website/` (done; kept for reference). `src/site-shelf.ts` data layer stays in use by `web/`; only its HTML templates/`public/shelf.css` are dead. `docs/website.md`, `docs/operations.md` updated for the Astro site.
 7. Run the Impeccable finish review and documenter to write the new DESIGN.md and `.impeccable/design.json`.
 
 The deploy order in AGENTS.md (bot → `stripe-webhook` → website) still applies to any billing change.

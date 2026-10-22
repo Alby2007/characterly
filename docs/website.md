@@ -1,124 +1,139 @@
-# Website & Web Accounts
+# Website (`web/`) + account linking
 
-The `website/` directory is a self-contained Vite multi-page app — the public face of Characterly and the "real-life user" half of the product (accounts, billing). It shares the Supabase Postgres database with the bot but is otherwise independent: no build step touches `src/`, and the bot never serves it.
+`web/` is an Astro app on Cloudflare Workers (`@astrojs/cloudflare`), worker
+name `characterly-website`, live at `https://characterly.app` (non-apex hosts
+301 to the apex). It replaced the old Vite build (archived at
+`archive/website/`) and owns four surfaces: the marketing pages, the SSR
+marketplace **shelf** under `/characters`, the **account**/**dashboard**
+plates, and the worker-only API lanes.
 
-Production: **https://characterly.app** (Cloudflare Workers Static Assets — `characterly-website` worker). The worker 301s `www.characterly.app` and the `workers.dev` hostname onto the apex — one canonical origin so search equity doesn't split across duplicates. Localhost/`127.x` origins pass through unredirected.
+## How a page is built
 
----
+| Route | File | Mode |
+|-------|------|------|
+| `/` | `src/pages/index.astro` | SSR — live shelf strip |
+| `/characters`, `/characters/[id]` | `src/pages/characters/*` | SSR — catalog + per-listing cards |
+| `/terms` `/privacy` `/security` `/safety` | `src/pages/[doc].astro` | prerendered at build time from the repo-root `*.md` files via `src/lib/legal.ts` |
+| `/guides/...` | `src/pages/guides/*` | prerendered |
+| `/account`, `/dashboard`, `/404` | matching `.astro` + `src/scripts/*.ts` | prerendered shells — all auth/data work is client-side supabase-js |
+| `/sitemap.xml` | `src/pages/sitemap.xml.ts` | generated from `sitemapXml` in the bot's `src/site-shelf.ts` |
 
-## Pages
+Shared code is imported cross-tree, never duplicated: `web/src/lib/shelf.ts`
+pulls the catalog/cache/label helpers from the bot's `src/site-shelf.ts`
+(the bot's test suite covers them), and `src/charcard.ts`,
+`src/chathist.ts`, `src/discord-events.ts`, `src/seed-personas.ts` feed the
+site too.
 
-| Path | File | Purpose |
-|------|------|---------|
-| `/` | `index.html` + `src/main.js` | Landing page: hero with a looping companion chat scene + journal page, at-a-glance ledger, how it works (awaken / summon / remember, each with a product figure), "what it's like" notes, **pricing** (Free vs featured Premium — hosted is the default frame, BYOK reduced to a footnote since that's the funnel), privacy vault, FAQ, closing CTA. The Premium CTA goes to `/account?next=/dashboard#billing` — auth bounces then lands on the billing plate, which carries the `client_reference_id`'d Stripe links (bare links can't attribute a pre-account purchase). Session-aware nav swaps "Sign in" ↔ user chip. |
-| `/account` | `account.html` + `src/account.js` | Auth: sign in / sign up / email link tabs, forgot-password flow, recovery mode for reset links, "Continue with Discord" (hidden unless `DISCORD_OAUTH_ENABLED`). Split layout on desktop, form only on mobile. |
-| `/dashboard` | `dashboard.html` + `src/dashboard.js` | Auth-guarded account page: profile (display name), Discord link card (link/unlink + `/link` code claim — renders the Discord username/avatar snapshot stored on `web_profiles`), **Tokens** plate (balance, plan, recent `credit_ledger` rows — visible once Discord is linked), **Companion settings** plate (c2c toggle, low-token DM alerts, read-only BYOK status — via `my_bot_settings`/`upsert_my_settings`/`my_byok_status` rpcs), **What X remembers** plate (`src/memories.js` — per-companion picker listing DM-scope memories, journal entries, and story recaps with pin/edit/forget controls — via `my_memory_overview`, `memory_pin`, `memory_update`, `memory_forget`, `journal_pin`, `journal_forget`, `story_summary_save`; the same rows Discord's `/memory list`, `/memory forget`, and `/companion story` reach), **Import a character** plate (`src/import-card.js` — parses a `.json`/`.png` card client-side with the shared `charcard` parser, previews, uploads an extracted avatar to the `card-avatars` bucket, creates listing+clone via `import_companion_card`), **Billing** plate (Premium subscribe + token packs — buttons call the `create-checkout` edge function which mints a Checkout Session server-side after checking `plan`: packs require premium, subscribe requires non-premium; `client_reference_id` is forced to the caller's account and `metadata.checkout_kind` tells the webhook what was bought. The public payment links are deactivated — they couldn't gate anything), password change, delete account (type-`DELETE` modal). First-visit authed users without a `consent_events` row at `TERMS_VERSION` are held behind an acceptance modal (`ensureConsent`) — the web-side clickwrap. |
-| `/terms`, `/privacy`, `/security`, `/safety` | `terms.html` / `privacy.html` / `security.html` / `safety.html` + `src/legal.js` | The house documents, rendered at build time from the repo's `TERMS.md`/`PRIVACY.md`/`SECURITY.md`/`SAFETY.md` into styled sheets — editing the `.md` redeploys the copy. `/safety` is the public moderation statement: content policy, screening, crisis triage, reporting — a user-facing distillation of `docs/moderation.md` with the ops internals left out. Terms/Privacy are the URLs `TERMS_URL`/`PRIVACY_URL` (`config.siteUrl` + path) in `src/ops.ts` point at, and the clickwrap targets on both the signup checkbox and the Discord verify gate. |
-| 404 | `404.html` | Served by the Worker's `notFoundHandling: "404-page"`. |
-| `/characters` | `src/site-shelf.ts` (worker-rendered) | The public shelf — the marketplace's indexable surface. Streams live `companion_listings` rows via PostgREST; card grid + `ItemList` JSON-LD. |
-| `/characters/<id>` | `src/site-shelf.ts` (worker-rendered) | One page per published listing: name, cover, tagline, traits/tags, rating, greeting/backstory, "meet them" Discord CTA, and a "More like this" block (`relatedListings` — shared creator tags weigh 2×, shared traits 1×, adoptions tiebreak) for internal linking. `Product` + `BreadcrumbList` JSON-LD — Product with a $0 `Offer` is the documented shape that can earn review snippets; `aggregateRating` only when a real rating count exists. Numeric ids, not slugs — names are mutable. |
-| `/guides/import-character-cards` | `src/site-shelf.ts` (worker-rendered) | The migration-intent page — "import a character card into Discord". Static copy through the same shell; linked from the homepage FAQ and the shelf index. |
-| `/sitemap.xml` | `src/site-shelf.ts` (worker-rendered) | Static public pages + live listing urls with `lastmod` — generated per request so it never rots. `robots.txt` is a `public/` file pointing here. |
+The worker (`web/src/worker.ts`) runs ahead of every request
+(`run_worker_first`): canonical-host redirect, security headers + CSP on
+HTML, `POST /track` → Analytics Engine `web_event` (allowlist:
+`signup_start`, `signup_done`, `checkout_click`, `link_attempt`,
+`discord_signin_click`) plus `page_view` beacons, `POST /discord/events`
+→ `record_app_install`, `PUT /avatar` / `POST /avatar/gc` (shared-secret
+`AVATAR_UPLOAD_SECRET`), and `OPTIONS` for the API lanes. Everything else
+falls through to Astro.
 
-### The shelf contract (`src/site-shelf.ts`)
+The design system ("The Character Archive") is captured in `DESIGN.md` at
+the repo root.
 
-- **Active-only at the boundary.** Every query carries `status=eq.active` — delisted/flagged/banned/unlisted rows never reach a template. Unknown or delisted ids return a real **404** (not a soft-404) so they drop out of the index; they also disappear from `/sitemap.xml`.
-- **Escaping is the security contract.** All user-authored fields (name, tagline, persona, traits, tags, backstory, greeting) pass `esc()` before interpolation; publish-time screening is not output encoding. JSON-LD is emitted via `JSON.stringify` + `</`→`<\/` neutralization. Creator attribution is deliberately generic ("a community creator") — Discord snowflakes never render.
-- **Private imports stay invisible.** `status='unlisted'` (the `/companion import` default) is excluded by the same filter — the migration promise holds.
-- **Caching:** `public, max-age=60, s-maxage=300` — a delist surfaces within ~5 min at the edge; PostgREST isn't hammered by crawls. Missing/failed Supabase reads degrade to an empty shelf or a 404, never a 500.
-- **Styling is standalone.** `public/shelf.css` + `public/fonts/*.woff2` re-implement "The Familiar" outside the hashed vite bundle — worker HTML can't reach it. The nav "Join the server" CTA hardcodes the invite (`DISCORD_INVITE` in `site-shelf.ts` — keep in sync with `src/config.js`).
+## Account linking (`/link` ↔ dashboard)
 
-Every page script imports `src/base.js` first — fonts, `styles.css`, `data-link` URL injection from `config.js`, nav scroll/mobile-menu behaviour, and `.rv` scroll reveals.
+Two layers:
 
-`src/config.js` holds the public runtime constants — Supabase URL, publishable key, links, `DISCORD_OAUTH_ENABLED`. The publishable key is browser-safe by design; RLS enforces access. **Never put the service-role key in `website/`.**
+- **Web account** (Supabase Auth, email or Discord OAuth) — required for
+  hosted-credit chat and marketplace publishing.
+- **Discord linkage** (`web_profiles.discord_user_id`) — connects that
+  account to a Discord user.
 
-## Design system — "The Familiar"
+Flow A (site-first): sign in on the site → dashboard → **Link Discord** →
+supabase-js `linkIdentity('discord')` → OAuth **scope `identify` only** (no
+`guilds.join`) → Discord returns a second identity on the same account →
+dashboard reads `identities[].provider === 'discord'` and PATCHes
+`web_profiles.discord_user_id`. On the next sign-in an `identities`
+changed-callback does the same PATCH automatically. **Supabase Dashboard
+→ Authentication → Sign In/Providers → "Allow manual linking" must be ON**
+— without it `linkIdentity` errors in the browser.
 
-A candlelit study at 1am: a companion as a familiar bound to you, written about in a hand-bound journal. Warm and intimate rather than playful; all tokens live at the top of `src/styles.css`.
+Flow B (DM-first): user runs `/link` in Discord → bot inserts a `link_codes`
+row (10-min expiry) → reply contains a one-click URL
+`https://characterly.app/dashboard?code=XXXX-XXXX` → dashboard prompts
+sign-in → POSTs to `POST /auth/v1/.../rpc/claim_link_code` (SECURITY
+DEFINER — validates code + caller, stamps `discord_user_id`, returns the
+Discord identity JSON the code pre-fetched from the Discord API) → balance
+shows in `/tokens`, hosted-credit chat works, publish/adopt gates pass.
 
-- **Colour:** warm ink backgrounds (`--bg` `#0d0a0e`), parchment text (`--paper*`), candlelight gold accents (`--gold*`), wax red for seals, and `--ghost` teal reserved **only** for companions (avatars, names, the COMPANION tag) so they read as a distinct presence. The one light surface is the journal page (`.sheet`).
-- **Type:** Fraunces (display, `opsz` axis; italics in gold for emphasis instead of gradient text), Instrument Sans (body/UI), IBM Plex Mono (catalogue labels, commands, timestamps). All self-hosted via `@fontsource`.
-- **Motifs:** `public/mark.svg` (crescent + star seal mark, also the favicon), `public/seal.svg` (wax seal), engraved corner ticks on `.figure-frame`/`.plate`, double-ruled frames on `.vault`/`.folio`, `fig. i` captions. Use them sparingly.
-- **Motion:** slow candle flicker on background glows, ink-settle reveals (`.rv`, stagger with `style="--d:N"`). Everything is disabled under `prefers-reduced-motion`; reveals only hide content when the inline `js` class is present.
-- **Copy voice:** plain, specific, second person. Say what the product does; avoid hype words.
+## Supabase Auth setup
 
-## Local development
+- **Site URL:** `https://characterly.app`
+- **Redirect URLs** (must include):
+  `https://characterly.app/**` (covers `/account`, `/dashboard`,
+  `/onboarding`, and every `?next=` return target), and
+  `http://localhost:4321/**` for dev.
+- **Email:** enable Email provider. Confirm-email ON if you want verified
+  emails before the dashboard works.
+- **Discord:** enable the Discord provider with the app's
+  Client ID/Secret; Discord Developer Portal → OAuth2 → Redirects must
+  include `https://<project-ref>.supabase.co/auth/v1/callback`.
+- **Manual linking:** ON (see Flow A).
 
-```bash
-cd website
-npm install
-npm run dev    # http://localhost:5173
-```
+Google and Apple were considered and dropped — the account only exists to
+bind a Discord identity, so the native Discord button plus email cover the
+whole funnel.
 
-## Deployment
+## OAuth return URLs
 
-```bash
-cd website
-npm run deploy   # vite build (Cloudflare plugin emits the Build Output Spec) + cf deploy
-```
+Supabase's `redirectTo` must be **allowlisted** in the project config. The
+client passes `authRedirectTarget()` (current origin + `?next=` when
+present); after OAuth completes Supabase redirects back and
+`onAuthStateChange` picks up the session on whatever page it lands on —
+the dashboard then navigates to `?next=` if set. This means a sign-in on a
+live origin not in the allowlist breaks OAuth entirely while email still
+works — if Discord sign-in fails with a redirect error, add the origin
+to Supabase → Authentication → URL Configuration first.
 
-`cloudflare.config.ts` declares the `characterly-website` Worker (static assets only, SPA-style not-found handling, observability on) plus two bindings: `ANALYTICS` (Workers Analytics Engine, dataset `characterly_site`, auto-created on deploy — note the account-level "Enable Analytics Engine" click in the dashboard is required once, before the first bound deploy) and `ASSETS` (explicit `bindings.assets()`). `assets.runWorkerFirst: true` routes every request through the worker — **required for `page_view` to fire**, since asset hits otherwise bypass the worker entirely (and `env.ASSETS` must be bound or the asset fallback throws 1101). `worker.ts` writes first-party datapoints — `page_view` (path + referer host + status; no IPs, cookies, or query strings), `discord_event`, `avatar_upload`, `avatar_gc`, and `web_event` via `POST /track` (allowlisted names beaconed from `account.js`/`dashboard.js`: `signup_start`, `signup_done`, `checkout_click`, `link_attempt`). Query via the dashboard's Analytics Engine panel or the GraphQL `analyticsEngineAdaptiveGroups` node — see `docs/operations.md` → Product analytics. First deploy requires `cf login`. Deploys are manual — the site is not part of CI.
+## Discord-sign-in UTM param
 
-Custom domains are attached through the Cloudflare API (`PUT /accounts/{account_id}/workers/domains` with `{ zone_id, hostname, service: "characterly-website", environment: "production" }`) since the `cf` beta CLI doesn't expose worker domains yet. Adding a new hostname still requires its `https://<host>/**` pattern in the Supabase redirect allowlist (below) or OAuth/magic links on that origin will fail.
+The account page's Discord OAuth button adds `utm_source=discord_signin`
+to `redirectTo`, and the Supabase Discord provider's callback URL carries
+the same param (paste it in the Discord dev portal's redirect list). Stripe
+Checkout return URLs keep UTM params (Stripe preserves the querystring on
+the built success/cancel URLs), so `?utm_source=discord_signin` on a
+checkout completion tells you the signup came through the Discord lane vs
+email — `discord_signin_click` is the matching `web_event` beacon.
 
----
+## Session teardown notes
 
-## Supabase Auth setup (dashboard — required, manual)
+- Sign-out doesn't ride the SDK's session path: `signOut()` in
+  `src/scripts/auth.ts` manually removes `sb-*-auth-token` keys from
+  `localStorage` *then* calls `supabase.auth.signOut({ scope: "local" })`.
+  supabase-js `signOut()` can hang on a dead session (the
+  `navigator.locks` wedge), which previously left the session alive while
+  the UI looked signed out.
+- Account deletion reads the access token straight out of `localStorage`
+  for the same reason, POSTs to `POST /auth/v1/.../rpc/delete_own_account`,
+  then signs out — `web_profiles` and everything beneath it cascade on
+  `auth.users` deletion.
+- `discord_user_id` is protected by a trigger: PATCH attempts to change it
+  once set are refused (`discord_id_locked`). Re-link flow: delete the
+  account, sign up again, link the correct Discord.
 
-These live in the Supabase dashboard, not the repo. Project: `tfukkoektmsrolykliop`.
+## Operational notes
 
-### URL Configuration — `Auth → URL Configuration`
-
-| Setting | Value |
-|---------|-------|
-| Site URL | `https://characterly.app` |
-| Redirect URLs | `https://characterly.app/**`, `https://www.characterly.app/**`, `https://characterly-website.albertjemmettwaite.workers.dev/**` (legacy, keep while the hostname stays live), and `http://localhost:5173/**` |
-
-The `/**` glob covers verification emails, magic links, password recovery, and OAuth callbacks on each origin. Add a new origin's `/**` pattern here whenever the site's hostname changes (custom domain, preview deploys).
-
-### Discord provider — `Auth → Providers → Discord`
-
-- **Enabled**, with the bot application's **Client ID** and **Client Secret** from the [Discord Developer Portal](https://discord.com/developers/applications) → the bot's app → OAuth2. (The client secret is independent of the bot token — resetting one doesn't touch the other.)
-- Copy Supabase's **Callback URL** (`https://tfukkoektmsrolykliop.supabase.co/auth/v1/callback`) into the Discord app's **OAuth2 → Redirects** list, then save in both portals.
-- Flip `DISCORD_OAUTH_ENABLED = true` in `website/src/config.js` and redeploy.
-
-### Other toggles
-
-| Setting | State | Why |
-|---------|-------|-----|
-| **Allow manual linking** (`Auth → Sign In / Providers`) | **ON — required** | Without it `linkIdentity()` errors and the dashboard's Link Discord button does nothing. |
-| **Leaked password protection** (`Auth → Password security`) | Recommended ON | HaveIBeenPwned screening; Supabase advisor flags it when off. |
-| Email confirmations | ON (default) | Sign-ups get a verification link; redirect allowlist must cover the landing page. |
-
-### Auth email templates
-
-Branded templates live in `supabase/email/` (`confirm-signup`, `magic-link`,
-`reset-password`, `change-email`) — hosted projects don't read email
-templates from `config.toml`, so they're applied via the Management API:
-
-```bash
-SUPABASE_ACCESS_TOKEN=sbp_... node supabase/email/apply.mjs --check  # read live state
-SUPABASE_ACCESS_TOKEN=sbp_... node supabase/email/apply.mjs          # apply all four
-```
-
-(or paste each file into Dashboard → Authentication → Email Templates).
-The script refuses to apply a file missing `{{ .ConfirmationURL }}` — a
-template without its link is a dead letter. Invite/reauthentication
-templates stay at Supabase defaults (nothing on the site fires them).
-
----
-
-## How Discord ↔ account linking works
-
-`web_profiles.discord_user_id` is the join column and is **server-write-only** — `authenticated` can update only `display_name`/`updated_at` on their own row (column-level grants, v27), so a forged link can't steal another user's perks.
-
-Two trusted paths write it:
-
-1. **OAuth identity sync** — `on_identity_sync` trigger (`internal.sync_discord_identity`) on `auth.identities`. Discord OAuth sign-up, `linkIdentity` from the dashboard, and Supabase's same-verified-email auto-merge all write a `discord` identity row → the trigger copies `provider_id` (the Discord snowflake) into `discord_user_id`. Identity deletion (unlink, account delete) NULLs it back. If the snowflake is already bound to another account, the trigger raises `discord_already_linked`.
-2. **`/link` code flow** — the bot's `/link` command mints a one-time `XXXX-XXXX` code (`link_codes`, 10-min expiry, one active code per Discord user, ephemeral reply) carrying a snapshot of the caller's Discord `username`/`avatar` (v38). Claiming it on the dashboard calls `claim_link_code` (security-definer rpc, `auth.uid()`-guarded) which validates and stamps the link — copying the snapshot onto `web_profiles.discord_username`/`discord_avatar_url` so code-linked accounts render a Discord identity in the dashboard exactly like OAuth-linked ones (the identity trigger stamps the same fields for OAuth rows; `unlink_discord` clears them). This path exists for users who sign up with email and never touch Discord OAuth. A boot-time store backfill (`syncDiscordIdentity`) heals rows linked before snapshots existed.
-
-**Unlink:** identity-backed links use `unlinkIdentity` — the dashboard offers Unlink only when ≥2 identities exist (Supabase refuses to remove the last one — the UI explains the set-a-password escape hatch for OAuth-only accounts). Code-claimed links have no identity row, so the dashboard calls `unlink_discord` (v28 rpc, own-row only) instead — always permitted since it isn't an auth identity. `web_profiles.stripe_customer_id` / `stripe_subscription_id` (v31) are written by the Stripe webhook edge function (`supabase/functions/stripe-webhook`): `checkout.session.completed` grants packs (idempotent on session id via `credit_ledger.stripe_ref`) or flips `plan='premium'`; `customer.subscription.updated/deleted` move plan back down. Checkout sessions carry `client_reference_id=<web_profiles.id>` (and `metadata.checkout_kind`) so fulfillment attributes correctly — the webhook still accepts the legacy `payment_link` routing so deliveries created before the links were deactivated still land. Perks read `discord_user_id → plan` in the bot. The hosted lane charges **tokens** (`credit_balance` on `web_profiles`, audited by `credit_ledger`): a human's turn costs 2 (their message + the companion reply, both refunded if no reply lands), companion-to-companion hops cost the replying companion's owner 1 — which is exactly why the c2c dashboard toggle is a spend control. Grants are lazy (applied inside the spend tx) and BYOK lanes never spend tokens.
-
-**`?next=` redirects:** `requireAuth()` (auth.js) bounces signed-out visitors to `/account?next=<attempted path>`; `authRedirectTarget()` validates it (same-origin `/`-prefixed paths only — blocks open redirects) and every post-auth navigation honors it: password sign-in, magic link (`emailRedirectTo`), Discord OAuth, and recovery. Default is `/dashboard`.
-
-**Session teardown can't wait on the network.** supabase-js guards token access behind a `navigator.locks` lock, and a wedged auth call (e.g. a hung `/logout` — a known upstream edge against a dead session) holds it forever, silently queueing every later auth-touching call. So: `signOut()` clears `sb-*-auth-token` keys synchronously and fires `/logout` revocation in the background (navigation is unconditional); `deleteAccount()` reads the stored access token and POSTs `delete_own_account` via raw `fetch`, bypassing the SDK's lock-guarded session path (a bounded `getSession()` refresh is tried first). Both are raced with `withTimeout`, and the delete modal surfaces failures inline (`#delete-error`, case-insensitive `DELETE` confirm) rather than `alert()`. On `/dashboard`, sign-out/delete listeners attach before every network-bound render — profile, Discord card, tokens, settings renders are each capped at 8s and non-fatal — so a hung RPC can never leave the buttons inert.
+- Deploy: `cd web && npm run deploy` (`astro build` + `wrangler deploy`).
+  `CLOUDFLARE_ENV=preview npm run deploy` ships `characterly-website-preview`.
+- Worker secrets: `DISCORD_APP_PUBLIC_KEY`, `SUPABASE_URL`,
+  `SUPABASE_SERVICE_ROLE_KEY`, `AVATAR_UPLOAD_SECRET` — set via
+  `wrangler secret put` or the dashboard; the publishable anon key lives in
+  `src/lib/config.ts` (safe — RLS enforces).
+- Local dev: `cd web && npm run dev` → `http://localhost:4321` (Astro dev —
+  CSP/worker rules don't run; `npm run preview` builds and serves under
+  `wrangler dev` with real headers). `npm test` covers the worker rules and
+  allowlists. Without `SUPABASE_SERVICE_ROLE_KEY` in `.dev.vars` the shelf
+  falls back to the seed roster via `devFixture` — dev only.
+- Browser/env overrides: `PUBLIC_SUPABASE_URL` and
+  `PUBLIC_SUPABASE_PUBLISHABLE_KEY` env vars override `config.ts` at build
+  time — that's the staging-host switch.
+- Site copy (links, plans, `TERMS_VERSION`, Support button URL): single
+  source in `web/src/lib/config.ts`.
+- The legacy Vite site lives at `archive/website/` for reference; its
+  `config.js`/`legal.js`/`shell.js` model is superseded — don't patch it.

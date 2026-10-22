@@ -10,9 +10,8 @@ docs/handoff.md
 keys/
 *.pub
 
-# website build output
-website/dist/
-website/.cloudflare/
+# archived site build output (dist/ covered globally above)
+archive/website/.cloudflare/
 supabase/.temp/
 
 # Agent tooling (local installs — not project code)

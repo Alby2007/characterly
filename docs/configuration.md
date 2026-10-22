@@ -26,7 +26,11 @@ Characterly is configured through environment variables validated at startup by 
 | `DM_CONTEXT_MESSAGES` | `40` | Live transcript window for DM replies — wider than the shared-guild default of 25 since a 1:1 chat has no other voices (range 10–100). The rolling story recap folds everything older; keep the two in step if you change it. |
 | `FREE_DAILY_CREDITS` | `30` | Free-plan hosted accounts' daily allowance refills to this each UTC day (hosted lane only). Applied lazily inside `spendCredits` — no scheduler. Only the allowance (`credit_balance − purchased_balance`) refills; pack/bonus tokens sit on top and never suppress it. The allowance is spent first; a negative allowance (clawed-back pack already spent) is paid down by grants rather than erased. |
 | `PREMIUM_DAILY_CREDITS` | `150` | Daily refill floor for premium accounts — high enough to feel unlimited (≈75 turns/day) while remaining metered so an abusive account stays bounded. |
-| `HOSTED_DAILY_LLM_CAP` | `20000` | Fleet-wide circuit breaker: max hosted (env-key) LLM calls per UTC day across all users. BYOK calls never count. When tripped, hosted chats get the capacity notice until UTC midnight. |
+| `HOSTED_DAILY_LLM_CAP` | `20000` | Fleet-wide **base** circuit breaker: max hosted (env-key) LLM calls per UTC day across all users — a floor, not the whole budget (see the `FLEET_*` vars). BYOK calls never count. When tripped, hosted chats get the capacity notice until UTC midnight. `0` is a deliberate freeze. |
+| `FLEET_PREMIUM_DAILY_REVENUE_USD` | `0.22` | Assumed $/premium-sub/day feeding the fleet-cap bonus (yearly-normalized — `web_profiles` stores no interval). |
+| `FLEET_COST_PER_HOSTED_CALL_USD` | `0.0005` | Assumed blended $/hosted call. Set from real spend across the hosted models — mispricing eats margin inside the safety factor. |
+| `FLEET_CAP_SAFETY_FACTOR` | `0.5` | Fraction of theoretical premium-funded headroom actually released as bonus calls. |
+| `FLEET_CAP_MAX_BONUS` | `60000` | Ceiling on the daily bonus calls premium revenue can add to the base cap. Formula in [operations.md](operations.md#fleet-capacity-revenue-aware); the ratchet persists in `fleet_cap_state` so restarts can't re-anchor below committed spend. |
 | `HOSTED_BACKGROUND_SHARE` | `0.4` | Fraction (0–1) of `HOSTED_DAILY_LLM_CAP` that background cognition may use — worker jobs (extract, journal, summary, chat-import) and the periodic sweeps/maintenance run in a background budget context and also charge `hosted:background`. The rest is reserved so live chat never sheds because jobs ate the budget; jobs past the share park until UTC midnight. |
 | `ONBOARDING_FREE_TURNS` | `8` | Hosted companion-draft (onboarding) turns that are free; each turn after that — typed or a preset button — costs a normal 2-token turn. Locking in and Edit Draft stay free; BYOK never pays. |
 | `LOW_CREDIT_ALERT` | `5` | Balance threshold for the once-per-day low-token DM (skippable via the dashboard Companion settings toggle). |
@@ -111,7 +115,8 @@ Entirely opt-in: **`HOUSE_GUILD_ID` unset disables everything** below — no ext
 | `HOUSE_ANNOUNCE_CHANNEL_ID` | — | `/ops announce` target |
 | `HOUSE_ADOPTEES_CHANNEL_ID` | name-match `adoptees` | Parent channel for adopted-companion private threads (v54). Name fallback binds a channel created before the env existed |
 | `HOUSE_INVITE_URL` | `SITE_URL` | Public server invite shown to non-member adopters who need to join before their adoptee thread can open |
-| `OPS_CHANNEL_ID` | `MARKETPLACE_MOD_CHANNEL_ID` | Ops alerts + host breach/recovery notices |
+| `OPS_CHANNEL_ID` | `MARKETPLACE_MOD_CHANNEL_ID` | Ops notices channel — host breach/recovery, house report relays, routine pings |
+| `OPS_ALERT_CHANNEL_ID` | `OPS_CHANNEL_ID` | Optional separate channel for **high-severity** alerts (`opsAlert(…, "alert")`) — lets page-worthy breaches dodge a noisy notices channel |
 | `OPS_USER_IDS` | — | Comma-separated user ids allowed to run `/ops` (controls the host — person-level, tighter than ManageGuild) |
 | `OPS_REPO_DIR` | `~/characterly` | Repo checkout on the host for `/ops deploy` |
 | `AUTOMOD_BURST_COUNT` / `_WINDOW_MS` | `6` / `8000` | Messages-per-window that trips burst spam (delete + 5m timeout) |
@@ -119,6 +124,11 @@ Entirely opt-in: **`HOUSE_GUILD_ID` unset disables everything** below — no ext
 | `AUTOMOD_NEW_ACCOUNT_DAYS` | `7` | Accounts younger than this can't post external links |
 | `AUTOMOD_RAID_JOINS` | `8` | Joins in 60s that trip the raid alert |
 | `AUTOMOD_RAID_KICK` | off | `1` auto-kicks joins while the raid window is hot |
+| `AUTOMOD_KICK_THRESHOLD` | `4` | Repeat-offense ladder (v66): the Nth automod offense inside the escalate window kicks instead of timing out; `0` never kicks |
+| `HOUSE_VERIFY_NUDGE` | on (`0` disables) | 24h+ unverified members get a verify nudge DM (≤25 per sweep, analytics opt-out respected) |
+| `HOUSE_THREAD_WARN` / `HOUSE_THREAD_CLEAR` | `700` / `600` | Floodgate: `#adoptees` live-thread counts that post/clear the "host your own shelf" card (hysteresis band — card stands until *both* clear) |
+| `HOUSE_GUILD_THREAD_WARN` / `HOUSE_GUILD_THREAD_CLEAR` | `850` / `750` | Guild-wide active-thread counts that also trip/clear the card — the ~1,000 ceiling counts tickets and forum posts too |
+| `ADOPTEE_THREAD_ARCHIVE_MINUTES` | `4320` | Adoptee-thread inactivity auto-archive — Discord-valid values only (60/1440/4320/10080). Shorter recycles the active-thread pool faster |
 | `HOST_HEAP_PCT` / `HOST_DISK_PCT` / `HOST_LAG_MS` | `90` / `85` / `1000` | Watchdog breach thresholds (alert once, recover notice) |
 | `HOST_HEALTH_INTERVAL_MS` | `300000` | Watchdog tick |
 
@@ -181,12 +191,15 @@ Deferrable cognition (`extract`, `journal-write`, `pair-analysis`, and `summary-
 
 ## Website configuration
 
-The site in `website/` has no env file — its client config is compile-time in `website/src/config.js`:
+The site in `web/` keeps its client config compile-time in `web/src/lib/config.ts`:
 
 | Key | Purpose |
 |-----|---------|
-| `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` | The same Supabase project as the bot (`tfukkoektmsrolykliop`). The publishable key is public by design — access is enforced by RLS, not key secrecy. |
+| `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` | The same Supabase project as the bot (`tfukkoektmsrolykliop`). The publishable key is public by design — access is enforced by RLS, not key secrecy. Build-time env overrides: `PUBLIC_SUPABASE_URL` / `PUBLIC_SUPABASE_PUBLISHABLE_KEY` (the staging-host switch). |
 | `LINKS` | Single source of truth for outbound links (bot invite, Discord invite, repo, legal pages). |
-| `DISCORD_OAUTH_ENABLED` | Shows the Discord sign-in/link buttons once the Discord provider is configured in Supabase Auth (client id + secret from the bot's Discord application, callback URL registered in the Discord developer portal). Currently `true`. |
+| `TERMS_VERSION` | Clickwrap version stamped into `consent_events` — bump in the same commit as a legal `.md` change (see [operations.md](operations.md)). |
+| Plans/prices | The only place pack/Premium prices live — keep in step with the Stripe catalog. |
+
+Worker-side secrets (`wrangler secret put` or dashboard → Variables and Secrets): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `DISCORD_APP_PUBLIC_KEY`, `AVATAR_UPLOAD_SECRET`. Discord sign-in is always offered — the Discord provider in Supabase Auth (client id + secret from the bot's Discord application, callback URL registered in the Discord developer portal) is the only configuration it needs.
 
 Server-side, `SITE_URL` (above) tells the bot where to send users claiming a `/link` code.
