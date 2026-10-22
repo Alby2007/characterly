@@ -70,12 +70,12 @@ export function initImportCard({ linked, uid }) {
     const openingsEl = $("#import-openings");
     openingsEl.hidden = !persona.openings.length;
     openingsEl.textContent = persona.openings.length
-      ? `+${persona.openings.length} alternate opening${persona.openings.length === 1 ? "" : "s"} — you'll pick one when you first meet.`
+      ? `+${persona.openings.length} alternate opening${persona.openings.length === 1 ? "" : "s"}. You'll pick one when you first meet.`
       : "";
     const loreEl = $("#import-lore");
     loreEl.hidden = !persona.lore.length;
     loreEl.textContent = persona.lore.length
-      ? `+${persona.lore.length} lore ${persona.lore.length === 1 ? "entry" : "entries"} — they surface when the conversation touches them.`
+      ? `+${persona.lore.length} lore ${persona.lore.length === 1 ? "entry" : "entries"}. They surface when the conversation touches them.`
       : "";
     const creator = $("#import-creator");
     creator.hidden = !parsed.card.creator;

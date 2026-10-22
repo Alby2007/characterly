@@ -131,10 +131,10 @@ export type CreatorFields = { slug: string | null; name: string; bio: string; pu
  *  feedback. Returns the first problem, or null when clean. A public page
  *  requires a slug; a private profile may keep everything else empty. */
 export function validateCreatorFields(f: CreatorFields): { field: string; error: string } | null {
-  if (f.public && !f.slug) return { field: "slug", error: "A public creator page needs a slug — it's the page URL." };
+  if (f.public && !f.slug) return { field: "slug", error: "A public creator page needs a slug. It's the page URL." };
   if (f.slug != null) {
     if (!CREATOR_SLUG_RE.test(f.slug)) {
-      return { field: "slug", error: "Slugs are 3–32 chars: lowercase letters, numbers, hyphens (no leading hyphen)." };
+      return { field: "slug", error: "Slugs are 3-32 chars: lowercase letters, numbers, hyphens (no leading hyphen)." };
     }
     if ((RESERVED_CREATOR_SLUGS as readonly string[]).includes(f.slug)) {
       return { field: "slug", error: "That slug is reserved." };

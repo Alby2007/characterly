@@ -425,7 +425,7 @@ export function listingPage(l: ShelfListing, rating: ShelfRating, related: Shelf
   const canonical = `${SITE_ORIGIN}/characters/${l.id}`;
   const title = `${l.name}, an AI companion for Discord · Characterly`;
   const traitLine = l.coreTraits.length ? ` Traits: ${l.coreTraits.slice(0, 5).join(", ")}.` : "";
-  const description = `${l.tagline ? `${l.tagline}.` : `${l.name} is a community AI companion on the Characterly shelf.`}${traitLine} Adopt ${l.name} into a private Discord thread — it remembers you from the first hello.`;
+  const description = `${l.tagline ? `${l.tagline}.` : `${l.name} is a community AI companion on the Characterly shelf.`}${traitLine} Adopt ${l.name} into a private Discord thread. It remembers you from the first hello.`;
   const traits = l.coreTraits.slice(0, 6).map(t => `<span class="tag">${esc(t)}</span>`).join("");
   const tags = l.creatorTags.slice(0, 4).map(t => `<span class="tag tag-dim">${esc(t)}</span>`).join("");
   const product: Record<string, unknown> = {
@@ -460,7 +460,7 @@ export function listingPage(l: ShelfListing, rating: ShelfRating, related: Shelf
           <h1>${esc(l.name)}</h1>
           ${l.tagline ? `<p class="lede">${esc(l.tagline)}</p>` : ""}
           <p class="listing-meta">${traits}${tags}<span class="dim">${ratingText(rating)} · ${l.addCount} ${l.addCount === 1 ? "adoption" : "adoptions"}${l.loreCount ? ` · world lore · ${l.loreCount} ${l.loreCount === 1 ? "entry" : "entries"}` : ""} · a community creator</span></p>
-          <p><a class="btn" href="${DISCORD_INVITE}" target="_blank" rel="noopener noreferrer">Meet ${esc(l.name)} — join the server</a></p>
+          <p><a class="btn" href="${DISCORD_INVITE}" target="_blank" rel="noopener noreferrer">Meet ${esc(l.name)} · join the server</a></p>
         </div>
       </div>
       ${l.voicePersona ? `<section><h2>Who they are</h2><p>${nl2br(l.voicePersona)}</p></section>` : ""}
@@ -478,11 +478,11 @@ export function listingPage(l: ShelfListing, rating: ShelfRating, related: Shelf
 export function notFoundPage(): string {
   return shell({
     title: "Off the shelf · Characterly",
-    description: "This listing isn't on the shelf — it may have been delisted or taken down.",
+    description: "This listing isn't on the shelf. It may have been delisted or taken down.",
     canonical: `${SITE_ORIGIN}/characters`,
     body: `    <section class="shelf">
       <h1>Off the shelf.</h1>
-      <p class="lede">This companion isn't listed anymore — it may have been delisted or taken down. The rest of the shelf is still open.</p>
+      <p class="lede">This companion isn't listed anymore. It may have been delisted or taken down. The rest of the shelf is still open.</p>
       <p><a class="btn" href="/characters">Browse the shelf</a></p>
     </section>`,
   });

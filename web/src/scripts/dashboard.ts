@@ -389,7 +389,7 @@ $("#form-creator").addEventListener("submit", async e => {
   msg.classList.remove("ok");
   const slug = $<HTMLInputElement>("#creator-slug").value.trim().toLowerCase();
   if (slug && !/^[a-z0-9][a-z0-9-]{2,31}$/.test(slug)) {
-    msg.textContent = "Slugs are 3–32 chars: lowercase letters, numbers, hyphens (no leading hyphen).";
+    msg.textContent = "Slugs are 3-32 chars: lowercase letters, numbers, hyphens (no leading hyphen).";
     msg.hidden = false;
     return;
   }

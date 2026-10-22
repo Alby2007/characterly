@@ -111,7 +111,7 @@ export async function handleCreatorProfileSave(request: Request, env: CreatorPro
   const profRes = await fetch(`${r.base}/rest/v1/web_profiles?select=discord_user_id&id=eq.${encodeURIComponent(uid)}&limit=1`, { headers: r.headers }).catch(() => null);
   if (!profRes?.ok) return err(502, "upstream error");
   const prof = ((await profRes.json().catch(() => [])) as Array<{ discord_user_id: string | null }>)[0];
-  if (!prof?.discord_user_id) return err(403, "Link Discord first — creator pages sit on top of your published characters.");
+  if (!prof?.discord_user_id) return err(403, "Link Discord first. Creator pages sit on top of your published characters.");
   const bannedRes = await fetch(`${r.base}/rest/v1/marketplace_bans?select=discord_user_id&discord_user_id=eq.${encodeURIComponent(prof.discord_user_id)}&limit=1`, { headers: r.headers }).catch(() => null);
   if (!bannedRes?.ok) return err(502, "upstream error");
   if (((await bannedRes.json().catch(() => [])) as unknown[]).length) {
@@ -129,12 +129,12 @@ export async function handleCreatorProfileSave(request: Request, env: CreatorPro
   const bad = validateCreatorFields(fields);
   if (bad) return err(400, bad.error, { field: bad.field });
 
-  if (!saveAllowed(uid)) return err(429, "Too many saves — try again in a bit.");
+  if (!saveAllowed(uid)) return err(429, "Too many saves. Try again in a bit.");
 
   // Deterministic first line on every field, every save — public or not.
   for (const [field, text] of [["slug", fields.slug ?? ""], ["name", fields.name], ["bio", fields.bio]] as const) {
     const hit = checkMessageContent(text);
-    if (!hit.ok) return err(422, `That can't go on a public page — the ${field} trips the content policy (${hit.category}).`, { field, category: hit.category });
+    if (!hit.ok) return err(422, `That can't go on a public page: the ${field} trips the content policy (${hit.category}).`, { field, category: hit.category });
   }
 
   // The model screen only guards text that's actually going public — a save
@@ -143,9 +143,9 @@ export async function handleCreatorProfileSave(request: Request, env: CreatorPro
   if (fields.public && env.GROQ_API_KEY) {
     let verdict;
     try { verdict = await screenModelCall(env, creatorProfileSubject(fields)); }
-    catch { return err(503, "Content screening is unavailable right now — try again in a moment."); }
+    catch { return err(503, "Content screening is unavailable right now. Try again in a moment."); }
     if (verdict.verdict === "flag") {
-      return err(422, `That can't go on a public page — ${verdict.category ? `flagged as ${verdict.category}` : "it trips the content policy"}.`);
+      return err(422, `That can't go on a public page: ${verdict.category ? `flagged as ${verdict.category}` : "it trips the content policy"}.`);
     }
   }
 

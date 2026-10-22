@@ -19,7 +19,7 @@ Astro.response.headers.set("cache-control", SHELF_CACHE);
 const { creator: c, listings, ratings, stats } = res.data;
 const canonical = `${SITE_ORIGIN}/creators/${c.slug}`;
 const ratingBit = stats.avgRating != null ? ` rated ${stats.avgRating.toFixed(1)} across ${stats.ratingCount} ${stats.ratingCount === 1 ? "rating" : "ratings"},` : "";
-const description = `${c.name} makes AI characters for Discord on Characterly — ${stats.characters} on the shelf,${ratingBit} ${stats.adoptions.toLocaleString("en-US")} ${stats.adoptions === 1 ? "adoption" : "adoptions"}.`;
+const description = `${c.name} makes AI characters for Discord on Characterly: ${stats.characters} on the shelf,${ratingBit} ${stats.adoptions.toLocaleString("en-US")} ${stats.adoptions === 1 ? "adoption" : "adoptions"}.`;
 const profilePage = {
   "@context": "https://schema.org", "@type": "ProfilePage",
   mainEntity: {
@@ -68,7 +68,7 @@ const bioParas = c.bio.split(/\n+/).map(t => t.trim()).filter(Boolean);
     ) : (
       <div class="empty">
         <h2>Nothing live right now.</h2>
-        <p class="lede">This creator has no public characters at the moment — the shelf shifts as listings come and go.</p>
+        <p class="lede">This creator has no public characters at the moment. The shelf shifts as listings come and go.</p>
         <p class="empty-actions"><a class="btn" href="/characters">Browse the shelf</a><a class="link" href={LINKS.discord} target="_blank" rel="noopener noreferrer">Visit the server</a></p>
       </div>
     )}
