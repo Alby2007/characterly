@@ -34,9 +34,11 @@ live listing — a new listing, or a delisted → active *revive*. Republishing 
 already-live listing is the only free path.
 
 Modal (`market_publish:<companionId>`): **display name**, **tagline** (card
-blurb), **greeting** (the character's first DM to an adopter), and **cover
+blurb), **greeting** (the character's first DM to an adopter), **cover
 image URL** (optional — prefilled with the current cover, so clearing it
-removes the art). On first publish the persona is cloned from the companion;
+removes the art), and **alternate openings** (optional — one per blank line;
+see *Alternate openings* below). On first publish the persona is cloned from
+the companion;
 on republish the existing listing persona is preserved and only the modal
 fields update — persona edits go through **Edit persona** (`market:editmodal`
 → `market_edit:<listingId>` modal: name, voice, traits, bond, backstory).
@@ -58,7 +60,10 @@ embedded `tEXt`/`ccv3` payload — the portable v1/v2/v3 format shared by
 character tools and card libraries). The shared parser (`src/charcard.ts`,
 bundled into the website too) normalizes the card into persona fields and
 stamps `persona_source='card_import'` + `import_meta` (spec, claimed creator,
-filename, `sha256` of the source bytes) on both rows.
+filename, `sha256` of the source bytes) on both rows. A card's
+`alternate_greetings` become the listing's **openings** (v68 — placeholders
+filled, deduped against `first_mes`, capped at 4×1000) — see *Alternate
+openings* below.
 
 **Private by default.** An import creates a `status='unlisted'` listing plus an
 adopted clone owned by the importer — invisible to marketplace queries and live
@@ -98,7 +103,9 @@ exports are dropped before anything is stored.
    `createListing`) and snapshots the persona into `companion_persona_versions`
    (audit trail — "the character said X on version 3" is checkable).
 2. **The bot itself creates the forum thread** and posts the listing card —
-   name, tagline, vibe, traits, add-count, `by <creator> · v<N>` footer — with
+   name, tagline, vibe, traits, add-count, a quiet "N openings" *Ways to
+   meet* field when the listing has alternates, and the `by <creator> · v<N>`
+   footer — with
    **Add to your companions** and **Report** buttons (`market:add:<id>` /
    `market:report:<id>`). Only the bot can mint those buttons, so listings
    can't be faked by users posting links.
@@ -281,6 +288,50 @@ otherwise the listing's covers it — so cover changes reach every existing
 and future adoptee thread with no backfill, on top of
 `propagateListingVersion`'s normal persona sync.
 
+## Alternate openings ("scenes")
+
+A listing can carry up to four **alternate openings** alongside its canonical
+`greeting` (v68 — `companion_listings.openings`, `[{text, label?, premise?}]`,
+array-CHECK'd; `label`/`premise` are reserved fields nothing populates yet).
+Openings are listing-side only — adoptee clones never carry them, exactly
+like `greeting`: the Meet path reads the listing row fresh.
+
+- **Where they come from.** Card `alternate_greetings` import as openings
+  automatically (both lanes — the Discord `/companion import` confirm and the
+  web `import_companion_card` RPC, which accepts `["text"]` or `[{"text":…}]`
+  shapes). Creators can also write them freehand.
+- **Editing.** Two doors, one format (blank-line-separated — one opening per
+  blank line): the optional *Alternate openings* field on both publish
+  modals, and the dedicated **Scenes** button (`market:scenes:<id>` →
+  `market_scenes:<id>` modal). Scenes lives on the card's second,
+  creator-manage row next to *Edit persona* — the public row was already at
+  Discord's five-button cap — so freehand and import-published listings keep
+  a persistent edit path after the ephemeral publish reply scrolls away.
+  Ownership + creator-ban are re-checked at click *and* submit; a blank
+  submit clears all openings (same rule as Cover). Every openings write is a
+  version bump with the usual persona-fields screen — scenes are
+  marketplace-facing text.
+- **The Meet pick.** A *fresh* Meet (`market:talk` on a deferred adoption —
+  no `chat_thread_id`, never `dm_introduced_at`) on a multi-opening listing
+  doesn't create the thread: it answers with an ephemeral select — the
+  greeting first ("The first hello"), then each opening, then **Surprise
+  me**. The select's values are pool indexes, never text, so a forged option
+  can't inject content — out-of-range and junk values clamp to the greeting.
+  The pick resolves server-side (`market:scenesel:<companionId>` →
+  `handleMeetScenePick`), then takes the *same* `ensureAdopteeThread` path a
+  plain Meet does — the chosen text is simply substituted as the greeting
+  that `greetAdopteeInThread` posts. Single-opening and greeting-only
+  listings keep the one-click Meet; an existing thread ("Open") never
+  re-picks; awakened companions never see the picker.
+- **The shelf.** The card advertises the count only ("N openings" — the text
+  stays a Meet-time reveal); the public `/characters/<id>` page shows them
+  under a *More ways to meet* tab, rendered through the same esc'd greeting
+  renderer (`*stage directions*` italicized).
+
+Premise injection into the prompt, re-scening an existing thread, and
+awakened-companion openings are deliberately out of scope — the pick only
+chooses which first message posts.
+
 ## Adopting
 
 Forum card → **Add** → `store.adoptListing` in one transaction:
@@ -313,7 +364,10 @@ Forum card → **Add** → `store.adoptListing` in one transaction:
   confirm reply carries a **Meet** button (`market:talk`) instead of a thread
   link; the click is the first chat intent that materializes the named
   private thread under `#adoptees` and posts the listing `greeting` there
-  (`ensureAdopteeThread` with `allowCreate`). An adopt-and-bounce user never
+  (`ensureAdopteeThread` with `allowCreate`). When the listing has
+  **alternate openings**, a never-met adoption first gets an ephemeral
+  scene picker — the greeting, each opening, *Surprise me* — and the picked
+  text is what posts as the first message (see *Alternate openings*). An adopt-and-bounce user never
   spends a guild active-thread slot — under the ~1,000 active-threads
   budget, slots are reserved for people who actually engage. The
   `chat_thread_id`/`dm_introduced_at` pair is the state machine:

@@ -402,6 +402,119 @@ test("updateListing edits a freehand listing, bumps version, propagates to clone
   assert.equal((await store.listingById(listing.id))!.name, "After");
 });
 
+test("openings: createListing round-trips them; persona_json snapshots carry them", async () => {
+  const { store } = await freshStore();
+  const res = await store.createListing("u-scenes", {
+    name: "Scenic", tagline: "t", voicePersona: "v", coreTraits: [],
+    ownerDynamic: "d", backstory: "", greeting: "*waves*",
+    avatarUrl: null,
+    openings: [{ text: "*the tavern door opens*" }, { text: "a letter arrives", label: "The Letter", premise: "someone wrote to you" }],
+  });
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  const listing = (await store.listingById(res.listing.id))!;
+  assert.equal(listing.openings.length, 2);
+  assert.equal(listing.openings[0].text, "*the tavern door opens*");
+  assert.equal(listing.openings[1].label, "The Letter", "label survives the round-trip");
+  assert.equal(listing.openings[1].premise, "someone wrote to you", "premise survives the round-trip");
+
+  const snap = await sql<Array<{ persona_json: { openings?: unknown[] } }>>`
+    SELECT persona_json FROM companion_persona_versions WHERE listing_id = ${listing.id}`;
+  assert.equal(snap.length, 1);
+  assert.equal((snap[0].persona_json.openings ?? []).length, 2, "version snapshot carries openings");
+});
+
+test("openings: updateListing tri-state — undefined preserves, [] clears, values replace", async () => {
+  const { store } = await freshStore();
+  const res = await store.createListing("u-tri", {
+    name: "Tri", tagline: "t", voicePersona: "v", coreTraits: [],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+    openings: [{ text: "first way" }],
+  });
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  const id = res.listing.id;
+  const base = {
+    name: "Tri", tagline: "t", voicePersona: "v", coreTraits: [] as string[],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null as string | null,
+  };
+
+  // Omitted (persona-only edit, e.g. the cover/edit paths) → column untouched.
+  await store.updateListing(id, "u-tri", { ...base });
+  assert.equal((await store.listingById(id))!.openings.length, 1, "omission preserves openings");
+
+  // Explicit replace.
+  await store.updateListing(id, "u-tri", { ...base, openings: [{ text: "way A" }, { text: "way B" }] });
+  assert.deepEqual((await store.listingById(id))!.openings.map(o => o.text), ["way A", "way B"]);
+
+  // Explicit empty clears — the scenes editor's blank-submit path.
+  await store.updateListing(id, "u-tri", { ...base, openings: [] });
+  assert.equal((await store.listingById(id))!.openings.length, 0, "explicit [] clears");
+});
+
+test("openings: caps and hygiene — count, per-opening length, blanks and stray fields", async () => {
+  const { store } = await freshStore();
+  const res = await store.createListing("u-cap", {
+    name: "Cap", tagline: "t", voicePersona: "v", coreTraits: [],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+    openings: [
+      { text: "  " },
+      { text: "a".repeat(2500) },
+      { text: "b" }, { text: "c" }, { text: "d" }, { text: "e" }, { text: "f-overflow" },
+    ],
+  });
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  const openings = res.listing.openings;
+  assert.equal(openings.length, 4, "blank drops, overflow past the max is cut");
+  assert.equal(openings[0].text.length, 1000, "over-long opening is cut to the cap");
+  assert.deepEqual(openings.map(o => o.text).slice(1), ["b", "c", "d"]);
+});
+
+test("openings: upsertListing republish without openings preserves the column", async () => {
+  const { store } = await freshStore();
+  const awakened = await awakenedCompanion(store, "u-ups", "Up");
+  // Publish once WITH openings, then republish without — the awakened
+  // publish modal has the field, but a spec that omits it must not wipe.
+  const res1 = await store.upsertListing("u-ups", awakened.id, {
+    name: "Up", tagline: "t", voicePersona: "v", coreTraits: [],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+    openings: [{ text: "opening one" }],
+  });
+  assert.equal(res1.ok, true);
+  if (!res1.ok) return;
+  const res2 = await store.upsertListing("u-ups", awakened.id, {
+    name: "Up", tagline: "t2", voicePersona: "v", coreTraits: [],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+    // no openings key at all
+  });
+  assert.equal(res2.ok, true);
+  if (!res2.ok) return;
+  assert.equal(res2.listing.version, 2);
+  assert.deepEqual(res2.listing.openings.map(o => o.text), ["opening one"], "republish preserving openings — the modal always sends them, but a bare spec can't wipe");
+});
+
+test("openings: publishListing carries them when an unlisted import goes live", async () => {
+  const { store } = await freshStore();
+  const imp = await store.createListing("u-pub-scene", {
+    ...IMPORT_SPEC, name: "Imported",
+    openings: [{ text: "alt hello" }],
+  }, { status: "unlisted", personaSource: "card_import" });
+  assert.equal(imp.ok, true);
+  if (!imp.ok) return;
+  assert.equal(imp.listing.openings.length, 1);
+
+  const pub = await store.publishListing(imp.listing.id, "u-pub-scene", { ...IMPORT_SPEC }, 10);
+  assert.equal(pub.ok, true);
+  if (!pub.ok) return;
+  assert.equal(pub.listing.status, "active");
+  assert.deepEqual(pub.listing.openings.map(o => o.text), ["alt hello"], "publish keeps the imported openings");
+
+  const snap = await sql<Array<{ persona_json: { openings?: unknown[] } }>>`
+    SELECT persona_json FROM companion_persona_versions WHERE listing_id = ${pub.listing.id} ORDER BY version DESC LIMIT 1`;
+  assert.equal((snap[0]?.persona_json.openings ?? []).length, 1, "published version snapshot carries them");
+});
+
 test("republish revives a delisted listing but never clears a moderation flag", async () => {
   const { store } = await freshStore();
   const awakened = await awakenedCompanion(store, "u-flagged", "Flaggy");

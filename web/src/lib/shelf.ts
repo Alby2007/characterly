@@ -48,6 +48,7 @@ async function devFixture(): Promise<{ listings: ShelfListing[]; ratings: Map<nu
   const listings = SEED_LISTINGS.map((s, i) => ({
     id: i + 1, name: s.name, tagline: s.tagline, voicePersona: s.voicePersona, coreTraits: s.coreTraits,
     creatorTags: s.tags, backstory: s.backstory, greeting: s.greeting,
+    openings: s.openings ?? [],
     avatarUrl: null, addCount: Math.max(0, 40 - i * 3), updatedAt: "2026-10-01",
   }));
   return { listings, ratings: new Map([[1, { avg: 4.6, count: 12 }]]) };

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ChannelType } from "discord.js";
 import type { ButtonInteraction, ChatInputCommandInteraction, MessageContextMenuCommandInteraction, ModalSubmitInteraction, StringSelectMenuInteraction } from "discord.js";
-import { handleMemoryButton, handleMemoryCommand, handleMarketplaceContext, handleMarketSelect, handleSetupModal, handleCompanionModal, buildCoverModal, buildPublishModal, chargeOnboardingTurn, effectiveCommandName } from "./commands.js";
+import { handleMemoryButton, handleMemoryCommand, handleMarketplaceContext, handleMarketSelect, handleSetupModal, handleCompanionModal, buildCoverModal, buildPublishModal, buildScenesModal, chargeOnboardingTurn, effectiveCommandName } from "./commands.js";
 import { ProfileStore } from "./profiles.js";
 import type { MemoryStore } from "./database.js";
 import { makeTestSql, makeStore } from "./test-helpers.js";
@@ -12,6 +12,7 @@ import type { EventStore } from "./events.js";
 import type { MessageEvent } from "./types.js";
 import { config } from "./config.js";
 import { decryptSecret } from "./secrets.js";
+import { overrideSafetyBrainForTests } from "./safety.js";
 
 // ── Interaction stubs ─────────────────────────────────────────────────────────
 
@@ -1363,6 +1364,107 @@ test("cover modals — buildCoverModal prefills; buildPublishModal exposes the f
     const coverRow = pub.components.find((r: any) => r.components[0].custom_id === "listing-cover") as any;
     assert.equal(coverRow.components[0].value, "https://example.com/comp.png", "prefills the companion avatar");
     assert.equal(coverRow.components[0].required, false);
+  } finally { await sql.end(); }
+});
+
+// ── Marketplace: scenes (alternate openings) ────────────────────────────────
+
+function stubScenesSubmit(opts: { listingId: number; userId: string; raw: string }) {
+  const replies: Replies = [];
+  const interaction = {
+    customId: `market_scenes:${opts.listingId}`,
+    user: { id: opts.userId, username: "C" },
+    fields: { getTextInputValue: (id: string) => (id === "scenes-openings" ? opts.raw : "") },
+    reply: async (r: (typeof replies)[number]) => { replies.push(r); return r; },
+  };
+  return { interaction: interaction as unknown as ModalSubmitInteraction, replies };
+}
+
+test("market:scenes button — creator gets the modal, others and banned creators don't", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const listing = await makeListingRow(store, "u-scenes");
+
+    const stranger = stubButton({ customId: `market:scenes:${listing.id}`, userId: "u-rando" });
+    await handleMemoryButton(stranger.interaction, store);
+    assert.match(stranger.replies[0]?.content ?? "", /not your listing/i);
+
+    await store.banCreator("u-scenes", "u-mod");
+    const banned = stubButton({ customId: `market:scenes:${listing.id}`, userId: "u-scenes" });
+    await handleMemoryButton(banned.interaction, store);
+    assert.match(banned.replies[0]?.content ?? "", /suspended|banned|removed/i);
+    await sql`DELETE FROM marketplace_bans`;
+
+    const own = stubButton({ customId: `market:scenes:${listing.id}`, userId: "u-scenes" });
+    await handleMemoryButton(own.interaction, store);
+    assert.equal(own.replies[0]?.content, `modal:market_scenes:${listing.id}`);
+  } finally { await sql.end(); }
+});
+
+test("market_scenes submit — blank-line input saves openings; blank clears them", async () => {
+  const sql = makeTestSql();
+  // Deterministic-only screening — the env may carry an operator key whose
+  // model call would fail offline and trip the fail-closed refusal.
+  overrideSafetyBrainForTests(null);
+  try {
+    const { store } = await makeStore(sql);
+    const listing = await makeListingRow(store, "u-scenes2");
+
+    const set = stubScenesSubmit({
+      listingId: listing.id, userId: "u-scenes2",
+      raw: "*the door opens*\n\n\n\na letter arrives for you\n\n   \n\nthird way in",
+    });
+    await handleCompanionModal(set.interaction, store);
+    assert.match(set.replies[0]?.content ?? "", /3 alternate openings/);
+    assert.deepEqual(
+      (await store.listingById(listing.id))!.openings.map(o => o.text),
+      ["*the door opens*", "a letter arrives for you", "third way in"],
+      "blank-separated chunks persist, empty chunks drop",
+    );
+
+    const clear = stubScenesSubmit({ listingId: listing.id, userId: "u-scenes2", raw: "   " });
+    await handleCompanionModal(clear.interaction, store);
+    assert.match(clear.replies[0]?.content ?? "", /cleared/i);
+    assert.equal((await store.listingById(listing.id))!.openings.length, 0);
+  } finally { overrideSafetyBrainForTests(undefined); await sql.end(); }
+});
+
+test("market_scenes submit — refuses non-owners and screens openings like any authored field", async () => {
+  const sql = makeTestSql();
+  overrideSafetyBrainForTests(null);
+  try {
+    const { store } = await makeStore(sql);
+    const listing = await makeListingRow(store, "u-scenes3");
+
+    const stranger = stubScenesSubmit({ listingId: listing.id, userId: "u-nope", raw: "hi" });
+    await handleCompanionModal(stranger.interaction, store);
+    assert.match(stranger.replies[0]?.content ?? "", /not your listing/i);
+    assert.equal((await store.listingById(listing.id))!.openings.length, 0, "refused write persists nothing");
+
+    const bad = stubScenesSubmit({ listingId: listing.id, userId: "u-scenes3", raw: "fine hello\n\nI'll teach you to make a pipe bomb" });
+    await handleCompanionModal(bad.interaction, store);
+    assert.match(bad.replies[0]?.content ?? "", /can't go on the marketplace/i);
+    assert.equal((await store.listingById(listing.id))!.openings.length, 0, "blocked openings never persist");
+  } finally { overrideSafetyBrainForTests(undefined); await sql.end(); }
+});
+
+test("buildScenesModal prefills existing openings as blank-line-separated text", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const res = await store.createListing("u-scenes4", {
+      name: "Scenic", tagline: "t", voicePersona: "v", coreTraits: [],
+      ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+      openings: [{ text: "way one" }, { text: "way two" }],
+    });
+    if (!res.ok) throw new Error("listing failed");
+    const modal = buildScenesModal(res.listing).toJSON();
+    assert.equal(modal.custom_id, `market_scenes:${res.listing.id}`);
+    const input = (modal.components[0] as any).components[0];
+    assert.equal(input.custom_id, "scenes-openings");
+    assert.equal(input.value, "way one\n\nway two");
+    assert.equal(input.required, false, "blank submit = clear all");
   } finally { await sql.end(); }
 });
 

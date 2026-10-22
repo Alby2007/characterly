@@ -116,6 +116,50 @@ test("cardToPersona maps and bounds fields", () => {
   assert.deepEqual(p.coreTraits, ["curious", "soft-spoken", "brave"]);
 });
 
+test("cardToPersona maps alternate_greetings to deduped openings", () => {
+  const res = parseCardFile(enc.encode(JSON.stringify(V2)), "lirael.json");
+  assert.ok(res.ok);
+  const p = cardToPersona(res.card);
+  assert.deepEqual(p.openings, [{ text: "*a bell rings softly*" }]);
+});
+
+test("openings fill {{user}} as 'you', dedupe against the greeting, and cap", () => {
+  const card = {
+    name: "N",
+    description: "d",
+    first_mes: "Hi {{user}}!",
+    alternate_greetings: [
+      "Hi {{user}}!",            // the greeting repeated — must dedupe out
+      "  hi   {{user}}! ",       // same, whitespace-normalized — also dedupes
+      "Hey {{user}}, {{char}} waves.",  // distinct — survives, both slots filled
+      ...Array.from({ length: 10 }, (_, i) => `Opening number ${i} for {{user}}`),
+    ],
+  };
+  const res = parseCardFile(enc.encode(JSON.stringify(card)), "n.json");
+  assert.ok(res.ok);
+  const p = cardToPersona(res.card);
+  assert.equal(p.greeting, "Hi you!");
+  // First two alternates collapse to the greeting; the wave survives, then
+  // the numbered openings fill out the cap (greeting + 4 max).
+  assert.equal(p.openings.length, 4);
+  assert.equal(p.openings[0].text, "Hey you, N waves.");
+  assert.ok(p.openings.every(o => !o.text.includes("{{")), "no placeholder survives");
+  assert.ok(new Set(p.openings.map(o => o.text)).size === p.openings.length, "no dupes");
+});
+
+test("openings respect the per-opening length cap and drop blanks", () => {
+  const card = {
+    name: "N", description: "d", first_mes: "hi",
+    alternate_greetings: ["x".repeat(3000), "", "   ", "short"],
+  };
+  const res = parseCardFile(enc.encode(JSON.stringify(card)), "n.json");
+  assert.ok(res.ok);
+  const p = cardToPersona(res.card);
+  assert.equal(p.openings.length, 2, "blanks drop, over-long opening counts once");
+  assert.ok(p.openings[0].text.length <= 1000);
+  assert.equal(p.openings[1].text, "short");
+});
+
 test("cardToPersona truncates oversized card fields", () => {
   const huge = { name: "Big", description: "d".repeat(20_000), personality: "x".repeat(5_000) };
   const res = parseCardFile(enc.encode(JSON.stringify(huge)), "big.json");

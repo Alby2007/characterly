@@ -437,7 +437,7 @@ export async function handleOpsCommand(interaction: ChatInputCommandInteraction)
       // Upload the cover art first so the listing carries a durable avatar_url
       // from birth — Discord CDN URLs expire, the Supabase object doesn't.
       const hosted = p.coverFile ? await uploadAvatarFile(marketplaceAssetPath(p.coverFile) ?? "") : null;
-      const res = await deps.store.createListing(deps.botId, { ...p, avatarUrl: hosted ?? p.avatarUrl }).catch(() => null);
+      const res = await deps.store.createListing(deps.botId, { ...p, avatarUrl: hosted ?? p.avatarUrl, openings: (p.openings ?? []).map(text => ({ text })) }).catch(() => null);
       if (!res?.ok) { results.push(`✖ ${p.name} — listing create failed`); continue; }
       const fan = await postListingToDeployments(fetchChannel,
         deployFanout(), "the Characterly house", res.listing, deps.store, { tagNames: p.tags, coverFile: p.coverFile });

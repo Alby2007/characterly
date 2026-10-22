@@ -8,7 +8,8 @@ import { fetchImageBytes, isSafeUrl, resolvesToPrivateAddress } from "./tools.js
 import { detectProviderFromKey, guardedLlmFetch } from "./brains.js";
 import { runProfileBuild, PROFILE_BUILD_COOLDOWN_MS } from "./profile-build.js";
 import { inc, metricsSnapshot } from "./metrics.js";
-import type { ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, GuildDeployment, MessageEvent } from "./types.js";
+import type { ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, GuildDeployment, MessageEvent, SceneOpening } from "./types.js";
+import { LISTING_MAX_OPENINGS, LISTING_OPENING_MAX_CHARS } from "./types.js";
 import { config } from "./config.js";
 import { linkSteps } from "./copy.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
@@ -485,12 +486,22 @@ export function buildPublishModal(companion: Companion, listing: CompanionListin
     .setPlaceholder("https://… image URL — becomes the gallery cover");
   const prefillCover = listing?.avatarUrl ?? companion.avatarUrl;
   if (prefillCover) coverInput.setValue(prefillCover.slice(0, 400));
+  const openingsInput = new TextInputBuilder()
+    .setCustomId("listing-openings")
+    .setLabel("Alternate openings (optional)")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(false)
+    .setMaxLength(4000)
+    .setPlaceholder("One per blank line — adopters pick one when they meet");
+  const openingsText = openingsFieldText(listing?.openings ?? []);
+  if (openingsText) openingsInput.setValue(openingsText);
 
   modal.addComponents(
     new ActionRowBuilder<TextInputBuilder>().addComponents(nameInput),
     new ActionRowBuilder<TextInputBuilder>().addComponents(taglineInput),
     new ActionRowBuilder<TextInputBuilder>().addComponents(greetingInput),
     new ActionRowBuilder<TextInputBuilder>().addComponents(coverInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(openingsInput),
   );
   return modal;
 }
@@ -532,12 +543,22 @@ export function buildImportPublishModal(listing: CompanionListing): ModalBuilder
     .setMaxLength(400)
     .setPlaceholder("https://… image URL — becomes the gallery cover");
   if (listing.avatarUrl) coverInput.setValue(listing.avatarUrl.slice(0, 400));
+  const openingsInput = new TextInputBuilder()
+    .setCustomId("listing-openings")
+    .setLabel("Alternate openings (optional)")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(false)
+    .setMaxLength(4000)
+    .setPlaceholder("One per blank line — adopters pick one when they meet");
+  const openingsText = openingsFieldText(listing.openings);
+  if (openingsText) openingsInput.setValue(openingsText);
 
   modal.addComponents(
     new ActionRowBuilder<TextInputBuilder>().addComponents(nameInput),
     new ActionRowBuilder<TextInputBuilder>().addComponents(taglineInput),
     new ActionRowBuilder<TextInputBuilder>().addComponents(greetingInput),
     new ActionRowBuilder<TextInputBuilder>().addComponents(coverInput),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(openingsInput),
   );
   return modal;
 }
@@ -556,6 +577,49 @@ export function buildCoverModal(listing: CompanionListing): ModalBuilder {
   return new ModalBuilder()
     .setCustomId(`market_cover:${listing.id}`)
     .setTitle(`Cover image — ${listing.name.slice(0, 30)}`)
+    .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+}
+
+/** The scenes-editor wire format: openings joined by blank lines. Shared by
+ *  the publish modals' optional field and the dedicated Scenes modal. Sliced
+ *  to fit the 4000-char field — the slice is visible to the editor, so an
+ *  over-long set shows exactly what a save would persist. */
+const openingsFieldText = (openings: SceneOpening[]): string =>
+  openings.map(o => o.text).join("\n\n").slice(0, 3990);
+
+/** Blank-line-separated modal input → opening specs. Empty chunks drop;
+ *  count and length caps apply per opening. */
+function parseOpeningsField(raw: string): SceneOpening[] {
+  return raw
+    .split(/\n\s*\n/)
+    .map(t => t.trim().slice(0, LISTING_OPENING_MAX_CHARS))
+    .filter(Boolean)
+    .slice(0, LISTING_MAX_OPENINGS)
+    .map(text => ({ text }));
+}
+
+/** Select-menu description for one opening — single line, under Discord's
+ *  100-char option-description cap. */
+const openingPreview = (text: string, n = 80): string => {
+  const t = text.replace(/\s+/g, " ").trim();
+  return (t.length > n ? `${t.slice(0, n - 1)}…` : t) || "—";
+};
+
+/** One-field scenes modal for the card's Scenes button — blank-line-separated
+ *  alternate openings. Blank input clears them all (same rule as Cover). */
+export function buildScenesModal(listing: CompanionListing): ModalBuilder {
+  const input = new TextInputBuilder()
+    .setCustomId("scenes-openings")
+    .setLabel("Alternate openings — one per blank line")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(false)
+    .setMaxLength(4000)
+    .setPlaceholder("*The tavern door swings open…* — up to 4 openings, ~1000 chars each");
+  const text = openingsFieldText(listing.openings);
+  if (text) input.setValue(text);
+  return new ModalBuilder()
+    .setCustomId(`market_scenes:${listing.id}`)
+    .setTitle(`Scenes — ${listing.name.slice(0, 30)}`)
     .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
 }
 
@@ -680,7 +744,7 @@ async function publishGateError(store: MemoryStore, userId: string, isNewListing
  *  time-sensitive — retrying is the correct UX). */
 async function screenListingFields(fields: {
   name: string; tagline: string; greeting: string; voicePersona: string;
-  coreTraits: string[]; ownerDynamic: string; backstory: string;
+  coreTraits: string[]; ownerDynamic: string; backstory: string; openings?: string[];
 }): Promise<string | null> {
   const det = checkListingFields(fields);
   if (!det.ok) {
@@ -695,7 +759,8 @@ async function screenListingFields(fields: {
       subject:
         `Name: ${fields.name}\nTagline: ${fields.tagline}\nGreeting: ${fields.greeting}\n` +
         `Voice: ${fields.voicePersona}\nTraits: ${fields.coreTraits.join(", ")}\n` +
-        `Dynamic: ${fields.ownerDynamic}\nBackstory: ${fields.backstory}`,
+        `Dynamic: ${fields.ownerDynamic}\nBackstory: ${fields.backstory}` +
+        (fields.openings?.length ? `\nOpenings: ${fields.openings.join(" | ")}` : ""),
     });
     if (verdict.verdict === "flag") {
       inc("safety.listing_flagged");
@@ -810,7 +875,7 @@ async function refreshListingCard(client: Client, listing: CompanionListing, sto
     if (!starter) return;
     await starter.edit({
       embeds: [buildListingCard(listing, creatorName, stats)],
-      components: [buildListingComponents(listing.id)],
+      components: buildListingComponents(listing.id),
     }).catch(() => {});
   });
 }
@@ -1979,7 +2044,7 @@ async function cmdCompanion(c: SlashCtx): Promise<unknown> {
       return interaction.reply({ content: why, ephemeral: true });
     }
     const persona = cardToPersona(parsed.card);
-    const screened = checkListingFields({ ...persona });
+    const screened = checkListingFields({ ...persona, openings: persona.openings.map(o => o.text) });
     if (!screened.ok) {
       return interaction.reply({ content: `I can't import this card — its ${screened.field} trips the **${screened.category}** content rule.`, ephemeral: true });
     }
@@ -2028,6 +2093,7 @@ async function cmdCompanion(c: SlashCtx): Promise<unknown> {
         { name: "Voice & Vibe", value: persona.voicePersona.slice(0, 300) || "*(blank)*", inline: false },
         ...(persona.coreTraits.length ? [{ name: "Traits", value: persona.coreTraits.join(", "), inline: false }] : []),
         ...(persona.greeting ? [{ name: "They'll say", value: persona.greeting.slice(0, 300), inline: false }] : []),
+        ...(persona.openings.length ? [{ name: "Openings", value: `+${persona.openings.length} more way${persona.openings.length === 1 ? "" : "s"} they'll introduce themselves — you'll pick when you meet.`, inline: false }] : []),
         { name: "Card format", value: `${card.spec || "unknown"}${card.specVersion ? ` v${card.specVersion}` : ""}`, inline: true },
         { name: "Source file", value: file.name ?? "card", inline: true },
       )
@@ -3034,12 +3100,13 @@ export async function handleCompanionModal(
     const manageRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId(`market:editmodal:${listing.id}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`market:cover:${listing.id}`).setLabel("Cover image").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`market:scenes:${listing.id}`).setLabel("Scenes").setStyle(ButtonStyle.Secondary),
     );
     const tagRow = await tagPickerRow(interaction.client, listing.id, interaction.guildId);
     return interaction.reply({
       ephemeral: true,
       content:
-        `**${listing.name}** is live in <#${config.marketplaceChannelId}>! Use **Edit persona** for traits and bond, or **Cover image** for the gallery art.` +
+        `**${listing.name}** is live in <#${config.marketplaceChannelId}>! Use **Edit persona** for traits and bond, **Cover image** for the gallery art, **Scenes** for alternate openings.` +
         (tagRow ? " Pick the tags that fit it below." : ""),
       components: [manageRow, ...(tagRow ? [tagRow] : [])],
     });
@@ -3083,12 +3150,14 @@ export async function handleCompanionModal(
     }
     // The persona internals are the imported fields — screen the whole thing;
     // publishing is where private content becomes our public surface.
+    const openings = parseOpeningsField(interaction.fields.getTextInputValue("listing-openings") ?? "");
     const screenError = await screenListingFields({
       name, tagline, greeting,
       voicePersona: prior.voicePersona,
       coreTraits: prior.coreTraits,
       ownerDynamic: prior.ownerDynamic,
       backstory: prior.backstory,
+      openings: openings.map(o => o.text),
     });
     if (screenError) return interaction.reply({ content: screenError, ephemeral: true });
     const res = await store.publishListing(listingId, userId, {
@@ -3097,6 +3166,7 @@ export async function handleCompanionModal(
       coreTraits: prior.coreTraits,
       ownerDynamic: prior.ownerDynamic,
       backstory: prior.backstory,
+      openings,
     }, listingCapFor(store, account), config.marketPublishDailyCap);
     if (!res.ok) {
       return interaction.reply({
@@ -3119,6 +3189,7 @@ export async function handleCompanionModal(
     const manageRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId(`market:editmodal:${listing.id}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`market:cover:${listing.id}`).setLabel("Cover image").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`market:scenes:${listing.id}`).setLabel("Scenes").setStyle(ButtonStyle.Secondary),
     );
     const tagRow = await tagPickerRow(interaction.client, listing.id, interaction.guildId);
     return interaction.reply({
@@ -3174,12 +3245,14 @@ export async function handleCompanionModal(
     }
     // Screen the assembled persona — inherited fields are the creator's own,
     // but the listing is public content either way.
+    const openings = parseOpeningsField(interaction.fields.getTextInputValue("listing-openings") ?? "");
     const screenError = await screenListingFields({
       name, tagline, greeting,
       voicePersona: existing?.voicePersona ?? companion.voicePersona,
       coreTraits: existing?.coreTraits ?? companion.coreTraits,
       ownerDynamic: existing?.ownerDynamic ?? companion.ownerDynamic,
       backstory: existing?.backstory ?? companion.backstory,
+      openings: openings.map(o => o.text),
     });
     if (screenError) return interaction.reply({ content: screenError, ephemeral: true });
     const res = await store.upsertListing(userId, companion.id, {
@@ -3190,6 +3263,7 @@ export async function handleCompanionModal(
       ownerDynamic: existing?.ownerDynamic ?? companion.ownerDynamic,
       backstory: existing?.backstory ?? companion.backstory,
       greeting,
+      openings,
       avatarUrl,
     }, { maxListings: listingCapFor(store, account), maxDailyPublish: config.marketPublishDailyCap });
     if (!res.ok) {
@@ -3226,6 +3300,7 @@ export async function handleCompanionModal(
     const manageRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId(`market:editmodal:${listing.id}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`market:cover:${listing.id}`).setLabel("Cover image").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`market:scenes:${listing.id}`).setLabel("Scenes").setStyle(ButtonStyle.Secondary),
     );
     const tagRow = await tagPickerRow(interaction.client, listing.id, interaction.guildId);
     return interaction.reply({
@@ -3266,6 +3341,7 @@ export async function handleCompanionModal(
     const screenError = await screenListingFields({
       name, tagline: listing.tagline, greeting: listing.greeting,
       voicePersona, coreTraits, ownerDynamic, backstory,
+      openings: listing.openings.map(o => o.text),
     });
     if (screenError) return interaction.reply({ content: screenError, ephemeral: true });
     const updated = await store.updateListing(listing.id, userId, {
@@ -3319,6 +3395,47 @@ export async function handleCompanionModal(
       content: avatarUrl
         ? `Cover updated for **${updated.name}** — the forum post refreshes in place.`
         : `Cover removed from **${updated.name}** — the card still renders normally.`,
+    });
+  }
+
+  // market_scenes:<listingId> — the scenes editor: alternate openings as a
+  // blank-line-separated list. Blank input clears them (cover-field rule);
+  // the write bumps the version + snapshots like any persona edit.
+  if (interaction.customId.startsWith("market_scenes:")) {
+    const listingId = Number(interaction.customId.slice("market_scenes:".length));
+    const userId = interaction.user.id;
+    const listing = await store.listingById(listingId);
+    if (!listing || listing.creatorUserId !== userId) {
+      return interaction.reply({ content: "That's not your listing.", ephemeral: true });
+    }
+    if (await store.creatorBan(userId).catch(() => null)) {
+      return interaction.reply({ content: BANNED_CREATOR_MSG, ephemeral: true });
+    }
+    const openings = parseOpeningsField(interaction.fields.getTextInputValue("scenes-openings") ?? "");
+    // Scenes are marketplace-facing text — full-persona screen, same freeze
+    // rule as a persona edit.
+    const screenError = await screenListingFields({
+      name: listing.name, tagline: listing.tagline, greeting: listing.greeting,
+      voicePersona: listing.voicePersona, coreTraits: listing.coreTraits,
+      ownerDynamic: listing.ownerDynamic, backstory: listing.backstory,
+      openings: openings.map(o => o.text),
+    });
+    if (screenError) return interaction.reply({ content: screenError, ephemeral: true });
+    const updated = await store.updateListing(listing.id, userId, {
+      name: listing.name, tagline: listing.tagline, voicePersona: listing.voicePersona,
+      coreTraits: listing.coreTraits, ownerDynamic: listing.ownerDynamic,
+      backstory: listing.backstory, greeting: listing.greeting, avatarUrl: listing.avatarUrl,
+      openings,
+    });
+    if (!updated) {
+      return interaction.reply({ content: "That's not your listing.", ephemeral: true });
+    }
+    inc("market.scenes_saved");
+    return interaction.reply({
+      ephemeral: true,
+      content: openings.length
+        ? `**${updated.name}** now has ${openings.length} alternate opening${openings.length === 1 ? "" : "s"} (v${updated.version}) — adopters pick one when they meet.`
+        : `**${updated.name}**'s alternate openings are cleared (v${updated.version}) — the greeting is the only way in now.`,
     });
   }
 
@@ -4143,6 +4260,38 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
     const listing = companion.adoptedFromListingId
       ? await store.listingById(companion.adoptedFromListingId).catch(() => null)
       : null;
+    // Scene pick: only a never-met adoption on a multi-opening listing gets
+    // the picker — Open on an existing thread, and single-opening listings,
+    // keep the one-click path. The pick resolves server-side in
+    // handleMeetScenePick (values are indexes, never the text).
+    const met = !!(adoption.chatThreadId || adoption.dmIntroducedAt);
+    const listingOpenings = listing?.openings ?? [];
+    if (!met && listingOpenings.length) {
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId(`market:scenesel:${companion.id}`)
+        .setPlaceholder(`How do you meet ${companion.name || "them"}?`)
+        .addOptions(
+          {
+            label: "The first hello",
+            description: openingPreview(listing?.greeting || "*They join you.*"),
+            value: "0",
+          },
+          ...listingOpenings.map((o, i) => ({
+            label: (o.label?.trim() || `Opening ${i + 2}`).slice(0, 100),
+            description: openingPreview(o.text),
+            value: String(i + 1),
+          })),
+          {
+            label: "Surprise me",
+            description: "Pick an opening at random",
+            value: "surprise",
+          },
+        );
+      return interaction.update({
+        content: `**${escapeMarkdown(companion.name)}** can open more than one way — pick how you meet, or let them surprise you.`,
+        components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu)],
+      });
+    }
     // The Meet surface: this click IS the chat intent that materializes a
     // deferred adoptee thread (allowCreate) — adopt-and-bounce rows never
     // get this far, so they never hold a guild thread slot.
@@ -4276,6 +4425,19 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
       return interaction.reply({ content: "Setting a cover requires modal support.", ephemeral: true });
     }
     return interaction.showModal(buildCoverModal(listing));
+  }
+  if (sub === "scenes") {
+    const listing = await store.listingById(id);
+    if (!listing || listing.creatorUserId !== userId) {
+      return interaction.reply({ content: "That's not your listing.", ephemeral: true });
+    }
+    if (await store.creatorBan(userId).catch(() => null)) {
+      return interaction.reply({ content: BANNED_CREATOR_MSG, ephemeral: true });
+    }
+    if (typeof interaction.showModal !== "function") {
+      return interaction.reply({ content: "Editing scenes requires modal support.", ephemeral: true });
+    }
+    return interaction.showModal(buildScenesModal(listing));
   }
   return;
 }
@@ -4607,8 +4769,53 @@ const COMMENT_REPORT_CATEGORIES = REPORT_CATEGORIES.filter(([c]) => c !== "theft
  *  (v59): ids differ per forum, so the picks persist to `creator_tags` and
  *  re-resolve against each mirror's live taxonomy. Ownership re-checks at
  *  submit; curated badges on each thread are preserved across a re-tag. */
+/** The Meet-time scene pick — re-runs the talk branch's guards, resolves the
+ *  chosen opening server-side (the select value is an index, never text), and
+ *  hands it to the same thread-create path a plain Meet click takes. */
+async function handleMeetScenePick(interaction: StringSelectMenuInteraction, store: MemoryStore, parts: string[]) {
+  const companionId = Number(parts[2]);
+  const userId = interaction.user.id;
+  const roster = await store.listCompanionsForUser(userId);
+  const companion = roster.find(c => c.id === companionId);
+  if (!companion) {
+    return interaction.update({ content: "That companion isn't on your roster.", components: [] });
+  }
+  if (companion.kind === "awakened") {
+    return interaction.update({ content: `**${companion.name}** lives in my DMs — that's your permanent bond.`, components: [] });
+  }
+  const adoption = await store.adoptionForCompanion(companion.id);
+  if (!adoption) {
+    return interaction.update({ content: "That adoption isn't active anymore.", components: [] });
+  }
+  const listing = companion.adoptedFromListingId
+    ? await store.listingById(companion.adoptedFromListingId).catch(() => null)
+    : null;
+  // Index 0 is the canonical greeting; "surprise" and out-of-range/forged
+  // values resolve to a real opening — the pick can never inject text.
+  const pool = [listing?.greeting ?? "", ...(listing?.openings ?? []).map(o => o.text)];
+  const pick = interaction.values[0] ?? "0";
+  const idx = pick === "surprise"
+    ? Math.floor(Math.random() * pool.length)
+    : Math.min(Math.max(Number(pick) || 0, 0), pool.length - 1);
+  const t = await adopteeThreadResult({
+    adoption, companion,
+    listing: listing ? { id: listing.id, greeting: pool[idx] ?? "" } : null,
+    username: interaction.user.username,
+    allowCreate: true,
+  });
+  if (t.thread) inc("market.meet");
+  if (idx > 0) inc("market.meet_scene");
+  return interaction.update({
+    content: `**${companion.name}** —${adoptPointerCopy({ ...t, needsVerify: needsVerify(interaction) })}`,
+    components: [],
+  });
+}
+
 export async function handleMarketSelect(interaction: StringSelectMenuInteraction, store: MemoryStore) {
   const parts = interaction.customId.split(":");
+  if (parts[0] === "market" && parts[1] === "scenesel") {
+    return handleMeetScenePick(interaction, store, parts);
+  }
   if (parts[0] !== "market" || parts[1] !== "tagsel") return;
   const listingId = Number(parts[2]);
   const listing = Number.isFinite(listingId) ? await store.listingById(listingId).catch(() => null) : null;

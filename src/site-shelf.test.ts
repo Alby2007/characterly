@@ -17,7 +17,7 @@ import {
 const listing = (over: Partial<ShelfListing> = {}): ShelfListing => ({
   id: 7, name: "Wren", tagline: "A quiet archivist", voicePersona: "speaks softly",
   coreTraits: ["patient"], creatorTags: ["original"], backstory: "keeps the stacks",
-  greeting: "shh, welcome.", avatarUrl: null, addCount: 12, updatedAt: "2026-04-02T10:00:00Z",
+  greeting: "shh, welcome.", openings: [], avatarUrl: null, addCount: 12, updatedAt: "2026-04-02T10:00:00Z",
   ...over,
 });
 
@@ -208,6 +208,36 @@ test("fetchListing asks PostgREST for the active row and maps it", async () => {
   );
   assert.ok(seenUrl.includes("status=eq.active"), seenUrl);
   assert.ok(seenUrl.includes("id=eq.8"), seenUrl);
+});
+
+test("fetchListing maps openings from both the object and legacy string shapes", async () => {
+  let seenUrl = "";
+  await withFetch(
+    async (input) => {
+      seenUrl = String(input);
+      return new Response(JSON.stringify([{
+        id: 9, name: "N", openings: [{ text: "  *a door opens*  " }, "plain string opening", { text: " " }, { nope: 1 }],
+      }]));
+    },
+    async () => {
+      const l = await fetchListing(ENV, 9);
+      assert.deepEqual(l?.openings, ["*a door opens*", "plain string opening"], "objects unwrap, strings pass, blanks/junk drop");
+    },
+  );
+  assert.ok(seenUrl.includes("openings"), "the column is in the PostgREST select");
+});
+
+test("listing page renders 'More ways to meet' with every opening escaped", () => {
+  const html = listingPage(listing({
+    openings: ["*the door opens* <img src=x onerror='pwn'>", "a second <b>way</b>"],
+  }), { avg: 0, count: 0 });
+  assert.ok(html.includes("More ways to meet"));
+  assert.ok(!html.includes("<img src=x"), "markup inside an opening is escaped");
+  assert.ok(html.includes("&lt;img src=x"), "the escape is visible text, not swallowed");
+  assert.ok(!html.includes("<b>way</b>"));
+
+  const bare = listingPage(listing(), { avg: 0, count: 0 });
+  assert.ok(!bare.includes("More ways to meet"), "no openings → no section");
 });
 
 test("fetchListing returns null for a delisted/unknown id (the row never arrives)", async () => {

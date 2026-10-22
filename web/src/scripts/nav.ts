@@ -1,4 +1,14 @@
 import { LINKS } from "../lib/config";
+import { showLoader } from "./loader";
+
+// Discord sign-in links: show the loading screen the moment they're clicked, so
+// the hop to /account and on to Discord never sits on a blank page. Plain
+// left-clicks only; a new-tab click leaves this page as it is.
+document.addEventListener("click", e => {
+  const a = (e.target as Element).closest<HTMLAnchorElement>('a[href^="/account?start=discord"]');
+  if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  showLoader("Opening Discord…");
+});
 
 // Every page: nav border once scrolled, mobile menu, funnel beacons, and the
 // session-aware account slot. The slot reads the stored Supabase session

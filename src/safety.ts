@@ -52,7 +52,7 @@ export function checkMessageContent(text: string): { ok: true } | { ok: false; c
 /** Deterministic check over authored listing fields. Returns the first hit
  *  with its category and field name so the refusal can name both. */
 export function checkListingFields(
-  fields: { name: string; tagline: string; greeting: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string },
+  fields: { name: string; tagline: string; greeting: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; openings?: string[] },
 ): { ok: true } | { ok: false; category: string; field: string } {
   const entries: Array<[string, string]> = [
     ["name", fields.name],
@@ -62,6 +62,7 @@ export function checkListingFields(
     ["traits", fields.coreTraits.join(", ")],
     ["dynamic", fields.ownerDynamic],
     ["backstory", fields.backstory],
+    ...(fields.openings ?? []).map((t, i) => [`opening ${i + 1}`, t] as [string, string]),
   ];
   for (const [field, text] of entries) {
     if (!text) continue;
@@ -133,6 +134,12 @@ export function safetyBrain(): Brain | null {
     _safetyBrain = config.groqKey ? new Brain(config.groqKey, config.safetyModel, config.groqBaseUrl) : null;
   }
   return _safetyBrain;
+}
+
+/** Test hook — forces the deterministic-only screening path (or a stub brain)
+ *  regardless of env keys, so suites don't depend on operator-key reachability. */
+export function overrideSafetyBrainForTests(brain: Brain | null | undefined): void {
+  _safetyBrain = brain;
 }
 
 // The moderation gate (screenListingFields) deliberately stays on the

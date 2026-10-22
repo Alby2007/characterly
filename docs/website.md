@@ -12,7 +12,7 @@ plates, and the worker-only API lanes.
 | Route | File | Mode |
 |-------|------|------|
 | `/` | `src/pages/index.astro` | SSR — live shelf strip |
-| `/characters`, `/characters/[id]` | `src/pages/characters/*` | SSR — catalog + per-listing cards |
+| `/characters`, `/characters/[id]` | `src/pages/characters/*` | SSR — catalog + per-listing pages (tabs incl. *First hello* and, when the listing has alternate openings, *More ways to meet*) |
 | `/terms` `/privacy` `/security` `/safety` | `src/pages/[doc].astro` | prerendered at build time from the repo-root `*.md` files via `src/lib/legal.ts` |
 | `/guides/...` | `src/pages/guides/*` | prerendered |
 | `/account`, `/dashboard`, `/404` | matching `.astro` + `src/scripts/*.ts` | prerendered shells — all auth/data work is client-side supabase-js |

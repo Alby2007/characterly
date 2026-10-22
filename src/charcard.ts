@@ -4,6 +4,8 @@
  *  ecosystem formats: chara_card_v2 (`{spec, spec_version, data}`), ccv3,
  *  flat v1 cards, and common exporter key aliases (CAI Tools etc.). */
 
+import { LISTING_MAX_OPENINGS, LISTING_OPENING_MAX_CHARS } from "./types.js";
+
 export const CARD_MAX_BYTES = 8 * 1024 * 1024;
 const JSON_MAX_BYTES = 256 * 1024;
 
@@ -31,6 +33,9 @@ export interface ImportPersona {
   ownerDynamic: string;
   backstory: string;
   greeting: string;
+  /** Card `alternate_greetings`, kept as pickable openings on the listing —
+   *  the primary greeting above stays the default. */
+  openings: { text: string }[];
 }
 
 export interface CardImportMeta {
@@ -228,6 +233,22 @@ export function cardToPersona(card: ParsedCard): ImportPersona {
     .slice(0, 8)
     .map(t => cut(t, 48));
 
+  const greeting = cut(fill(card.firstMes, "you"), 2000);
+  // Alternate greetings become pickable openings at first meet. Cards often
+  // repeat first_mes inside alternates — dedupe against the greeting and
+  // each other (whitespace-normalized), cap by count then length.
+  const seen = new Set([greeting.replace(/\s+/g, " ").trim().toLowerCase()]);
+  const openings = card.alternateGreetings
+    .map(g => cut(fill(g, "you"), LISTING_OPENING_MAX_CHARS))
+    .filter(g => {
+      const key = g.replace(/\s+/g, " ").trim().toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, LISTING_MAX_OPENINGS)
+    .map(text => ({ text }));
+
   return {
     name,
     tagline: firstSentence(description || personality, 200) || "Imported character",
@@ -235,7 +256,8 @@ export function cardToPersona(card: ParsedCard): ImportPersona {
     coreTraits: traits,
     ownerDynamic: "Companion",
     backstory: cut(backstory, 4000),
-    greeting: cut(fill(card.firstMes, "you"), 2000),
+    greeting,
+    openings,
   };
 }
 

@@ -73,6 +73,11 @@ export function buildListingCard(listing: CompanionListing, creatorName: string,
   if (listing.personaSource === "card_import") {
     embed.addFields({ name: "Provenance", value: "Imported character card", inline: true });
   }
+  // Alternate openings are a quiet signal on the card — a count, not
+  // previews; the openings themselves reveal themselves at Meet time.
+  if (listing.openings?.length) {
+    embed.addFields({ name: "Ways to meet", value: `${listing.openings.length + 1} openings`, inline: true });
+  }
   // The LARGE image, not the thumbnail: Discord derives a forum post's Gallery
   // cover from the OP message's embed image / attachments — thumbnails don't
   // count. So a creator's avatar URL doubles as the cover art.
@@ -80,15 +85,24 @@ export function buildListingCard(listing: CompanionListing, creatorName: string,
   return embed;
 }
 
-export function buildListingComponents(listingId: number): ActionRowBuilder<ButtonBuilder> {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`market:add:${listingId}`).setLabel("Add to your companions").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`market:rate:${listingId}`).setLabel("Rate").setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`market:tags:${listingId}`).setLabel("Tags").setStyle(ButtonStyle.Secondary),
-    // Creator-only at click (same gate as Tags) — the URL-modal cover setter.
-    new ButtonBuilder().setCustomId(`market:cover:${listingId}`).setLabel("Cover image").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`market:report:${listingId}`).setLabel("Report").setStyle(ButtonStyle.Secondary),
-  );
+export function buildListingComponents(listingId: number): ActionRowBuilder<ButtonBuilder>[] {
+  return [
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(`market:add:${listingId}`).setLabel("Add to your companions").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`market:rate:${listingId}`).setLabel("Rate").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`market:tags:${listingId}`).setLabel("Tags").setStyle(ButtonStyle.Secondary),
+      // Creator-only at click (same gate as Tags) — the URL-modal cover setter.
+      new ButtonBuilder().setCustomId(`market:cover:${listingId}`).setLabel("Cover image").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`market:report:${listingId}`).setLabel("Report").setStyle(ButtonStyle.Secondary),
+    ),
+    // Creator manage row — same click-gate as Tags/Cover. Gives freehand and
+    // import-published listings a persistent edit path (their only one; the
+    // post-publish manage row is ephemeral).
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(`market:editmodal:${listingId}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`market:scenes:${listingId}`).setLabel("Scenes").setStyle(ButtonStyle.Secondary),
+    ),
+  ];
 }
 
 interface ForumLike {
@@ -140,7 +154,7 @@ export async function postListingInForum(
     appliedTags: appliedTags.length ? appliedTags : undefined,
     message: {
       embeds: [buildListingCard(listing, creatorName, stats)],
-      components: [buildListingComponents(listing.id)],
+      components: buildListingComponents(listing.id),
       ...(coverPath ? { files: [new AttachmentBuilder(coverPath, { name: opts.coverFile! })] } : {}),
     },
   }).catch(() => null);

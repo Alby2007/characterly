@@ -97,7 +97,8 @@ design. Secret inventory + rotation runbook: → `docs/operations.md`
 
 **Companion personas → chat.** Listings are untrusted authored content:
 publish/edit screens are fail-closed (blocklist → `safetyVerdict` on the
-operator model), imported cards carry `sha256` provenance, adopted replies
+operator model — the screened set includes each alternate opening), imported
+cards carry `sha256` provenance, adopted replies
 are output-screened (above). Awakened companions are first-party private
 content and unscreened by design. → `docs/moderation.md`.
 

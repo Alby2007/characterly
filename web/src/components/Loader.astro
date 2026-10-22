@@ -1,0 +1,48 @@
+---
+// Full-screen loading state for redirects and slow first loads: the mark, one
+// plain status line, and three archive rows that fill in one after another
+// (the archive "filling in" is the world's own motion). Rendered once by
+// Base.astro; scripts toggle it with showLoader()/hideLoader() in
+// scripts/loader.ts. Static under reduced motion.
+import Mark from "./Mark.astro";
+interface Props { text?: string; visible?: boolean }
+const { text = "Loading…", visible = false } = Astro.props;
+---
+<div class="loader" data-loader role="status" aria-live="polite" hidden={!visible}>
+  <div class="loader-inner">
+    <span class="loader-mark"><Mark /></span>
+    <p class="loader-text" data-loader-text>{text}</p>
+    <ul class="loader-rows" aria-hidden="true">
+      <li><span class="chip chip-dm"></span><span class="bar" style="--w: 78%"></span></li>
+      <li><span class="chip chip-srv"></span><span class="bar" style="--w: 58%"></span></li>
+      <li><span class="chip chip-dm"></span><span class="bar" style="--w: 68%"></span></li>
+    </ul>
+  </div>
+</div>
+
+<style>
+  .loader { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; padding: 24px; background: var(--field); }
+  .loader[hidden] { display: none; }
+  .loader-inner { width: min(100%, 340px); display: grid; justify-items: center; gap: 18px; }
+  .loader-mark :global(svg) { width: 56px; height: 56px; display: block; }
+  .loader-text { font-size: 18px; font-weight: 700; color: var(--ink); text-align: center; }
+  .loader-rows { list-style: none; width: 100%; padding: 14px 18px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 24px 48px -32px rgba(20, 24, 58, 0.45); }
+  .loader-rows li { display: grid; grid-template-columns: 56px 1fr; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .loader-rows li:last-child { border-bottom: 0; }
+  .chip { height: 16px; border-radius: 5px; }
+  .chip-dm { background: var(--dm); }
+  .chip-srv { background: var(--srv); }
+  .bar { height: 10px; width: var(--w); border-radius: 5px; background: var(--field-deep); }
+  /* One loop: each row unlocks in turn, holds, then the set resets. */
+  .loader-rows li { animation: row-unlock 2.4s var(--ease) infinite both; }
+  .loader-rows li:nth-child(2) { animation-delay: 0.25s; }
+  .loader-rows li:nth-child(3) { animation-delay: 0.5s; }
+  @keyframes row-unlock {
+    0% { opacity: 0; transform: translateY(6px); }
+    18%, 78% { opacity: 1; transform: none; }
+    100% { opacity: 0; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .loader-rows li { animation: none; opacity: 1; }
+  }
+</style>

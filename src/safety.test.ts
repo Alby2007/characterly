@@ -32,6 +32,16 @@ test("listing blocklist: hits carry category + field", () => {
   assert.equal(checkListingFields(clean({ tagline: "free nitro click here" })).ok, false);
 });
 
+test("listing blocklist: openings screen like any authored field", () => {
+  assert.equal(checkListingFields(clean({ openings: ["*waves*", "come sit by me"] })).ok, true);
+  const hit = checkListingFields(clean({ openings: ["a fine hello", "I'll teach you to make a pipe bomb"] }));
+  assert.equal(hit.ok, false);
+  if (!hit.ok) {
+    assert.equal(hit.field, "opening 2", "the refusal names which opening tripped it");
+    assert.equal(hit.category, "illegal content");
+  }
+});
+
 test("self-harm triage: first-person signals fire", () => {
   for (const text of [
     "i want to kill myself",

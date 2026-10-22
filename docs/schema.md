@@ -1,6 +1,6 @@
 # Database Schema
 
-Characterly stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts` (`v1`–`v67`).
+Characterly stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts` (`v1`–`v68`).
 
 **Supabase lockdown (v23+):** every `public`-schema table has `ENABLE ROW LEVEL SECURITY` with zero Data-API policies — deny-all for `anon`/`authenticated`, while the bot's `postgres` role bypasses RLS. The exceptions are the web-account tables (`web_profiles`, `link_codes`), which have their own policy/grant design documented below. All Supabase-specific DDL is conditional on the `auth` schema existing, so plain-Postgres test/local databases run every migration unchanged.
 
@@ -737,6 +737,7 @@ The marketplace's publishable persona (v34): a creator's awakened companion proj
 | `name` / `tagline` | TEXT | Display name + listing-card blurb |
 | `voice_persona` / `core_traits` / `owner_dynamic` / `backstory` | — | Persona fields cloned into adopters' `companions` rows |
 | `greeting` | TEXT | First DM the character sends on adoption — stamps `dm_introduced_at` on successful send |
+| `openings` | JSONB | Alternate openings (v68) — `[{text, label?, premise?}]`, ≤4 × ≤1000 chars, array-CHECK'd. The greeting is the canonical first opening; these are the alternates an adopter can pick between at a fresh Meet. Card `alternate_greetings` land here on import |
 | `avatar_url` | TEXT NULL | |
 | `forum_thread_id` | TEXT NULL | The bot-created forum post (its embed card owns the Add/Report buttons) |
 | `version` | INTEGER | Increments on every upsert; each version is snapshotted in `companion_persona_versions` |
@@ -760,7 +761,7 @@ Append-only audit trail for listing personas (v34): one row per `(listing_id, ve
 | `id` | BIGINT PK | |
 | `listing_id` | BIGINT | FK → `companion_listings.id ON DELETE CASCADE` (indexed) |
 | `version` | INTEGER | Composite unique with `listing_id` |
-| `persona_json` | JSONB | Snapshot of name/tagline/persona/greeting/avatar fields |
+| `persona_json` | JSONB | Snapshot of name/tagline/persona/greeting/avatar fields — includes `openings` (v68) |
 | `created_at` | TIMESTAMPTZ | |
 
 **RLS:** enabled, zero policies.
@@ -1027,3 +1028,4 @@ Version tracking for the migration system.
 | 65 | `v65_fleet_cap_state` | `fleet_cap_state` — persisted fleet-cap day-ratchet (`day` PK, `highwater`) so a restart can't re-anchor the cap below committed spend |
 | 66 | `v66_mod_actions_ticket_triage` | `mod_actions` ledger (house mod actions feed the repeat-offense ladder); `support_tickets` gains `category` (open-time picker), `last_staff_reply_at`, and `stale_notified_at` (unanswered-ticket nudge dedupe) |
 | 67 | `v67_reply_regens` | `reply_regens` — one row per Regenerate context-menu retry; the free-lane daily cap source and the audit trail |
+| 68 | `v68_listing_openings` | `companion_listings.openings` JSONB (array CHECK) — alternate Meet openings ("scenes"); `import_companion_card` re-stated to carry `openings` from the web import lane; repairs `persona_json`/`analytics_events.meta` rows that landed as jsonb strings (double-encoded writes); rollback refuses while openings exist |

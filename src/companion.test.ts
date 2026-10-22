@@ -1,7 +1,7 @@
 import "dotenv/config";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ComponentType, MessageFlags, type ChatInputCommandInteraction } from "discord.js";
+import { ComponentType, MessageFlags, type ChatInputCommandInteraction, type StringSelectMenuInteraction } from "discord.js";
 import { Brain, type LlmClient } from "./brain.js";
 import { createBrainResolver } from "./brains.js";
 import { ConversationTracker } from "./conversation.js";
@@ -18,6 +18,7 @@ import {
   buildOnboardingWelcomePayload,
   buildUserApiKeyModal,
   handleCompanionModal,
+  handleMarketSelect,
   handleMemoryButton,
   handleMemoryCommand,
   handleSetupModal,
@@ -1031,6 +1032,194 @@ test("DM lane: awakening owns DMs; adopted companions get private #adoptees thre
     assert.match(again.box.replied?.content ?? "", /already in your companions/);
     assert.ok(JSON.stringify(again.box.replied?.components ?? []).includes("market:drop:"), "drop button offered on re-click");
     assert.ok(JSON.stringify(again.box.replied?.components ?? []).includes("market:talk:"), "the Open button rides the re-click");
+  } finally {
+    config.houseAdopteesChannelId = savedAdoptees;
+    config.houseGuildId = savedHouse;
+    initOps(null as unknown as OpsDeps);
+    resetOpsState();
+  }
+});
+
+test("Meet picker: a multi-opening listing offers the scene select; the pick becomes the greeting", async () => {
+  const adopted = {
+    ...makeCompanion(2, "u-pat", "Wren"),
+    kind: "adopted",
+    adoptedFromListingId: 11,
+  } as GuildCompanion;
+  const sentPayloads: unknown[] = [];
+  const thread = {
+    id: "t-wren",
+    members: { add: async () => {} },
+    send: async (p: unknown) => { sentPayloads.push(p); return p; },
+    setLocked: async () => {}, setArchived: async () => {},
+    messages: { fetchPinned: async () => new Map(), fetch: async () => new Map() },
+  };
+  const createdThreads: Array<Record<string, unknown>> = [];
+  const adoption = { id: 9, userId: "u-pat", chatGuildId: null, chatChannelId: null, chatThreadId: null as string | null, dmIntroducedAt: null as Date | null };
+  const listing = {
+    id: 11, name: "Wren", status: "active", creatorUserId: "u-creator",
+    greeting: "*waves*",
+    openings: [{ text: "*a bell rings*" }, { text: "a letter arrives" }],
+  };
+  const store = {
+    listCompanionsForUser: async (uid: string) => (uid === "u-pat" ? [adopted] : []),
+    adoptionForCompanion: async () => adoption,
+    listingById: async () => listing,
+    listingForCompanion: async () => null,
+    setAdoptionLocation: async (_a: number, loc: { threadId?: string | null }) => { adoption.chatThreadId = loc.threadId ?? null; },
+    setAdoptionThread: async (_a: number, t: string) => { adoption.chatThreadId = t; },
+    markDmIntroduced: async () => { adoption.dmIntroducedAt = new Date(); },
+    creatorBan: async () => null,
+    accountForDiscordUser: async () => null,
+    creditsSupported: false,
+    trackEvent: async () => {},
+  } as unknown as MemoryStore;
+  const savedAdoptees = config.houseAdopteesChannelId;
+  const savedHouse = config.houseGuildId;
+  config.houseAdopteesChannelId = "c-adoptees";
+  config.houseGuildId = "g-house";
+  initOps({
+    store,
+    fetchMember: async () => ({ user: { id: "u-pat", username: "Pat" } }),
+    fetchChannel: async (id: string) => id === "c-adoptees"
+      ? { send: async () => {}, threads: { create: async (o: Record<string, unknown>) => { createdThreads.push(o); return thread; } } }
+      : id === thread.id ? thread : { send: async () => {} },
+    fetchGuild: async () => null,
+    botId: "bot-1",
+  } as unknown as OpsDeps);
+  const ix = (customId: string) => {
+    const box: { replied: any } = { replied: null };
+    return {
+      box,
+      interaction: {
+        customId,
+        user: { id: "u-pat", username: "Pat" },
+        reply: async (r: any) => { box.replied = r; },
+        update: async (r: any) => { box.replied = r; },
+      } as any,
+    };
+  };
+  try {
+    // Meet on a fresh adoption + multi-opening listing → the picker, not a
+    // thread. Index 0 is the greeting; each opening follows; surprise is last.
+    const talk = ix(`market:talk:${adopted.id}`);
+    await handleMemoryButton(talk.interaction, store);
+    assert.equal(createdThreads.length, 0, "the picker shows instead of creating");
+    const menuJson = JSON.stringify(talk.box.replied?.components ?? []);
+    assert.ok(menuJson.includes(`market:scenesel:${adopted.id}`), "the select is keyed to the companion");
+    assert.ok(menuJson.includes("Surprise me"), "surprise rides the menu");
+    assert.ok(menuJson.includes("Opening 2"), "unlabeled openings get ordinal labels");
+
+    // Picking opening #2 → that text greets the fresh thread.
+    const selBox: { replied: any } = { replied: null };
+    await handleMarketSelect({
+      customId: `market:scenesel:${adopted.id}`,
+      user: { id: "u-pat", username: "Pat" },
+      values: ["2"],
+      update: async (r: any) => { selBox.replied = r; },
+      reply: async (r: any) => { selBox.replied = r; },
+    } as unknown as StringSelectMenuInteraction, store);
+    assert.equal(createdThreads.length, 1, "the pick materializes the room");
+    assert.match(selBox.replied?.content ?? "", /<#t-wren>/);
+    assert.ok(JSON.stringify(sentPayloads[0]).includes("a letter arrives"), "the picked opening is the greeting");
+    assert.ok(!JSON.stringify(sentPayloads[0]).includes("*waves*"), "the default greeting was replaced");
+
+    // Once met, Meet is the plain Open — no picker, live thread reattaches.
+    sentPayloads.length = 0;
+    const reopen = ix(`market:talk:${adopted.id}`);
+    await handleMemoryButton(reopen.interaction, store);
+    assert.match(reopen.box.replied?.content ?? "", /<#t-wren>/);
+    assert.ok(!JSON.stringify(reopen.box.replied?.components ?? []).includes("scenesel"), "an Open never re-picks the scene");
+  } finally {
+    config.houseAdopteesChannelId = savedAdoptees;
+    config.houseGuildId = savedHouse;
+    initOps(null as unknown as OpsDeps);
+    resetOpsState();
+  }
+});
+
+test("Meet picker: single-opening and greeting-only listings keep the one-click Meet", async () => {
+  const adopted = {
+    ...makeCompanion(2, "u-pat", "Wren"),
+    kind: "adopted",
+    adoptedFromListingId: 11,
+  } as GuildCompanion;
+  const sentPayloads: unknown[] = [];
+  const thread = {
+    id: "t-wren",
+    members: { add: async () => {} },
+    send: async (p: unknown) => { sentPayloads.push(p); return p; },
+    setLocked: async () => {}, setArchived: async () => {},
+    messages: { fetchPinned: async () => new Map(), fetch: async () => new Map() },
+  };
+  const createdThreads: Array<Record<string, unknown>> = [];
+  const adoption = { id: 9, userId: "u-pat", chatGuildId: null, chatChannelId: null, chatThreadId: null as string | null, dmIntroducedAt: null as Date | null };
+  const listing = { id: 11, name: "Wren", status: "active", creatorUserId: "u-creator", greeting: "*waves*", openings: [] };
+  const store = {
+    listCompanionsForUser: async (uid: string) => (uid === "u-pat" ? [adopted] : []),
+    adoptionForCompanion: async () => adoption,
+    listingById: async () => listing,
+    listingForCompanion: async () => null,
+    setAdoptionLocation: async (_a: number, loc: { threadId?: string | null }) => { adoption.chatThreadId = loc.threadId ?? null; },
+    setAdoptionThread: async (_a: number, t: string) => { adoption.chatThreadId = t; },
+    markDmIntroduced: async () => { adoption.dmIntroducedAt = new Date(); },
+    creatorBan: async () => null,
+    accountForDiscordUser: async () => null,
+    creditsSupported: false,
+    trackEvent: async () => {},
+  } as unknown as MemoryStore;
+  const savedAdoptees = config.houseAdopteesChannelId;
+  const savedHouse = config.houseGuildId;
+  config.houseAdopteesChannelId = "c-adoptees";
+  config.houseGuildId = "g-house";
+  initOps({
+    store,
+    fetchMember: async () => ({ user: { id: "u-pat" } }),
+    fetchChannel: async (id: string) => id === "c-adoptees"
+      ? { send: async () => {}, threads: { create: async (o: Record<string, unknown>) => { createdThreads.push(o); return thread; } } }
+      : id === thread.id ? thread : { send: async () => {} },
+    fetchGuild: async () => null,
+    botId: "bot-1",
+  } as unknown as OpsDeps);
+  try {
+    const talk = {
+      replied: null as any,
+      interaction: {
+        customId: `market:talk:${adopted.id}`,
+        user: { id: "u-pat", username: "Pat" },
+        reply: async (r: any) => { talk.replied = r; },
+        update: async (r: any) => { talk.replied = r; },
+      } as any,
+    };
+    await handleMemoryButton(talk.interaction, store);
+    assert.equal(createdThreads.length, 1, "no openings → straight to the room");
+    assert.ok(!JSON.stringify(talk.replied?.components ?? []).includes("scenesel"));
+    assert.ok(JSON.stringify(sentPayloads[0]).includes("*waves*"), "the canonical greeting posts");
+
+    // A forged scenesel on a listing without openings can't inject text —
+    // the pool is just the greeting, and an out-of-range index clamps to it.
+    const selBox: { replied: any } = { replied: null };
+    adoption.chatThreadId = null; adoption.dmIntroducedAt = null; createdThreads.length = 0; sentPayloads.length = 0;
+    await handleMarketSelect({
+      customId: `market:scenesel:${adopted.id}`,
+      user: { id: "u-pat", username: "Pat" },
+      values: ["<script>alert(1)</script>"],
+      update: async (r: any) => { selBox.replied = r; },
+      reply: async (r: any) => { selBox.replied = r; },
+    } as unknown as StringSelectMenuInteraction, store);
+    assert.ok(JSON.stringify(sentPayloads[0]).includes("*waves*"), "forged value resolves to the greeting");
+    assert.ok(!JSON.stringify(sentPayloads[0]).includes("script"), "the value is an index, never text");
+
+    // Someone else's roster → hard refuse.
+    const deniedBox: { replied: any } = { replied: null };
+    await handleMarketSelect({
+      customId: `market:scenesel:${adopted.id}`,
+      user: { id: "u-stranger", username: "Stranger" },
+      values: ["1"],
+      update: async (r: any) => { deniedBox.replied = r; },
+      reply: async (r: any) => { deniedBox.replied = r; },
+    } as unknown as StringSelectMenuInteraction, store);
+    assert.match(deniedBox.replied?.content ?? "", /isn't on your roster/i);
   } finally {
     config.houseAdopteesChannelId = savedAdoptees;
     config.houseGuildId = savedHouse;

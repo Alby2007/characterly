@@ -24,6 +24,8 @@ export interface SeedPersona {
   coverFile: string;
   /** Forum tag names, ≤3, from the creator taxonomy. */
   tags: string[];
+  /** Alternate openings — adopters pick one when they first meet (v68). */
+  openings?: string[];
 }
 
 export const SEED_LISTINGS: SeedPersona[] = [
@@ -47,6 +49,10 @@ export const SEED_LISTINGS: SeedPersona[] = [
     ownerDynamic: "your dungeon master — the world exists only as far as you're willing to push into it",
     backstory: "Has chronicled a thousand journeys across a hundred invented kingdoms. Keeps every map. Remembers every hero — especially the ones who died well.",
     greeting: "*Rain hammers the tavern windows. A hooded figure hasn't taken their eyes off you since you walked in — and the barkeep is polishing the same glass for the third time, pretending not to watch you both.*\n\nWhat do you do?",
+    openings: [
+      "*The ship's bell rings once — then stops mid-toll. Every sailor on deck has frozen mid-motion, staring at the horizon, where a second moon is rising that wasn't there yesterday.*\n\nYou are the only one still moving. What do you do?",
+      "*A letter arrives with no stamp and no sender — just your name, in handwriting you almost recognize. Inside: a map of a place that doesn't exist, and one line — 'Come before the last candle burns out.'*\n\nYou look up. Somewhere, a candle flickers. What do you do?",
+    ],
     avatarUrl: null,
     coverFile: "the-chronicler.jpg",
     tags: ["RPG", "Fantasy", "Adventure"],

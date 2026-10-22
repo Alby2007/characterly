@@ -41,11 +41,13 @@ const crumbs = {
     { "@type": "ListItem", position: 3, name: l.name },
   ],
 };
-const tabs = ["Profile", ...(l.voicePersona ? ["Who they are"] : []), ...(l.backstory ? ["Backstory"] : []), ...(l.greeting ? ["First hello"] : [])];
+const tabs = ["Profile", ...(l.voicePersona ? ["Who they are"] : []), ...(l.backstory ? ["Backstory"] : []), ...(l.greeting ? ["First hello"] : []), ...(l.openings.length ? ["More ways to meet"] : [])];
 const slotOf = (label: string) => `tab-${tabs.indexOf(label)}`;
-// Greeting: *stage directions* italic, the rest speech. Text only; Astro escapes it.
-const greeting = l.greeting.split(/(\*[^*]+\*)/g).filter(Boolean)
+// Openings: *stage directions* italic, the rest speech. Text only; Astro escapes it.
+const renderOpening = (s: string) => s.split(/(\*[^*]+\*)/g).filter(Boolean)
   .map(p => p.startsWith("*") && p.endsWith("*") && p.length > 2 ? { act: true, text: p.slice(1, -1) } : { act: false, text: p });
+const greeting = renderOpening(l.greeting);
+const openings = l.openings.map(renderOpening);
 const paras = (s: string) => s.split(/\n+/).map(t => t.trim()).filter(Boolean);
 const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashboard?welcome=1");
 ---
@@ -69,6 +71,7 @@ const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashb
         {l.voicePersona && <div slot={slotOf("Who they are")} class="prose">{paras(l.voicePersona).map(p => <p>{p}</p>)}</div>}
         {l.backstory && <div slot={slotOf("Backstory")} class="prose">{paras(l.backstory).map(p => <p>{p}</p>)}</div>}
         {l.greeting && <blockquote slot={slotOf("First hello")} class="hello">{greeting.map(p => p.act ? <em>{p.text}</em> : <span>{p.text}</span>)}</blockquote>}
+        {l.openings.length > 0 && <div slot={slotOf("More ways to meet")} class="hellos">{openings.map(o => <blockquote class="hello">{o.map(p => p.act ? <em>{p.text}</em> : <span>{p.text}</span>)}</blockquote>)}</div>}
       </Archive>
       <div class="meet">
         <a class="btn btn-go btn-lg" href={discordStart} data-meet data-beacon="discord_signin_click"><Icon name="discord" size={20} />Meet {l.name} in Discord</a>
@@ -116,6 +119,8 @@ const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashb
   .hello { padding: 16px 0 4px; font-size: 18px; line-height: 1.55; }
   .hello em { color: var(--ink-3); }
   .hello span { font-weight: 600; }
+  .hellos { display: grid; gap: 20px; padding: 16px 0 4px; }
+  .hellos .hello { padding: 0; margin: 0; border-left: 3px solid var(--line); padding-left: 14px; }
   .char-grid > div { min-width: 0; }
   .meet { margin-top: 24px; display: grid; gap: 10px; justify-items: start; }
   .meet .btn { white-space: normal; text-align: left; max-width: 100%; }

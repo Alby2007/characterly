@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildListingCard, marketplaceAssetPath, CURATED_TAGS, postListingToDeployments, archiveListingPosts } from "./marketplace.js";
+import { buildListingCard, buildListingComponents, marketplaceAssetPath, CURATED_TAGS, postListingToDeployments, archiveListingPosts } from "./marketplace.js";
 import type { CompanionListing, GuildDeployment } from "./types.js";
 import type { MemoryStore } from "./database.js";
 
 const listing = (over: Partial<CompanionListing> = {}): CompanionListing => ({
   id: 1, creatorUserId: "u1", sourceCompanionId: null, name: "Test", tagline: "t",
-  voicePersona: "v", coreTraits: [], ownerDynamic: "d", backstory: "b", greeting: "g",
+  voicePersona: "v", coreTraits: [], ownerDynamic: "d", backstory: "b", greeting: "g", openings: [],
   avatarUrl: null, version: 1, status: "active", addCount: 0, reportCount: 0, forumThreadId: null,
   personaSource: "authored", importMeta: null, creatorTags: [],
   createdAt: "2026-01-01", updatedAt: "2026-01-01", ...over,
@@ -29,6 +29,25 @@ test("marketplaceAssetPath resolves committed art and refuses traversal", () => 
 
 test("CURATED_TAGS owns the four managed badge names", () => {
   assert.deepEqual({ ...CURATED_TAGS }, { new: "New", topRated: "Top Rated", trending: "Trending", staffPick: "Staff Pick" });
+});
+
+test("listing card: openings surface as a 'Ways to meet' count, not previews", () => {
+  const plain = buildListingCard(listing(), "me").toJSON();
+  assert.ok(!plain.fields?.some(f => f.name === "Ways to meet"), "no openings → no field");
+
+  const scenic = buildListingCard(listing({ openings: [{ text: "a" }, { text: "b" }, { text: "c" }] }), "me").toJSON();
+  const field = scenic.fields?.find(f => f.name === "Ways to meet");
+  assert.equal(field?.value, "4 openings", "greeting + 3 alternates");
+  assert.ok(!JSON.stringify(field).includes("text"), "the field is a count — opening text stays a Meet-time reveal");
+});
+
+test("listing components: row 1 is the public actions; row 2 is the creator manage row", () => {
+  const rows = buildListingComponents(42).map(r => r.toJSON());
+  assert.equal(rows.length, 2);
+  const ids = (r: { components: Array<{ custom_id?: string }> }) => r.components.map(c => c.custom_id);
+  assert.deepEqual(ids(rows[0] as never), ["market:add:42", "market:rate:42", "market:tags:42", "market:cover:42", "market:report:42"]);
+  assert.deepEqual(ids(rows[1] as never), ["market:editmodal:42", "market:scenes:42"], "creator edit paths live on the second row");
+  assert.equal((rows[0] as { components: unknown[] }).components.length, 5, "public row stays at the Discord 5-button cap");
 });
 
 // ── Mirror fan-out (v59) ─────────────────────────────────────────────────────

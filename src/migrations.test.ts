@@ -952,6 +952,39 @@ test("migration v54 adds companion_adoptions.chat_thread_id + partial index, rol
   } finally { await sql.end(); }
 });
 
+test("migration v68 adds companion_listings.openings with an array CHECK; guarded rollback", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any);
+
+    const col = await sql<Array<{ column_default: string }>>`
+      SELECT column_default FROM information_schema.columns
+      WHERE table_name = 'companion_listings' AND column_name = 'openings'`;
+    assert.equal(col.length, 1, "openings column exists");
+    assert.equal(col[0].column_default, "'[]'::jsonb", "defaults to an empty array");
+
+    // The CHECK constraint — an object-shaped blob is rejected, arrays pass.
+    await assert.rejects(
+      sql`INSERT INTO companion_listings (creator_user_id, name, openings) VALUES ('u-v68', 'BadShape', '{"text":"x"}'::jsonb)`,
+      "non-array openings must fail the CHECK",
+    );
+    const [row] = await sql<Array<{ id: number; openings: unknown }>>`
+      INSERT INTO companion_listings (creator_user_id, name, openings)
+      VALUES ('u-v68', 'Scenic', '[{"text":"hi"}]'::jsonb) RETURNING id, openings`;
+    assert.ok(Array.isArray(row.openings));
+
+    // Rollback refuses while any row holds real openings — scenes are data.
+    await assert.rejects(runMigrations(sql as any, 67), "rollback must refuse while openings exist");
+    await sql`DELETE FROM companion_listings WHERE id = ${row.id}`;
+    await runMigrations(sql as any, 67);
+    const gone = await sql<Array<{ column_name: string }>>`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'companion_listings' AND column_name = 'openings'`;
+    assert.equal(gone.length, 0, "clean rollback drops the column");
+  } finally { await sql.end(); }
+});
+
 test("migration v64 creates the listing_rating_stats view — one row per listing, rolls back", async () => {
   const sql = makeTestSql();
   try {

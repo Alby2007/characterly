@@ -2,6 +2,7 @@
 import "../styles/global.css";
 import Mark from "../components/Mark.astro";
 import Icon from "../components/Icon.astro";
+import Loader from "../components/Loader.astro";
 import { SITE_ORIGIN, LINKS } from "../lib/config";
 import { jsonLd as ld } from "../lib/ldjson";
 
@@ -19,8 +20,10 @@ interface Props {
   /** "site": full nav. "app": signed-in back office (dashboard). "focus": brand only (auth). */
   chrome?: "site" | "app" | "focus";
   current?: string;
+  /** Render the loading screen already showing, with this status line. */
+  loading?: string;
 }
-const { title, description, path, ogImage, ogImageAlt, ogType = "website", noindex = false, jsonLd = [], chrome = "site", current } = Astro.props;
+const { title, description, path, ogImage, ogImageAlt, ogType = "website", noindex = false, jsonLd = [], chrome = "site", current, loading } = Astro.props;
 const canonical = path ? `${SITE_ORIGIN}${path === "/" ? "/" : path}` : null;
 const image = ogImage ?? `${SITE_ORIGIN}/og.png`;
 // og.png is a fixed 1200×630 card — declare its size so unfurlers skip the
@@ -65,8 +68,10 @@ const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashb
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <slot name="head" />
   {jsonLd.map(d => <script type="application/ld+json" set:html={ld(d)} />)}
+  <noscript><style>[data-loader] { display: none !important; }</style></noscript>
 </head>
 <body>
+  <Loader visible={Boolean(loading)} text={loading} />
   <a class="skip" href="#main">Skip to content</a>
 
   <header class="nav" data-nav>

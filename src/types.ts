@@ -318,6 +318,18 @@ export type Companion = {
  * awakened companion. Editable + versioned; adopters clone it into their own
  * companions row, so creator edits propagate without ever mutating the
  * creator's (permanently locked) awakened bond. */
+/** One alternate opening a listing can greet with. v1 fills `text` only —
+ *  `label` (picker title) and `premise` (per-scene prompt overlay) are
+ *  reserved so a scenes v2 lands without a column reshape. The primary
+ *  `greeting` stays the canonical first opening; these are the alternates. */
+export type SceneOpening = { text: string; label?: string; premise?: string };
+
+/** Alternate-opening bounds. 4 alternates + the primary greeting = 5 ways to
+ *  meet; the per-opening cap matches the authored greeting modal (1000) and
+ *  keeps the scenes editor's serialized field inside Discord's 4000 limit. */
+export const LISTING_MAX_OPENINGS = 4;
+export const LISTING_OPENING_MAX_CHARS = 1000;
+
 export type CompanionListing = {
   id: number;
   creatorUserId: string;
@@ -331,6 +343,9 @@ export type CompanionListing = {
   ownerDynamic: string;
   backstory: string;
   greeting: string;
+  /** Alternate openings picked at Meet time (v68) — card `alternate_greetings`
+   *  or creator-authored. Empty = the greeting is the only way in. */
+  openings: SceneOpening[];
   avatarUrl: string | null;
   /** House forum thread id — the canonical post. Mirrors in partner servers
    *  live in listing_posts (v59); this column stays the house pointer. */

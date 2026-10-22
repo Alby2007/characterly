@@ -11,6 +11,7 @@ import {
   type Profile,
 } from "./auth";
 import { supabase } from "./supabase";
+import { showLoader, hideLoader } from "./loader";
 import { TERMS_VERSION, PLANS } from "../lib/config";
 import { initImportCard } from "./import-card";
 import { initImportHistory } from "./import-history";
@@ -21,8 +22,16 @@ const $$ = <T extends HTMLElement = HTMLElement>(sel: string) => [...document.qu
 const guard = <T>(p: Promise<T>, ms = 8000) => withTimeout(p, ms).catch(e => console.warn("dashboard section failed:", e));
 const goHome = async () => { try { await signOut(); } finally { location.href = "/"; } };
 
+// The page renders with the loading screen up (dashboard.astro). Coming back
+// from Discord, say what's actually happening; and never leave the visitor
+// stuck behind it if something below throws.
+{
+  const q = new URLSearchParams(location.search);
+  if (q.has("code") || q.has("welcome") || location.hash.includes("access_token")) showLoader("Signing you in…");
+  setTimeout(hideLoader, 12_000);
+}
 const user = await requireAuth();
-if (!user) throw new Error("redirecting");
+if (!user) { showLoader("Taking you to sign in…"); throw new Error("redirecting"); }
 // Hoisted functions don't keep the `user` narrowing; a const id does.
 const userId = user.id;
 
@@ -364,6 +373,7 @@ async function refreshAll() {
 }
 
 await refreshAll();
+hideLoader();
 // On a failed profile read the sections still attempt their own RPCs, which
 // either succeed (transient profile error) or surface their own honest error.
 const linkedOrRetry = linked() || profileUnknown();

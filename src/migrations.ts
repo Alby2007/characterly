@@ -6077,6 +6077,496 @@ export const migrations: Migration[] = [
       await sql`DROP TABLE IF EXISTS reply_regens`;
     },
   },
+
+  // ── v68: listing openings ("scenes") ──────────────────────────────────────
+  // Alternate openings a listing can greet with — card `alternate_greetings`
+  // and creator-authored scenes share one column. The primary `greeting`
+  // column stays the canonical first opening; `openings` holds the rest as
+  // [{text, label?, premise?}] — label/premise are reserved for a scenes v2.
+  {
+    version: 68,
+    name: "v68_listing_openings",
+    up: async (sql) => {
+      await sql`ALTER TABLE companion_listings ADD COLUMN IF NOT EXISTS openings jsonb NOT NULL DEFAULT '[]'::jsonb`;
+      await sql`
+        ALTER TABLE companion_listings
+          ADD CONSTRAINT companion_listings_openings_array
+          CHECK (jsonb_typeof(openings) = 'array')
+      `;
+      // Re-state import_companion_card with v_openings (web lane) — mirrors
+      // the bot-side openings field; accepts ["text"] or [{"text":…}].
+      await sql`
+        DO $web$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'web_profiles') THEN
+            EXECUTE $dfn$
+              CREATE OR REPLACE FUNCTION public.import_companion_card(p_payload jsonb)
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+                v_plan text;
+                v_max_slots int;
+                v_count int;
+                v_listing bigint;
+                v_companion bigint;
+                v_name text;
+                v_tagline text;
+                v_voice text;
+                v_traits text[] := '{}'::text[];
+                v_dynamic text;
+                v_backstory text;
+                v_greeting text;
+                v_openings jsonb := '[]'::jsonb;
+                v_avatar text;
+                v_meta jsonb;
+                v_tags jsonb := '[]'::jsonb;
+                v_row record;
+                v_adoption record;
+              BEGIN
+                IF uid IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                SELECT discord_user_id, plan INTO did, v_plan
+                  FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN
+                  RAISE EXCEPTION 'discord not linked';
+                END IF;
+
+                v_name := left(btrim(coalesce(p_payload->>'name', '')), 64);
+                IF v_name = '' THEN
+                  RAISE EXCEPTION 'name required';
+                END IF;
+                v_tagline := left(coalesce(p_payload->>'tagline', ''), 200);
+                v_voice := left(coalesce(p_payload->>'voice_persona', ''), 2000);
+                v_dynamic := left(coalesce(p_payload->>'owner_dynamic', ''), 300);
+                v_backstory := left(coalesce(p_payload->>'backstory', ''), 4000);
+                v_greeting := left(coalesce(p_payload->>'greeting', ''), 2000);
+                v_avatar := left(coalesce(p_payload->>'avatar_url', ''), 500);
+                IF v_avatar <> '' AND v_avatar NOT LIKE 'https://%' AND v_avatar NOT LIKE 'http://%' THEN
+                  v_avatar := '';
+                END IF;
+                IF jsonb_typeof(p_payload->'core_traits') = 'array' THEN
+                  SELECT coalesce(array_agg(left(t, 48)), '{}'::text[]) INTO v_traits
+                    FROM (SELECT jsonb_array_elements_text(p_payload->'core_traits') AS t
+                          LIMIT 8) s;
+                END IF;
+                IF jsonb_typeof(p_payload->'openings') = 'array' THEN
+                  SELECT coalesce(jsonb_agg(jsonb_build_object('text', t)), '[]'::jsonb) INTO v_openings
+                    FROM (SELECT t FROM (
+                            SELECT left(coalesce(el->>'text', el#>>'{}'), 1000) AS t
+                              FROM jsonb_array_elements(p_payload->'openings') AS el) raw
+                           WHERE btrim(t) <> ''
+                           LIMIT 4) s;
+                END IF;
+                IF jsonb_typeof(p_payload->'import_meta'->'tags') = 'array' THEN
+                  SELECT coalesce(jsonb_agg(left(el, 48)), '[]'::jsonb) INTO v_tags
+                    FROM (SELECT jsonb_array_elements_text(p_payload->'import_meta'->'tags') AS el
+                          LIMIT 10) s;
+                END IF;
+                v_meta := jsonb_build_object(
+                  'source', 'character_card',
+                  'spec', left(coalesce(p_payload->'import_meta'->>'spec', ''), 40),
+                  'specVersion', left(coalesce(p_payload->'import_meta'->>'specVersion', ''), 20),
+                  'creator', left(coalesce(p_payload->'import_meta'->>'creator', ''), 120),
+                  'characterVersion', left(coalesce(p_payload->'import_meta'->>'characterVersion', ''), 40),
+                  'filename', left(coalesce(p_payload->'import_meta'->>'filename', ''), 200),
+                  'sha256', left(coalesce(p_payload->'import_meta'->>'sha256', ''), 80),
+                  'tags', v_tags,
+                  'importedVia', 'web',
+                  'importedAt', now()
+                );
+
+                PERFORM pg_advisory_xact_lock(hashtext('adopt:' || did));
+                v_max_slots := CASE WHEN v_plan = 'premium' THEN 100 ELSE 1 END;
+
+                SELECT l.id INTO v_listing FROM public.companion_listings l
+                  WHERE l.creator_user_id = did AND l.status = 'unlisted'
+                    AND l.import_meta->>'sha256' =
+                        coalesce(p_payload->'import_meta'->>'sha256', '~~~')
+                  LIMIT 1;
+                IF v_listing IS NOT NULL THEN
+                  SELECT a.companion_id, a.dropped_at, a.cooldown_until INTO v_adoption
+                    FROM public.companion_adoptions a
+                    WHERE a.user_id = did AND a.listing_id = v_listing;
+                  IF v_adoption.companion_id IS NOT NULL AND v_adoption.dropped_at IS NULL THEN
+                    SELECT c.name INTO v_name FROM public.companions c
+                      WHERE c.id = v_adoption.companion_id;
+                    RETURN json_build_object(
+                      'companion_id', v_adoption.companion_id, 'listing_id', v_listing,
+                      'name', v_name, 'reused', true, 'revived', false);
+                  END IF;
+                  IF v_adoption.cooldown_until IS NOT NULL AND v_adoption.cooldown_until > now() THEN
+                    RAISE EXCEPTION 're-adoption cooldown';
+                  END IF;
+                  SELECT COUNT(*) INTO v_count FROM public.companion_adoptions a
+                    LEFT JOIN public.companion_listings l ON l.id = a.listing_id
+                    WHERE a.user_id = did AND a.dropped_at IS NULL
+                      AND (l.id IS NULL OR l.status <> 'banned');
+                  IF v_count >= v_max_slots THEN
+                    RAISE EXCEPTION 'adoption slot full';
+                  END IF;
+                  SELECT COUNT(*) INTO v_count FROM public.companion_adoptions
+                    WHERE user_id = did AND adopted_at > now() - interval '1 day';
+                  IF v_count >= 20 THEN
+                    RAISE EXCEPTION 'daily adoption cap';
+                  END IF;
+                  IF v_adoption.companion_id IS NULL THEN
+                    SELECT l.* INTO v_row FROM public.companion_listings l WHERE l.id = v_listing;
+                    INSERT INTO public.companions (
+                      owner_user_id, name, avatar_url, voice_persona, core_traits,
+                      owner_dynamic, backstory, onboarding_state, onboarding_turns,
+                      kind, adopted_from_listing_id, listing_version, persona_source,
+                      import_meta, created_at, updated_at
+                    ) VALUES (
+                      did, v_row.name, v_row.avatar_url, v_row.voice_persona,
+                      v_row.core_traits, v_row.owner_dynamic, v_row.backstory,
+                      'active', 0, 'adopted', v_listing, v_row.version,
+                      'card_import', v_row.import_meta, now(), now()
+                    )
+                    RETURNING id INTO v_companion;
+                    INSERT INTO public.companion_adoptions (user_id, listing_id, companion_id, adopted_at)
+                    VALUES (did, v_listing, v_companion, now());
+                    RETURN json_build_object(
+                      'companion_id', v_companion, 'listing_id', v_listing,
+                      'name', v_row.name, 'reused', true, 'revived', true);
+                  END IF;
+                  UPDATE public.companion_adoptions
+                    SET dropped_at = NULL, cooldown_until = NULL, adopted_at = now()
+                    WHERE user_id = did AND listing_id = v_listing AND dropped_at IS NOT NULL;
+                  SELECT c.name INTO v_name FROM public.companions c WHERE c.id = v_adoption.companion_id;
+                  RETURN json_build_object(
+                    'companion_id', v_adoption.companion_id, 'listing_id', v_listing,
+                    'name', v_name, 'reused', true, 'revived', true);
+                END IF;
+
+                SELECT COUNT(*) INTO v_count FROM public.companion_listings
+                 WHERE creator_user_id = did AND status = 'unlisted';
+                IF v_count >= 25 THEN
+                  RAISE EXCEPTION 'import cap reached';
+                END IF;
+                SELECT COUNT(*) INTO v_count FROM public.companion_adoptions a
+                  LEFT JOIN public.companion_listings l ON l.id = a.listing_id
+                  WHERE a.user_id = did AND a.dropped_at IS NULL
+                    AND (l.id IS NULL OR l.status <> 'banned');
+                IF v_count >= v_max_slots THEN
+                  RAISE EXCEPTION 'adoption slot full';
+                END IF;
+                SELECT COUNT(*) INTO v_count FROM public.companion_adoptions
+                  WHERE user_id = did AND adopted_at > now() - interval '1 day';
+                IF v_count >= 20 THEN
+                  RAISE EXCEPTION 'daily adoption cap';
+                END IF;
+
+                INSERT INTO public.companion_listings (
+                  creator_user_id, source_companion_id, name, tagline, voice_persona,
+                  core_traits, owner_dynamic, backstory, greeting, openings, avatar_url,
+                  version, status, persona_source, import_meta, created_at, updated_at
+                ) VALUES (
+                  did, NULL, v_name, v_tagline, v_voice, v_traits, v_dynamic,
+                  v_backstory, v_greeting, v_openings, nullif(v_avatar, ''),
+                  1, 'unlisted', 'card_import', v_meta, now(), now()
+                )
+                RETURNING id INTO v_listing;
+
+                INSERT INTO public.companion_persona_versions (listing_id, version, persona_json)
+                VALUES (v_listing, 1, jsonb_build_object(
+                  'name', v_name, 'tagline', v_tagline, 'voicePersona', v_voice,
+                  'coreTraits', v_traits, 'ownerDynamic', v_dynamic,
+                  'backstory', v_backstory, 'greeting', v_greeting,
+                  'openings', v_openings,
+                  'avatarUrl', nullif(v_avatar, '')))
+                ON CONFLICT (listing_id, version) DO NOTHING;
+
+                INSERT INTO public.companions (
+                  owner_user_id, name, avatar_url, voice_persona, core_traits,
+                  owner_dynamic, backstory, onboarding_state, onboarding_turns,
+                  kind, adopted_from_listing_id, listing_version, persona_source,
+                  import_meta, created_at, updated_at
+                ) VALUES (
+                  did, v_name, nullif(v_avatar, ''), v_voice, v_traits, v_dynamic,
+                  v_backstory, 'active', 0, 'adopted', v_listing, 1,
+                  'card_import', v_meta, now(), now()
+                )
+                RETURNING id INTO v_companion;
+
+                INSERT INTO public.companion_adoptions (user_id, listing_id, companion_id, adopted_at)
+                VALUES (did, v_listing, v_companion, now());
+
+                INSERT INTO public.user_bot_settings (discord_user_id, active_dm_companion_id)
+                VALUES (did, v_companion)
+                ON CONFLICT (discord_user_id) DO UPDATE
+                  SET active_dm_companion_id = EXCLUDED.active_dm_companion_id
+                  WHERE public.user_bot_settings.active_dm_companion_id IS NULL;
+
+                RETURN json_build_object(
+                  'companion_id', v_companion, 'listing_id', v_listing, 'name', v_name,
+                  'reused', false, 'revived', false);
+              END
+              $body$
+            $dfn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.import_companion_card(jsonb) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.import_companion_card(jsonb) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.import_companion_card(jsonb) TO authenticated';
+            END IF;
+          END IF;
+        END $web$
+      `;
+      // Repair rows written by JSON.stringify'd driver params pre-v68: they
+      // landed as jsonb *strings* (not objects), so ->> key reads returned NULL
+      // — the avatar GC missed snapshot-held urls and persona_json assertions
+      // passed vacuously. Unwrap the string payload back to real jsonb.
+      await sql`
+        UPDATE companion_persona_versions
+          SET persona_json = (persona_json #>> '{}')::jsonb
+          WHERE jsonb_typeof(persona_json) = 'string'
+      `;
+      await sql`
+        UPDATE analytics_events
+          SET meta = (meta #>> '{}')::jsonb
+          WHERE jsonb_typeof(meta) = 'string'
+      `;
+    },
+    down: async (sql) => {
+      // Openings are creator/import content — refuse to drop real data.
+      // (The jsonb-string repairs above are left in place on rollback —
+      // unwrapping is strictly a correction.)
+      await sql`
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM companion_listings WHERE openings <> '[]'::jsonb) THEN
+            RAISE EXCEPTION 'v68 rollback refused: listing openings exist';
+          END IF;
+        END $$
+      `;
+      // Restore the pre-v68 import_companion_card body (no openings arg).
+      await sql`
+        DO $web$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'web_profiles') THEN
+            EXECUTE $dfn$
+              CREATE OR REPLACE FUNCTION public.import_companion_card(p_payload jsonb)
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                uid uuid := auth.uid();
+                did text;
+                v_plan text;
+                v_max_slots int;
+                v_count int;
+                v_listing bigint;
+                v_companion bigint;
+                v_name text;
+                v_tagline text;
+                v_voice text;
+                v_traits text[] := '{}'::text[];
+                v_dynamic text;
+                v_backstory text;
+                v_greeting text;
+                v_avatar text;
+                v_meta jsonb;
+                v_tags jsonb := '[]'::jsonb;
+                v_row record;
+                v_adoption record;
+              BEGIN
+                IF uid IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                SELECT discord_user_id, plan INTO did, v_plan
+                  FROM public.web_profiles WHERE id = uid;
+                IF did IS NULL THEN
+                  RAISE EXCEPTION 'discord not linked';
+                END IF;
+
+                v_name := left(btrim(coalesce(p_payload->>'name', '')), 64);
+                IF v_name = '' THEN
+                  RAISE EXCEPTION 'name required';
+                END IF;
+                v_tagline := left(coalesce(p_payload->>'tagline', ''), 200);
+                v_voice := left(coalesce(p_payload->>'voice_persona', ''), 2000);
+                v_dynamic := left(coalesce(p_payload->>'owner_dynamic', ''), 300);
+                v_backstory := left(coalesce(p_payload->>'backstory', ''), 4000);
+                v_greeting := left(coalesce(p_payload->>'greeting', ''), 2000);
+                v_avatar := left(coalesce(p_payload->>'avatar_url', ''), 500);
+                IF v_avatar <> '' AND v_avatar NOT LIKE 'https://%' AND v_avatar NOT LIKE 'http://%' THEN
+                  v_avatar := '';
+                END IF;
+                IF jsonb_typeof(p_payload->'core_traits') = 'array' THEN
+                  SELECT coalesce(array_agg(left(t, 48)), '{}'::text[]) INTO v_traits
+                    FROM (SELECT jsonb_array_elements_text(p_payload->'core_traits') AS t
+                          LIMIT 8) s;
+                END IF;
+                IF jsonb_typeof(p_payload->'import_meta'->'tags') = 'array' THEN
+                  SELECT coalesce(jsonb_agg(left(el, 48)), '[]'::jsonb) INTO v_tags
+                    FROM (SELECT jsonb_array_elements_text(p_payload->'import_meta'->'tags') AS el
+                          LIMIT 10) s;
+                END IF;
+                v_meta := jsonb_build_object(
+                  'source', 'character_card',
+                  'spec', left(coalesce(p_payload->'import_meta'->>'spec', ''), 40),
+                  'specVersion', left(coalesce(p_payload->'import_meta'->>'specVersion', ''), 20),
+                  'creator', left(coalesce(p_payload->'import_meta'->>'creator', ''), 120),
+                  'characterVersion', left(coalesce(p_payload->'import_meta'->>'characterVersion', ''), 40),
+                  'filename', left(coalesce(p_payload->'import_meta'->>'filename', ''), 200),
+                  'sha256', left(coalesce(p_payload->'import_meta'->>'sha256', ''), 80),
+                  'tags', v_tags,
+                  'importedVia', 'web',
+                  'importedAt', now()
+                );
+
+                PERFORM pg_advisory_xact_lock(hashtext('adopt:' || did));
+                v_max_slots := CASE WHEN v_plan = 'premium' THEN 100 ELSE 1 END;
+
+                SELECT l.id INTO v_listing FROM public.companion_listings l
+                  WHERE l.creator_user_id = did AND l.status = 'unlisted'
+                    AND l.import_meta->>'sha256' =
+                        coalesce(p_payload->'import_meta'->>'sha256', '~~~')
+                  LIMIT 1;
+                IF v_listing IS NOT NULL THEN
+                  SELECT a.companion_id, a.dropped_at, a.cooldown_until INTO v_adoption
+                    FROM public.companion_adoptions a
+                    WHERE a.user_id = did AND a.listing_id = v_listing;
+                  IF v_adoption.companion_id IS NOT NULL AND v_adoption.dropped_at IS NULL THEN
+                    SELECT c.name INTO v_name FROM public.companions c
+                      WHERE c.id = v_adoption.companion_id;
+                    RETURN json_build_object(
+                      'companion_id', v_adoption.companion_id, 'listing_id', v_listing,
+                      'name', v_name, 'reused', true, 'revived', false);
+                  END IF;
+                  IF v_adoption.cooldown_until IS NOT NULL AND v_adoption.cooldown_until > now() THEN
+                    RAISE EXCEPTION 're-adoption cooldown';
+                  END IF;
+                  SELECT COUNT(*) INTO v_count FROM public.companion_adoptions a
+                    LEFT JOIN public.companion_listings l ON l.id = a.listing_id
+                    WHERE a.user_id = did AND a.dropped_at IS NULL
+                      AND (l.id IS NULL OR l.status <> 'banned');
+                  IF v_count >= v_max_slots THEN
+                    RAISE EXCEPTION 'adoption slot full';
+                  END IF;
+                  SELECT COUNT(*) INTO v_count FROM public.companion_adoptions
+                    WHERE user_id = did AND adopted_at > now() - interval '1 day';
+                  IF v_count >= 20 THEN
+                    RAISE EXCEPTION 'daily adoption cap';
+                  END IF;
+                  IF v_adoption.companion_id IS NULL THEN
+                    SELECT l.* INTO v_row FROM public.companion_listings l WHERE l.id = v_listing;
+                    INSERT INTO public.companions (
+                      owner_user_id, name, avatar_url, voice_persona, core_traits,
+                      owner_dynamic, backstory, onboarding_state, onboarding_turns,
+                      kind, adopted_from_listing_id, listing_version, persona_source,
+                      import_meta, created_at, updated_at
+                    ) VALUES (
+                      did, v_row.name, v_row.avatar_url, v_row.voice_persona,
+                      v_row.core_traits, v_row.owner_dynamic, v_row.backstory,
+                      'active', 0, 'adopted', v_listing, v_row.version,
+                      'card_import', v_row.import_meta, now(), now()
+                    )
+                    RETURNING id INTO v_companion;
+                    INSERT INTO public.companion_adoptions (user_id, listing_id, companion_id, adopted_at)
+                    VALUES (did, v_listing, v_companion, now());
+                    RETURN json_build_object(
+                      'companion_id', v_companion, 'listing_id', v_listing,
+                      'name', v_row.name, 'reused', true, 'revived', true);
+                  END IF;
+                  UPDATE public.companion_adoptions
+                    SET dropped_at = NULL, cooldown_until = NULL, adopted_at = now()
+                    WHERE user_id = did AND listing_id = v_listing AND dropped_at IS NOT NULL;
+                  SELECT c.name INTO v_name FROM public.companions c WHERE c.id = v_adoption.companion_id;
+                  RETURN json_build_object(
+                    'companion_id', v_adoption.companion_id, 'listing_id', v_listing,
+                    'name', v_name, 'reused', true, 'revived', true);
+                END IF;
+
+                SELECT COUNT(*) INTO v_count FROM public.companion_listings
+                 WHERE creator_user_id = did AND status = 'unlisted';
+                IF v_count >= 25 THEN
+                  RAISE EXCEPTION 'import cap reached';
+                END IF;
+                SELECT COUNT(*) INTO v_count FROM public.companion_adoptions a
+                  LEFT JOIN public.companion_listings l ON l.id = a.listing_id
+                  WHERE a.user_id = did AND a.dropped_at IS NULL
+                    AND (l.id IS NULL OR l.status <> 'banned');
+                IF v_count >= v_max_slots THEN
+                  RAISE EXCEPTION 'adoption slot full';
+                END IF;
+                SELECT COUNT(*) INTO v_count FROM public.companion_adoptions
+                  WHERE user_id = did AND adopted_at > now() - interval '1 day';
+                IF v_count >= 20 THEN
+                  RAISE EXCEPTION 'daily adoption cap';
+                END IF;
+
+                INSERT INTO public.companion_listings (
+                  creator_user_id, source_companion_id, name, tagline, voice_persona,
+                  core_traits, owner_dynamic, backstory, greeting, avatar_url,
+                  version, status, persona_source, import_meta, created_at, updated_at
+                ) VALUES (
+                  did, NULL, v_name, v_tagline, v_voice, v_traits, v_dynamic,
+                  v_backstory, v_greeting, nullif(v_avatar, ''),
+                  1, 'unlisted', 'card_import', v_meta, now(), now()
+                )
+                RETURNING id INTO v_listing;
+
+                INSERT INTO public.companion_persona_versions (listing_id, version, persona_json)
+                VALUES (v_listing, 1, jsonb_build_object(
+                  'name', v_name, 'tagline', v_tagline, 'voicePersona', v_voice,
+                  'coreTraits', v_traits, 'ownerDynamic', v_dynamic,
+                  'backstory', v_backstory, 'greeting', v_greeting,
+                  'avatarUrl', nullif(v_avatar, '')))
+                ON CONFLICT (listing_id, version) DO NOTHING;
+
+                INSERT INTO public.companions (
+                  owner_user_id, name, avatar_url, voice_persona, core_traits,
+                  owner_dynamic, backstory, onboarding_state, onboarding_turns,
+                  kind, adopted_from_listing_id, listing_version, persona_source,
+                  import_meta, created_at, updated_at
+                ) VALUES (
+                  did, v_name, nullif(v_avatar, ''), v_voice, v_traits, v_dynamic,
+                  v_backstory, 'active', 0, 'adopted', v_listing, 1,
+                  'card_import', v_meta, now(), now()
+                )
+                RETURNING id INTO v_companion;
+
+                INSERT INTO public.companion_adoptions (user_id, listing_id, companion_id, adopted_at)
+                VALUES (did, v_listing, v_companion, now());
+
+                INSERT INTO public.user_bot_settings (discord_user_id, active_dm_companion_id)
+                VALUES (did, v_companion)
+                ON CONFLICT (discord_user_id) DO UPDATE
+                  SET active_dm_companion_id = EXCLUDED.active_dm_companion_id
+                  WHERE public.user_bot_settings.active_dm_companion_id IS NULL;
+
+                RETURN json_build_object(
+                  'companion_id', v_companion, 'listing_id', v_listing, 'name', v_name,
+                  'reused', false, 'revived', false);
+              END
+              $body$
+            $dfn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.import_companion_card(jsonb) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.import_companion_card(jsonb) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.import_companion_card(jsonb) TO authenticated';
+            END IF;
+          END IF;
+        END $web$
+      `;
+      await sql`ALTER TABLE companion_listings DROP CONSTRAINT IF EXISTS companion_listings_openings_array`;
+      await sql`ALTER TABLE companion_listings DROP COLUMN IF EXISTS openings`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

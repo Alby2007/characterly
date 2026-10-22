@@ -95,7 +95,10 @@ Statuses: `active` → `flagged` (report threshold hold) → `delisted` /
   `Brain.safetyVerdict` on the operator model. If the classifier is
   configured but errors, the publish is refused and can be retried. When no
   operator key exists (pure-BYOK self-host), the deterministic layer plus
-  the report pipeline carry the load — documented, not hidden.
+  the report pipeline carry the load — documented, not hidden. The screened
+  field set covers every authored surface on the listing — name, tagline,
+  greeting, voice, traits, dynamic, backstory, **and each alternate
+  opening** (`opening N` names the culprit field on a blocklist hit).
 - **Replies (fail-open):** if the screen call errors, the reply sends and
   `safety.screen_error` is incremented. Chats don't break on provider
   hiccups; a spike in that metric is the ops tripwire.

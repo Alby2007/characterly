@@ -4,9 +4,14 @@
 // (they link Discord later with a /link code).
 import Base from "../layouts/Base.astro";
 import Icon from "../components/Icon.astro";
-export const prerender = true;
+// Rendered on request so ?start=discord can arrive with the loading screen
+// already up: the email form never flashes before the hop to Discord.
+export const prerender = false;
+const q = Astro.url.searchParams;
+const startingDiscord = q.get("start") === "discord" && !q.has("error") && !q.has("error_description");
+Astro.response.headers.set("cache-control", "no-store");
 ---
-<Base title="Sign in · Characterly" description="Sign in to Characterly with Discord or email." noindex chrome="focus">
+<Base title="Sign in · Characterly" description="Sign in to Characterly with Discord or email." noindex chrome="focus" loading={startingDiscord ? "Opening Discord…" : undefined}>
   <section class="wrap auth">
     <div class="auth-card" data-auth>
       <h1 id="auth-title">Sign in</h1>

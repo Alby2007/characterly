@@ -6,6 +6,7 @@ import {
   resendVerification, signInWithDiscord, resetPassword, updatePassword, recordConsent, beacon,
 } from "./auth";
 import { TERMS_VERSION } from "../lib/config";
+import { showLoader, hideLoader } from "./loader";
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) => document.querySelector(sel) as T;
 type Mode = "signin" | "signup" | "magic" | "forgot" | "recovery";
@@ -97,6 +98,7 @@ async function startDiscord() {
   if (error) {
     discordBtn.disabled = false;
     discordBtn.querySelector("span")!.textContent = "Continue with Discord";
+    hideLoader();
     showError(`Couldn't reach Discord: ${error.message}`);
   }
 }
@@ -117,8 +119,17 @@ if (inRecovery) setMode("recovery");
 
 getSession().then(session => {
   if (inRecovery) { if (session) recoveryReady = true; return; }
-  if (session) { location.replace(authRedirectTarget()); return; }
+  if (session) {
+    showLoader("Taking you to your dashboard…");
+    location.replace(authRedirectTarget());
+    return;
+  }
   if (params.get("start") === "discord" && !urlError) startDiscord();
+  else hideLoader(); // e.g. a cached ?start page whose session check failed
+}, () => {
+  // getSession itself failed: never strand the visitor behind the loader.
+  hideLoader();
+  showError("Sign-in didn't load. Refresh the page and try again.");
 });
 onAuthChange((event, session) => {
   if (inRecovery && (event === "PASSWORD_RECOVERY" || session)) { recoveryReady = true; setMode("recovery"); }

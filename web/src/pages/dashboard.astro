@@ -7,7 +7,7 @@ import Icon from "../components/Icon.astro";
 import { LINKS, PLANS, PACKS } from "../lib/config";
 export const prerender = true;
 ---
-<Base title="Your dashboard · Characterly" description="Your Characterly account: memory, imports, tokens and billing." noindex chrome="app">
+<Base title="Your dashboard · Characterly" description="Your Characterly account: memory, imports, tokens and billing." noindex chrome="app" loading="Loading your account…">
   <div class="wrap dash" data-dash aria-busy="true">
     <header class="dash-head">
       <h1><span id="dash-greeting">Hello</span>, <span id="dash-name" class="name">there</span>.</h1>
@@ -79,6 +79,7 @@ export const prerender = true;
                 <h3 id="import-name"></h3>
                 <p class="muted" id="import-voice"></p>
                 <p class="small" id="import-traits" hidden></p>
+                <p class="small muted" id="import-openings" hidden></p>
                 <p class="small muted" id="import-creator" hidden></p>
               </div>
               <div class="preview-actions">

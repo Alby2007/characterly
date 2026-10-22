@@ -23,6 +23,9 @@ export type ShelfListing = {
   creatorTags: string[];
   backstory: string;
   greeting: string;
+  /** Alternate openings (v68) — text-only projection; the column's
+   *  {text,label?,premise?} objects flatten to their text for display. */
+  openings: string[];
   avatarUrl: string | null;
   addCount: number;
   updatedAt: string;
@@ -51,10 +54,10 @@ const escAttr = esc; // same escaping covers attribute positions
 type RawListing = {
   id: number; name: string; tagline: string; voice_persona: string;
   core_traits: string[]; creator_tags: string[]; backstory: string;
-  greeting: string; avatar_url: string | null; add_count: number; updated_at: string;
+  greeting: string; openings: unknown; avatar_url: string | null; add_count: number; updated_at: string;
 };
 
-const LISTING_SELECT = "id,name,tagline,voice_persona,core_traits,creator_tags,backstory,greeting,avatar_url,add_count,updated_at";
+const LISTING_SELECT = "id,name,tagline,voice_persona,core_traits,creator_tags,backstory,greeting,openings,avatar_url,add_count,updated_at";
 
 function restBase(env: ShelfEnv): { base: string; headers: Record<string, string> } | null {
   const base = env.SUPABASE_URL?.replace(/\/+$/, "");
@@ -72,10 +75,21 @@ function restBase(env: ShelfEnv): { base: string; headers: Record<string, string
 const safeAvatarUrl = (u: string | null): string | null =>
   u != null && (/^https?:\/\//i.test(u) || /^\/(?!\/)/.test(u)) ? u : null;
 
+/** openings jsonb tolerates both the [{text}] object shape and plain
+ *  strings (hand-written fixtures) — the shelf only ever needs the text. */
+const openingTexts = (raw: unknown): string[] =>
+  Array.isArray(raw)
+    ? raw.slice(0, 4).flatMap(o => {
+        const t = (typeof o === "string" ? o : String((o as { text?: unknown })?.text ?? "")).trim().slice(0, 1000);
+        return t ? [t] : [];
+      })
+    : [];
+
 const toListing = (r: RawListing): ShelfListing => ({
   id: r.id, name: r.name ?? "", tagline: r.tagline ?? "", voicePersona: r.voice_persona ?? "",
   coreTraits: r.core_traits ?? [], creatorTags: r.creator_tags ?? [],
   backstory: r.backstory ?? "", greeting: r.greeting ?? "",
+  openings: openingTexts(r.openings),
   avatarUrl: safeAvatarUrl(r.avatar_url), addCount: r.add_count ?? 0, updatedAt: r.updated_at ?? "",
 });
 
@@ -314,6 +328,7 @@ export function listingPage(l: ShelfListing, rating: ShelfRating, related: Shelf
       ${l.voicePersona ? `<section><h2>Who they are</h2><p>${nl2br(l.voicePersona)}</p></section>` : ""}
       ${l.backstory ? `<section><h2>Backstory</h2><p>${nl2br(l.backstory)}</p></section>` : ""}
       ${l.greeting ? `<section><h2>The first hello</h2><blockquote class="greet">${nl2br(l.greeting)}</blockquote></section>` : ""}
+      ${l.openings.length ? `<section><h2>More ways to meet</h2>${l.openings.map(o => `<blockquote class="greet">${nl2br(o)}</blockquote>`).join("")}</section>` : ""}
       ${related.length ? `<section><h2>More like this</h2><div class="grid grid-tight">\n${related.map(o => listingCard(o, undefined)).join("\n")}\n      </div></section>` : ""}
       <p class="cta-back"><a href="/characters">← Back to the shelf</a></p>
     </article>`,

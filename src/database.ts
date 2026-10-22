@@ -1,5 +1,6 @@
 import { randomInt } from "node:crypto";
-import type { AppInstall, AttributeStatus, ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, ConversationSummary, EvidenceEffect, EvidenceType, GuildCompanion, GuildDeployment, JournalCandidate, JournalEntry, ListingPost, Member, MemoryCandidate, MemoryStatus, MessageEvent, ModAction, OnboardingState, ProfileAttribute, RelationshipEdge, SupportTicket, VerificationVerdict, WebhookMessageRecord } from "./types.js";
+import type { AppInstall, AttributeStatus, ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, ConversationSummary, EvidenceEffect, EvidenceType, GuildCompanion, GuildDeployment, JournalCandidate, JournalEntry, ListingPost, Member, MemoryCandidate, MemoryStatus, MessageEvent, ModAction, OnboardingState, ProfileAttribute, RelationshipEdge, SceneOpening, SupportTicket, VerificationVerdict, WebhookMessageRecord } from "./types.js";
+import { LISTING_MAX_OPENINGS, LISTING_OPENING_MAX_CHARS } from "./types.js";
 import { sql as defaultSql, type Sql } from "./db.js";
 import { runMigrations } from "./migrations.js";
 import { CreditStore } from "./credit-store.js";
@@ -153,6 +154,39 @@ function mergeEdgesForSubject(edges: RelationshipEdge[], subjectId: string): Mer
 
 function ts(d: Date | string): string {
   return d instanceof Date ? d.toISOString() : d;
+}
+
+/** Storage-bound normalizer for listing openings — the write paths run every
+ *  spec value through this so a bad caller can't smuggle over-cap or
+ *  text-less openings into the column. Objects pass through with their
+ *  reserved fields so future {label, premise} data survives a round-trip. */
+function normalizeSceneOpenings(openings: SceneOpening[]): SceneOpening[] {
+  return openings.flatMap(o => {
+    const text = (o?.text ?? "").trim().slice(0, LISTING_OPENING_MAX_CHARS);
+    if (!text) return [];
+    const out: SceneOpening = { text };
+    if (typeof o.label === "string" && o.label.trim()) out.label = o.label.trim().slice(0, 80);
+    if (typeof o.premise === "string" && o.premise.trim()) out.premise = o.premise.trim().slice(0, 4000);
+    return [out];
+  }).slice(0, LISTING_MAX_OPENINGS);
+}
+
+/** Read-side mirror — rows may carry plain strings (hand-written fixtures,
+ *  legacy data) or full objects; both coerce to SceneOpening. */
+function sceneOpeningsFromDb(raw: unknown): SceneOpening[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap(o => {
+    const text = typeof o === "string" ? o : typeof o === "object" && o !== null ? String((o as SceneOpening).text ?? "") : "";
+    const trimmed = text.trim().slice(0, LISTING_OPENING_MAX_CHARS);
+    if (!trimmed) return [];
+    const out: SceneOpening = { text: trimmed };
+    if (typeof o === "object" && o !== null) {
+      const { label, premise } = o as SceneOpening;
+      if (typeof label === "string" && label.trim()) out.label = label.trim().slice(0, 80);
+      if (typeof premise === "string" && premise.trim()) out.premise = premise.trim().slice(0, 4000);
+    }
+    return [out];
+  }).slice(0, LISTING_MAX_OPENINGS);
 }
 
 const num = (v: unknown) => Number(v ?? 0);
@@ -550,7 +584,7 @@ export class MemoryStore {
       if (discordUserId === null) {
         await this.sql`
           INSERT INTO analytics_events (discord_user_id, event, scope, meta)
-          SELECT NULL, ${event}, ${scope}, ${JSON.stringify(meta)}::jsonb
+          SELECT NULL, ${event}, ${scope}, ${this.sql.json(meta as never)}
         `;
         return;
       }
@@ -567,7 +601,7 @@ export class MemoryStore {
         await sql`SELECT pg_advisory_xact_lock(hashtextextended(${discordUserId}, 0))`;
         await sql`
           INSERT INTO analytics_events (discord_user_id, event, scope, meta)
-          SELECT ${discordUserId}, ${event}, ${scope}, ${JSON.stringify(meta)}::jsonb
+          SELECT ${discordUserId}, ${event}, ${scope}, ${this.sql.json(meta as never)}
           WHERE NOT EXISTS (SELECT 1 FROM user_bot_settings WHERE discord_user_id = ${discordUserId} AND analytics_opt_out)
         `;
       });
@@ -3242,6 +3276,7 @@ export class MemoryStore {
       ownerDynamic: r.owner_dynamic,
       backstory: r.backstory,
       greeting: r.greeting,
+      openings: sceneOpeningsFromDb(r.openings),
       avatarUrl: r.avatar_url,
       forumThreadId: r.forum_thread_id,
       creatorTags: r.creator_tags ?? [],
@@ -3290,7 +3325,7 @@ export class MemoryStore {
   async upsertListing(
     creatorUserId: string,
     sourceCompanionId: number,
-    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
+    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null; openings?: SceneOpening[] },
     opts: { forumThreadId?: string | null; maxListings?: number; maxDailyPublish?: number } = {},
   ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "cap" | "daily_cap" }> {
     spec = { ...spec, name: sanitizeStoredName(spec.name, 64) || "Companion" };
@@ -3299,6 +3334,10 @@ export class MemoryStore {
       coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
       backstory: spec.backstory, greeting: spec.greeting, avatarUrl: spec.avatarUrl,
     };
+    // Openings tri-state: undefined preserves the column on conflict,
+    // [] clears it, values replace it — the republish modal always sends
+    // an explicit array so creator edits can't silently drop scenes.
+    const openingsVal = spec.openings === undefined ? null : this.sql.json(normalizeSceneOpenings(spec.openings) as never);
     const res = await this.sql.begin(async sql => {
       // Serialize per-creator listing writes — the cap count and the insert
       // must be atomic across parallel publishes/creates/relists.
@@ -3331,11 +3370,11 @@ export class MemoryStore {
         }
       }
       const rows = await sql<Array<any>>`
-        INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, avatar_url, forum_thread_id, version, status, published_at, created_at, updated_at)
+        INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, openings, avatar_url, forum_thread_id, version, status, published_at, created_at, updated_at)
         VALUES (
           ${creatorUserId}, ${sourceCompanionId},
           ${spec.name}, ${spec.tagline}, ${spec.voicePersona}, ${spec.coreTraits},
-          ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${spec.avatarUrl},
+          ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${sql.json(normalizeSceneOpenings(spec.openings ?? []) as never)}, ${spec.avatarUrl},
           ${opts.forumThreadId ?? null}, 1, 'active', NOW(), NOW(), NOW()
         )
         ON CONFLICT (source_companion_id) DO UPDATE SET
@@ -3346,6 +3385,7 @@ export class MemoryStore {
           owner_dynamic  = EXCLUDED.owner_dynamic,
           backstory      = EXCLUDED.backstory,
           greeting       = EXCLUDED.greeting,
+          openings       = COALESCE(${openingsVal}::jsonb, companion_listings.openings),
           avatar_url     = EXCLUDED.avatar_url,
           forum_thread_id = COALESCE(EXCLUDED.forum_thread_id, companion_listings.forum_thread_id),
           version        = companion_listings.version + 1,
@@ -3373,7 +3413,7 @@ export class MemoryStore {
       const listing = this.rowToListing(rows[0]);
       await sql`
         INSERT INTO companion_persona_versions (listing_id, version, persona_json)
-        VALUES (${listing.id}, ${listing.version}, ${JSON.stringify(persona)})
+        VALUES (${listing.id}, ${listing.version}, ${sql.json({ ...persona, openings: listing.openings })})
         ON CONFLICT (listing_id, version) DO NOTHING
       `;
       return { ok: true as const, listing };
@@ -3387,7 +3427,7 @@ export class MemoryStore {
    *  `maxListings` is given the cap check runs atomically in the same tx. */
   async createListing(
     creatorUserId: string,
-    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
+    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null; openings?: SceneOpening[] },
     opts: { maxListings?: number; maxDailyPublish?: number; status?: "active" | "unlisted"; personaSource?: string; importMeta?: Record<string, unknown> | null } = {},
   ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "cap" | "daily_cap" }> {
     spec = { ...spec, name: sanitizeStoredName(spec.name, 64) || "Companion" };
@@ -3411,11 +3451,11 @@ export class MemoryStore {
         }
       }
       const rows = await sql<Array<any>>`
-        INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, avatar_url, version, status, persona_source, import_meta, published_at, created_at, updated_at)
+        INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, openings, avatar_url, version, status, persona_source, import_meta, published_at, created_at, updated_at)
         VALUES (
           ${creatorUserId}, NULL,
           ${spec.name}, ${spec.tagline}, ${spec.voicePersona}, ${spec.coreTraits},
-          ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${spec.avatarUrl},
+          ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${sql.json(normalizeSceneOpenings(spec.openings ?? []) as never)}, ${spec.avatarUrl},
           1, ${status}, ${opts.personaSource ?? "authored"}, ${opts.importMeta ? sql.json(opts.importMeta as never) : null},
           CASE WHEN ${status} = 'active' THEN NOW() ELSE NULL END, NOW(), NOW()
         )
@@ -3424,10 +3464,11 @@ export class MemoryStore {
       const listing = this.rowToListing(rows[0]);
       await sql`
         INSERT INTO companion_persona_versions (listing_id, version, persona_json)
-        VALUES (${listing.id}, 1, ${JSON.stringify({
+        VALUES (${listing.id}, 1, ${sql.json({
           name: spec.name, tagline: spec.tagline, voicePersona: spec.voicePersona,
           coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
           backstory: spec.backstory, greeting: spec.greeting, avatarUrl: spec.avatarUrl,
+          openings: listing.openings,
         })})
         ON CONFLICT (listing_id, version) DO NOTHING
       `;
@@ -3509,14 +3550,18 @@ export class MemoryStore {
   async updateListing(
     listingId: number,
     creatorUserId: string,
-    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
+    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null; openings?: SceneOpening[] },
   ): Promise<CompanionListing | null> {
     spec = { ...spec, name: sanitizeStoredName(spec.name, 64) || "Companion" };
+    // undefined preserves openings — persona-only edit paths (edit modal,
+    // cover setter) never mention them and can't wipe scenes by omission.
+    const openingsVal = spec.openings === undefined ? null : this.sql.json(normalizeSceneOpenings(spec.openings) as never);
     const rows = await this.sql<Array<any>>`
       UPDATE companion_listings SET
         name = ${spec.name}, tagline = ${spec.tagline}, voice_persona = ${spec.voicePersona},
         core_traits = ${spec.coreTraits}, owner_dynamic = ${spec.ownerDynamic},
         backstory = ${spec.backstory}, greeting = ${spec.greeting}, avatar_url = ${spec.avatarUrl},
+        openings = COALESCE(${openingsVal}::jsonb, openings),
         version = version + 1, updated_at = NOW()
       WHERE id = ${listingId} AND creator_user_id = ${creatorUserId}
       RETURNING *
@@ -3525,10 +3570,11 @@ export class MemoryStore {
     const listing = this.rowToListing(rows[0]);
     await this.sql`
       INSERT INTO companion_persona_versions (listing_id, version, persona_json)
-      VALUES (${listing.id}, ${listing.version}, ${JSON.stringify({
+      VALUES (${listing.id}, ${listing.version}, ${this.sql.json({
         name: spec.name, tagline: spec.tagline, voicePersona: spec.voicePersona,
         coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
         backstory: spec.backstory, greeting: spec.greeting, avatarUrl: spec.avatarUrl,
+        openings: listing.openings,
       })})
       ON CONFLICT (listing_id, version) DO NOTHING
     `;
@@ -3639,11 +3685,12 @@ export class MemoryStore {
   async publishListing(
     listingId: number,
     creatorUserId: string,
-    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null },
+    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null; openings?: SceneOpening[] },
     maxListings: number,
     maxDailyPublish?: number,
   ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "not_found" | "not_unlisted" | "cap" | "moderated" | "daily_cap" }> {
     spec = { ...spec, name: sanitizeStoredName(spec.name, 64) || "Companion" };
+    const openingsVal = spec.openings === undefined ? null : this.sql.json(normalizeSceneOpenings(spec.openings) as never);
     const res = (await this.sql.begin(async sql => {
       await sql`SELECT pg_advisory_xact_lock(hashtext(${`listing:${creatorUserId}`}))`;
       const rows = await sql<Array<any>>`
@@ -3688,16 +3735,18 @@ export class MemoryStore {
           voice_persona = ${spec.voicePersona}, core_traits = ${spec.coreTraits},
           owner_dynamic = ${spec.ownerDynamic}, backstory = ${spec.backstory},
           greeting = ${spec.greeting}, avatar_url = ${spec.avatarUrl},
+          openings = COALESCE(${openingsVal}::jsonb, openings),
           version = ${newVersion}, status = 'active', published_at = NOW(), updated_at = NOW()
         WHERE id = ${listingId}
         RETURNING *
       `;
       await sql`
         INSERT INTO companion_persona_versions (listing_id, version, persona_json)
-        VALUES (${listingId}, ${newVersion}, ${JSON.stringify({
+        VALUES (${listingId}, ${newVersion}, ${sql.json({
           name: spec.name, tagline: spec.tagline, voicePersona: spec.voicePersona,
           coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
           backstory: spec.backstory, greeting: spec.greeting, avatarUrl: spec.avatarUrl,
+          openings: sceneOpeningsFromDb(updated[0].openings),
         })})
         ON CONFLICT (listing_id, version) DO NOTHING
       `;
