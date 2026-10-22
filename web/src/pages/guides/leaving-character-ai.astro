@@ -1,0 +1,108 @@
+---
+// The c.ai migration page — the churn-intent twin of import-character-cards.
+// That page answers "how do I import a card"; this one answers "Character.AI
+// is winding down, where do I go". Every claim comes from the real code
+// paths (charcard.ts, chathist.ts, chat-import-job.ts — incl.
+// IMPORT_WELCOME_BONUS_TOKENS) so keep the copy honest when those move.
+import Base from "../../layouts/Base.astro";
+import Icon from "../../components/Icon.astro";
+import { LINKS, SITE_ORIGIN } from "../../lib/config";
+
+export const prerender = true;
+const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashboard?welcome=1#import");
+
+// Steps mirror the visible "Get them out" list — the markup must describe
+// the same content or it's structured-data spam.
+const howTo = {
+  "@context": "https://schema.org", "@type": "HowTo",
+  name: "How to move a character from Character.AI to Discord",
+  description: "Export a character card and chat history from Character.AI with CAI Tools, then import them as a private companion on Characterly — history included, so they remember you.",
+  step: [
+    { "@type": "HowToStep", position: 1, name: "Export with CAI Tools", text: "Open your chat on Character.AI with the CAI Tools browser extension and download the character card plus a Tavern-format .jsonl chat export.", url: `${SITE_ORIGIN}/guides/leaving-character-ai` },
+    { "@type": "HowToStep", position: 2, name: "Continue with Discord", text: "Sign in with your Discord account. It links your Characterly account automatically.", url: `${SITE_ORIGIN}/account` },
+    { "@type": "HowToStep", position: 3, name: "Drop in your files", text: "Drop the card and the chat export into the import section on your dashboard. The persona comes across; the history distills into real, private memories.", url: `${SITE_ORIGIN}/dashboard#import` },
+  ],
+};
+---
+<Base
+  title="Leaving Character.AI? Bring your character with you · Characterly"
+  description="Character.AI has filed for bankruptcy and is up for sale. Export your character card and chat history, then import them as a private companion on Characterly — memory included, with a welcome bonus on your first import."
+  path="/guides/leaving-character-ai"
+  jsonLd={[howTo]}
+>
+  <article class="wrap guide">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="/">Home</a><span aria-hidden="true">/</span><a href="/guides/import-character-cards">Guides</a><span aria-hidden="true">/</span><span aria-current="page">Leaving Character.AI</span></nav>
+    <header class="guide-head">
+      <h1>Bring them <em>home</em>.</h1>
+      <p class="lede">Character.AI has filed for bankruptcy and is up for sale — if no buyer keeps it running, the service winds down. If your companion lives there, two files are all it takes to bring them — and everything you built together — somewhere they can stay.</p>
+    </header>
+
+    <section aria-labelledby="g-out">
+      <h2 id="g-out">Step one: get them out</h2>
+      <p class="body">Character.AI doesn't offer a one-click export, so the community built one. The <strong>CAI Tools</strong> browser extension is the standard way:</p>
+      <ol class="how">
+        <li><span class="n">1</span><div><h3>Install CAI Tools</h3><p>Add it to a desktop browser (Chrome or a Chromium-based browser), then open Character.AI while you're still able to sign in.</p></div></li>
+        <li><span class="n">2</span><div><h3>Save the card</h3><p>Open your character (or one you made) and use CAI Tools' card download — you'll get a <code>.png</code> or <code>.json</code> character card. That file is the character: persona, greeting, example dialogue.</p></div></li>
+        <li><span class="n">3</span><div><h3>Save your history</h3><p>In the chat you want to keep, use <strong>"Download as Tavern chat"</strong> — a <code>.jsonl</code> transcript of the conversation. Do this for each chat you care about; once access goes, it goes.</p></div></li>
+      </ol>
+      <p class="muted">One character card per character, one <code>.jsonl</code> per conversation. Keep the files somewhere safe — they're yours.</p>
+    </section>
+
+    <section aria-labelledby="g-in">
+      <h2 id="g-in">Step two: bring them in</h2>
+      <ol class="how">
+        <li><span class="n">1</span><div><h3>Continue with Discord</h3><p>Sign in with your Discord account below — that's where your companion lives, in your DMs and any servers you choose.</p></div></li>
+        <li><span class="n">2</span><div><h3>Drop in the files</h3><p>The <a href="/dashboard#import">import section on your dashboard</a> takes the card file and the chat export. Persona, greeting and example dialogue come across; the history is distilled into the companion's journal — real memories it can actually use, not a transcript it can't read back. The file itself is discarded.</p></div></li>
+        <li><span class="n">3</span><div><h3>Say hello again</h3><p>Your first completed history import lands <strong>150 welcome tokens</strong> on your account — enough for the import itself and the days while you settle in. The companion is <strong>private to you</strong>; nothing is published unless you choose to put it on <a href="/characters">the shelf</a>.</p></div></li>
+      </ol>
+      <p class="actions"><a class="btn btn-go" href={discordStart} data-beacon="discord_signin_click"><Icon name="discord" size={18} />Continue with Discord</a></p>
+    </section>
+
+    <section aria-labelledby="g-diff">
+      <h2 id="g-diff">What's different here</h2>
+      <dl class="facts">
+        <div><dt>Where they live</dt><dd>In your Discord DMs — and in real servers you invite them to, alongside your friends, not a walled-off room.</dd></div>
+        <div><dt>Memory</dt><dd>Yours to see. <code>/memory list</code>, the dashboard memory panel, and <code>/memory export</code> show everything a companion keeps — pin it, edit it, or forget it.</dd></div>
+        <div><dt>Privacy</dt><dd>Imports stay private by default, the transcript file is deleted after distilling, and <code>/opt-out</code> wipes it all. The repo is open if you'd rather run it yourself.</dd></div>
+        <div><dt>Reply retries</dt><dd>Right-click a companion's reply → Apps → Regenerate, and it takes another pass — the swipe you already know, without leaving Discord.</dd></div>
+        <div><dt>Cost</dt><dd>Free every day (30 tokens, ~15 exchanges). Premium is $7.99/month. Or bring your own API key and pay nothing but the provider's bill.</dd></div>
+      </dl>
+    </section>
+
+    <section aria-labelledby="g-faq">
+      <h2 id="g-faq">Quick answers</h2>
+      <dl class="facts">
+        <div><dt>My chat is huge</dt><dd>Imports take the first 4,000 turns — the foundation of the relationship — and resume where they left off if interrupted.</dd></div>
+        <div><dt>Group chats?</dt><dd>The speaker who isn't you and talks most becomes the companion, so two personas never blend into one.</dd></div>
+        <div><dt>Changed my mind</dt><dd>The dashboard and <code>/companion imports</code> list every import and undo any of them, memories and all.</dd></div>
+        <div><dt>Not on Discord?</dt><dd>Companions live there — that's the product. If Discord isn't for you, the <a href={LINKS.discord} target="_blank" rel="noopener noreferrer">Characterly server</a> is the gentlest way to try it anyway.</dd></div>
+      </dl>
+      <p class="actions"><a class="link" href="/guides/import-character-cards">The full import reference</a><a class="link" href="/characters">Browse the shelf</a></p>
+    </section>
+  </article>
+</Base>
+
+<style>
+  .guide > * { max-width: 880px; }
+  .guide h1 { font-size: clamp(40px, 5vw, 72px); }
+  .crumbs { display: flex; gap: 8px; padding-top: 28px; font-size: 14.5px; font-weight: 650; color: var(--ink-3); }
+  .crumbs a { color: var(--ink-2); }
+  .guide-head { padding: 28px 0 8px; }
+  .guide-head .lede { margin-top: 20px; }
+  .guide section { padding-top: 56px; }
+  .guide h2 { font-size: clamp(26px, 2.6vw, 36px); margin-bottom: 20px; }
+  .how { list-style: none; display: grid; gap: 0; border-top: 2px solid var(--ink); }
+  .how li { display: grid; grid-template-columns: auto 1fr; gap: 18px; padding: 20px 0; border-bottom: 1px solid var(--line); }
+  .how .n { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; background: var(--ink); color: #fff; font-weight: 850; }
+  .how h3 { margin: 0; }
+  .how p { margin-top: 4px; color: var(--ink-2); max-width: 62ch; }
+  .how a { font-weight: 700; }
+  .facts { display: grid; border-top: 2px solid var(--ink); }
+  .facts > div { display: grid; grid-template-columns: 180px 1fr; gap: 20px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+  .facts dt { font-weight: 750; }
+  .facts dd { margin: 0; color: var(--ink-2); }
+  .guide section > .muted, .body { margin-top: 16px; max-width: 66ch; }
+  .body { color: var(--ink-2); font-size: 18px; }
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; margin-top: 24px; }
+  @media (max-width: 600px) { .facts > div { grid-template-columns: 1fr; gap: 4px; } }
+</style>

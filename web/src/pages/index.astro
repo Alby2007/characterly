@@ -177,7 +177,7 @@ const jsonLd = [
           <div><dt>Chat exports</dt><dd>Tavern-style <code>.jsonl</code>, oobabooga <code>.json</code> and more</dd></div>
           <div><dt>Privacy</dt><dd>Imports stay private to you unless you choose to publish</dd></div>
         </dl>
-        <p class="bring-actions"><a class="link" href="/guides/import-character-cards">How to import a character card <Icon name="arrow" size={16} /></a></p>
+        <p class="bring-actions"><a class="link" href="/guides/import-character-cards">How to import a character card <Icon name="arrow" size={16} /></a><a class="link" href="/guides/leaving-character-ai">Coming from Character.AI? <Icon name="arrow" size={16} /></a></p>
       </div>
       <div class="bring-visual" aria-hidden="true">
         <div class="file"><Icon name="upload" size={22} /><span><b>wren.png</b><small>character card · 412 KB</small></span></div>
@@ -377,7 +377,7 @@ const jsonLd = [
   .facts > div { display: grid; grid-template-columns: 130px 1fr; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
   .facts dt { font-weight: 750; font-size: 14.5px; }
   .facts dd { margin: 0; color: var(--ink-2); }
-  .bring-actions { margin-top: 16px; }
+  .bring-actions { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 8px 24px; }
   .bring-visual { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 18px; }
   .bring-visual .archive { min-width: 0; }
   .file { display: flex; align-items: center; gap: 12px; padding: 16px 18px; background: var(--panel); border: 1.5px dashed var(--line-strong); border-radius: var(--radius-s); }

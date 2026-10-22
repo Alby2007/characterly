@@ -220,6 +220,38 @@ export class CreditStore {
     });
   }
 
+  /** One-off bonus grant keyed by Discord user (welcome/migration gifts —
+   *  the bot-side twin of the edge functions' grant_pack RPC). `ref` is the
+   *  idempotency key: pick a per-user value like `migration-bonus:<userId>`
+   *  and the ledger's unique stripe_ref index gives exactly-once semantics
+   *  for free — concurrent triggers can't double-grant. Bonuses land in the
+   *  purchased slice, so they persist past daily refills like packs. */
+  async grantBonus(discordUserId: string, n: number, reason: string, ref: string): Promise<{ ok: boolean; duplicate: boolean; balance: number }> {
+    // n<=0 would write a junk ledger row AND burn the dedupe ref — a later
+    // legitimate grant with the same ref would then silently no-op.
+    if (!this.creditsEnabled || !Number.isInteger(n) || n <= 0) return { ok: false, duplicate: false, balance: 0 };
+    return this.sql.begin(async tx => {
+      const rows = await tx<Array<{ id: string; credit_balance: number }>>`
+        SELECT id, credit_balance FROM public.web_profiles WHERE discord_user_id = ${discordUserId} FOR UPDATE
+      `;
+      if (!rows[0]) return { ok: false, duplicate: false, balance: 0 };
+      const inserted = await tx`
+        INSERT INTO public.credit_ledger (account_id, delta, kind, reason, stripe_ref, balance_after)
+        VALUES (${rows[0].id}, ${n}, 'grant_bonus', ${reason}, ${ref}, ${Number(rows[0].credit_balance) + n})
+        ON CONFLICT (stripe_ref) WHERE stripe_ref IS NOT NULL DO NOTHING
+        RETURNING id
+      `;
+      if (!inserted[0]) return { ok: true, duplicate: true, balance: Number(rows[0].credit_balance) };
+      const updated = await tx<Array<{ credit_balance: number }>>`
+        UPDATE public.web_profiles
+        SET credit_balance = credit_balance + ${n}, purchased_balance = purchased_balance + ${n}, updated_at = now()
+        WHERE id = ${rows[0].id} RETURNING credit_balance
+      `;
+      this.accountCache.delete(discordUserId);
+      return { ok: true, duplicate: false, balance: Number(updated[0].credit_balance) };
+    });
+  }
+
   /** Today's hosted:global LLM-call count — the fleet breaker's current spend.
    * Used to shed the free lane before the hard cap trips. */
   async hostedUsageToday(): Promise<number> {

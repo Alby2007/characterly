@@ -181,6 +181,52 @@ test("purchaseCredits adds pack tokens idempotently on stripe_ref", async () => 
   await sql.end();
 });
 
+test("grantBonus credits the purchased slice exactly once per ref", async () => {
+  const sql = makeTestSql();
+  const store = await fixture(sql);
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS credit_ledger_stripe_ref ON credit_ledger (stripe_ref) WHERE stripe_ref IS NOT NULL`;
+  const accountId = await addAccount(sql, "u-mig", "free", 30);
+
+  const g1 = await store.grantBonus("u-mig", 150, "migration_bonus", "migration-bonus:u-mig");
+  assert.deepEqual(g1, { ok: true, duplicate: false, balance: 180 });
+  const acct = await store.accountForDiscordUser("u-mig");
+  assert.equal(acct?.creditBalance, 180);
+  assert.equal(acct?.purchasedBalance, 150, "bonus is the persistent slice — refills don't eat it");
+
+  // Same ref → the unique index absorbs it: ledger stays at one row.
+  const g2 = await store.grantBonus("u-mig", 150, "migration_bonus", "migration-bonus:u-mig");
+  assert.deepEqual(g2, { ok: true, duplicate: true, balance: 180 });
+  const rows = await sql<Array<{ n: number }>>`SELECT count(*)::int AS n FROM credit_ledger WHERE account_id = ${accountId}`;
+  assert.equal(rows[0].n, 1);
+  const row = await sql<Array<{ kind: string; reason: string; delta: number }>>`
+    SELECT kind, reason, delta FROM credit_ledger WHERE stripe_ref = 'migration-bonus:u-mig'`;
+  assert.equal(row[0].kind, "grant_bonus");
+  assert.equal(row[0].reason, "migration_bonus");
+  assert.equal(row[0].delta, 150);
+
+  // Concurrent triggers serialize on the account row + index — exactly once.
+  await addAccount(sql, "u-mig2", "free", 0);
+  const pair = await Promise.all([
+    store.grantBonus("u-mig2", 150, "migration_bonus", "migration-bonus:u-mig2"),
+    store.grantBonus("u-mig2", 150, "migration_bonus", "migration-bonus:u-mig2"),
+  ]);
+  assert.equal(pair.filter(r => r.ok && !r.duplicate).length, 1);
+  assert.equal(pair.filter(r => r.duplicate).length, 1);
+
+  // Unlinked user fails closed — no row, no balance.
+  assert.deepEqual(await store.grantBonus("u-ghost", 150, "migration_bonus", "migration-bonus:u-ghost"),
+    { ok: false, duplicate: false, balance: 0 });
+
+  // Bad amounts fail closed too — a zero/negative grant would junk the
+  // ledger and burn the dedupe ref for the real one later.
+  assert.deepEqual(await store.grantBonus("u-mig", 0, "migration_bonus", "migration-bonus:u-mig-z"),
+    { ok: false, duplicate: false, balance: 0 });
+  assert.deepEqual(await store.grantBonus("u-mig", -50, "migration_bonus", "migration-bonus:u-mig-n"),
+    { ok: false, duplicate: false, balance: 0 });
+  assert.equal((await sql`SELECT count(*)::int AS n FROM credit_ledger WHERE account_id = ${accountId}`)[0].n, 1);
+  await sql.end();
+});
+
 test("hostedUsageToday reads the hosted:global counter for today only", async () => {
   const sql = makeTestSql();
   const store = await fixture(sql);

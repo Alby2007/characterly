@@ -275,7 +275,8 @@ characterly/
 │   ├── discord-events.ts     # Discord Webhook Events verify/handler shared with web/'s worker
 │   ├── avatars.ts            # Durable avatar uploads → web worker PUT /avatar → Supabase Storage
 │   ├── copy.ts               # Shared house copy (welcome/deny/verify-gate strings) for bot + web
-│   ├── credit-store.ts       # Token buckets: credit_balance vs purchased_balance, grant_pack/clawback
+│   ├── credit-store.ts       # Token buckets: credit_balance vs purchased_balance, grantBonus/grant_pack/clawback
+│   ├── chat-import-job.ts    # chat-import worker: transcript → journal distillation + first-import welcome grant
 │   ├── turn-billing.ts       # Per-turn charge/refund orchestration for hosted replies
 │   ├── regen.ts              # "Regenerate" context-menu resolution (target → archived turn, dm: lanes)
 │   ├── fleet-cap.ts          # Revenue-aware hosted fleet cap (premium subs raise the daily ceiling)

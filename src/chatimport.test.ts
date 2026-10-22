@@ -388,3 +388,55 @@ test("listChatImports + deleteChatImport — manager view, owner guard, journal 
     SELECT COUNT(*) AS c FROM companion_journal WHERE import_id = ${a.id}`;
   assert.equal(Number(journal[0].c), 0);
 });
+
+test("job — welcome bonus lands once per user; the DM says so only when it does", async () => {
+  const { store } = await freshStore();
+  const comp = await awakenedCompanion(store, "u-gift");
+  const sent: string[] = [];
+  const grants: Array<{ uid: string; n: number; reason: string; ref: string }> = [];
+  (store as any).grantBonus = async (uid: string, n: number, reason: string, ref: string) => {
+    grants.push({ uid, n, reason, ref });
+    return { ok: true, duplicate: grants.length > 1, balance: 180 };
+  };
+
+  const imp = await store.createChatImport("u-gift", comp.id, importOpts());
+  await runChatImportJob("dm:u-gift", { importId: imp.id },
+    { ...jobDeps(store, fakeBrain(), sent), welcomeBonus: 150 });
+  assert.equal(grants.length, 1);
+  assert.equal(grants[0].ref, "migration-bonus:u-gift");
+  assert.equal(grants[0].reason, "migration_bonus");
+  assert.match(sent[0], /150 tokens/, "a fresh grant gets the gift line");
+
+  // Second completed import — every completion still tries (the per-user
+  // ref is the once-only flag), but a duplicate doesn't re-announce.
+  const imp2 = await store.createChatImport("u-gift", comp.id, importOpts("again.jsonl"));
+  await runChatImportJob("dm:u-gift", { importId: imp2.id },
+    { ...jobDeps(store, fakeBrain(), sent), welcomeBonus: 150 });
+  assert.equal(grants.length, 2);
+  assert.doesNotMatch(sent[1], /tokens/, "duplicate grant stays quiet");
+
+  // welcomeBonus unset (or 0) → no grant attempt at all.
+  const imp3 = await store.createChatImport("u-gift", comp.id, importOpts("third.jsonl"));
+  await runChatImportJob("dm:u-gift", { importId: imp3.id }, jobDeps(store, fakeBrain(), sent));
+  assert.equal(grants.length, 2);
+});
+
+test("job — an unlinked/no-credits grant still completes the import cleanly", async () => {
+  const { store } = await freshStore();
+  const comp = await awakenedCompanion(store, "u-nobal");
+  const imp = await store.createChatImport("u-nobal", comp.id, importOpts());
+  const sent: string[] = [];
+  (store as any).grantBonus = async () => ({ ok: false, duplicate: false, balance: 0 });
+
+  await runChatImportJob("dm:u-nobal", { importId: imp.id },
+    { ...jobDeps(store, fakeBrain(), sent), welcomeBonus: 150 });
+  assert.equal((await store.chatImportById(imp.id))?.status, "done");
+  assert.doesNotMatch(sent[0], /tokens/, "no grant, no gift line — import still done");
+
+  // Even a throwing grant can't fail a completed import — it's garnish.
+  const imp2 = await store.createChatImport("u-nobal", comp.id, importOpts("b.jsonl"));
+  (store as any).grantBonus = async () => { throw new Error("ledger down"); };
+  await runChatImportJob("dm:u-nobal", { importId: imp2.id },
+    { ...jobDeps(store, fakeBrain(), sent), welcomeBonus: 150 });
+  assert.equal((await store.chatImportById(imp2.id))?.status, "done");
+});

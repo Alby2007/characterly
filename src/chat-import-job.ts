@@ -20,6 +20,15 @@ export type ChatImportJobPayload = { importId: number };
 /** One credit per distilled window — the metered cost of the LLM call it buys. */
 export const CHAT_IMPORT_CREDITS_PER_WINDOW = 1;
 
+/** One-time welcome grant on a user's first completed history import —
+ *  ≈5 free days. Under one pack, so it stays a gift rather than a
+ *  balance-sheet event; the per-user `migration-bonus:` ref makes it
+ *  exactly-once even under concurrent completing imports. Sized to keep a
+ *  refugee's import finishing *today* instead of drip-feeding across UTC
+ *  grants — that's the conversion moment. (web's leaving-character-ai guide
+ *  hardcodes this figure — keep them in sync.) */
+export const IMPORT_WELCOME_BONUS_TOKENS = 150;
+
 export interface ChatImportJobDeps {
   store: MemoryStore;
   brainFor: (scope: string) => Promise<Brain | null>;
@@ -28,6 +37,8 @@ export interface ChatImportJobDeps {
   /** Max ~30-turn windows per import — bounds hosted spend per transcript. */
   maxWindows: number;
   windowSize: number;
+  /** One-time token grant on a user's first completed import — 0 disables. */
+  welcomeBonus?: number;
   /** Completion/progress DM — faked in tests, real client.send in prod. */
   sendDm: (userId: string, content: string) => Promise<void>;
 }
@@ -153,10 +164,24 @@ export async function runChatImportJob(
     const done = await store.chatImportById(imp.id);
     if (!done) { inc("jobs.dropped_stale"); return; } // deleted mid-run — undo already handled cleanup, skip the DM.
     const kept = done.keptCount;
+    // First completed import earns the welcome grant — a gift toward the
+    // days ahead, ref-deduped so it lands exactly once per user. A duplicate
+    // just means an earlier import already granted; failures never fail the
+    // import (it's done either way — the bonus is garnish, not the meal).
+    const bonus = deps.welcomeBonus ?? 0;
+    let granted = false;
+    if (bonus > 0) {
+      // grantBonus itself no-ops to {ok:false} where credits aren't
+      // supported — self-hosts and unlinked users just skip the gift.
+      const g = await store.grantBonus(imp.ownerUserId, bonus, "migration_bonus", `migration-bonus:${imp.ownerUserId}`)
+        .catch(e => { inc("chat_import.bonus_error"); logError("chat-import welcome bonus failed", e); return null; });
+      granted = Boolean(g?.ok && !g.duplicate);
+    }
     inc("jobs.chat_import_done");
     await deps.sendDm(
       imp.ownerUserId,
-      `I finished reading our old chats — **${kept} moment${kept === 1 ? "" : "s"}** from **${imp.filename}** are part of me now${summary ? ", plus what we were to each other" : ""}. The file itself is gone — I keep the memories, not the transcript.`,
+      `I finished reading our old chats — **${kept} moment${kept === 1 ? "" : "s"}** from **${imp.filename}** are part of me now${summary ? ", plus what we were to each other" : ""}. The file itself is gone — I keep the memories, not the transcript.` +
+        (granted ? `\n\nAnd a welcome gift landed with them — **${bonus} tokens** on your account, so the next few days of us are on the house.` : ""),
     ).catch(e => logError("chat-import completion DM failed", e));
   } catch (error) {
     // The row can't keep pretending it runs once the job is out of runway:

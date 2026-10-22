@@ -696,9 +696,9 @@ Audit trail for hosted-lane credits (user-facing name: "tokens") — v29. Every 
 | `id` | BIGINT IDENTITY PK | |
 | `account_id` | UUID FK → `web_profiles(id)` | Cascade-deletes with the account |
 | `delta` | INT | Signed credit change |
-| `kind` | TEXT | `grant_daily` · `grant_weekly` (v29–v30 only) · `spend` · `refund` · `adjust` · `purchase` (v31+) |
-| `stripe_ref` | TEXT NULL | Stripe session id — unique; webhook redelivery dedupes on it (v31+) |
-| `reason` | TEXT NULL | Spend/refund reason (`dm_turn`, `guild_turn`, `c2c`, `*_refund`) |
+| `kind` | TEXT | `grant_daily` · `grant_weekly` (v29–v30 only) · `spend` · `refund` · `adjust` · `purchase` (v31+) · `grant_bonus` (v60+ — launch/migration gifts; reason e.g. `migration_bonus` from the first-completed-import welcome grant) |
+| `stripe_ref` | TEXT NULL | Stripe session id or grant ref (`launch-bonus:*`, `migration-bonus:*`) — unique; webhook redelivery and repeat grants dedupe on it (v31+) |
+| `reason` | TEXT NULL | Spend/refund reason (`dm_turn`, `guild_turn`, `c2c`, `regen`, `chat_import`, `*_refund`) or bonus label (`launch_bonus`, `migration_bonus`) |
 | `balance_after` | INT | Running balance — written inside the spend transaction |
 | `created_at` | TIMESTAMPTZ | |
 

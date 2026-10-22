@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   esc, sitemapXml, listingIndexPage, listingPage, notFoundPage,
   fetchActiveListings, fetchListing, lookupListing, fetchListingRating, fetchRatingStats,
-  relatedListings, importGuidePage,
+  relatedListings,
   SITE_ORIGIN, type ShelfListing,
 } from "./site-shelf.js";
 
@@ -145,27 +145,6 @@ test("notFoundPage is a real shelf-shaped 404", () => {
 
 // ── Sitemap ──────────────────────────────────────────────────────────────────
 
-test("import guide renders the migration-intent page", () => {
-  const html = importGuidePage();
-  assert.ok(html.includes("Import a character card into Discord"));
-  assert.ok(html.includes("/companion import"));
-  assert.ok(html.includes("discord.gg"), "join CTA present");
-  assert.ok(html.includes('href="/characters"'), "links back to the shelf");
-});
-
-test("import guide states the real limits and failure semantics from the importers", () => {
-  const html = importGuidePage();
-  // charcard.ts: CARD_MAX_BYTES 8MB, JSON_MAX_BYTES 256KB, chara_card_v2/ccv3/v1
-  for (const s of ["8&nbsp;MB", "256&nbsp;KB", "chara_card_v2", "ccv3"]) assert.ok(html.includes(s), s);
-  // chathist.ts: CHAT_MAX_TURNS 4000 — earliest turns, not the recent window
-  assert.ok(html.includes("4,000 turns"));
-  assert.ok(html.includes("first 4,000"), "slice(0, MAX) keeps the beginning of the history");
-  // chat-import-job.ts: resume from processed_turns, credits park, journal rollback
-  assert.ok(html.includes("resumes where it left off"));
-  assert.ok(html.includes("parks and resumes"));
-  assert.ok(html.includes("roll back"));
-});
-
 test("sitemap lists static pages plus live listing urls with lastmod", () => {
   const xml = sitemapXml([
     { id: 3, updatedAt: "2026-04-02T10:00:00+00:00" },
@@ -174,6 +153,7 @@ test("sitemap lists static pages plus live listing urls with lastmod", () => {
   assert.ok(xml.includes(`<loc>${SITE_ORIGIN}/</loc>`));
   assert.ok(xml.includes(`<loc>${SITE_ORIGIN}/characters</loc>`));
   assert.ok(xml.includes(`<loc>${SITE_ORIGIN}/guides/import-character-cards</loc>`));
+  assert.ok(xml.includes(`<loc>${SITE_ORIGIN}/guides/leaving-character-ai</loc>`));
   assert.ok(xml.includes(`<loc>${SITE_ORIGIN}/safety</loc>`));
   assert.ok(xml.includes(`<loc>${SITE_ORIGIN}/characters/3</loc>`));
   assert.ok(xml.includes("<lastmod>2026-04-02</lastmod>"));

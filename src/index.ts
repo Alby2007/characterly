@@ -45,7 +45,7 @@ import { createFleetCap } from "./fleet-cap.js";
 import { runExtractJob, type ExtractJobPayload } from "./extract-job.js";
 import { runJournalJob, type JournalJobPayload } from "./journal-job.js";
 import { runSummaryJob, SUMMARY_REPLY_INTERVAL, type SummaryJobPayload } from "./summary-job.js";
-import { runChatImportJob, type ChatImportJobPayload } from "./chat-import-job.js";
+import { runChatImportJob, IMPORT_WELCOME_BONUS_TOKENS, type ChatImportJobPayload } from "./chat-import-job.js";
 import { greetPendingInstalls } from "./install-greet.js";
 import { selectCompanionForTurn } from "./scene-router.js";
 import { editCompanionMessage, sendAsCompanion } from "./webhooks.js";
@@ -1037,6 +1037,7 @@ const chatImportDeps = {
   isHostedScope,
   maxWindows: config.chatImportMaxWindows,
   windowSize: 30,
+  welcomeBonus: IMPORT_WELCOME_BONUS_TOKENS,
   sendDm: async (userId: string, content: string) => {
     const u = await client.users.fetch(userId);
     await u.send(content);

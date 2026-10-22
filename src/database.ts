@@ -5487,6 +5487,7 @@ export class MemoryStore {
   syncDiscordIdentity(...a: Parameters<CreditStore["syncDiscordIdentity"]>) { return this.credits.syncDiscordIdentity(...a); }
   spendCredits(...a: Parameters<CreditStore["spendCredits"]>) { return this.credits.spendCredits(...a); }
   refundCredits(...a: Parameters<CreditStore["refundCredits"]>) { return this.credits.refundCredits(...a); }
+  grantBonus(...a: Parameters<CreditStore["grantBonus"]>) { return this.credits.grantBonus(...a); }
   purchaseCredits(...a: Parameters<CreditStore["purchaseCredits"]>) { return this.credits.purchaseCredits(...a); }
   hostedUsageToday() { return this.credits.hostedUsageToday(); }
   premiumAccountCount() { return this.credits.premiumAccountCount(); }
