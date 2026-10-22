@@ -271,7 +271,8 @@ One-time setup — **deploy order matters** (Discord health-checks the URL when 
    { "name": "DISCORD_APP_PUBLIC_KEY", "text": "<value>", "type": "secret_text" }
    ```
    Verify with `cf workers secrets list --worker characterly-website` — should show all three names.
-2. `cd web && npm run deploy` — builds the Astro site and ships `web/src/worker.ts` (`/discord/events`, `/avatar`, `/avatar/gc`, `/track` are the worker lanes; everything else falls through to the pages).
+   - Also recommended: `GROQ_API_KEY` (plus optional `GROQ_BASE_URL`/`SAFETY_MODEL`) for `POST /creator-profile` — the public creator-page model screen. Unset means deterministic-blocklist-only saves (same semantics as the bot's missing key), so the endpoint degrades rather than breaks.
+2. `cd web && npm run deploy` — builds the Astro site and ships `web/src/worker.ts` (`/discord/events`, `/avatar`, `/avatar/gc`, `/track`, `/creator-profile` are the worker lanes; everything else falls through to the pages).
 3. Dev portal → **General Information → Webhooks** → set **Webhook Events URL** to `https://<site-domain>/discord/events` and save. Discord probes it with deliberately invalid signatures — **401 is the correct answer**; a 2xx to a bad sig gets the endpoint removed.
 
 Slash-command registration now tags install contexts (`scopedCommandDefinitions`): DM-safe commands are invocable in the App DM on user installs; server-only commands stay guild-scoped. No portal action needed beyond the URL — but note user installs only grant the `applications.commands` scope, so anything needing a bot scope stays guild-side.

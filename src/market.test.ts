@@ -515,6 +515,121 @@ test("openings: publishListing carries them when an unlisted import goes live", 
   assert.equal((snap[0]?.persona_json.openings ?? []).length, 1, "published version snapshot carries them");
 });
 
+test("lorebook: createListing round-trips entries + flags; persona_json snapshots carry them", async () => {
+  const { store } = await freshStore();
+  const res = await store.createListing("u-lore", {
+    name: "Lorekeeper", tagline: "t", voicePersona: "v", coreTraits: [],
+    ownerDynamic: "d", backstory: "", greeting: "*nods*",
+    avatarUrl: null,
+    lorebook: [
+      { keys: ["the spire"], content: "The Spire's laws bind every citizen.", order: 1 },
+      { keys: ["veil"], secondaryKeys: ["thin"], selective: true, caseSensitive: true, content: "The Veil thins." },
+      { keys: [], constant: true, content: "Every bell marks a death." },
+    ],
+  });
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  const listing = (await store.listingById(res.listing.id))!;
+  assert.equal(listing.lorebook.length, 3);
+  assert.equal(listing.lorebook[0].order, 1);
+  assert.equal(listing.lorebook[1].selective, true, "selective flag survives jsonb");
+  assert.deepEqual(listing.lorebook[1].secondaryKeys, ["thin"]);
+  assert.equal(listing.lorebook[1].caseSensitive, true);
+  assert.equal(listing.lorebook[2].constant, true);
+
+  const snap = await sql<Array<{ persona_json: { lorebook?: unknown[] } }>>`
+    SELECT persona_json FROM companion_persona_versions WHERE listing_id = ${listing.id}`;
+  assert.equal(snap.length, 1);
+  assert.equal((snap[0].persona_json.lorebook ?? []).length, 3, "version snapshot carries lorebook");
+});
+
+test("lorebook: updateListing tri-state — undefined preserves, [] clears, values replace", async () => {
+  const { store } = await freshStore();
+  const res = await store.createListing("u-ltri", {
+    name: "Tri", tagline: "t", voicePersona: "v", coreTraits: [],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+    lorebook: [{ keys: ["canon"], content: "first canon" }],
+  });
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  const id = res.listing.id;
+  const base = {
+    name: "Tri", tagline: "t", voicePersona: "v", coreTraits: [] as string[],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null as string | null,
+  };
+
+  await store.updateListing(id, "u-ltri", { ...base });
+  assert.equal((await store.listingById(id))!.lorebook.length, 1, "omission preserves lorebook");
+
+  await store.updateListing(id, "u-ltri", { ...base, lorebook: [{ keys: ["a"], content: "canon A" }, { keys: ["b"], content: "canon B" }] });
+  assert.deepEqual((await store.listingById(id))!.lorebook.map(e => e.content), ["canon A", "canon B"]);
+
+  await store.updateListing(id, "u-ltri", { ...base, lorebook: [] });
+  assert.equal((await store.listingById(id))!.lorebook.length, 0, "explicit [] clears");
+});
+
+test("lorebook: caps and hygiene — count, key/content caps, dead entries drop", async () => {
+  const { store } = await freshStore();
+  const res = await store.createListing("u-lcap2", {
+    name: "Cap", tagline: "t", voicePersona: "v", coreTraits: [],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+    lorebook: [
+      { keys: [], content: "dead — no trigger" },
+      { keys: ["k".repeat(100)], content: "x".repeat(3000), comment: "c".repeat(200) },
+      ...Array.from({ length: 30 }, (_, i) => ({ keys: [`k${i}`], content: `e${i}` })),
+    ],
+  });
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  const lore = res.listing.lorebook;
+  assert.equal(lore.length, 25, "dead entry drops, overflow past the max is cut");
+  assert.deepEqual(lore[0].keys, ["k".repeat(64)], "keys cap at 64 chars");
+  assert.equal(lore[0].content.length, 1200, "content caps at 1200");
+  assert.equal(lore[0].comment!.length, 120, "comment caps at 120");
+});
+
+test("lorebook: upsertListing republish without lorebook preserves the column", async () => {
+  const { store } = await freshStore();
+  const awakened = await awakenedCompanion(store, "u-lups", "Up");
+  const res1 = await store.upsertListing("u-lups", awakened.id, {
+    name: "Up", tagline: "t", voicePersona: "v", coreTraits: [],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+    lorebook: [{ keys: ["canon"], content: "kept canon" }],
+  });
+  assert.equal(res1.ok, true);
+  if (!res1.ok) return;
+  const res2 = await store.upsertListing("u-lups", awakened.id, {
+    name: "Up", tagline: "t2", voicePersona: "v", coreTraits: [],
+    ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+    // no lorebook key at all — a bare spec can't wipe authored canon
+  });
+  assert.equal(res2.ok, true);
+  if (!res2.ok) return;
+  assert.equal(res2.listing.version, 2);
+  assert.deepEqual(res2.listing.lorebook.map(e => e.content), ["kept canon"]);
+});
+
+test("lorebook: publishListing carries it when an unlisted import goes live", async () => {
+  const { store } = await freshStore();
+  const imp = await store.createListing("u-pub-lore", {
+    ...IMPORT_SPEC, name: "Imported",
+    lorebook: [{ keys: ["spire"], content: "imported canon" }],
+  }, { status: "unlisted", personaSource: "card_import" });
+  assert.equal(imp.ok, true);
+  if (!imp.ok) return;
+  assert.equal(imp.listing.lorebook.length, 1);
+
+  const pub = await store.publishListing(imp.listing.id, "u-pub-lore", { ...IMPORT_SPEC }, 10);
+  assert.equal(pub.ok, true);
+  if (!pub.ok) return;
+  assert.equal(pub.listing.status, "active");
+  assert.deepEqual(pub.listing.lorebook.map(e => e.content), ["imported canon"], "publish keeps the imported lorebook");
+
+  const snap = await sql<Array<{ persona_json: { lorebook?: unknown[] } }>>`
+    SELECT persona_json FROM companion_persona_versions WHERE listing_id = ${pub.listing.id} ORDER BY version DESC LIMIT 1`;
+  assert.equal((snap[0]?.persona_json.lorebook ?? []).length, 1, "published version snapshot carries it");
+});
+
 test("republish revives a delisted listing but never clears a moderation flag", async () => {
   const { store } = await freshStore();
   const awakened = await awakenedCompanion(store, "u-flagged", "Flaggy");

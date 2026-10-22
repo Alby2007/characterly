@@ -78,6 +78,12 @@ export function buildListingCard(listing: CompanionListing, creatorName: string,
   if (listing.openings?.length) {
     embed.addFields({ name: "Ways to meet", value: `${listing.openings.length + 1} openings`, inline: true });
   }
+  // World lore shows as a count only — keys and content stay hidden so the
+  // canon still surprises adopters when it triggers.
+  const loreCount = (listing.lorebook ?? []).filter(e => e.enabled !== false).length;
+  if (loreCount) {
+    embed.addFields({ name: "World lore", value: `${loreCount} ${loreCount === 1 ? "entry" : "entries"}`, inline: true });
+  }
   // The LARGE image, not the thumbnail: Discord derives a forum post's Gallery
   // cover from the OP message's embed image / attachments — thumbnails don't
   // count. So a creator's avatar URL doubles as the cover art.
@@ -101,6 +107,7 @@ export function buildListingComponents(listingId: number): ActionRowBuilder<Butt
     new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId(`market:editmodal:${listingId}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`market:scenes:${listingId}`).setLabel("Scenes").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`market:lore:${listingId}`).setLabel("Lore").setStyle(ButtonStyle.Secondary),
     ),
   ];
 }

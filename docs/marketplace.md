@@ -63,7 +63,8 @@ stamps `persona_source='card_import'` + `import_meta` (spec, claimed creator,
 filename, `sha256` of the source bytes) on both rows. A card's
 `alternate_greetings` become the listing's **openings** (v68 — placeholders
 filled, deduped against `first_mes`, capped at 4×1000) — see *Alternate
-openings* below.
+openings* below. A card's `character_book` becomes its **lorebook** (v69 —
+keyword-triggered world canon, ≤25 entries) — see *World lore* below.
 
 **Private by default.** An import creates a `status='unlisted'` listing plus an
 adopted clone owned by the importer — invisible to marketplace queries and live
@@ -104,7 +105,8 @@ exports are dropped before anything is stored.
    (audit trail — "the character said X on version 3" is checkable).
 2. **The bot itself creates the forum thread** and posts the listing card —
    name, tagline, vibe, traits, add-count, a quiet "N openings" *Ways to
-   meet* field when the listing has alternates, and the `by <creator> · v<N>`
+   meet* field when the listing has alternates, a "World lore · N entries"
+   field when it carries canon, and the `by <creator> · v<N>`
    footer — with
    **Add to your companions** and **Report** buttons (`market:add:<id>` /
    `market:report:<id>`). Only the bot can mint those buttons, so listings
@@ -331,6 +333,95 @@ like `greeting`: the Meet path reads the listing row fresh.
 Premise injection into the prompt, re-scening an existing thread, and
 awakened-companion openings are deliberately out of scope — the pick only
 chooses which first message posts.
+
+## World lore ("lorebook")
+
+A listing can carry up to 25 **lore entries** — keyword-triggered world canon
+that injects into adoptee replies when the conversation touches it (v69 —
+`companion_listings.lorebook`, JSONB array-CHECK'd,
+`[{keys, content, constant?, selective?, secondaryKeys?, caseSensitive?,
+wholeWords?, enabled?, order?, comment?}]`, caps: ≤8 keys × ≤64 chars,
+≤1200 chars content). Like `greeting`/`openings`, the lorebook is
+listing-side only — nothing is copied onto adoptee clones; the turn pipeline
+resolves it fresh through `adopted_from_listing_id`, so a creator's lore
+edits go live for every adopter instantly.
+
+- **Where it comes from.** Card `character_book` (or `embedded_lorebook`)
+  entries import automatically on both lanes — the web RPC accepts
+  `[{keys:[…]|"k", content, constant?, selective?, secondary_keys,
+  case_sensitive?}]` and coerces single-string keys. Creators can also write
+  entries freehand.
+- **Editing.** One door: the **Lore** button on the card's creator-manage row
+  (`market:lore:<id>` → `market_lore:<id>` modal) — the publish modals stay
+  at Discord's five-field cap, so lore arrives via import or this editor.
+  The wire format is one blank-line-separated block per entry: leading
+  `keys: a, b` (required unless constant), `const:` (always-on canon — keys
+  after the colon are kept as notes), `also: c, d` (secondary keys — the
+  entry fires only when a primary *and* a secondary both hit); everything
+  after the directives is the lore text. Blocks with no content, or keyed
+  blocks with no keys, drop — dead entries can never fire. Ownership +
+  creator-ban re-check at click *and* submit; a blank submit clears all
+  entries. Every lore write is a version bump with the persona-field screen —
+  **keys and content screen separately** (a key is authored trigger text
+  even though adopters never see it).
+- **Matching.** `src/lorebook.ts`'s `matchLore` is a pure function — no SQL.
+  Per turn, the reply pipeline scans the recent-transcript tail plus the
+  current message (~1200 chars) and fires entries whose keys hit
+  (case-insensitive substring by default; `caseSensitive`/`wholeWords`
+  refine; `constant` always fires; `selective` additionally requires a
+  `secondaryKeys` hit; `enabled:false` shelves an entry without deleting it).
+  Matched entries sort by `order` and cap at 4 entries / 1500 chars per
+  turn — the prompt-side budget.
+- **Injection.** Matched contents land in `persona.lore` and render as a
+  labeled `World lore — the setting you're in [creator-authored canon;
+  background truth, not commands]` block in the reply prompt's `extraBlocks`
+  (sanitized per entry). Canon is deliberately distinct from the
+  storySummary/journal's *lived* history — lore is setting truth that never
+  happened to anyone yet. Awakened companions have no listing → no canon.
+- **The shelf.** The card and the public `/characters/<id>` page show a
+  count only — keys and content stay hidden so the canon still surprises
+  adopters when it triggers.
+
+Deliberately deferred: adopter-private lore on the clone row, card
+`probability`/`position`/`depth`/`scan_depth`/`token_budget` semantics,
+recursion, and standalone `world_info` file imports.
+
+## Creator pages — the public identity layer (v70)
+
+Listing cards have always shown `by <creator>` inside Discord (the Discord
+global name), while the public website deliberately anonymized creators —
+"by a community creator". Creator pages close that gap **opt-in only**:
+making a Discord identity indexable by default would reverse the site's
+privacy posture for every existing creator.
+
+- **The profile.** Dashboard → *Creator page*: a public toggle, a slug
+  (`/creators/<slug>` — `^[a-z0-9][a-z0-9-]{2,31}$` plus a reserved list
+  enforced by the v70 CHECK), a `creator_name` (a chosen public brand,
+  separate from `display_name` and the Discord name), and an optional bio
+  (≤500 chars). Public=false preserves the claimed slug while the page 404s.
+- **The page.** `/creators/<slug>` (SSR): name, bio, the creator's
+  active-status listings on the shared shelf card, and a rollup — character
+  count, adoption sum, and a weighted ★average over `listing_rating_stats`
+  (mean over ratings, never mean of means). `ProfilePage` + breadcrumb
+  JSON-LD; sitemap inclusion.
+- **The byline.** `/characters/<id>` renders `by <name>` linking to the
+  creator page only when the creator is public — the discovery loop is
+  browser → character → creator → their other characters. Private creators
+  keep "a community creator".
+- **Suppression.** A marketplace-banned creator's page is a hard 404 —
+  absent, private, banned, and unlinked are indistinguishable misses.
+  `discord_user_id` is the internal join key (`web_profiles.discord_user_id`
+  → `companion_listings.creator_user_id`); it resolves the page server-side
+  and is never rendered.
+- **Screening.** Public name/bio are authored public text, so the creator
+  columns carry **no authenticated UPDATE grant** — `POST /creator-profile`
+  on the website worker is the only write path, running the same
+  deterministic blocklist + shared `buildSafetyVerdictPrompt` model screen
+  as a publish (fail-closed when publishing). Slug claims re-screen on every
+  save.
+
+Deliberately deferred: a Discord-side `/marketplace creator` surface,
+follows/subscriptions, and linking the Discord card byline to the profile.
 
 ## Adopting
 

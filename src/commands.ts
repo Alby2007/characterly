@@ -8,8 +8,9 @@ import { fetchImageBytes, isSafeUrl, resolvesToPrivateAddress } from "./tools.js
 import { detectProviderFromKey, guardedLlmFetch } from "./brains.js";
 import { runProfileBuild, PROFILE_BUILD_COOLDOWN_MS } from "./profile-build.js";
 import { inc, metricsSnapshot } from "./metrics.js";
-import type { ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, GuildDeployment, MessageEvent, SceneOpening } from "./types.js";
+import type { ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, GuildDeployment, LoreEntry, MessageEvent, SceneOpening } from "./types.js";
 import { LISTING_MAX_OPENINGS, LISTING_OPENING_MAX_CHARS } from "./types.js";
+import { normalizeLoreEntries } from "./lorebook.js";
 import { config } from "./config.js";
 import { linkSteps } from "./copy.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
@@ -623,6 +624,71 @@ export function buildScenesModal(listing: CompanionListing): ModalBuilder {
     .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
 }
 
+/** The lore-editor wire format: one blank-line-separated block per entry.
+ *  Leading directive lines mark the trigger — `keys: a, b` (required unless
+ *  const), `const:` (always-on; keys after the colon are kept as notes),
+ *  `also: c, d` (secondary keys — the entry fires only when one of each
+ *  hits). Everything after the directives is the lore text itself.
+ *  Directives only parse before the first content line, so lore text may
+ *  itself start with a "keys:"-looking line deeper in the block. */
+const loreFieldText = (entries: LoreEntry[]): string =>
+  entries.map(e => {
+    const head = e.constant
+      ? `const:${e.keys.length ? ` ${e.keys.join(", ")}` : ""}`
+      : `keys: ${e.keys.join(", ")}`;
+    const also = e.secondaryKeys?.length ? `\nalso: ${e.secondaryKeys.join(", ")}` : "";
+    return `${head}${also}\n${e.content}`;
+  }).join("\n\n").slice(0, 3990);
+
+/** Blank-line-separated modal input → lore entries. Blocks with no content,
+ *  or keyed blocks with no keys, drop (dead entries can never fire); caps
+ *  come from normalizeLoreEntries — the same bounds the store applies. */
+function parseLoreField(raw: string): LoreEntry[] {
+  const out: LoreEntry[] = [];
+  for (const block of raw.split(/\n\s*\n/)) {
+    const keys: string[] = [];
+    const secondaryKeys: string[] = [];
+    const contentLines: string[] = [];
+    let constant = false;
+    for (const line of block.split("\n")) {
+      const dir = !contentLines.length ? /^(keys|also|const)\s*:\s*(.*)$/i.exec(line.trim()) : null;
+      if (dir) {
+        const list = dir[2].split(",").map(k => k.trim()).filter(Boolean);
+        if (dir[1].toLowerCase() === "keys") keys.push(...list);
+        else if (dir[1].toLowerCase() === "also") secondaryKeys.push(...list);
+        else { constant = true; keys.push(...list); }
+      } else if (line.trim() || contentLines.length) {
+        contentLines.push(line);
+      }
+    }
+    const content = contentLines.join("\n").trim();
+    const entry: LoreEntry = { keys, content };
+    if (constant) entry.constant = true;
+    if (secondaryKeys.length) { entry.secondaryKeys = secondaryKeys; entry.selective = true; }
+    out.push(entry);
+  }
+  return normalizeLoreEntries(out);
+}
+
+/** One-field lore modal for the card's Lore button — keyword-triggered
+ *  world canon in the keys/also/const block format. Blank input clears
+ *  every entry (same rule as Cover/Scenes). */
+export function buildLoreModal(listing: CompanionListing): ModalBuilder {
+  const input = new TextInputBuilder()
+    .setCustomId("lore-entries")
+    .setLabel("World lore — keys: triggers, then the canon")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(false)
+    .setMaxLength(4000)
+    .setPlaceholder("keys: a, b — trigger words · also: secondary keys · const: always on");
+  const text = loreFieldText(listing.lorebook ?? []);
+  if (text) input.setValue(text);
+  return new ModalBuilder()
+    .setCustomId(`market_lore:${listing.id}`)
+    .setTitle(`World lore — ${listing.name.slice(0, 30)}`)
+    .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+}
+
 export function buildMarketPersonaModal(listing: CompanionListing): ModalBuilder {
   const modal = new ModalBuilder()
     .setCustomId(`market_edit:${listing.id}`)
@@ -745,6 +811,7 @@ async function publishGateError(store: MemoryStore, userId: string, isNewListing
 async function screenListingFields(fields: {
   name: string; tagline: string; greeting: string; voicePersona: string;
   coreTraits: string[]; ownerDynamic: string; backstory: string; openings?: string[];
+  lore?: { keys: string[]; content: string }[];
 }): Promise<string | null> {
   const det = checkListingFields(fields);
   if (!det.ok) {
@@ -760,7 +827,8 @@ async function screenListingFields(fields: {
         `Name: ${fields.name}\nTagline: ${fields.tagline}\nGreeting: ${fields.greeting}\n` +
         `Voice: ${fields.voicePersona}\nTraits: ${fields.coreTraits.join(", ")}\n` +
         `Dynamic: ${fields.ownerDynamic}\nBackstory: ${fields.backstory}` +
-        (fields.openings?.length ? `\nOpenings: ${fields.openings.join(" | ")}` : ""),
+        (fields.openings?.length ? `\nOpenings: ${fields.openings.join(" | ")}` : "") +
+        (fields.lore?.length ? `\nLore: ${fields.lore.map(e => `${e.keys.join(", ")} — ${e.content}`).join(" | ")}` : ""),
     });
     if (verdict.verdict === "flag") {
       inc("safety.listing_flagged");
@@ -2044,7 +2112,7 @@ async function cmdCompanion(c: SlashCtx): Promise<unknown> {
       return interaction.reply({ content: why, ephemeral: true });
     }
     const persona = cardToPersona(parsed.card);
-    const screened = checkListingFields({ ...persona, openings: persona.openings.map(o => o.text) });
+    const screened = checkListingFields({ ...persona, openings: persona.openings.map(o => o.text), lore: persona.lore });
     if (!screened.ok) {
       return interaction.reply({ content: `I can't import this card — its ${screened.field} trips the **${screened.category}** content rule.`, ephemeral: true });
     }
@@ -2094,6 +2162,7 @@ async function cmdCompanion(c: SlashCtx): Promise<unknown> {
         ...(persona.coreTraits.length ? [{ name: "Traits", value: persona.coreTraits.join(", "), inline: false }] : []),
         ...(persona.greeting ? [{ name: "They'll say", value: persona.greeting.slice(0, 300), inline: false }] : []),
         ...(persona.openings.length ? [{ name: "Openings", value: `+${persona.openings.length} more way${persona.openings.length === 1 ? "" : "s"} they'll introduce themselves — you'll pick when you meet.`, inline: false }] : []),
+        ...(persona.lore.length ? [{ name: "World lore", value: `+${persona.lore.length} canon ${persona.lore.length === 1 ? "entry" : "entries"} — they surface in chat when the conversation touches them.`, inline: false }] : []),
         { name: "Card format", value: `${card.spec || "unknown"}${card.specVersion ? ` v${card.specVersion}` : ""}`, inline: true },
         { name: "Source file", value: file.name ?? "card", inline: true },
       )
@@ -3101,12 +3170,13 @@ export async function handleCompanionModal(
       new ButtonBuilder().setCustomId(`market:editmodal:${listing.id}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`market:cover:${listing.id}`).setLabel("Cover image").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`market:scenes:${listing.id}`).setLabel("Scenes").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`market:lore:${listing.id}`).setLabel("Lore").setStyle(ButtonStyle.Secondary),
     );
     const tagRow = await tagPickerRow(interaction.client, listing.id, interaction.guildId);
     return interaction.reply({
       ephemeral: true,
       content:
-        `**${listing.name}** is live in <#${config.marketplaceChannelId}>! Use **Edit persona** for traits and bond, **Cover image** for the gallery art, **Scenes** for alternate openings.` +
+        `**${listing.name}** is live in <#${config.marketplaceChannelId}>! Use **Edit persona** for traits and bond, **Cover image** for the gallery art, **Scenes** for alternate openings, **Lore** for world canon.` +
         (tagRow ? " Pick the tags that fit it below." : ""),
       components: [manageRow, ...(tagRow ? [tagRow] : [])],
     });
@@ -3158,6 +3228,7 @@ export async function handleCompanionModal(
       ownerDynamic: prior.ownerDynamic,
       backstory: prior.backstory,
       openings: openings.map(o => o.text),
+      lore: prior.lorebook ?? [],
     });
     if (screenError) return interaction.reply({ content: screenError, ephemeral: true });
     const res = await store.publishListing(listingId, userId, {
@@ -3190,6 +3261,7 @@ export async function handleCompanionModal(
       new ButtonBuilder().setCustomId(`market:editmodal:${listing.id}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`market:cover:${listing.id}`).setLabel("Cover image").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`market:scenes:${listing.id}`).setLabel("Scenes").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`market:lore:${listing.id}`).setLabel("Lore").setStyle(ButtonStyle.Secondary),
     );
     const tagRow = await tagPickerRow(interaction.client, listing.id, interaction.guildId);
     return interaction.reply({
@@ -3253,6 +3325,7 @@ export async function handleCompanionModal(
       ownerDynamic: existing?.ownerDynamic ?? companion.ownerDynamic,
       backstory: existing?.backstory ?? companion.backstory,
       openings: openings.map(o => o.text),
+      lore: existing?.lorebook ?? [],
     });
     if (screenError) return interaction.reply({ content: screenError, ephemeral: true });
     const res = await store.upsertListing(userId, companion.id, {
@@ -3301,6 +3374,7 @@ export async function handleCompanionModal(
       new ButtonBuilder().setCustomId(`market:editmodal:${listing.id}`).setLabel("Edit persona").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`market:cover:${listing.id}`).setLabel("Cover image").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`market:scenes:${listing.id}`).setLabel("Scenes").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`market:lore:${listing.id}`).setLabel("Lore").setStyle(ButtonStyle.Secondary),
     );
     const tagRow = await tagPickerRow(interaction.client, listing.id, interaction.guildId);
     return interaction.reply({
@@ -3342,6 +3416,7 @@ export async function handleCompanionModal(
       name, tagline: listing.tagline, greeting: listing.greeting,
       voicePersona, coreTraits, ownerDynamic, backstory,
       openings: listing.openings.map(o => o.text),
+      lore: listing.lorebook ?? [],
     });
     if (screenError) return interaction.reply({ content: screenError, ephemeral: true });
     const updated = await store.updateListing(listing.id, userId, {
@@ -3419,6 +3494,7 @@ export async function handleCompanionModal(
       voicePersona: listing.voicePersona, coreTraits: listing.coreTraits,
       ownerDynamic: listing.ownerDynamic, backstory: listing.backstory,
       openings: openings.map(o => o.text),
+      lore: listing.lorebook ?? [],
     });
     if (screenError) return interaction.reply({ content: screenError, ephemeral: true });
     const updated = await store.updateListing(listing.id, userId, {
@@ -3436,6 +3512,48 @@ export async function handleCompanionModal(
       content: openings.length
         ? `**${updated.name}** now has ${openings.length} alternate opening${openings.length === 1 ? "" : "s"} (v${updated.version}) — adopters pick one when they meet.`
         : `**${updated.name}**'s alternate openings are cleared (v${updated.version}) — the greeting is the only way in now.`,
+    });
+  }
+
+  // market_lore:<listingId> — the lore editor: keyword-triggered world canon
+  // in the keys/also/const block format. Blank input clears it (cover-field
+  // rule); the write bumps the version + snapshots like any persona edit.
+  if (interaction.customId.startsWith("market_lore:")) {
+    const listingId = Number(interaction.customId.slice("market_lore:".length));
+    const userId = interaction.user.id;
+    const listing = await store.listingById(listingId);
+    if (!listing || listing.creatorUserId !== userId) {
+      return interaction.reply({ content: "That's not your listing.", ephemeral: true });
+    }
+    if (await store.creatorBan(userId).catch(() => null)) {
+      return interaction.reply({ content: BANNED_CREATOR_MSG, ephemeral: true });
+    }
+    const lorebook = parseLoreField(interaction.fields.getTextInputValue("lore-entries") ?? "");
+    // Lore injects into every adopter's prompts — full-persona screen, same
+    // freeze rule as a persona edit (keys AND content screen via the lore param).
+    const screenError = await screenListingFields({
+      name: listing.name, tagline: listing.tagline, greeting: listing.greeting,
+      voicePersona: listing.voicePersona, coreTraits: listing.coreTraits,
+      ownerDynamic: listing.ownerDynamic, backstory: listing.backstory,
+      openings: (listing.openings ?? []).map(o => o.text),
+      lore: lorebook,
+    });
+    if (screenError) return interaction.reply({ content: screenError, ephemeral: true });
+    const updated = await store.updateListing(listing.id, userId, {
+      name: listing.name, tagline: listing.tagline, voicePersona: listing.voicePersona,
+      coreTraits: listing.coreTraits, ownerDynamic: listing.ownerDynamic,
+      backstory: listing.backstory, greeting: listing.greeting, avatarUrl: listing.avatarUrl,
+      lorebook,
+    });
+    if (!updated) {
+      return interaction.reply({ content: "That's not your listing.", ephemeral: true });
+    }
+    inc("market.lore_saved");
+    return interaction.reply({
+      ephemeral: true,
+      content: lorebook.length
+        ? `**${updated.name}** now carries ${lorebook.length} lore ${lorebook.length === 1 ? "entry" : "entries"} (v${updated.version}) — they surface in chat when the conversation touches their keys.`
+        : `**${updated.name}**'s world lore is cleared (v${updated.version}) — no canon injects on adoptee turns.`,
     });
   }
 
@@ -3642,7 +3760,7 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
         components: [],
       });
     }
-    const created = await store.createListing(userId, { ...pending.persona, avatarUrl: pending.avatarUrl }, {
+    const created = await store.createListing(userId, { ...pending.persona, lorebook: pending.persona.lore, avatarUrl: pending.avatarUrl }, {
       status: "unlisted",
       personaSource: "card_import",
       importMeta: pending.meta as unknown as Record<string, unknown>,
@@ -4438,6 +4556,19 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
       return interaction.reply({ content: "Editing scenes requires modal support.", ephemeral: true });
     }
     return interaction.showModal(buildScenesModal(listing));
+  }
+  if (sub === "lore") {
+    const listing = await store.listingById(id);
+    if (!listing || listing.creatorUserId !== userId) {
+      return interaction.reply({ content: "That's not your listing.", ephemeral: true });
+    }
+    if (await store.creatorBan(userId).catch(() => null)) {
+      return interaction.reply({ content: BANNED_CREATOR_MSG, ephemeral: true });
+    }
+    if (typeof interaction.showModal !== "function") {
+      return interaction.reply({ content: "Editing world lore requires modal support.", ephemeral: true });
+    }
+    return interaction.showModal(buildLoreModal(listing));
   }
   return;
 }

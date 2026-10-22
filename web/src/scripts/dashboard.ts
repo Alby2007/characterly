@@ -353,6 +353,78 @@ function setStep(id: string, done: boolean) {
   for (const p of li.querySelectorAll<HTMLElement>("[data-pending]")) p.hidden = done;
   for (const p of li.querySelectorAll<HTMLElement>("[data-done]")) p.hidden = !done;
 }
+// ── Creator page ───────────────────────────────────────────────────────────
+// The opt-in public profile at /creators/<slug>. Saves go through POST
+// /creator-profile (the only write path — the columns reject direct updates)
+// so public text always passes the listing screen.
+function renderCreator() {
+  const on = linked() && !profileUnknown();
+  $("#creator-body").hidden = !on;
+  $("#creator-locked").hidden = on;
+  if (!on) return;
+  $<HTMLInputElement>("#creator-public").checked = profile?.creator_public === true;
+  $<HTMLInputElement>("#creator-slug").value = profile?.creator_slug ?? "";
+  $<HTMLInputElement>("#creator-name").value = profile?.creator_name ?? "";
+  $<HTMLInputElement>("#creator-bio").value = profile?.creator_bio ?? "";
+  const badge = $("#creator-state");
+  const live = profile?.creator_public === true && profile?.creator_slug;
+  badge.textContent = live ? "Live" : "Off";
+  badge.className = live ? "badge badge-go" : "badge";
+  const view = $<HTMLAnchorElement>("#creator-view");
+  view.hidden = !live;
+  if (live) view.href = `/creators/${profile!.creator_slug}`;
+  updateSlugPreview();
+}
+function updateSlugPreview() {
+  const raw = $<HTMLInputElement>("#creator-slug").value.trim().toLowerCase();
+  const pv = $("#creator-url-preview");
+  pv.hidden = !raw;
+  if (raw) pv.textContent = `Your page: ${location.origin}/creators/${raw}`;
+}
+$("#creator-slug").addEventListener("input", updateSlugPreview);
+$("#form-creator").addEventListener("submit", async e => {
+  e.preventDefault();
+  const msg = $("#creator-msg");
+  msg.hidden = true;
+  msg.classList.remove("ok");
+  const slug = $<HTMLInputElement>("#creator-slug").value.trim().toLowerCase();
+  if (slug && !/^[a-z0-9][a-z0-9-]{2,31}$/.test(slug)) {
+    msg.textContent = "Slugs are 3–32 chars: lowercase letters, numbers, hyphens (no leading hyphen).";
+    msg.hidden = false;
+    return;
+  }
+  const btn = e.submitter as HTMLButtonElement | null;
+  if (btn) btn.disabled = true;
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    const res = await fetch("/creator-profile", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${session?.access_token ?? ""}` },
+      body: JSON.stringify({
+        slug,
+        name: $<HTMLInputElement>("#creator-name").value.trim(),
+        bio: $<HTMLInputElement>("#creator-bio").value.trim(),
+        public: $<HTMLInputElement>("#creator-public").checked,
+      }),
+    });
+    const data = await res.json().catch(() => ({})) as { error?: string; field?: string; slug?: string };
+    if (!res.ok) {
+      msg.textContent = data.error || "Save didn't go through. Try again.";
+      msg.hidden = false;
+      return;
+    }
+    msg.textContent = "Saved.";
+    msg.classList.add("ok");
+    msg.hidden = false;
+    await refreshAll();
+  } catch {
+    msg.textContent = "Save didn't go through. Check your connection and try again.";
+    msg.hidden = false;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
+
 function renderGuide() {
   const steps = { link: linked(), join: joinedServer() || hasCharacter, char: hasCharacter };
   setStep("#step-link", steps.link);
@@ -369,6 +441,7 @@ async function refreshAll() {
   renderBilling();
   await guard(renderTokens());
   await guard(renderBotSettings());
+  renderCreator();
   renderGuide();
 }
 

@@ -3,13 +3,13 @@
 // src/site-shelf.ts (tested there).
 import type { APIRoute } from "astro";
 import { sitemapXml } from "../../../src/site-shelf.ts";
-import { getCatalog, SHELF_CACHE } from "../lib/shelf";
+import { getCatalog, getPublicCreators, SHELF_CACHE } from "../lib/shelf";
 
 export const prerender = false;
 
 export const GET: APIRoute = async () => {
-  const { listings } = await getCatalog();
-  return new Response(sitemapXml(listings.map(l => ({ id: l.id, updatedAt: l.updatedAt }))), {
+  const [{ listings }, creators] = await Promise.all([getCatalog(), getPublicCreators()]);
+  return new Response(sitemapXml(listings.map(l => ({ id: l.id, updatedAt: l.updatedAt })), creators), {
     headers: { "content-type": "application/xml; charset=utf-8", "cache-control": SHELF_CACHE },
   });
 };

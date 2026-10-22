@@ -20,7 +20,7 @@ if (res.kind !== "hit") {
 }
 Astro.response.headers.set("cache-control", SHELF_CACHE);
 
-const { listing: l, rating, related, ratings } = res.data;
+const { listing: l, rating, related, ratings, creator } = res.data;
 const canonical = `${SITE_ORIGIN}/characters/${l.id}`;
 const traitLine = l.coreTraits.length ? ` Traits: ${l.coreTraits.slice(0, 5).join(", ")}.` : "";
 const description = `${l.tagline ? `${l.tagline}.` : `${l.name} is a community AI character on the Characterly shelf.`}${traitLine} Adopt ${l.name} into a private Discord thread, and they remember you from the first hello.`;
@@ -62,7 +62,7 @@ const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashb
         : <span class="char-ph" aria-hidden="true">{initial(l.name)}</span>}
     </figure>
     <div>
-      <Archive id="char" name={l.name} headingLevel="h1" sub={[...(r ? [r] : []), addsLabel(l.addCount), "by a community creator"]} tabs={tabs}>
+      <Archive id="char" name={l.name} headingLevel="h1" sub={[...(r ? [r] : []), addsLabel(l.addCount), ...(l.loreCount ? [`world lore · ${l.loreCount} ${l.loreCount === 1 ? "entry" : "entries"}`] : []), creator ? <a class="byline" href={`/creators/${creator.slug}`}>by {creator.name}</a> : "by a community creator"]} tabs={tabs}>
         <div slot={slotOf("Profile")} class="profile">
           {l.tagline && <p class="tagline">{l.tagline}</p>}
           {l.coreTraits.length > 0 && <div class="row"><span class="k">Traits</span><span class="traits">{l.coreTraits.slice(0, 6).map(t => <span class="tag">{t}</span>)}</span></div>}

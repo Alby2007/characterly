@@ -4,9 +4,10 @@ The policy and enforcement surface for the companion marketplace. The
 audience this product courts — companion-platform refugees — skews young and
 emotionally invested, so moderation is a product feature, not a checkbox.
 
-Four surfaces exist, and they are moderated **differently**:
+Five surfaces exist, and they are moderated **differently**:
 
-1. **Listing content** — name, tagline, greeting, persona fields. Authored
+1. **Listing content** — name, tagline, greeting, persona fields, openings,
+   lorebook keys + content. Authored
    text, reviewed at publish/edit time.
 2. **Generated output** — what adopted companions actually *say*. Unbounded
    and prompt-injectable; screened at generation time.
@@ -14,6 +15,13 @@ Four surfaces exist, and they are moderated **differently**:
    moderated by automod + message-level reports (below).
 4. **Actors** — creators and reporters, via linked accounts, bans, and rate
    limits.
+5. **Creator pages** — `creator_name`/`creator_bio` (v70). Authored text
+   indexed publicly under a claimed slug; screened at save time through
+   `POST /creator-profile`, the *only* write path (the columns carry no
+   authenticated UPDATE grant). Same deterministic blocklist + shared
+   `buildSafetyVerdictPrompt` model screen as listing content; the model
+   call runs only when a save makes the page public — private edits skip
+   the spend, and publishing always passes through it again.
 
 ## Content policy
 
@@ -23,7 +31,9 @@ Allowed: romance and companionship themes, dark/flawed characters,
 conflict-driven backstories, horror atmosphere.
 
 Prohibited in any listing field (name, tagline, greeting, voice, traits,
-dynamic, backstory, avatar):
+dynamic, backstory, avatar, opening text, lorebook keys, lorebook content)
+— and in creator-page `creator_name`/`creator_bio`, the same public-text
+policy:
 
 - **Minor-presenting sexual or romantic content** — hard line. No "aged-up"
   framing, no "they're actually 1000 years old" on a child-coded persona.

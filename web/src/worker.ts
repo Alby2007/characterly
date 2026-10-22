@@ -12,6 +12,7 @@
 // AVATAR_UPLOAD_SECRET.
 import { handle } from "@astrojs/cloudflare/handler";
 import { verifyDiscordSignature, parseDiscordEvent } from "../../src/discord-events.ts";
+import { handleCreatorProfileSave } from "../../src/creator-profile.ts";
 
 interface WorkerEnv {
   ASSETS: { fetch(request: Request): Promise<Response> };
@@ -19,6 +20,11 @@ interface WorkerEnv {
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   AVATAR_UPLOAD_SECRET?: string;
+  /** Operator model key for the /creator-profile public-text screen — unset
+   *  means deterministic-only, same as the bot's missing groqKey. */
+  GROQ_API_KEY?: string;
+  GROQ_BASE_URL?: string;
+  SAFETY_MODEL?: string;
   /** "off" on the preview Worker (wrangler.jsonc env.preview). */
   CANONICAL_REDIRECT?: string;
   /** "1" on the preview Worker: every response gets X-Robots-Tag: noindex. */
@@ -30,7 +36,8 @@ const EVENTS_PATH = "/discord/events";
 const AVATAR_PATH = "/avatar";
 const AVATAR_GC_PATH = "/avatar/gc";
 const TRACK_PATH = "/track";
-const API_PATHS = new Set([EVENTS_PATH, AVATAR_PATH, AVATAR_GC_PATH, TRACK_PATH]);
+const CREATOR_PROFILE_PATH = "/creator-profile";
+const API_PATHS = new Set([EVENTS_PATH, AVATAR_PATH, AVATAR_GC_PATH, TRACK_PATH, CREATOR_PROFILE_PATH]);
 const AVATAR_BUCKET = "companion-avatars";
 const AVATAR_MAX_BYTES = 8 * 1024 * 1024;
 const AVATAR_TYPES = /^image\/(png|jpe?g|webp|gif)$/;
@@ -100,6 +107,10 @@ export default {
     if (url.pathname === AVATAR_PATH && request.method === "PUT") return withSecurity(await handleAvatarUpload(request, env), noindex);
     if (url.pathname === AVATAR_GC_PATH && request.method === "POST") return withSecurity(await handleAvatarGc(request, env), noindex);
     if (url.pathname === TRACK_PATH && request.method === "POST") return withSecurity(await handleTrack(request, env), noindex);
+    if (url.pathname === CREATOR_PROFILE_PATH) {
+      if (request.method !== "POST") return withSecurity(new Response("method not allowed", { status: 405 }), noindex);
+      return withSecurity(await handleCreatorProfileSave(request, env), noindex);
+    }
 
     const res = await handle(request, env as never, ctx);
 

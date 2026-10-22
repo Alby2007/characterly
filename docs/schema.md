@@ -1,6 +1,6 @@
 # Database Schema
 
-Characterly stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts` (`v1`–`v68`).
+Characterly stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts` (`v1`–`v70`).
 
 **Supabase lockdown (v23+):** every `public`-schema table has `ENABLE ROW LEVEL SECURITY` with zero Data-API policies — deny-all for `anon`/`authenticated`, while the bot's `postgres` role bypasses RLS. The exceptions are the web-account tables (`web_profiles`, `link_codes`), which have their own policy/grant design documented below. All Supabase-specific DDL is conditional on the `auth` schema existing, so plain-Postgres test/local databases run every migration unchanged.
 
@@ -636,9 +636,13 @@ Web account profiles for Supabase Auth users (v26) — the "real life user" half
 | `discord_username` | TEXT NULL | Display snapshot of the linked Discord account (v38) — stamped by the trigger/`claim_link_code` like `discord_user_id`; display-only, never an auth key |
 | `discord_avatar_url` | TEXT NULL | Same snapshot — the avatar URL the dashboard renders |
 | `stripe_customer_id` | TEXT UNIQUE NULL | Reserved for billing — server-managed, not user-writable |
+| `creator_slug` | TEXT NULL | Public creator-page slug (v70) — partial UNIQUE index where non-null; CHECK enforces `^[a-z0-9][a-z0-9-]{2,31}$` plus a reserved-name list (`admin`, `staff`, `characterly`, …) |
+| `creator_name` | TEXT | Public brand name for `/creators/<slug>` (v70) — separate from `display_name` and from the Discord identity |
+| `creator_bio` | TEXT | Optional public bio (v70, ≤500 chars) |
+| `creator_public` | BOOL | Opt-in flag (v70, default false) — the page exists only when true AND a slug is set; private keeps the claimed slug |
 | `created_at` / `updated_at` | TIMESTAMPTZ | |
 
-**RLS:** own-row `SELECT`/`INSERT`/`UPDATE` policies for `authenticated`; `UPDATE` granted only on `(display_name, updated_at)` (v27) so a user can never forge `discord_user_id` or `stripe_customer_id` on their own row.
+**RLS:** own-row `SELECT`/`INSERT`/`UPDATE` policies for `authenticated`; `UPDATE` granted only on `(display_name, updated_at)` (v27) so a user can never forge `discord_user_id` or `stripe_customer_id` on their own row. The four `creator_*` columns are **deliberately outside that grant** (v70): public authored text must pass the screening pipeline, so `POST /creator-profile` on the website worker (service role) is the sole write path — a direct client PATCH is denied at the grant level. Owner `SELECT` still covers them, which is how the dashboard form pre-fills.
 
 **Supporting functions & triggers** (all under the auth-schema gate, `SECURITY DEFINER`, `search_path = ''`, revoked from PUBLIC/anon):
 
@@ -738,6 +742,7 @@ The marketplace's publishable persona (v34): a creator's awakened companion proj
 | `voice_persona` / `core_traits` / `owner_dynamic` / `backstory` | — | Persona fields cloned into adopters' `companions` rows |
 | `greeting` | TEXT | First DM the character sends on adoption — stamps `dm_introduced_at` on successful send |
 | `openings` | JSONB | Alternate openings (v68) — `[{text, label?, premise?}]`, ≤4 × ≤1000 chars, array-CHECK'd. The greeting is the canonical first opening; these are the alternates an adopter can pick between at a fresh Meet. Card `alternate_greetings` land here on import |
+| `lorebook` | JSONB | Authored world lore (v69) — `[{keys, content, constant?, selective?, secondaryKeys?, caseSensitive?, wholeWords?, enabled?, order?, comment?}]`, ≤25 entries × ≤1200 chars, ≤8 keys × ≤64 chars, array-CHECK'd. Keyword-triggered canon resolved per turn via `adopted_from_listing_id` — edits propagate to every adopter instantly. Card `character_book` lands here on import |
 | `avatar_url` | TEXT NULL | |
 | `forum_thread_id` | TEXT NULL | The bot-created forum post (its embed card owns the Add/Report buttons) |
 | `version` | INTEGER | Increments on every upsert; each version is snapshotted in `companion_persona_versions` |
@@ -761,7 +766,7 @@ Append-only audit trail for listing personas (v34): one row per `(listing_id, ve
 | `id` | BIGINT PK | |
 | `listing_id` | BIGINT | FK → `companion_listings.id ON DELETE CASCADE` (indexed) |
 | `version` | INTEGER | Composite unique with `listing_id` |
-| `persona_json` | JSONB | Snapshot of name/tagline/persona/greeting/avatar fields — includes `openings` (v68) |
+| `persona_json` | JSONB | Snapshot of name/tagline/persona/greeting/avatar fields — includes `openings` (v68) and `lorebook` (v69) |
 | `created_at` | TIMESTAMPTZ | |
 
 **RLS:** enabled, zero policies.
@@ -1029,3 +1034,5 @@ Version tracking for the migration system.
 | 66 | `v66_mod_actions_ticket_triage` | `mod_actions` ledger (house mod actions feed the repeat-offense ladder); `support_tickets` gains `category` (open-time picker), `last_staff_reply_at`, and `stale_notified_at` (unanswered-ticket nudge dedupe) |
 | 67 | `v67_reply_regens` | `reply_regens` — one row per Regenerate context-menu retry; the free-lane daily cap source and the audit trail |
 | 68 | `v68_listing_openings` | `companion_listings.openings` JSONB (array CHECK) — alternate Meet openings ("scenes"); `import_companion_card` re-stated to carry `openings` from the web import lane; repairs `persona_json`/`analytics_events.meta` rows that landed as jsonb strings (double-encoded writes); rollback refuses while openings exist |
+| 69 | `v69_listing_lorebook` | `companion_listings.lorebook` JSONB (array CHECK) — keyword-triggered world canon; `import_companion_card` re-stated to carry `lore` from the web import lane (string `keys` coerces to a one-element array); rollback refuses while lorebook entries exist |
+| 70 | `v70_creator_profiles` | `web_profiles` gains `creator_slug` (partial UNIQUE + format/reserved CHECK), `creator_name`, `creator_bio`, `creator_public` — opt-in public creator pages; columns stay outside the authenticated UPDATE grant so the screened `POST /creator-profile` endpoint is the sole write path; rollback refuses while any slug is claimed |

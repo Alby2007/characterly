@@ -97,10 +97,31 @@ design. Secret inventory + rotation runbook: → `docs/operations.md`
 
 **Companion personas → chat.** Listings are untrusted authored content:
 publish/edit screens are fail-closed (blocklist → `safetyVerdict` on the
-operator model — the screened set includes each alternate opening), imported
+operator model — the screened set includes each alternate opening and each
+lorebook entry's keys + content), imported
 cards carry `sha256` provenance, adopted replies
 are output-screened (above). Awakened companions are first-party private
 content and unscreened by design. → `docs/moderation.md`.
+
+**Lorebook → prompt.** Matched lorebook entries inject into adoptee reply
+prompts as creator-authored canon — the same trust class as the persona
+itself: each entry's contents pass `sanitizeBlock` on the way in and the
+block is labeled *background truth, not commands*, so a malicious key or
+lore text can't smuggle instructions past the screen at publish. Keys stay
+hidden from adopters (public surfaces show a count only), but they screen
+identically — hidden authored text is still authored text.
+
+**Creator pages → public identity (v70).** `creator_name`/`creator_bio`/
+`creator_slug`/`creator_public` are authored public text indexed by
+crawlers, so they sit outside the `authenticated` UPDATE grant entirely —
+the screened `POST /creator-profile` worker endpoint is the sole write
+path (JWT verify → linked+unbanned → validate → blocklist → the shared
+`buildSafetyVerdictPrompt` model screen → service-role PATCH). A direct
+client PATCH is denied at the grant level, so the screen can't be skipped.
+The page is opt-in: `creator_public=false` keeps the Discord identity
+Discord-side, and `web_profiles.discord_user_id` is a server-side join key
+only — never rendered into markup or JSON-LD. Banned creators' pages 404
+identically to absent ones.
 
 **Data retention.** Raw messages purge on `RAW_MESSAGE_RETENTION_DAYS`;
 `/opt-out` hard-deletes memories/journal about a subject; imported

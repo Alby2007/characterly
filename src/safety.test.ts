@@ -42,6 +42,25 @@ test("listing blocklist: openings screen like any authored field", () => {
   }
 });
 
+test("listing blocklist: lore keys AND content screen separately", () => {
+  assert.equal(checkListingFields(clean({ lore: [{ keys: ["the spire"], content: "laws bind every citizen" }] })).ok, true);
+  // Bad content inside an entry trips on its lore index.
+  const body = checkListingFields(clean({ lore: [{ keys: ["fine"], content: "I'll teach you to make a pipe bomb" }] }));
+  assert.equal(body.ok, false);
+  if (!body.ok) assert.equal(body.field, "lore 1");
+  // Keys are trigger text but still authored content — they screen too.
+  const key = checkListingFields(clean({ lore: [{ keys: ["totally fine", "make a pipe bomb"], content: "lore text" }] }));
+  assert.equal(key.ok, false);
+  if (!key.ok) assert.equal(key.field, "lore 1");
+  // The field label counts the entry index — lore 2 names the second entry.
+  const second = checkListingFields(clean({ lore: [
+    { keys: ["ok"], content: "fine" },
+    { keys: ["ok"], content: "encourages self-harm" },
+  ] }));
+  assert.equal(second.ok, false);
+  if (!second.ok) assert.equal(second.field, "lore 2");
+});
+
 test("self-harm triage: first-person signals fire", () => {
   for (const text of [
     "i want to kill myself",

@@ -101,7 +101,10 @@ Tests live alongside source files as `*.test.ts`. Run them all with `npm test`.
 | `market.test.ts` | Adoption slots and cooldowns, listing lifecycle state, mirror-post fan-out |
 | `seed-personas.test.ts` | Seed roster invariants: unique names, creator-tag taxonomy membership, blocklist-clean personas |
 | `safety.test.ts` | Listing blocklist category/field reporting; reply-screen classification |
-| `charcard.test.ts` | Character-card parsing: PNG `tEXt` chunk extraction, JSON cards, `cardToPersona`, `cardFileHash`, `cardImportMeta` |
+| `charcard.test.ts` | Character-card parsing: PNG `tEXt` chunk extraction, JSON cards, `cardToPersona`, `cardFileHash`, `cardImportMeta`, `character_book` → lore |
+| `lorebook.test.ts` | Lorebook matcher matrix: constants, case/whole-word refinement, selective secondaries, disabled entries, ordering, entry + char caps |
+| `authored-screen.test.ts` | Shared authored-text screening: blocklist categories, verdict prompt/parse, creator-slug format + reserved list |
+| `creator-profile.test.ts` | `POST /creator-profile` endpoint matrix: auth/link/ban gates, slug validation, deterministic + model screens (fail-closed on provider error), throttling, conflict mapping |
 | `chathist.test.ts` | Chat-history parsers: tavern jsonl metadata skip, turns/speakers/timestamps |
 | `chatimport.test.ts` | `runChatImportJob`: distillation windows fold into the pinned bond-summary journal entry |
 | `credits.test.ts` | `spendCredits`/`refundCredits`/`userBotSettings` against real SQL — lazy daily grants, ledger rows |
@@ -244,7 +247,7 @@ characterly/
 │   ├── db.ts                 # Shared postgres.js connection singleton
 │   ├── database.ts           # MemoryStore (Postgres: companions, journal, link codes, memories, edges)
 │   ├── events.ts             # EventStore (Postgres)
-│   ├── migrations.ts         # Versioned schema migrations (v1–v68)
+│   ├── migrations.ts         # Versioned schema migrations (v1–v69)
 │   ├── confidence.ts         # Deterministic confidence formulas
 │   ├── perception.ts         # Pre-filter regex, wake words, dismissals, tool cues
 │   ├── event-detection.ts    # EventPipeline — heuristic + LLM continuity
@@ -270,7 +273,8 @@ characterly/
 │   ├── marketplace.ts        # Listing card embed/components, forum thread posting, curated-tag names
 │   ├── safety.ts             # Listing/comment blocklists, self-harm triage, safe refusal, safety classifier client
 │   ├── seed-personas.ts      # Official marketplace seed roster (/ops seedmarket)
-│   ├── charcard.ts           # Character-card (.json/.png) parser shared with web/
+│   ├── charcard.ts           # Character-card (.json/.png) parser shared with web/ — incl. character_book → lorebook
+│   ├── lorebook.ts           # Listing lorebook: entry normalization (caps) + pure per-turn keyword matcher
 │   ├── chathist.ts           # Chat-history (.jsonl/.json) transcript parser shared with web/
 │   ├── discord-events.ts     # Discord Webhook Events verify/handler shared with web/'s worker
 │   ├── avatars.ts            # Durable avatar uploads → web worker PUT /avatar → Supabase Storage
@@ -281,7 +285,9 @@ characterly/
 │   ├── regen.ts              # "Regenerate" context-menu resolution (target → archived turn, dm: lanes)
 │   ├── fleet-cap.ts          # Revenue-aware hosted fleet cap (premium subs raise the daily ceiling)
 │   ├── prompt-safety.ts      # Injection hardening: promptInline/promptName/sanitizeBlock/wrapUntrusted
-│   ├── site-shelf.ts         # Marketplace shelf data layer shared with web/ (catalog, sitemap, labels)
+│   ├── authored-screen.ts    # Shared authored-content screening + creator-field validation (bot safety/brain + web worker)
+│   ├── creator-profile.ts    # POST /creator-profile handler — sole screened write path for public creator fields (v70)
+│   ├── site-shelf.ts         # Marketplace shelf data layer shared with web/ (catalog, creator lookup, sitemap, labels)
 │   ├── summary-job.ts        # Worker handler for channel 'summary' jobs
 │   ├── cross-context.ts      # Cross-scope context (server→DM digest lane, edge consent)
 │   ├── embeddings.ts         # Opt-in embeddings client for semantic recall (EMBED_*)
@@ -314,7 +320,7 @@ characterly/
 ├── scripts/                  # Operational one-shots (see table above)
 ├── docs/
 │   ├── architecture.md       # Module map, companions, journal, web accounts, data flow
-│   ├── schema.md             # Database schema reference (through v68)
+│   ├── schema.md             # Database schema reference (through v69)
 │   ├── event-pipeline.md     # Event detection explainer
 │   ├── configuration.md      # Env var + website config reference
 │   ├── marketplace.md        # Marketplace end-to-end: publish/adopt, ratings, comments, tags, moderation

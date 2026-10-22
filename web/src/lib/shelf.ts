@@ -5,10 +5,11 @@
 import { env } from "cloudflare:workers";
 import {
   fetchActiveListings, lookupListing, fetchListingRating, fetchRatingStats, relatedListings,
-  type ShelfListing, type ShelfRating,
+  fetchCreatorBySlug, fetchCreatorListings, fetchPublicCreator, fetchPublicCreators, creatorStats,
+  type ShelfListing, type ShelfRating, type ShelfCreator,
 } from "../../../src/site-shelf.ts";
 
-export type { ShelfListing, ShelfRating };
+export type { ShelfListing, ShelfRating, ShelfCreator };
 
 const shelfEnv = () => ({
   SUPABASE_URL: env.SUPABASE_URL,
@@ -49,6 +50,7 @@ async function devFixture(): Promise<{ listings: ShelfListing[]; ratings: Map<nu
     id: i + 1, name: s.name, tagline: s.tagline, voicePersona: s.voicePersona, coreTraits: s.coreTraits,
     creatorTags: s.tags, backstory: s.backstory, greeting: s.greeting,
     openings: s.openings ?? [],
+    loreCount: (s.lore ?? []).length,
     avatarUrl: null, addCount: Math.max(0, 40 - i * 3), updatedAt: "2026-10-01",
   }));
   return { listings, ratings: new Map([[1, { avg: 4.6, count: 12 }]]) };
@@ -69,6 +71,9 @@ export interface ListingPageData {
   rating: ShelfRating;
   related: ShelfListing[];
   ratings: Map<number, ShelfRating>;
+  /** The listing's opted-in public creator — null keeps the anonymous
+   *  "a community creator" byline. */
+  creator: { slug: string; name: string } | null;
 }
 /** "miss" is a real absence (delisted/unknown → 404). "error" is an upstream
  *  failure — the page serves 503, because a PostgREST blip must never read
@@ -80,7 +85,7 @@ export async function getListingPage(id: number): Promise<ListingPageResult> {
   if (fixture) {
     const listing = fixture.listings.find(l => l.id === id);
     if (!listing) return { kind: "miss" };
-    return { kind: "hit", data: { listing, rating: fixture.ratings.get(id) ?? { avg: 0, count: 0 }, related: relatedListings(listing, fixture.listings), ratings: fixture.ratings } };
+    return { kind: "hit", data: { listing, rating: fixture.ratings.get(id) ?? { avg: 0, count: 0 }, related: relatedListings(listing, fixture.listings), ratings: fixture.ratings, creator: DEV_CREATOR } };
   }
   // A remembered miss short-circuits entirely — errors never cache, so an
   // outage retries rather than pinning a false 404.
@@ -90,10 +95,48 @@ export async function getListingPage(id: number): Promise<ListingPageResult> {
   const lookup = await lookupListing(shelfEnv(), id);
   if (lookup.kind === "miss") { missRemember(id); return lookup; }
   if (lookup.kind !== "hit") return lookup;
-  const [rating, cat] = await Promise.all([
-    fetchListingRating(shelfEnv(), id), getCatalog(),
+  const [rating, cat, creator] = await Promise.all([
+    fetchListingRating(shelfEnv(), id), getCatalog(), fetchPublicCreator(shelfEnv(), lookup.creatorUserId),
   ]);
-  return { kind: "hit", data: { listing: lookup.listing, rating, related: relatedListings(lookup.listing, cat.listings), ratings: cat.ratings } };
+  return { kind: "hit", data: { listing: lookup.listing, rating, related: relatedListings(lookup.listing, cat.listings), ratings: cat.ratings, creator } };
+}
+
+// ── Creator pages (/creators/<slug>) ─────────────────────────────────────────
+
+const DEV_CREATOR = { slug: "characterly", name: "the Characterly team" };
+
+export interface CreatorPageData {
+  creator: ShelfCreator;
+  listings: ShelfListing[];
+  ratings: Map<number, ShelfRating>;
+  stats: { characters: number; adoptions: number; avgRating: number | null; ratingCount: number };
+}
+export type CreatorPageResult = { kind: "hit"; data: CreatorPageData } | { kind: "miss" } | { kind: "error" };
+
+/** The public creator page: profile → (ban-filtered inside the lookup) →
+ *  listings + stats. Same absent-vs-broken discipline as listing pages —
+ *  a 404 must mean "no such page", never an upstream blip. */
+export async function getCreatorPage(slug: string): Promise<CreatorPageResult> {
+  const fixture = await devFixture();
+  if (fixture) {
+    if (slug !== DEV_CREATOR.slug) return { kind: "miss" };
+    const stats = creatorStats(fixture.listings, fixture.ratings);
+    return { kind: "hit", data: { creator: { slug: DEV_CREATOR.slug, name: DEV_CREATOR.name, bio: "First-party characters from the Characterly team.", avatarUrl: null, creatorUserId: "" }, listings: fixture.listings, ratings: fixture.ratings, stats } };
+  }
+  const env2 = shelfEnv();
+  const lookup = await fetchCreatorBySlug(env2, slug.trim().toLowerCase());
+  if (lookup.kind !== "hit") return lookup;
+  const [listings, ratings] = await Promise.all([
+    fetchCreatorListings(env2, lookup.creator.creatorUserId), fetchRatingStats(env2),
+  ]);
+  return { kind: "hit", data: { creator: lookup.creator, listings, ratings, stats: creatorStats(listings, ratings) } };
+}
+
+/** Public creator slugs for /sitemap.xml — banned creators already excluded
+ *  at the fetch layer so the index never points at a suppressed page. */
+export async function getPublicCreators(): Promise<Array<{ slug: string; updatedAt: string }>> {
+  if (await devFixture()) return [{ slug: DEV_CREATOR.slug, updatedAt: "2026-10-01" }];
+  return fetchPublicCreators(shelfEnv());
 }
 
 export const SHELF_CACHE = "public, max-age=60, s-maxage=300";

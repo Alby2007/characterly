@@ -1,6 +1,7 @@
 import { randomInt } from "node:crypto";
-import type { AppInstall, AttributeStatus, ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, ConversationSummary, EvidenceEffect, EvidenceType, GuildCompanion, GuildDeployment, JournalCandidate, JournalEntry, ListingPost, Member, MemoryCandidate, MemoryStatus, MessageEvent, ModAction, OnboardingState, ProfileAttribute, RelationshipEdge, SceneOpening, SupportTicket, VerificationVerdict, WebhookMessageRecord } from "./types.js";
+import type { AppInstall, AttributeStatus, ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, ConversationSummary, EvidenceEffect, EvidenceType, GuildCompanion, GuildDeployment, JournalCandidate, JournalEntry, ListingPost, LoreEntry, Member, MemoryCandidate, MemoryStatus, MessageEvent, ModAction, OnboardingState, ProfileAttribute, RelationshipEdge, SceneOpening, SupportTicket, VerificationVerdict, WebhookMessageRecord } from "./types.js";
 import { LISTING_MAX_OPENINGS, LISTING_OPENING_MAX_CHARS } from "./types.js";
+import { normalizeLoreEntries } from "./lorebook.js";
 import { sql as defaultSql, type Sql } from "./db.js";
 import { runMigrations } from "./migrations.js";
 import { CreditStore } from "./credit-store.js";
@@ -3277,6 +3278,9 @@ export class MemoryStore {
       backstory: r.backstory,
       greeting: r.greeting,
       openings: sceneOpeningsFromDb(r.openings),
+      // normalizeLoreEntries doubles as the read-side coercion — object
+      // shapes and string-keyed entries both normalize to LoreEntry[].
+      lorebook: normalizeLoreEntries(r.lorebook),
       avatarUrl: r.avatar_url,
       forumThreadId: r.forum_thread_id,
       creatorTags: r.creator_tags ?? [],
@@ -3325,7 +3329,7 @@ export class MemoryStore {
   async upsertListing(
     creatorUserId: string,
     sourceCompanionId: number,
-    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null; openings?: SceneOpening[] },
+    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null; openings?: SceneOpening[]; lorebook?: LoreEntry[] },
     opts: { forumThreadId?: string | null; maxListings?: number; maxDailyPublish?: number } = {},
   ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "cap" | "daily_cap" }> {
     spec = { ...spec, name: sanitizeStoredName(spec.name, 64) || "Companion" };
@@ -3334,10 +3338,11 @@ export class MemoryStore {
       coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
       backstory: spec.backstory, greeting: spec.greeting, avatarUrl: spec.avatarUrl,
     };
-    // Openings tri-state: undefined preserves the column on conflict,
+    // Openings/lorebook tri-state: undefined preserves the column on conflict,
     // [] clears it, values replace it — the republish modal always sends
-    // an explicit array so creator edits can't silently drop scenes.
+    // an explicit array so creator edits can't silently drop scenes or lore.
     const openingsVal = spec.openings === undefined ? null : this.sql.json(normalizeSceneOpenings(spec.openings) as never);
+    const lorebookVal = spec.lorebook === undefined ? null : this.sql.json(normalizeLoreEntries(spec.lorebook) as never);
     const res = await this.sql.begin(async sql => {
       // Serialize per-creator listing writes — the cap count and the insert
       // must be atomic across parallel publishes/creates/relists.
@@ -3370,11 +3375,11 @@ export class MemoryStore {
         }
       }
       const rows = await sql<Array<any>>`
-        INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, openings, avatar_url, forum_thread_id, version, status, published_at, created_at, updated_at)
+        INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, openings, lorebook, avatar_url, forum_thread_id, version, status, published_at, created_at, updated_at)
         VALUES (
           ${creatorUserId}, ${sourceCompanionId},
           ${spec.name}, ${spec.tagline}, ${spec.voicePersona}, ${spec.coreTraits},
-          ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${sql.json(normalizeSceneOpenings(spec.openings ?? []) as never)}, ${spec.avatarUrl},
+          ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${sql.json(normalizeSceneOpenings(spec.openings ?? []) as never)}, ${sql.json(normalizeLoreEntries(spec.lorebook ?? []) as never)}, ${spec.avatarUrl},
           ${opts.forumThreadId ?? null}, 1, 'active', NOW(), NOW(), NOW()
         )
         ON CONFLICT (source_companion_id) DO UPDATE SET
@@ -3386,6 +3391,7 @@ export class MemoryStore {
           backstory      = EXCLUDED.backstory,
           greeting       = EXCLUDED.greeting,
           openings       = COALESCE(${openingsVal}::jsonb, companion_listings.openings),
+          lorebook       = COALESCE(${lorebookVal}::jsonb, companion_listings.lorebook),
           avatar_url     = EXCLUDED.avatar_url,
           forum_thread_id = COALESCE(EXCLUDED.forum_thread_id, companion_listings.forum_thread_id),
           version        = companion_listings.version + 1,
@@ -3413,7 +3419,7 @@ export class MemoryStore {
       const listing = this.rowToListing(rows[0]);
       await sql`
         INSERT INTO companion_persona_versions (listing_id, version, persona_json)
-        VALUES (${listing.id}, ${listing.version}, ${sql.json({ ...persona, openings: listing.openings })})
+        VALUES (${listing.id}, ${listing.version}, ${sql.json({ ...persona, openings: listing.openings, lorebook: listing.lorebook })})
         ON CONFLICT (listing_id, version) DO NOTHING
       `;
       return { ok: true as const, listing };
@@ -3427,7 +3433,7 @@ export class MemoryStore {
    *  `maxListings` is given the cap check runs atomically in the same tx. */
   async createListing(
     creatorUserId: string,
-    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null; openings?: SceneOpening[] },
+    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null; openings?: SceneOpening[]; lorebook?: LoreEntry[] },
     opts: { maxListings?: number; maxDailyPublish?: number; status?: "active" | "unlisted"; personaSource?: string; importMeta?: Record<string, unknown> | null } = {},
   ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "cap" | "daily_cap" }> {
     spec = { ...spec, name: sanitizeStoredName(spec.name, 64) || "Companion" };
@@ -3451,11 +3457,11 @@ export class MemoryStore {
         }
       }
       const rows = await sql<Array<any>>`
-        INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, openings, avatar_url, version, status, persona_source, import_meta, published_at, created_at, updated_at)
+        INSERT INTO companion_listings (creator_user_id, source_companion_id, name, tagline, voice_persona, core_traits, owner_dynamic, backstory, greeting, openings, lorebook, avatar_url, version, status, persona_source, import_meta, published_at, created_at, updated_at)
         VALUES (
           ${creatorUserId}, NULL,
           ${spec.name}, ${spec.tagline}, ${spec.voicePersona}, ${spec.coreTraits},
-          ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${sql.json(normalizeSceneOpenings(spec.openings ?? []) as never)}, ${spec.avatarUrl},
+          ${spec.ownerDynamic}, ${spec.backstory}, ${spec.greeting}, ${sql.json(normalizeSceneOpenings(spec.openings ?? []) as never)}, ${sql.json(normalizeLoreEntries(spec.lorebook ?? []) as never)}, ${spec.avatarUrl},
           1, ${status}, ${opts.personaSource ?? "authored"}, ${opts.importMeta ? sql.json(opts.importMeta as never) : null},
           CASE WHEN ${status} = 'active' THEN NOW() ELSE NULL END, NOW(), NOW()
         )
@@ -3468,7 +3474,7 @@ export class MemoryStore {
           name: spec.name, tagline: spec.tagline, voicePersona: spec.voicePersona,
           coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
           backstory: spec.backstory, greeting: spec.greeting, avatarUrl: spec.avatarUrl,
-          openings: listing.openings,
+          openings: listing.openings, lorebook: listing.lorebook,
         })})
         ON CONFLICT (listing_id, version) DO NOTHING
       `;
@@ -3550,18 +3556,21 @@ export class MemoryStore {
   async updateListing(
     listingId: number,
     creatorUserId: string,
-    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null; openings?: SceneOpening[] },
+    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null; openings?: SceneOpening[]; lorebook?: LoreEntry[] },
   ): Promise<CompanionListing | null> {
     spec = { ...spec, name: sanitizeStoredName(spec.name, 64) || "Companion" };
-    // undefined preserves openings — persona-only edit paths (edit modal,
-    // cover setter) never mention them and can't wipe scenes by omission.
+    // undefined preserves openings/lorebook — persona-only edit paths (edit
+    // modal, cover setter) never mention them and can't wipe scenes or lore
+    // by omission.
     const openingsVal = spec.openings === undefined ? null : this.sql.json(normalizeSceneOpenings(spec.openings) as never);
+    const lorebookVal = spec.lorebook === undefined ? null : this.sql.json(normalizeLoreEntries(spec.lorebook) as never);
     const rows = await this.sql<Array<any>>`
       UPDATE companion_listings SET
         name = ${spec.name}, tagline = ${spec.tagline}, voice_persona = ${spec.voicePersona},
         core_traits = ${spec.coreTraits}, owner_dynamic = ${spec.ownerDynamic},
         backstory = ${spec.backstory}, greeting = ${spec.greeting}, avatar_url = ${spec.avatarUrl},
         openings = COALESCE(${openingsVal}::jsonb, openings),
+        lorebook = COALESCE(${lorebookVal}::jsonb, lorebook),
         version = version + 1, updated_at = NOW()
       WHERE id = ${listingId} AND creator_user_id = ${creatorUserId}
       RETURNING *
@@ -3574,7 +3583,7 @@ export class MemoryStore {
         name: spec.name, tagline: spec.tagline, voicePersona: spec.voicePersona,
         coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
         backstory: spec.backstory, greeting: spec.greeting, avatarUrl: spec.avatarUrl,
-        openings: listing.openings,
+        openings: listing.openings, lorebook: listing.lorebook,
       })})
       ON CONFLICT (listing_id, version) DO NOTHING
     `;
@@ -3685,12 +3694,13 @@ export class MemoryStore {
   async publishListing(
     listingId: number,
     creatorUserId: string,
-    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null; openings?: SceneOpening[] },
+    spec: { name: string; tagline: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; greeting: string; avatarUrl: string | null; openings?: SceneOpening[]; lorebook?: LoreEntry[] },
     maxListings: number,
     maxDailyPublish?: number,
   ): Promise<{ ok: true; listing: CompanionListing } | { ok: false; reason: "not_found" | "not_unlisted" | "cap" | "moderated" | "daily_cap" }> {
     spec = { ...spec, name: sanitizeStoredName(spec.name, 64) || "Companion" };
     const openingsVal = spec.openings === undefined ? null : this.sql.json(normalizeSceneOpenings(spec.openings) as never);
+    const lorebookVal = spec.lorebook === undefined ? null : this.sql.json(normalizeLoreEntries(spec.lorebook) as never);
     const res = (await this.sql.begin(async sql => {
       await sql`SELECT pg_advisory_xact_lock(hashtext(${`listing:${creatorUserId}`}))`;
       const rows = await sql<Array<any>>`
@@ -3736,6 +3746,7 @@ export class MemoryStore {
           owner_dynamic = ${spec.ownerDynamic}, backstory = ${spec.backstory},
           greeting = ${spec.greeting}, avatar_url = ${spec.avatarUrl},
           openings = COALESCE(${openingsVal}::jsonb, openings),
+          lorebook = COALESCE(${lorebookVal}::jsonb, lorebook),
           version = ${newVersion}, status = 'active', published_at = NOW(), updated_at = NOW()
         WHERE id = ${listingId}
         RETURNING *
@@ -3747,6 +3758,7 @@ export class MemoryStore {
           coreTraits: spec.coreTraits, ownerDynamic: spec.ownerDynamic,
           backstory: spec.backstory, greeting: spec.greeting, avatarUrl: spec.avatarUrl,
           openings: sceneOpeningsFromDb(updated[0].openings),
+          lorebook: normalizeLoreEntries(updated[0].lorebook),
         })})
         ON CONFLICT (listing_id, version) DO NOTHING
       `;

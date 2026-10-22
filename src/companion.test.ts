@@ -198,6 +198,56 @@ test("Brain.reply injects CompanionPersona, Vault Rule for ownerSubtext in serve
   assert.match(lastInput, /The Pizza Debate/);
 });
 
+test("Brain.reply injects World lore as labeled creator-authored canon — and bounds it", async () => {
+  let situation = "";
+  const fakeClient: LlmClient = {
+    responses: { create: async () => ({ output_text: "{}" }) },
+    chat: {
+      completions: {
+        create: async (params: any) => {
+          situation = params.messages.map((m: any) => m.content).join("\n");
+          return { choices: [{ message: { content: JSON.stringify({ text: "Indeed.", end_conversation: false }) } }] };
+        },
+      },
+    },
+  };
+  const brain = new Brain("test-key", "test-model", undefined, fakeClient);
+  const room = (lore?: string[]) => ({
+    guildName: "Direct Message", ownerName: "Alice", botName: "Wren", isDm: true,
+    companion: {
+      companionId: 2, name: "Wren", ownerUserId: "u-alice", ownerName: "Alice",
+      voicePersona: "soft", coreTraits: [], ownerDynamic: "d", backstory: "",
+      lore,
+    },
+  });
+
+  await brain.reply(
+    msg("tell me about the spire", { guildId: "dm:u-alice", authorId: "u-alice", authorName: "Alice" }),
+    [], [], [], [], undefined, false, "companion:2", room(["The Spire's laws bind every citizen.", "Wardens remember faces."]),
+  );
+  assert.match(situation, /World lore — the setting you're in/);
+  assert.match(situation, /creator-authored canon/);
+  assert.match(situation, /The Spire's laws bind every citizen/);
+  assert.match(situation, /Wardens remember faces/);
+
+  // No lore on the persona → no canon block at all (awakened companions land here).
+  situation = "";
+  await brain.reply(
+    msg("hello", { guildId: "dm:u-alice", authorId: "u-alice", authorName: "Alice" }),
+    [], [], [], [], undefined, false, "companion:2", room(undefined),
+  );
+  assert.doesNotMatch(situation, /World lore/);
+
+  // sanitizeBlock bounds each entry — over-long canon can't flood the prompt.
+  situation = "";
+  await brain.reply(
+    msg("lore?", { guildId: "dm:u-alice", authorId: "u-alice", authorName: "Alice" }),
+    [], [], [], [], undefined, false, "companion:2", room(["x".repeat(5000)]),
+  );
+  const loreLine = situation.split("\n").find(l => l.includes("xxxx"))!;
+  assert.ok(loreLine.length < 1500, "each entry sanitizes to the block cap");
+});
+
 test("createBrainResolver resolves dm:<userId> scopes using operator envKey even when requireGuildKeys=true", async () => {
   const meteredScopes: string[] = [];
   const resolver = createBrainResolver({

@@ -6,7 +6,9 @@
 interface Props {
   id: string;
   name: string;
-  sub?: string[];
+  /** Fact line under the name — plain strings, or an element when a fact
+   *  needs a link (the creator byline on public-creator listings). */
+  sub?: unknown[];
   tabs: string[];
   initial?: number;
   example?: boolean;

@@ -1,0 +1,94 @@
+---
+// /creators/<slug>: one indexable page per opted-in public creator — their
+// live characters plus a rating/adoption rollup. Miss (absent, private,
+// banned) is a real 404; an upstream failure is a 503, never a false absence.
+import Base from "../../layouts/Base.astro";
+import ShelfCard from "../../components/ShelfCard.astro";
+import { SITE_ORIGIN, LINKS } from "../../lib/config";
+import { getCreatorPage, SHELF_CACHE, initial } from "../../lib/shelf";
+
+export const prerender = false;
+
+const slug = (Astro.params.slug ?? "").trim().toLowerCase();
+const res = await getCreatorPage(slug);
+if (res.kind !== "hit") {
+  return Astro.rewrite(res.kind === "error" ? "/unavailable" : "/creators/not-found");
+}
+Astro.response.headers.set("cache-control", SHELF_CACHE);
+
+const { creator: c, listings, ratings, stats } = res.data;
+const canonical = `${SITE_ORIGIN}/creators/${c.slug}`;
+const ratingBit = stats.avgRating != null ? ` rated ${stats.avgRating.toFixed(1)} across ${stats.ratingCount} ${stats.ratingCount === 1 ? "rating" : "ratings"},` : "";
+const description = `${c.name} makes AI characters for Discord on Characterly — ${stats.characters} on the shelf,${ratingBit} ${stats.adoptions.toLocaleString("en-US")} ${stats.adoptions === 1 ? "adoption" : "adoptions"}.`;
+const profilePage = {
+  "@context": "https://schema.org", "@type": "ProfilePage",
+  mainEntity: {
+    "@type": "Person", name: c.name, url: canonical,
+    ...(c.bio ? { description: c.bio.slice(0, 200) } : {}),
+    ...(c.avatarUrl ? { image: c.avatarUrl } : {}),
+  },
+};
+const crumbs = {
+  "@context": "https://schema.org", "@type": "BreadcrumbList",
+  itemListElement: [
+    { "@type": "ListItem", position: 1, name: "Home", item: `${SITE_ORIGIN}/` },
+    { "@type": "ListItem", position: 2, name: "The shelf", item: `${SITE_ORIGIN}/characters` },
+    { "@type": "ListItem", position: 3, name: c.name },
+  ],
+};
+const statParts = [
+  `${stats.characters} ${stats.characters === 1 ? "character" : "characters"}`,
+  `${stats.adoptions.toLocaleString("en-US")} ${stats.adoptions === 1 ? "adoption" : "adoptions"}`,
+  ...(stats.avgRating != null ? [`★ ${stats.avgRating.toFixed(1)} across ${stats.ratingCount} ${stats.ratingCount === 1 ? "rating" : "ratings"}`] : []),
+];
+const bioParas = c.bio.split(/\n+/).map(t => t.trim()).filter(Boolean);
+---
+<Base title={`${c.name} · Characterly creator`} description={description} path={`/creators/${c.slug}`} ogType="profile" ogImage={c.avatarUrl} jsonLd={[profilePage, crumbs]} current="/characters">
+  <div class="wrap">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="/">Home</a><span aria-hidden="true">/</span><a href="/characters">The shelf</a><span aria-hidden="true">/</span><span aria-current="page">{c.name}</span></nav>
+  </div>
+  <section class="wrap creator-top">
+    <span class="creator-av">
+      {c.avatarUrl
+        ? <img src={c.avatarUrl} alt="" width="96" height="96" />
+        : <span class="creator-ph" aria-hidden="true">{initial(c.name)}</span>}
+    </span>
+    <div class="creator-head">
+      <h1>{c.name}</h1>
+      <p class="muted creator-stats">{statParts.join(" · ")}</p>
+      {bioParas.map(p => <p class="creator-bio">{p}</p>)}
+    </div>
+  </section>
+
+  <section class="wrap" aria-label={`${c.name}'s characters`}>
+    {listings.length > 0 ? (
+      <ul class="collection">
+        {listings.map(l => <ShelfCard l={l} r={ratings.get(l.id)} />)}
+      </ul>
+    ) : (
+      <div class="empty">
+        <h2>Nothing live right now.</h2>
+        <p class="lede">This creator has no public characters at the moment — the shelf shifts as listings come and go.</p>
+        <p class="empty-actions"><a class="btn" href="/characters">Browse the shelf</a><a class="link" href={LINKS.discord} target="_blank" rel="noopener noreferrer">Visit the server</a></p>
+      </div>
+    )}
+  </section>
+</Base>
+
+<style>
+  .creator-top { display: flex; gap: 22px; align-items: flex-start; padding-top: 40px; padding-bottom: 36px; }
+  .creator-av { width: 96px; height: 96px; border-radius: 50%; overflow: hidden; flex: none; background: var(--field-deep); display: grid; place-items: center; }
+  .creator-av img { width: 100%; height: 100%; object-fit: cover; }
+  .creator-ph { font-variation-settings: var(--wide); font-weight: 850; font-size: 44px; color: var(--ink-3); }
+  .creator-head h1 { margin: 0 0 8px; }
+  .creator-stats { font-weight: 700; }
+  .creator-bio { max-width: 62ch; margin-top: 10px; }
+  .collection { list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 32px 20px; }
+  .empty { max-width: 640px; padding: 40px 0; }
+  .empty .lede { margin-top: 14px; }
+  .empty-actions { display: flex; align-items: center; gap: 10px 22px; margin-top: 22px; }
+  @media (max-width: 600px) {
+    .creator-top { padding-top: 28px; }
+    .collection { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 14px; }
+  }
+</style>

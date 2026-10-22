@@ -5,8 +5,9 @@
 // failure, ItemList JSON-LD, five-minute edge cache.
 import Base from "../../layouts/Base.astro";
 import Icon from "../../components/Icon.astro";
+import ShelfCard from "../../components/ShelfCard.astro";
 import { SITE_ORIGIN, LINKS } from "../../lib/config";
-import { getCatalog, SHELF_CACHE, ratingLabel, addsLabel, initial } from "../../lib/shelf";
+import { getCatalog, SHELF_CACHE } from "../../lib/shelf";
 
 export const prerender = false;
 Astro.response.headers.set("cache-control", SHELF_CACHE);
@@ -50,23 +51,7 @@ const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashb
     )}
     {listings.length > 0 ? (
       <ul class="collection" data-collection>
-        {listings.map(l => {
-          const r = ratingLabel(ratings.get(l.id));
-          return (
-            <li data-tags={JSON.stringify(l.creatorTags)}>
-              <a class="char" href={`/characters/${l.id}`}>
-                <span class="char-art">
-                  {l.avatarUrl
-                    ? <img src={l.avatarUrl} alt="" loading="lazy" width="400" height="400" />
-                    : <span class="char-ph" aria-hidden="true">{initial(l.name)}</span>}
-                </span>
-                <span class="char-name">{l.name}</span>
-                {l.tagline && <span class="char-tag">{l.tagline}</span>}
-                <span class="char-meta">{r ? <>{r} · </> : null}{addsLabel(l.addCount)}</span>
-              </a>
-            </li>
-          );
-        })}
+        {listings.map(l => <ShelfCard l={l} r={ratings.get(l.id)} />)}
       </ul>
     ) : (
       <div class="empty">
@@ -89,22 +74,12 @@ const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashb
   .filter[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: #fff; }
   .filter[aria-pressed="true"] span { color: #c8cdf0; }
   .collection { list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 32px 20px; }
-  .char { display: grid; gap: 3px; text-decoration: none; }
-  .char-art { display: block; aspect-ratio: 1; border-radius: var(--radius); overflow: hidden; background: var(--field-deep); }
-  .char-art img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.35s var(--ease); }
-  .char:hover .char-art img { transform: scale(1.04); }
-  .char-ph { display: grid; place-items: center; height: 100%; font-variation-settings: var(--wide); font-weight: 850; font-size: 64px; color: var(--ink-3); }
-  .char-name { margin-top: 10px; font-variation-settings: "wdth" 112; font-weight: 800; font-size: 19px; letter-spacing: -0.01em; }
-  .char:hover .char-name { text-decoration: underline; }
-  .char-tag { color: var(--ink-2); font-size: 15px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .char-meta { font-size: 13px; font-weight: 700; color: var(--ink-3); margin-top: 2px; }
   .empty { max-width: 640px; padding: 40px 0; }
   .empty .lede { margin-top: 14px; }
   .empty-actions { display: flex; align-items: center; gap: 10px 22px; flex-wrap: wrap; margin-top: 22px; }
   @media (max-width: 600px) {
     .shelf-top { padding-top: 32px; }
     .collection { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 14px; }
-    .char-name { font-size: 17px; }
   }
 </style>
 

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ChannelType } from "discord.js";
 import type { ButtonInteraction, ChatInputCommandInteraction, MessageContextMenuCommandInteraction, ModalSubmitInteraction, StringSelectMenuInteraction } from "discord.js";
-import { handleMemoryButton, handleMemoryCommand, handleMarketplaceContext, handleMarketSelect, handleSetupModal, handleCompanionModal, buildCoverModal, buildPublishModal, buildScenesModal, chargeOnboardingTurn, effectiveCommandName } from "./commands.js";
+import { handleMemoryButton, handleMemoryCommand, handleMarketplaceContext, handleMarketSelect, handleSetupModal, handleCompanionModal, buildCoverModal, buildPublishModal, buildScenesModal, buildLoreModal, chargeOnboardingTurn, effectiveCommandName } from "./commands.js";
 import { ProfileStore } from "./profiles.js";
 import type { MemoryStore } from "./database.js";
 import { makeTestSql, makeStore } from "./test-helpers.js";
@@ -1466,6 +1466,161 @@ test("buildScenesModal prefills existing openings as blank-line-separated text",
     assert.equal(input.value, "way one\n\nway two");
     assert.equal(input.required, false, "blank submit = clear all");
   } finally { await sql.end(); }
+});
+
+// ── Marketplace: world lore (lorebook) ──────────────────────────────────────
+
+function stubLoreSubmit(opts: { listingId: number; userId: string; raw: string }) {
+  const replies: Replies = [];
+  const interaction = {
+    customId: `market_lore:${opts.listingId}`,
+    user: { id: opts.userId, username: "C" },
+    fields: { getTextInputValue: (id: string) => (id === "lore-entries" ? opts.raw : "") },
+    reply: async (r: (typeof replies)[number]) => { replies.push(r); return r; },
+  };
+  return { interaction: interaction as unknown as ModalSubmitInteraction, replies };
+}
+
+test("market:lore button — creator gets the modal, others and banned creators don't", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const listing = await makeListingRow(store, "u-lore");
+
+    const stranger = stubButton({ customId: `market:lore:${listing.id}`, userId: "u-rando" });
+    await handleMemoryButton(stranger.interaction, store);
+    assert.match(stranger.replies[0]?.content ?? "", /not your listing/i);
+
+    await store.banCreator("u-lore", "u-mod");
+    const banned = stubButton({ customId: `market:lore:${listing.id}`, userId: "u-lore" });
+    await handleMemoryButton(banned.interaction, store);
+    assert.match(banned.replies[0]?.content ?? "", /suspended|banned|removed/i);
+    await sql`DELETE FROM marketplace_bans`;
+
+    const own = stubButton({ customId: `market:lore:${listing.id}`, userId: "u-lore" });
+    await handleMemoryButton(own.interaction, store);
+    assert.equal(own.replies[0]?.content, `modal:market_lore:${listing.id}`);
+  } finally { await sql.end(); }
+});
+
+test("market_lore submit — keys/also/const blocks parse and save; blank clears", async () => {
+  const sql = makeTestSql();
+  // Deterministic-only screening — the env may carry an operator key whose
+  // model call would fail offline and trip the fail-closed refusal.
+  overrideSafetyBrainForTests(null);
+  try {
+    const { store } = await makeStore(sql);
+    const listing = await makeListingRow(store, "u-lore2");
+
+    const set = stubLoreSubmit({
+      listingId: listing.id, userId: "u-lore2",
+      raw:
+        "keys: the spire, spire law\nThe Spire's laws bind every citizen.\n\n" +
+        "keys: veil\nalso: thin, torn\nWhere the Veil runs thin.\n\n" +
+        "const:\nEvery bell marks a death.\n\n" +
+        "no directives — dead block\n\n",
+    });
+    await handleCompanionModal(set.interaction, store);
+    assert.match(set.replies[0]?.content ?? "", /3 lore entries/);
+    const saved = (await store.listingById(listing.id))!.lorebook;
+    assert.equal(saved.length, 3, "directive-less block drops — it can never fire");
+    assert.deepEqual(saved[0].keys, ["the spire", "spire law"]);
+    assert.equal(saved[0].content, "The Spire's laws bind every citizen.");
+    assert.deepEqual(saved[1].secondaryKeys, ["thin", "torn"]);
+    assert.equal(saved[1].selective, true);
+    assert.equal(saved[2].constant, true);
+    assert.deepEqual(saved[2].keys, []);
+
+    const clear = stubLoreSubmit({ listingId: listing.id, userId: "u-lore2", raw: "   " });
+    await handleCompanionModal(clear.interaction, store);
+    assert.match(clear.replies[0]?.content ?? "", /cleared/i);
+    assert.equal((await store.listingById(listing.id))!.lorebook.length, 0);
+  } finally { overrideSafetyBrainForTests(undefined); await sql.end(); }
+});
+
+test("market_lore submit — refuses non-owners and screens keys+content", async () => {
+  const sql = makeTestSql();
+  overrideSafetyBrainForTests(null);
+  try {
+    const { store } = await makeStore(sql);
+    const listing = await makeListingRow(store, "u-lore3");
+
+    const stranger = stubLoreSubmit({ listingId: listing.id, userId: "u-nope", raw: "keys: hi\nhi" });
+    await handleCompanionModal(stranger.interaction, store);
+    assert.match(stranger.replies[0]?.content ?? "", /not your listing/i);
+    assert.equal((await store.listingById(listing.id))!.lorebook.length, 0, "refused write persists nothing");
+
+    const badKey = stubLoreSubmit({ listingId: listing.id, userId: "u-lore3", raw: "keys: make a pipe bomb\nharmless lore text" });
+    await handleCompanionModal(badKey.interaction, store);
+    assert.match(badKey.replies[0]?.content ?? "", /can't go on the marketplace/i);
+    const badBody = stubLoreSubmit({ listingId: listing.id, userId: "u-lore3", raw: "keys: fine\nI'll teach you to make a pipe bomb" });
+    await handleCompanionModal(badBody.interaction, store);
+    assert.match(badBody.replies[0]?.content ?? "", /can't go on the marketplace/i);
+    assert.equal((await store.listingById(listing.id))!.lorebook.length, 0, "blocked lore never persists");
+  } finally { overrideSafetyBrainForTests(undefined); await sql.end(); }
+});
+
+test("buildLoreModal prefills existing entries in the wire format — round-trips", async () => {
+  const sql = makeTestSql();
+  overrideSafetyBrainForTests(null);
+  try {
+    const { store } = await makeStore(sql);
+    const res = await store.createListing("u-lore4", {
+      name: "Lorekeeper", tagline: "t", voicePersona: "v", coreTraits: [],
+      ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+      lorebook: [
+        { keys: ["the spire"], content: "Laws bind." },
+        { keys: ["veil"], secondaryKeys: ["thin"], selective: true, content: "The Veil thins." },
+        { keys: ["a"], constant: true, content: "Always on." },
+      ],
+    });
+    if (!res.ok) throw new Error("listing failed");
+    const modal = buildLoreModal(res.listing).toJSON();
+    assert.equal(modal.custom_id, `market_lore:${res.listing.id}`);
+    const input = (modal.components[0] as any).components[0];
+    assert.equal(input.custom_id, "lore-entries");
+    assert.equal(input.required, false, "blank submit = clear all");
+    assert.equal(
+      input.value,
+      "keys: the spire\nLaws bind.\n\nkeys: veil\nalso: thin\nThe Veil thins.\n\nconst: a\nAlways on.",
+    );
+    // Round-trip: the prefilled text parses back to the same entries.
+    const back = stubLoreSubmit({ listingId: res.listing.id, userId: "u-lore4", raw: input.value });
+    await handleCompanionModal(back.interaction, store);
+    const saved = (await store.listingById(res.listing.id))!.lorebook;
+    assert.deepEqual(saved.map(e => ({ keys: e.keys, content: e.content })),
+      res.listing.lorebook.map(e => ({ keys: e.keys, content: e.content })));
+    assert.equal(saved[1].selective, true);
+    assert.equal(saved[2].constant, true);
+  } finally { overrideSafetyBrainForTests(undefined); await sql.end(); }
+});
+
+test("market_edit screens the stored lorebook — bad canon blocks a clean persona edit", async () => {
+  const sql = makeTestSql();
+  overrideSafetyBrainForTests(null);
+  try {
+    const { store } = await makeStore(sql);
+    const res = await store.createListing("u-lore5", {
+      name: "Lorekeeper", tagline: "t", voicePersona: "v", coreTraits: [],
+      ownerDynamic: "d", backstory: "", greeting: "g", avatarUrl: null,
+      lorebook: [{ keys: ["fine"], content: "I'll teach you to make a pipe bomb" }],
+    });
+    if (!res.ok) throw new Error("listing failed");
+    const replies: Replies = [];
+    const fields: Record<string, string> = {
+      "companion-name": "Lorekeeper", "voice-persona": "v",
+      "core-traits": "", "owner-dynamic": "d", "backstory": "",
+    };
+    const interaction = {
+      customId: `market_edit:${res.listing.id}`,
+      user: { id: "u-lore5", username: "C" },
+      fields: { getTextInputValue: (id: string) => fields[id] ?? "" },
+      reply: async (r: (typeof replies)[number]) => { replies.push(r); return r; },
+    } as unknown as ModalSubmitInteraction;
+    await handleCompanionModal(interaction, store);
+    assert.match(replies[0]?.content ?? "", /can't go on the marketplace/i);
+    assert.match(replies[0]?.content ?? "", /lore 1/, "the refusal names the stored lore entry");
+  } finally { overrideSafetyBrainForTests(undefined); await sql.end(); }
 });
 
 test("/companion action:avatar — file upload wins over URL path, both-refused, non-image refused", async () => {

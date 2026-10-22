@@ -5,6 +5,8 @@
  *  flat v1 cards, and common exporter key aliases (CAI Tools etc.). */
 
 import { LISTING_MAX_OPENINGS, LISTING_OPENING_MAX_CHARS } from "./types.js";
+import type { LoreEntry } from "./types.js";
+import { normalizeLoreEntries } from "./lorebook.js";
 
 export const CARD_MAX_BYTES = 8 * 1024 * 1024;
 const JSON_MAX_BYTES = 256 * 1024;
@@ -17,6 +19,7 @@ export interface ParsedCard {
   firstMes: string;
   mesExample: string;
   alternateGreetings: string[];
+  lorebook: LoreEntry[];
   tags: string[];
   creator: string;
   creatorNotes: string;
@@ -36,6 +39,9 @@ export interface ImportPersona {
   /** Card `alternate_greetings`, kept as pickable openings on the listing —
    *  the primary greeting above stays the default. */
   openings: { text: string }[];
+  /** Card `character_book` entries — the listing's authored world canon,
+   *  keyword-triggered into replies at turn time. */
+  lore: LoreEntry[];
 }
 
 export interface CardImportMeta {
@@ -134,6 +140,51 @@ const firstField = (o: Record<string, unknown>, keys: string[]): string => {
   return "";
 };
 
+/** Raw card `character_book`/`embedded_lorebook` → normalized LoreEntry[]. The
+ *  spec wraps entries in `book.entries` (array; some exporters emit an
+ *  id-keyed object — world_info style). Field names follow chara_card_v2/v3;
+ *  `insertion_order`/`priority` collapse into `order`, `extensions.
+ *  match_whole_words` surfaces as `wholeWords`. Position/depth/probability/
+ *  scan/budget semantics are intentionally dropped — see lorebook.ts. */
+function cardLorebook(raw: unknown): LoreEntry[] {
+  const book = raw && typeof raw === "object" && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : null;
+  const entries = book?.entries;
+  const list = Array.isArray(entries)
+    ? entries
+    : entries && typeof entries === "object"
+      ? Object.values(entries)
+      : [];
+  const asList = (v: unknown): unknown[] => (Array.isArray(v) ? v : v != null ? [v] : []);
+  const out: LoreEntry[] = [];
+  for (const item of list) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const e = item as Record<string, unknown>;
+    const content = str(e.content);
+    if (!content) continue;
+    const keys = strArr(asList(e.keys)).map(k => k.slice(0, 64));
+    const secondaryKeys = strArr(asList(e.secondary_keys)).map(k => k.slice(0, 64));
+    const constant = e.constant === true;
+    if (!constant && !keys.length) continue;
+    const entry: LoreEntry = { keys, content };
+    if (constant) entry.constant = true;
+    if (secondaryKeys.length) entry.secondaryKeys = secondaryKeys;
+    if (e.selective === true && secondaryKeys.length) entry.selective = true;
+    if (e.case_sensitive === true) entry.caseSensitive = true;
+    if (e.enabled === false) entry.enabled = false;
+    const order = e.insertion_order ?? e.order ?? e.priority;
+    if (typeof order === "number" && Number.isFinite(order)) entry.order = order;
+    const comment = str(e.comment) || str(e.name);
+    if (comment) entry.comment = comment.slice(0, 120);
+    const ext = e.extensions && typeof e.extensions === "object" && !Array.isArray(e.extensions)
+      ? e.extensions as Record<string, unknown> : null;
+    if (ext?.match_whole_words === true) entry.wholeWords = true;
+    out.push(entry);
+  }
+  return out;
+}
+
 function normalizeCard(raw: unknown): ParsedCard | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const outer = raw as Record<string, unknown>;
@@ -150,6 +201,7 @@ function normalizeCard(raw: unknown): ParsedCard | null {
     firstMes: firstField(merged, ["first_mes", "greeting", "first_message", "firstMessage"]),
     mesExample: firstField(merged, ["mes_example", "example_dialogue", "example_messages"]),
     alternateGreetings: strArr(merged.alternate_greetings ?? merged.alt_greetings),
+    lorebook: cardLorebook(merged.character_book ?? merged.embedded_lorebook),
     tags: strArr(merged.tags).slice(0, 20),
     creator: firstField(merged, ["creator", "author", "creator_name"]),
     creatorNotes: firstField(merged, ["creator_notes", "comment", "creator_comment"]),
@@ -249,6 +301,18 @@ export function cardToPersona(card: ParsedCard): ImportPersona {
     .slice(0, LISTING_MAX_OPENINGS)
     .map(text => ({ text }));
 
+  // World-book entries keep their flags; {{char}}/{{user}} fill applies to
+  // keys and content alike — a key "{{char}}'s mother" should still trigger.
+  // normalizeLoreEntries enforces the storage caps so import, the modal
+  // editor and the DB write path all agree.
+  const lore = normalizeLoreEntries(card.lorebook.map(e => ({
+    ...e,
+    keys: e.keys.map(k => fill(k)),
+    secondaryKeys: e.secondaryKeys?.map(k => fill(k)),
+    content: fill(e.content),
+    comment: e.comment ? fill(e.comment) : undefined,
+  })));
+
   return {
     name,
     tagline: firstSentence(description || personality, 200) || "Imported character",
@@ -258,6 +322,7 @@ export function cardToPersona(card: ParsedCard): ImportPersona {
     backstory: cut(backstory, 4000),
     greeting,
     openings,
+    lore,
   };
 }
 

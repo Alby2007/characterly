@@ -12,11 +12,12 @@ plates, and the worker-only API lanes.
 | Route | File | Mode |
 |-------|------|------|
 | `/` | `src/pages/index.astro` | SSR — live shelf strip |
-| `/characters`, `/characters/[id]` | `src/pages/characters/*` | SSR — catalog + per-listing pages (tabs incl. *First hello* and, when the listing has alternate openings, *More ways to meet*) |
+| `/characters`, `/characters/[id]` | `src/pages/characters/*` | SSR — catalog + per-listing pages (tabs incl. *First hello* and, when the listing has alternate openings, *More ways to meet*; a `loreCount` stat shows "World lore · N entries" — count only, keys/content stay hidden). The byline links to the creator page when the creator has opted into one, otherwise it stays "a community creator" |
+| `/creators/[slug]` | `src/pages/creators/*` | SSR — opt-in public creator pages: brand name, bio, live characters + a rating/adoption rollup. Absent/private/banned → real 404; upstream failure → 503, never a false absence |
 | `/terms` `/privacy` `/security` `/safety` | `src/pages/[doc].astro` | prerendered at build time from the repo-root `*.md` files via `src/lib/legal.ts` |
 | `/guides/...` | `src/pages/guides/*` | prerendered |
-| `/account`, `/dashboard`, `/404` | matching `.astro` + `src/scripts/*.ts` | prerendered shells — all auth/data work is client-side supabase-js |
-| `/sitemap.xml` | `src/pages/sitemap.xml.ts` | generated from `sitemapXml` in the bot's `src/site-shelf.ts` |
+| `/account`, `/dashboard`, `/404` | matching `.astro` + `src/scripts/*.ts` | prerendered shells — all auth/data work is client-side supabase-js (creator-page saves ride `POST /creator-profile`, see below) |
+| `/sitemap.xml` | `src/pages/sitemap.xml.ts` | generated from `sitemapXml` in the bot's `src/site-shelf.ts` — static paths, live listings, and public creator slugs (banned creators excluded) |
 
 Shared code is imported cross-tree, never duplicated: `web/src/lib/shelf.ts`
 pulls the catalog/cache/label helpers from the bot's `src/site-shelf.ts`
@@ -30,8 +31,40 @@ HTML, `POST /track` → Analytics Engine `web_event` (allowlist:
 `signup_start`, `signup_done`, `checkout_click`, `link_attempt`,
 `discord_signin_click`) plus `page_view` beacons, `POST /discord/events`
 → `record_app_install`, `PUT /avatar` / `POST /avatar/gc` (shared-secret
-`AVATAR_UPLOAD_SECRET`), and `OPTIONS` for the API lanes. Everything else
+`AVATAR_UPLOAD_SECRET`), `POST /creator-profile` (the screened save lane —
+see *Creator pages* below), and `OPTIONS` for the API lanes. Everything else
 falls through to Astro.
+
+## Creator pages (`/creators/<slug>`, v70)
+
+Opt-in public profiles for marketplace creators — **off by default**: a
+creator's Discord identity stays Discord-side unless they claim a page in
+dashboard → *Creator page*. The profile is a separate public brand
+(`creator_name`), not the dashboard `display_name` and never the Discord
+username.
+
+- **Write path:** the dashboard form POSTs `/creator-profile` (implemented in
+  `src/creator-profile.ts` — bot-src so the suite covers it). The creator
+  columns carry **no authenticated UPDATE grant**, so this endpoint is the
+  sole write path — a direct client PATCH is denied at the grant level.
+  Pipeline: user-JWT verify → linked `discord_user_id` → not
+  marketplace-banned → field validation → deterministic blocklist on every
+  save → the shared `buildSafetyVerdictPrompt` model screen when (and only
+  when) the save makes the page public → service-role PATCH. Provider
+  failure fails closed (503, nothing written).
+- **Read path:** `fetchCreatorBySlug` filters `creator_public=eq.true` +
+  non-null slug at the PostgREST boundary and joins `marketplace_bans`
+  server-side — banned creators' pages are a real 404, exactly like absent
+  or private ones. `discord_user_id` is the internal join key to listings;
+  it resolves the page but is never rendered into markup or JSON-LD.
+- **Surfaces:** `/characters/[id]` swaps its byline for a `by <name>` link
+  only when the creator is public (banned/private → anonymous);
+  `/sitemap.xml` includes public creator slugs, banning excluded. A public
+  creator with zero live listings still renders (the page is about the
+  person), with an empty-state card.
+- **The slug:** `/creators/<slug>` — `^[a-z0-9][a-z0-9-]{2,31}$`, plus a
+  reserved list (`admin`, `staff`, `characterly`, `support`, …) enforced in
+  the v70 CHECK constraint, not just client-side.
 
 The design system ("The Character Archive") is captured in `DESIGN.md` at
 the repo root.
@@ -122,9 +155,11 @@ email — `discord_signin_click` is the matching `web_event` beacon.
 - Deploy: `cd web && npm run deploy` (`astro build` + `wrangler deploy`).
   `CLOUDFLARE_ENV=preview npm run deploy` ships `characterly-website-preview`.
 - Worker secrets: `DISCORD_APP_PUBLIC_KEY`, `SUPABASE_URL`,
-  `SUPABASE_SERVICE_ROLE_KEY`, `AVATAR_UPLOAD_SECRET` — set via
-  `wrangler secret put` or the dashboard; the publishable anon key lives in
-  `src/lib/config.ts` (safe — RLS enforces).
+  `SUPABASE_SERVICE_ROLE_KEY`, `AVATAR_UPLOAD_SECRET`, and `GROQ_API_KEY`
+  (the `/creator-profile` model screen — unset means deterministic-only,
+  same semantics as the bot's missing key; `GROQ_BASE_URL`/`SAFETY_MODEL`
+  optional overrides) — set via `wrangler secret put` or the dashboard; the
+  publishable anon key lives in `src/lib/config.ts` (safe — RLS enforces).
 - Local dev: `cd web && npm run dev` → `http://localhost:4321` (Astro dev —
   CSP/worker rules don't run; `npm run preview` builds and serves under
   `wrangler dev` with real headers). `npm test` covers the worker rules and

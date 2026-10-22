@@ -4,6 +4,7 @@ import {
   esc, sitemapXml, listingIndexPage, listingPage, notFoundPage,
   fetchActiveListings, fetchListing, lookupListing, fetchListingRating, fetchRatingStats,
   relatedListings,
+  fetchCreatorBySlug, fetchPublicCreator, fetchCreatorListings, fetchPublicCreators, creatorStats,
   SITE_ORIGIN, type ShelfListing,
 } from "./site-shelf.js";
 
@@ -17,7 +18,7 @@ import {
 const listing = (over: Partial<ShelfListing> = {}): ShelfListing => ({
   id: 7, name: "Wren", tagline: "A quiet archivist", voicePersona: "speaks softly",
   coreTraits: ["patient"], creatorTags: ["original"], backstory: "keeps the stacks",
-  greeting: "shh, welcome.", openings: [], avatarUrl: null, addCount: 12, updatedAt: "2026-04-02T10:00:00Z",
+  greeting: "shh, welcome.", openings: [], loreCount: 0, avatarUrl: null, addCount: 12, updatedAt: "2026-04-02T10:00:00Z",
   ...over,
 });
 
@@ -227,6 +228,35 @@ test("fetchListing maps openings from both the object and legacy string shapes",
   assert.ok(seenUrl.includes("openings"), "the column is in the PostgREST select");
 });
 
+test("fetchListing maps lorebook to a live-entry count — enabled:false stays shelved", async () => {
+  let seenUrl = "";
+  await withFetch(
+    async (input) => {
+      seenUrl = String(input);
+      return new Response(JSON.stringify([{
+        id: 10, name: "N",
+        lorebook: [
+          { keys: ["a"], content: "one" },
+          { keys: ["b"], content: "two", enabled: false },
+          "a stray string shape still counts",
+        ],
+      }]));
+    },
+    async () => {
+      const l = await fetchListing(ENV, 10);
+      assert.equal(l?.loreCount, 2, "enabled:false entries don't count; other shapes do");
+    },
+  );
+  assert.ok(seenUrl.includes("lorebook"), "the column is in the PostgREST select");
+});
+
+test("listing page shows the world-lore count — never the content or keys", () => {
+  const html = listingPage(listing({ loreCount: 3 }), { avg: 0, count: 0 });
+  assert.ok(html.includes("world lore · 3 entries"));
+  const bare = listingPage(listing(), { avg: 0, count: 0 });
+  assert.ok(!bare.includes("world lore"), "no lore → no stat line");
+});
+
 test("listing page renders 'More ways to meet' with every opening escaped", () => {
   const html = listingPage(listing({
     openings: ["*the door opens* <img src=x onerror='pwn'>", "a second <b>way</b>"],
@@ -338,4 +368,176 @@ test("fetchListingRating maps the view row; no row or null avg → unrated", asy
       async () => { assert.deepEqual(await fetchListingRating(ENV, 7), { avg: 0, count: 0 }); },
     );
   }
+});
+
+// ── Creator profiles — opt-in public identity, banned creators 404 ──────────
+
+const PUBLIC_CREATOR_ROW = {
+  creator_slug: "night-forge", creator_name: "NightForge", creator_bio: "dark fantasy",
+  discord_user_id: "d1", discord_avatar_url: null,
+};
+
+/** Routed fetch stub for the two-table creator lookups. */
+const routedFetch = (routes: {
+  profiles?: (url: string) => Response | Promise<Response>;
+  bans?: (url: string) => Response | Promise<Response>;
+  listings?: (url: string) => Response | Promise<Response>;
+}, seen: string[] = []) =>
+  async (input: string | URL | Request) => {
+    const url = String((input as Request).url ?? input);
+    seen.push(url);
+    if (url.includes("marketplace_bans")) return routes.bans?.(url) ?? new Response("[]");
+    if (url.includes("companion_listings")) return routes.listings?.(url) ?? new Response("[]");
+    if (url.includes("web_profiles")) return routes.profiles?.(url) ?? new Response("[]");
+    return new Response("unrouted " + url, { status: 500 });
+  };
+
+test("fetchCreatorBySlug filters creator_public at the boundary and joins bans", async () => {
+  const seen: string[] = [];
+  await withFetch(routedFetch({ profiles: () => new Response(JSON.stringify([PUBLIC_CREATOR_ROW])) }, seen), async () => {
+    const r = await fetchCreatorBySlug(ENV, "night-forge");
+    assert.equal(r.kind, "hit");
+    if (r.kind === "hit") {
+      assert.equal(r.creator.slug, "night-forge");
+      assert.equal(r.creator.name, "NightForge");
+      assert.equal(r.creator.creatorUserId, "d1", "join key resolved server-side");
+    }
+  });
+  assert.ok(seen[0].includes("creator_public=eq.true"), seen[0]);
+  assert.ok(seen[0].includes("creator_slug=eq.night-forge"), seen[0]);
+  assert.ok(seen.some(u => u.includes("marketplace_bans") && u.includes("discord_user_id=eq.d1")), "ban check ran");
+});
+
+test("fetchCreatorBySlug — absent, private, unlinked and banned are all 'miss'", async () => {
+  // absent / private: the public filter returns no row
+  await withFetch(routedFetch({}), async () => {
+    assert.equal((await fetchCreatorBySlug(ENV, "nobody")).kind, "miss");
+  });
+  // unlinked: row exists but carries no discord id
+  await withFetch(routedFetch({
+    profiles: () => new Response(JSON.stringify([{ ...PUBLIC_CREATOR_ROW, discord_user_id: null }])),
+  }), async () => {
+    assert.equal((await fetchCreatorBySlug(ENV, "night-forge")).kind, "miss");
+  });
+  // banned: the page is suppressed entirely
+  await withFetch(routedFetch({
+    profiles: () => new Response(JSON.stringify([PUBLIC_CREATOR_ROW])),
+    bans: () => new Response(JSON.stringify([{ discord_user_id: "d1" }])),
+  }), async () => {
+    assert.equal((await fetchCreatorBySlug(ENV, "night-forge")).kind, "miss");
+  });
+});
+
+test("fetchCreatorBySlug — upstream failures are 'error', never 'miss'", async () => {
+  await withFetch(routedFetch({ profiles: () => new Response("boom", { status: 500 }) }), async () => {
+    assert.equal((await fetchCreatorBySlug(ENV, "x")).kind, "error");
+  });
+  await withFetch(routedFetch({
+    profiles: () => new Response(JSON.stringify([PUBLIC_CREATOR_ROW])),
+    bans: () => new Response("boom", { status: 500 }),
+  }), async () => {
+    assert.equal((await fetchCreatorBySlug(ENV, "x")).kind, "error", "a broken ban check must not render the page");
+  });
+  await withFetch(routedFetch({ profiles: () => new Response("not json") }), async () => {
+    assert.equal((await fetchCreatorBySlug(ENV, "x")).kind, "error");
+  });
+  assert.equal((await fetchCreatorBySlug({}, "x")).kind, "error");
+});
+
+test("fetchCreatorBySlug falls back to the slug when name is blank; bio is capped", async () => {
+  await withFetch(routedFetch({
+    profiles: () => new Response(JSON.stringify([{ ...PUBLIC_CREATOR_ROW, creator_name: "  ", creator_bio: "x".repeat(600) }])),
+  }), async () => {
+    const r = await fetchCreatorBySlug(ENV, "night-forge");
+    assert.equal(r.kind, "hit");
+    if (r.kind === "hit") {
+      assert.equal(r.creator.name, "night-forge");
+      assert.equal(r.creator.bio.length, 500);
+    }
+  });
+});
+
+test("fetchPublicCreator resolves the byline for public creators only", async () => {
+  const seen: string[] = [];
+  await withFetch(routedFetch({ profiles: () => new Response(JSON.stringify([PUBLIC_CREATOR_ROW])) }, seen), async () => {
+    assert.deepEqual(await fetchPublicCreator(ENV, "d1"), { slug: "night-forge", name: "NightForge" });
+  });
+  assert.ok(seen[0].includes("creator_public=eq.true"), seen[0]);
+  assert.ok(seen[0].includes("discord_user_id=eq.d1"), seen[0]);
+
+  // private / unlinked / banned / upstream-broken → null byline (anonymous)
+  await withFetch(routedFetch({}), async () => {
+    assert.equal(await fetchPublicCreator(ENV, "d1"), null);
+  });
+  await withFetch(routedFetch({
+    profiles: () => new Response(JSON.stringify([PUBLIC_CREATOR_ROW])),
+    bans: () => new Response(JSON.stringify([{ discord_user_id: "d1" }])),
+  }), async () => {
+    assert.equal(await fetchPublicCreator(ENV, "d1"), null);
+  });
+  await withFetch(routedFetch({ profiles: () => new Response("boom", { status: 500 }) }), async () => {
+    assert.equal(await fetchPublicCreator(ENV, "d1"), null);
+  });
+  assert.equal(await fetchPublicCreator(ENV, ""), null);
+});
+
+test("fetchCreatorListings is active-only, keyed by the internal discord id", async () => {
+  const seen: string[] = [];
+  await withFetch(routedFetch({
+    listings: () => new Response(JSON.stringify([{
+      id: 5, name: "W", tagline: "t", voice_persona: "v", core_traits: [], creator_tags: [],
+      backstory: "b", greeting: "g", avatar_url: null, add_count: 2, updated_at: "",
+    }])),
+  }, seen), async () => {
+    const rows = await fetchCreatorListings(ENV, "d1");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].id, 5);
+  });
+  assert.ok(seen[0].includes("status=eq.active"), seen[0]);
+  assert.ok(seen[0].includes("creator_user_id=eq.d1"), seen[0]);
+  // upstream failure → empty shelf, not a throw
+  await withFetch(routedFetch({ listings: () => new Response("boom", { status: 500 }) }), async () => {
+    assert.deepEqual(await fetchCreatorListings(ENV, "d1"), []);
+  });
+  assert.deepEqual(await fetchCreatorListings(ENV, ""), []);
+});
+
+test("fetchPublicCreators drops banned creators from the sitemap feed", async () => {
+  const rows = [
+    { creator_slug: "night-forge", discord_user_id: "d1", updated_at: "u1" },
+    { creator_slug: "banned-one", discord_user_id: "d2", updated_at: "u2" },
+    { creator_slug: null, discord_user_id: "d3", updated_at: "u3" },
+  ];
+  await withFetch(routedFetch({
+    profiles: () => new Response(JSON.stringify(rows)),
+    bans: () => new Response(JSON.stringify([{ discord_user_id: "d2" }])),
+  }), async () => {
+    const out = await fetchPublicCreators(ENV);
+    assert.deepEqual(out, [{ slug: "night-forge", updatedAt: "u1" }]);
+  });
+  await withFetch(routedFetch({ profiles: () => new Response("boom", { status: 500 }) }), async () => {
+    assert.deepEqual(await fetchPublicCreators(ENV), []);
+  });
+});
+
+test("creatorStats weights the rating mean by count — never a mean of means", () => {
+  const listings = [listing({ id: 1, addCount: 10 }), listing({ id: 2, addCount: 5 }), listing({ id: 3, addCount: 0 })];
+  const ratings = new Map<number, { avg: number; count: number }>([
+    [1, { avg: 4, count: 2 }],   // contributes 8
+    [2, { avg: 5, count: 1 }],   // contributes 5
+    // id 3 unrated — excluded entirely
+  ]);
+  assert.deepEqual(creatorStats(listings, ratings), {
+    characters: 3, adoptions: 15, avgRating: 13 / 3, ratingCount: 3,
+  });
+  assert.deepEqual(creatorStats([], new Map()), { characters: 0, adoptions: 0, avgRating: null, ratingCount: 0 });
+});
+
+test("sitemapXml adds creator pages alongside static paths and listings", async () => {
+  const xml = sitemapXml([{ id: 9, updatedAt: "2026-05-01" }], [{ slug: "night-forge", updatedAt: "2026-05-02" }]);
+  assert.ok(xml.includes(`<loc>${SITE_ORIGIN}/creators/night-forge</loc>`));
+  assert.ok(xml.includes(`<loc>${SITE_ORIGIN}/characters/9</loc>`));
+  assert.ok(xml.includes(`<loc>${SITE_ORIGIN}/</loc>`), "static paths kept");
+  const bare = sitemapXml([{ id: 9, updatedAt: "" }]);
+  assert.ok(!bare.includes("/creators/"), "no creators → no creator urls");
 });

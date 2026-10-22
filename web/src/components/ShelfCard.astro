@@ -1,0 +1,38 @@
+---
+// One shelf card — the character grid cell shared by /characters and
+// /creators/<slug>. data-tags feeds the index's progressive tag filter (harmless
+// on the creator page, which renders no filter bar). Styles live here so both
+// pages get identical cards.
+import { ratingLabel, addsLabel, initial, type ShelfListing, type ShelfRating } from "../lib/shelf";
+
+interface Props { l: ShelfListing; r?: ShelfRating }
+const { l, r } = Astro.props;
+const label = ratingLabel(r);
+---
+<li data-tags={JSON.stringify(l.creatorTags)}>
+  <a class="char" href={`/characters/${l.id}`}>
+    <span class="char-art">
+      {l.avatarUrl
+        ? <img src={l.avatarUrl} alt="" loading="lazy" width="400" height="400" />
+        : <span class="char-ph" aria-hidden="true">{initial(l.name)}</span>}
+    </span>
+    <span class="char-name">{l.name}</span>
+    {l.tagline && <span class="char-tag">{l.tagline}</span>}
+    <span class="char-meta">{label ? <>{label} · </> : null}{addsLabel(l.addCount)}</span>
+  </a>
+</li>
+
+<style>
+  .char { display: grid; gap: 3px; text-decoration: none; }
+  .char-art { display: block; aspect-ratio: 1; border-radius: var(--radius); overflow: hidden; background: var(--field-deep); }
+  .char-art img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.35s var(--ease); }
+  .char:hover .char-art img { transform: scale(1.04); }
+  .char-ph { display: grid; place-items: center; height: 100%; font-variation-settings: var(--wide); font-weight: 850; font-size: 64px; color: var(--ink-3); }
+  .char-name { margin-top: 10px; font-variation-settings: "wdth" 112; font-weight: 800; font-size: 19px; letter-spacing: -0.01em; }
+  .char:hover .char-name { text-decoration: underline; }
+  .char-tag { color: var(--ink-2); font-size: 15px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .char-meta { font-size: 13px; font-weight: 700; color: var(--ink-3); margin-top: 2px; }
+  @media (max-width: 600px) {
+    .char-name { font-size: 17px; }
+  }
+</style>

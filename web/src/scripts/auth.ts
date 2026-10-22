@@ -119,12 +119,13 @@ export type Profile = {
   id: string; display_name: string | null; discord_user_id: string | null;
   discord_username: string | null; discord_avatar_url: string | null;
   plan: string | null; credit_balance: number | null; purchased_balance: number | null;
+  creator_slug: string | null; creator_name: string | null; creator_bio: string | null; creator_public: boolean | null;
 };
 export async function getProfile(userId: string): Promise<Profile | null> {
   // Named columns only: the client never needs stripe ids or grant timestamps.
   const { data, error } = await supabase
     .from("web_profiles")
-    .select("id, display_name, discord_user_id, discord_username, discord_avatar_url, plan, credit_balance, purchased_balance")
+    .select("id, display_name, discord_user_id, discord_username, discord_avatar_url, plan, credit_balance, purchased_balance, creator_slug, creator_name, creator_bio, creator_public")
     .eq("id", userId).maybeSingle();
   if (error) throw error;
   return data as Profile | null;

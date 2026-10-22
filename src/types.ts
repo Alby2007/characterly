@@ -330,6 +330,34 @@ export type SceneOpening = { text: string; label?: string; premise?: string };
 export const LISTING_MAX_OPENINGS = 4;
 export const LISTING_OPENING_MAX_CHARS = 1000;
 
+/** One authored lore entry — the listing's world canon, surfaced into a
+ *  reply when a trigger key appears in recent conversation. `constant` fires
+ *  every turn; `selective` additionally requires a secondaryKeys hit.
+ *  `caseSensitive`/`wholeWords` refine key matching; `order` sorts injected
+ *  entries; `enabled:false` keeps an authored entry off the air without
+ *  deleting it. Imported cards' `character_book` lands here (v69). */
+export type LoreEntry = {
+  keys: string[];
+  content: string;
+  /** Creator-facing label for the entry — never injected. */
+  comment?: string;
+  constant?: boolean;
+  selective?: boolean;
+  secondaryKeys?: string[];
+  caseSensitive?: boolean;
+  wholeWords?: boolean;
+  enabled?: boolean;
+  order?: number;
+};
+
+/** Lorebook bounds. 25 authored entries is a generous canon for one listing;
+ *  the per-entry cap keeps a single injected block readable, and the match-
+ *  side caps (in lorebook.ts) bound prompt spend per turn. */
+export const LISTING_MAX_LORE_ENTRIES = 25;
+export const LISTING_LORE_ENTRY_MAX_CHARS = 1200;
+export const LISTING_LORE_MAX_KEYS = 8;
+export const LISTING_LORE_KEY_MAX_CHARS = 64;
+
 export type CompanionListing = {
   id: number;
   creatorUserId: string;
@@ -346,6 +374,10 @@ export type CompanionListing = {
   /** Alternate openings picked at Meet time (v68) — card `alternate_greetings`
    *  or creator-authored. Empty = the greeting is the only way in. */
   openings: SceneOpening[];
+  /** Authored world lore (v69) — card `character_book` entries or creator-
+   *  authored. Resolved per turn via adopted_from_listing_id; listing edits
+   *  are live for every adopter instantly. Empty = no canon block. */
+  lorebook: LoreEntry[];
   avatarUrl: string | null;
   /** House forum thread id — the canonical post. Mirrors in partner servers
    *  live in listing_posts (v59); this column stays the house pointer. */
@@ -567,6 +599,9 @@ export type CompanionPersona = {
   journal?: JournalEntry[];
   /** Rolling recap of this conversation older than the live transcript window. */
   storySummary?: string;
+  /** Matched lorebook entry contents for this turn (v69) — canon that the
+   *  conversation just touched. Populated by lorebook.ts matchLore. */
+  lore?: string[];
 };
 
 export type GuildCompanion = Companion & {

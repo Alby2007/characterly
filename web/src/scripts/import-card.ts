@@ -72,6 +72,11 @@ export function initImportCard({ linked, uid }) {
     openingsEl.textContent = persona.openings.length
       ? `+${persona.openings.length} alternate opening${persona.openings.length === 1 ? "" : "s"} — you'll pick one when you first meet.`
       : "";
+    const loreEl = $("#import-lore");
+    loreEl.hidden = !persona.lore.length;
+    loreEl.textContent = persona.lore.length
+      ? `+${persona.lore.length} lore ${persona.lore.length === 1 ? "entry" : "entries"} — they surface when the conversation touches them.`
+      : "";
     const creator = $("#import-creator");
     creator.hidden = !parsed.card.creator;
     creator.textContent = parsed.card.creator ? `Card credits: ${parsed.card.creator}` : "";
@@ -121,6 +126,7 @@ export function initImportCard({ linked, uid }) {
           backstory: pending.persona.backstory,
           greeting: pending.persona.greeting,
           openings: pending.persona.openings,
+          lore: pending.persona.lore,
           avatar_url: avatarUrl,
           import_meta: pending.meta,
         }),

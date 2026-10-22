@@ -985,6 +985,95 @@ test("migration v68 adds companion_listings.openings with an array CHECK; guarde
   } finally { await sql.end(); }
 });
 
+test("migration v69 adds companion_listings.lorebook with an array CHECK; guarded rollback", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    await runMigrations(sql as any);
+
+    const col = await sql<Array<{ column_default: string }>>`
+      SELECT column_default FROM information_schema.columns
+      WHERE table_name = 'companion_listings' AND column_name = 'lorebook'`;
+    assert.equal(col.length, 1, "lorebook column exists");
+    assert.equal(col[0].column_default, "'[]'::jsonb", "defaults to an empty array");
+
+    // The CHECK constraint — an object-shaped blob is rejected, arrays pass.
+    await assert.rejects(
+      sql`INSERT INTO companion_listings (creator_user_id, name, lorebook) VALUES ('u-v69', 'BadShape', '{"keys":["k"]}'::jsonb)`,
+      "non-array lorebook must fail the CHECK",
+    );
+    const [row] = await sql<Array<{ id: number; lorebook: unknown }>>`
+      INSERT INTO companion_listings (creator_user_id, name, lorebook)
+      VALUES ('u-v69', 'Lore', '[{"keys":["spire"],"content":"canon"}]'::jsonb) RETURNING id, lorebook`;
+    assert.ok(Array.isArray(row.lorebook));
+
+    // Rollback refuses while any row holds real lore — canon is data.
+    await assert.rejects(runMigrations(sql as any, 68), "rollback must refuse while lorebook entries exist");
+    await sql`DELETE FROM companion_listings WHERE id = ${row.id}`;
+    await runMigrations(sql as any, 68);
+    const gone = await sql<Array<{ column_name: string }>>`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'companion_listings' AND column_name = 'lorebook'`;
+    assert.equal(gone.length, 0, "clean rollback drops the column");
+  } finally { await sql.end(); }
+});
+
+test("migration v70 adds guarded creator columns to web_profiles — CHECK, unique slug, guarded rollback", async () => {
+  const sql = makeTestSql();
+  try {
+    await resetSchema(sql);
+    // web_profiles lives behind the `auth` schema gate (Supabase-only) — a stub
+    // auth.users satisfies the FK so the whole gated chain runs for real here.
+    await sql`CREATE SCHEMA IF NOT EXISTS auth`;
+    await sql`CREATE TABLE IF NOT EXISTS auth.users (id uuid PRIMARY KEY, email text, raw_user_meta_data jsonb DEFAULT '{}'::jsonb)`;
+    // v27's identity-sync backfill reads provider_id/identity_data for real.
+    await sql`CREATE TABLE IF NOT EXISTS auth.identities (id text PRIMARY KEY, user_id uuid, provider text, provider_id text, identity_data jsonb DEFAULT '{}'::jsonb)`;
+    // LANGUAGE sql function bodies validate auth.uid() at CREATE time.
+    await sql`CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS 'SELECT NULL::uuid'`;
+    try {
+      await runMigrations(sql as any);
+
+      const cols = await sql<Array<{ column_name: string }>>`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'web_profiles' AND column_name LIKE 'creator_%' ORDER BY column_name`;
+      assert.deepEqual(cols.map(c => c.column_name), ["creator_bio", "creator_name", "creator_public", "creator_slug"]);
+
+      const uid = "11111111-1111-1111-1111-111111111111";
+      // The on_auth_user_created trigger mints the profile row itself.
+      await sql`INSERT INTO auth.users (id, email) VALUES (${uid}, 'c@x.test')`;
+      await sql`UPDATE web_profiles SET creator_slug = 'night-forge' WHERE id = ${uid}`;
+
+      // Format CHECK: bad shapes and reserved names rejected at the DB boundary.
+      for (const bad of ["-x", "has space", "UPPER", "admin", "staff", "characterly"]) {
+        await assert.rejects(
+          sql`INSERT INTO web_profiles (id, creator_slug) VALUES (gen_random_uuid(), ${bad})`,
+          `slug '${bad}' must fail the CHECK`,
+        );
+      }
+      // Unique index: a second claim on a taken slug refuses.
+      await assert.rejects(
+        sql`INSERT INTO web_profiles (id, creator_slug) VALUES (gen_random_uuid(), 'night-forge')`,
+        "duplicate slug must fail the unique index",
+      );
+
+      // Rollback refuses while a slug is claimed — the profile is user data.
+      await assert.rejects(runMigrations(sql as any, 69), "rollback must refuse while creator slugs exist");
+      await sql`UPDATE web_profiles SET creator_slug = NULL`;
+      await runMigrations(sql as any, 69);
+      const gone = await sql<Array<{ column_name: string }>>`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'web_profiles' AND column_name LIKE 'creator_%'`;
+      assert.equal(gone.length, 0, "clean rollback drops the creator columns");
+    } finally {
+      // Restore the auth-gated world: later tests assert web_profiles is absent
+      // on plain Postgres, and a lingering auth schema flips every gate on.
+      await sql`DROP SCHEMA IF EXISTS auth CASCADE`;
+      await sql`DROP SCHEMA IF EXISTS internal CASCADE`;
+      await sql`DROP FUNCTION IF EXISTS public.delete_own_account()`;
+    }
+  } finally { await sql.end(); }
+});
+
 test("migration v64 creates the listing_rating_stats view — one row per listing, rolls back", async () => {
   const sql = makeTestSql();
   try {

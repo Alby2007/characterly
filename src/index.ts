@@ -68,6 +68,7 @@ import { monitorEventLoopDelay } from "node:perf_hooks";
 import { gatherOwnerSubtextForServer, gatherServerDigestForDm } from "./cross-context.js";
 import { rehostAvatar, gcRehostedAvatars } from "./avatars.js";
 import { defaultEmbedder, vectorLiteral } from "./embeddings.js";
+import { matchLore } from "./lorebook.js";
 import type { Companion, CompanionAdoption, CompanionPersona, JournalEntry, MessageEvent, PairContext } from "./types.js";
 
 // Register every credential before any code path can log it — redactSecrets
@@ -1614,7 +1615,7 @@ async function runCompanionTurn(opts: {
     const vecP = defaultEmbedder().embed(recallText).catch(() => null);
     const [
       lookups, profileBundle, pair, rawContext, freshOwnerName, serverDigest,
-      journal, storyRow, dmMemories, dmSelfMems, cachedImageContext,
+      journal, storyRow, dmMemories, dmSelfMems, cachedImageContext, loreListing,
     ] = await Promise.all([
       guildLookups(scope),
       profileStore.getProfiles(scope, [userId, compSubj]).then(async rows => ({
@@ -1637,6 +1638,11 @@ async function runCompanionTurn(opts: {
       (images.length || regen) && config.visionModel
         ? store.getMessage(scope, event.messageId).then(m => m?.imageContext ?? undefined)
         : Promise.resolve(undefined),
+      // The adopted listing — its lorebook is per-turn world canon (v69).
+      // Awakened companions have no listing → no fetch, no canon.
+      companion.adoptedFromListingId
+        ? store.listingById(companion.adoptedFromListingId).catch(() => null)
+        : Promise.resolve(null),
     ]);
     const profiles = profileBundle.rows.map(p => ({
       name: p.displayName,
@@ -1668,6 +1674,15 @@ async function runCompanionTurn(opts: {
       journal,
       storySummary: storyRow?.summary || undefined,
     };
+    // Authored world canon — entries fire on key hits against the recent
+    // transcript tail + this turn. Listing edits are live for every adopter
+    // (resolved per turn, not copied to the clone).
+    const loreScan = `${context.map(m => m.content).join("\n")}\n${recallText}`;
+    const loreMatches = loreListing?.lorebook?.length ? matchLore(loreListing.lorebook, loreScan) : [];
+    if (loreMatches.length) {
+      persona.lore = loreMatches.map(e => e.content);
+      inc("recall.lore_match");
+    }
 
     // visionClient is always operator-key spend (BYOK users' images run on it
     // too) — so it counts against the hosted:global breaker, not just the

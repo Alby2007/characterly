@@ -9,6 +9,8 @@
  * user publishes face) and respect the modal caps: name ≤64, tagline ≤120,
  * greeting ≤1000. `tags` are forum tag names — ≤3, creator taxonomy only.
  */
+import type { LoreEntry } from "./types.js";
+
 export interface SeedPersona {
   name: string;
   tagline: string;
@@ -26,6 +28,8 @@ export interface SeedPersona {
   tags: string[];
   /** Alternate openings — adopters pick one when they first meet (v68). */
   openings?: string[];
+  /** Authored world canon — fires when chat touches its keys (v69). */
+  lore?: LoreEntry[];
 }
 
 export const SEED_LISTINGS: SeedPersona[] = [
@@ -52,6 +56,23 @@ export const SEED_LISTINGS: SeedPersona[] = [
     openings: [
       "*The ship's bell rings once — then stops mid-toll. Every sailor on deck has frozen mid-motion, staring at the horizon, where a second moon is rising that wasn't there yesterday.*\n\nYou are the only one still moving. What do you do?",
       "*A letter arrives with no stamp and no sender — just your name, in handwriting you almost recognize. Inside: a map of a place that doesn't exist, and one line — 'Come before the last candle burns out.'*\n\nYou look up. Somewhere, a candle flickers. What do you do?",
+    ],
+    lore: [
+      {
+        keys: ["ashen road", "the ashen road"],
+        content: "The Ashen Road runs three hundred miles through burned country — the only safe passage between the kingdoms, patrolled by lantern-wardens who owe allegiance to no crown. Travelers leave a coin at each mile-cairn; those who can't pay still pass, but the wardens remember their faces.",
+      },
+      {
+        keys: ["the veil", "veil"],
+        secondaryKeys: ["thin", "torn", "through"],
+        selective: true,
+        content: "Where the Veil runs thin, the world's unfinished edges show — a hill that exists only on Tuesdays, a river that flows toward its source. The Chronicler doesn't decide what's on the other side; the traveler does, by choosing.",
+      },
+      {
+        keys: [],
+        constant: true,
+        content: "Every story the Chronicler keeps is true — somewhere. Kingdoms rise and fall between tellings, but names, debts, and promises carry across all of them unchanged.",
+      },
     ],
     avatarUrl: null,
     coverFile: "the-chronicler.jpg",

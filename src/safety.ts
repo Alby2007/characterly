@@ -3,56 +3,21 @@ import { Brain } from "./brain.js";
 import { meteredClient } from "./budget.js";
 import { config } from "./config.js";
 import type { MemoryStore } from "./database.js";
+import { checkMessageContent } from "./authored-screen.js";
 
 // Marketplace safety surface. Three mechanisms live here:
 //   1. LISTING_BLOCKLIST — deterministic first line on authored listing text
+//      (authored-screen.ts — shared verbatim with the website worker)
 //   2. SELF_HARM_PATTERNS + CRISIS_RESPONSE — phrase-triaged crisis reply (all DMs)
 //   3. safetyBrain() — operator-keyed Brain for the classifier pass
 // The blocklist is intentionally a cheap first line — the model verdict and
 // the report pipeline are the real screens. See docs/moderation.md.
-
-// ── Listing blocklist ────────────────────────────────────────────────────────
-// Word-boundary regexes — deliberately tight so ordinary words don't trip it
-// ("assassin" doesn't contain a slur; "grape" doesn't contain a profanity).
-const LISTING_BLOCKLIST: Array<{ re: RegExp; category: string }> = [
-  {
-    category: "minor safety",
-    re: /\b(loli|shota|lolita|underage\s+(sex|erotic|romance|roleplay)|preteen\s+(sexy|sexual|romance)|child\s+(sex|porn)|\bcsam\b|minor\s+(sex|nsfw|erotic))\b/i,
-  },
-  {
-    category: "hate",
-    // gg+ requires the doubled consonant — "Niger"/"Nigerian" don't trip it.
-    re: /\b(n[i1!]gg+[e3a4]r?s?|f[a4]gg?[o0]t|k[i1]ke|ch[i1]nk|sp[i1]c|tr[a4]nny)\b/i,
-  },
-  {
-    category: "self-harm promotion",
-    re: /\b(encourag\w*|promot\w*|romanticiz\w*|glorif\w*)\s+(self[- ]?harm|suicide|anorexia|eating\s+disorders?)\b/i,
-  },
-  {
-    category: "illegal content",
-    re: /\b((make|build|craft)\w*\s+(a\s+|an\s+)?(pipe\s+)?bomb|nerve\s+gas|hire\s+a\s+hitman|carding\s+tutorial|steal\s+credit\s+cards?|counterfeit\s+(money|id|passports?))\b/i,
-  },
-  {
-    category: "spam",
-    re: /\b(free\s+(nitro|robux|crypto)|airdrop\s+claim|double\s+your\s+(crypto|money)|dm\s+me\s+for\s+(cheap|free))\b/i,
-  },
-];
-
-/** Deterministic check over a single free-text field. Used by
- *  checkListingFields per field and by house automod on live comment text —
- *  the hard-line categories (minor safety, hate, self-harm promo, illegal)
- *  apply to any user-authored surface, not just authored listings. */
-export function checkMessageContent(text: string): { ok: true } | { ok: false; category: string } {
-  for (const { re, category } of LISTING_BLOCKLIST) {
-    if (re.test(text)) return { ok: false, category };
-  }
-  return { ok: true };
-}
+export { checkMessageContent };
 
 /** Deterministic check over authored listing fields. Returns the first hit
  *  with its category and field name so the refusal can name both. */
 export function checkListingFields(
-  fields: { name: string; tagline: string; greeting: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; openings?: string[] },
+  fields: { name: string; tagline: string; greeting: string; voicePersona: string; coreTraits: string[]; ownerDynamic: string; backstory: string; openings?: string[]; lore?: { keys: string[]; content: string }[] },
 ): { ok: true } | { ok: false; category: string; field: string } {
   const entries: Array<[string, string]> = [
     ["name", fields.name],
@@ -63,6 +28,9 @@ export function checkListingFields(
     ["dynamic", fields.ownerDynamic],
     ["backstory", fields.backstory],
     ...(fields.openings ?? []).map((t, i) => [`opening ${i + 1}`, t] as [string, string]),
+    // Keys are trigger text shown to no one but still authored content —
+    // screened alongside the lore body they unlock.
+    ...(fields.lore ?? []).map((e, i) => [`lore ${i + 1}`, `${e.keys.join(", ")}\n${e.content}`] as [string, string]),
   ];
   for (const [field, text] of entries) {
     if (!text) continue;

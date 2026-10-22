@@ -26,6 +26,9 @@ export type ShelfListing = {
   /** Alternate openings (v68) — text-only projection; the column's
    *  {text,label?,premise?} objects flatten to their text for display. */
   openings: string[];
+  /** Live lorebook entries (v69) — a count only; keys and content stay
+   *  off the public page so the canon still surprises adopters. */
+  loreCount: number;
   avatarUrl: string | null;
   addCount: number;
   updatedAt: string;
@@ -54,10 +57,13 @@ const escAttr = esc; // same escaping covers attribute positions
 type RawListing = {
   id: number; name: string; tagline: string; voice_persona: string;
   core_traits: string[]; creator_tags: string[]; backstory: string;
-  greeting: string; openings: unknown; avatar_url: string | null; add_count: number; updated_at: string;
+  greeting: string; openings: unknown; lorebook: unknown; avatar_url: string | null; add_count: number; updated_at: string;
+  /** Server-side join key to web_profiles.discord_user_id — never rendered;
+   *  only resolves an opted-in public creator handle. */
+  creator_user_id: string;
 };
 
-const LISTING_SELECT = "id,name,tagline,voice_persona,core_traits,creator_tags,backstory,greeting,openings,avatar_url,add_count,updated_at";
+const LISTING_SELECT = "id,name,tagline,voice_persona,core_traits,creator_tags,backstory,greeting,openings,lorebook,avatar_url,add_count,updated_at,creator_user_id";
 
 function restBase(env: ShelfEnv): { base: string; headers: Record<string, string> } | null {
   const base = env.SUPABASE_URL?.replace(/\/+$/, "");
@@ -85,11 +91,20 @@ const openingTexts = (raw: unknown): string[] =>
       })
     : [];
 
+/** lorebook jsonb → count of live entries. Object entries with
+ *  enabled:false stay shelved; anything else array-shaped counts (the
+ *  shelf only needs the number, so no full normalize here). */
+const loreEntryCount = (raw: unknown): number =>
+  Array.isArray(raw)
+    ? raw.filter(e => !e || typeof e !== "object" || (e as { enabled?: unknown }).enabled !== false).length
+    : 0;
+
 const toListing = (r: RawListing): ShelfListing => ({
   id: r.id, name: r.name ?? "", tagline: r.tagline ?? "", voicePersona: r.voice_persona ?? "",
   coreTraits: r.core_traits ?? [], creatorTags: r.creator_tags ?? [],
   backstory: r.backstory ?? "", greeting: r.greeting ?? "",
   openings: openingTexts(r.openings),
+  loreCount: loreEntryCount(r.lorebook),
   avatarUrl: safeAvatarUrl(r.avatar_url), addCount: r.add_count ?? 0, updatedAt: r.updated_at ?? "",
 });
 
@@ -111,7 +126,7 @@ export async function fetchActiveListings(env: ShelfEnv): Promise<ShelfListing[]
  *  failures must answer 503 instead, or a PostgREST blip reads as a delist
  *  and live pages drop out of the index during an outage. */
 export type ListingLookup =
-  | { kind: "hit"; listing: ShelfListing }
+  | { kind: "hit"; listing: ShelfListing; creatorUserId: string }
   | { kind: "miss" }
   | { kind: "error" };
 
@@ -123,7 +138,7 @@ export async function lookupListing(env: ShelfEnv, id: number): Promise<ListingL
   if (!res?.ok) return { kind: "error" };
   const rows = (await res.json().catch(() => null)) as RawListing[] | null;
   if (!Array.isArray(rows)) return { kind: "error" };
-  return rows[0] ? { kind: "hit", listing: toListing(rows[0]) } : { kind: "miss" };
+  return rows[0] ? { kind: "hit", listing: toListing(rows[0]), creatorUserId: rows[0].creator_user_id ?? "" } : { kind: "miss" };
 }
 
 export async function fetchListing(env: ShelfEnv, id: number): Promise<ShelfListing | null> {
@@ -156,6 +171,129 @@ export async function fetchRatingStats(env: ShelfEnv): Promise<Map<number, Shelf
   if (!Array.isArray(rows)) return out;
   for (const r of rows) if (r.avg != null) out.set(r.listing_id, { avg: Number(r.avg), count: Number(r.rating_count) });
   return out;
+}
+
+// ── Creator profiles (v70) ──────────────────────────────────────────────────
+// Opt-in public identity: a page exists only while creator_slug is set AND
+// creator_public is true. Publish-banned creators are treated as absent — a
+// suspended marketplace actor keeps no public page. The Discord snowflake
+// stays an internal join key: it resolves the page but is never rendered.
+
+export type ShelfCreator = {
+  slug: string;
+  /** Public brand name — creator_name, falling back to the slug. Distinct
+   *  from the Discord name, which stays a Discord-context identity. */
+  name: string;
+  bio: string;
+  avatarUrl: string | null;
+  /** Internal join key → companion_listings.creator_user_id. Server-side
+   *  only — never render it into markup or JSON-LD. */
+  creatorUserId: string;
+};
+
+export type CreatorLookup =
+  | { kind: "hit"; creator: ShelfCreator }
+  | { kind: "miss" }
+  | { kind: "error" };
+
+type RawCreator = {
+  creator_slug: string | null; creator_name: string; creator_bio: string;
+  discord_user_id: string; discord_avatar_url: string | null;
+};
+
+const CREATOR_SELECT = "creator_slug,creator_name,creator_bio,discord_user_id,discord_avatar_url";
+
+const toCreator = (r: RawCreator): ShelfCreator => ({
+  slug: r.creator_slug ?? "",
+  name: (r.creator_name ?? "").trim() || r.creator_slug || "a creator",
+  bio: (r.creator_bio ?? "").slice(0, 500),
+  avatarUrl: safeAvatarUrl(r.discord_avatar_url),
+  creatorUserId: r.discord_user_id ?? "",
+});
+
+/** True when the discord id holds a marketplace publish-ban — the row that
+ *  suppresses a creator page entirely. */
+async function creatorBanned(rest: { base: string; headers: Record<string, string> }, discordUserId: string): Promise<boolean | null> {
+  if (!discordUserId) return false;
+  const res = await fetch(`${rest.base}/rest/v1/marketplace_bans?select=discord_user_id&discord_user_id=eq.${encodeURIComponent(discordUserId)}&limit=1`, { headers: rest.headers }).catch(() => null);
+  if (!res?.ok) return null; // upstream broken — caller treats as error, not ban
+  const rows = (await res.json().catch(() => [])) as Array<{ discord_user_id: string }>;
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+/** A public creator profile by slug — hit carries the internal discord id for
+ *  the listings join; miss covers absent, private, banned and unlinked. */
+export async function fetchCreatorBySlug(env: ShelfEnv, slug: string): Promise<CreatorLookup> {
+  const rest = restBase(env);
+  if (!rest) return { kind: "error" };
+  const res = await fetch(`${rest.base}/rest/v1/web_profiles?select=${CREATOR_SELECT}&creator_slug=eq.${encodeURIComponent(slug)}&creator_public=eq.true&limit=1`, { headers: rest.headers }).catch(() => null);
+  if (!res?.ok) return { kind: "error" };
+  const rows = (await res.json().catch(() => null)) as RawCreator[] | null;
+  if (!Array.isArray(rows)) return { kind: "error" };
+  const row = rows[0];
+  if (!row || !row.creator_slug || !row.discord_user_id) return { kind: "miss" };
+  const banned = await creatorBanned(rest, row.discord_user_id);
+  if (banned == null) return { kind: "error" };
+  if (banned) return { kind: "miss" };
+  return { kind: "hit", creator: toCreator(row) };
+}
+
+/** The public creator behind one listing — byline resolution for
+ *  /characters/<id>. Private creators and banned creators both resolve null:
+ *  the byline stays "a community creator". */
+export async function fetchPublicCreator(env: ShelfEnv, discordUserId: string): Promise<{ slug: string; name: string } | null> {
+  const rest = restBase(env);
+  if (!rest || !discordUserId) return null;
+  const res = await fetch(`${rest.base}/rest/v1/web_profiles?select=${CREATOR_SELECT}&discord_user_id=eq.${encodeURIComponent(discordUserId)}&creator_public=eq.true&creator_slug=not.is.null&limit=1`, { headers: rest.headers }).catch(() => null);
+  if (!res?.ok) return null;
+  const rows = (await res.json().catch(() => [])) as RawCreator[];
+  const row = Array.isArray(rows) ? rows[0] : null;
+  if (!row?.creator_slug) return null;
+  const banned = await creatorBanned(rest, discordUserId);
+  if (banned !== false) return null;
+  const c = toCreator(row);
+  return { slug: c.slug, name: c.name };
+}
+
+/** A creator's live listings — the same active-only rule as the shelf. */
+export async function fetchCreatorListings(env: ShelfEnv, discordUserId: string): Promise<ShelfListing[]> {
+  const rest = restBase(env);
+  if (!rest || !discordUserId) return [];
+  const res = await fetch(`${rest.base}/rest/v1/companion_listings?select=${LISTING_SELECT}&status=eq.active&creator_user_id=eq.${encodeURIComponent(discordUserId)}&order=add_count.desc`, { headers: rest.headers }).catch(() => null);
+  if (!res?.ok) return [];
+  const rows = (await res.json().catch(() => [])) as RawListing[];
+  return Array.isArray(rows) ? rows.map(toListing) : [];
+}
+
+/** Every public creator slug for the sitemap — banned creators excluded so
+ *  the index never points at a suppressed (404) page. */
+export async function fetchPublicCreators(env: ShelfEnv): Promise<Array<{ slug: string; updatedAt: string }>> {
+  const rest = restBase(env);
+  if (!rest) return [];
+  const res = await fetch(`${rest.base}/rest/v1/web_profiles?select=creator_slug,discord_user_id,updated_at&creator_public=eq.true&creator_slug=not.is.null`, { headers: rest.headers }).catch(() => null);
+  if (!res?.ok) return [];
+  const rows = (await res.json().catch(() => [])) as Array<{ creator_slug: string | null; discord_user_id: string; updated_at: string }>;
+  if (!Array.isArray(rows)) return [];
+  const bans = await fetch(`${rest.base}/rest/v1/marketplace_bans?select=discord_user_id`, { headers: rest.headers }).catch(() => null);
+  const banned = new Set<string>();
+  if (bans?.ok) {
+    for (const b of (await bans.json().catch(() => [])) as Array<{ discord_user_id: string }>) banned.add(b.discord_user_id);
+  }
+  return rows
+    .filter(r => r.creator_slug && r.discord_user_id && !banned.has(r.discord_user_id))
+    .map(r => ({ slug: r.creator_slug!, updatedAt: r.updated_at ?? "" }));
+}
+
+/** The header rollup over a creator's shelf — adoption sum plus a weighted
+ *  rating average (mean over ratings, never mean of means). */
+export function creatorStats(listings: ShelfListing[], ratings: Map<number, ShelfRating>): { characters: number; adoptions: number; avgRating: number | null; ratingCount: number } {
+  let adoptions = 0, ratingCount = 0, weighted = 0;
+  for (const l of listings) {
+    adoptions += l.addCount;
+    const r = ratings.get(l.id);
+    if (r && r.count > 0) { ratingCount += r.count; weighted += r.avg * r.count; }
+  }
+  return { characters: listings.length, adoptions, avgRating: ratingCount ? weighted / ratingCount : null, ratingCount };
 }
 
 // ── Templates ───────────────────────────────────────────────────────────────
@@ -321,7 +459,7 @@ export function listingPage(l: ShelfListing, rating: ShelfRating, related: Shelf
         <div>
           <h1>${esc(l.name)}</h1>
           ${l.tagline ? `<p class="lede">${esc(l.tagline)}</p>` : ""}
-          <p class="listing-meta">${traits}${tags}<span class="dim">${ratingText(rating)} · ${l.addCount} ${l.addCount === 1 ? "adoption" : "adoptions"} · a community creator</span></p>
+          <p class="listing-meta">${traits}${tags}<span class="dim">${ratingText(rating)} · ${l.addCount} ${l.addCount === 1 ? "adoption" : "adoptions"}${l.loreCount ? ` · world lore · ${l.loreCount} ${l.loreCount === 1 ? "entry" : "entries"}` : ""} · a community creator</span></p>
           <p><a class="btn" href="${DISCORD_INVITE}" target="_blank" rel="noopener noreferrer">Meet ${esc(l.name)} — join the server</a></p>
         </div>
       </div>
@@ -354,11 +492,15 @@ export function notFoundPage(): string {
 
 export const SITEMAP_STATIC_PATHS = ["/", "/characters", "/guides/import-character-cards", "/guides/leaving-character-ai", "/safety", "/privacy", "/terms", "/security"];
 
-export function sitemapXml(rows: Array<{ id: number; updatedAt: string }>, origin = SITE_ORIGIN): string {
+export function sitemapXml(rows: Array<{ id: number; updatedAt: string }>, creators: Array<{ slug: string; updatedAt: string }> = [], origin = SITE_ORIGIN): string {
   const urls = SITEMAP_STATIC_PATHS.map(p => `  <url><loc>${origin}${p}</loc></url>`);
   for (const r of rows) {
     const lastmod = r.updatedAt ? `\n    <lastmod>${esc(r.updatedAt.slice(0, 10))}</lastmod>` : "";
     urls.push(`  <url>\n    <loc>${origin}/characters/${r.id}</loc>${lastmod}\n  </url>`);
+  }
+  for (const c of creators) {
+    const lastmod = c.updatedAt ? `\n    <lastmod>${esc(c.updatedAt.slice(0, 10))}</lastmod>` : "";
+    urls.push(`  <url>\n    <loc>${origin}/creators/${esc(c.slug)}</loc>${lastmod}\n  </url>`);
   }
   return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>`;
 }

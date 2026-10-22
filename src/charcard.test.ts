@@ -160,6 +160,54 @@ test("openings respect the per-opening length cap and drop blanks", () => {
   assert.equal(p.openings[1].text, "short");
 });
 
+test("cardToPersona maps character_book entries to lore with flags and fill", () => {
+  const card = {
+    name: "Lirael", description: "d", first_mes: "hi",
+    character_book: {
+      entries: [
+        { keys: ["the spire", "{{char}}'s archive"], content: "The Spire's laws bind {{user}} too.", insertion_order: 1, comment: "setting" },
+        { keys: [], constant: true, content: "Every bell marks a death." },
+        { keys: ["veil"], secondary_keys: ["thin"], selective: true, case_sensitive: true,
+          extensions: { match_whole_words: true }, content: "The Veil thins." },
+        { keys: ["dead"], content: "" },          // no content — drops
+        { content: "no trigger" },                 // no keys/constant — drops
+        "not an entry",                            // non-object — drops
+      ],
+    },
+  };
+  const res = parseCardFile(enc.encode(JSON.stringify(card)), "n.json");
+  assert.ok(res.ok);
+  const p = cardToPersona(res.card);
+  assert.equal(p.lore.length, 3);
+  assert.deepEqual(p.lore[0].keys, ["the spire", "Lirael's archive"], "{{char}} fills in keys");
+  assert.equal(p.lore[0].content, "The Spire's laws bind the user too.", "{{user}} fills in content (persona-prose register)");
+  assert.equal(p.lore[0].order, 1);
+  assert.equal(p.lore[0].comment, "setting");
+  assert.equal(p.lore[1].constant, true);
+  assert.equal(p.lore[2].selective, true);
+  assert.deepEqual(p.lore[2].secondaryKeys, ["thin"]);
+  assert.equal(p.lore[2].caseSensitive, true);
+  assert.equal(p.lore[2].wholeWords, true);
+});
+
+test("character_book tolerates object-map entries, embedded_lorebook, and string keys", () => {
+  const card = {
+    name: "N", description: "d", first_mes: "hi",
+    embedded_lorebook: {
+      entries: {
+        e1: { keys: "single-key", content: "string keys coerce" },
+        e2: { keys: ["k"], enabled: false, content: "shelved keeps its flag" },
+      },
+    },
+  };
+  const res = parseCardFile(enc.encode(JSON.stringify(card)), "n.json");
+  assert.ok(res.ok);
+  const p = cardToPersona(res.card);
+  assert.equal(p.lore.length, 2);
+  assert.deepEqual(p.lore[0].keys, ["single-key"]);
+  assert.equal(p.lore[1].enabled, false);
+});
+
 test("cardToPersona truncates oversized card fields", () => {
   const huge = { name: "Big", description: "d".repeat(20_000), personality: "x".repeat(5_000) };
   const res = parseCardFile(enc.encode(JSON.stringify(huge)), "big.json");
