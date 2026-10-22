@@ -11,7 +11,7 @@
 // deliberately out: the retry affordance is a 1:1 surface, matching the
 // swipe-model products this feature parallels.
 
-import type { MessageContextMenuCommandInteraction } from "discord.js";
+import { MessageFlags, type MessageContextMenuCommandInteraction } from "discord.js";
 import { MemoryStore } from "./database.js";
 import type { Companion } from "./types.js";
 
@@ -96,7 +96,12 @@ export async function resolveRegenTarget(
   // companion:<id> — system cards, notices and human messages can't qualify.
   const compSubj = MemoryStore.companionSubjectId(companion.id);
   const tail = await store.regenExchangeTail(scope, channelId, compSubj, target.id);
-  if (!tail.target || tail.target.authorId !== compSubj) return { ok: false, reason: "not_companion" };
+  // One compSubj row ISN'T a reply: the awakened card (its reply text +
+  // buttons archives under compSubj). An action row on a non-CV2 message
+  // marks card chrome — CV2 replies carry components legitimately, and link
+  // preview embeds attach to real replies, so only components distinguish.
+  const isCardChrome = Boolean(target.components?.length) && !target.flags?.has?.(MessageFlags.IsComponentsV2);
+  if (!tail.target || tail.target.authorId !== compSubj || isCardChrome) return { ok: false, reason: "not_companion" };
   if (tail.newerCount > 0) return { ok: false, reason: "moved_on" };
   if (!tail.trigger) return { ok: false, reason: "gone" };
   return {

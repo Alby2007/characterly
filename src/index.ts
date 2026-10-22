@@ -1576,7 +1576,7 @@ async function runCompanionTurn(opts: {
 
   const brain = await brainFor(scope);
   if (!brain) {
-    replyThrottle.refund(scope, userId);
+    if (!regen) replyThrottle.refund(scope, userId);
     if (config.keyEncryptionSecret) {
       await sendSystem(buildApiKeyOnboardingPayload(userId));
     }
@@ -1594,8 +1594,11 @@ async function runCompanionTurn(opts: {
       premium: account?.plan === "premium", hostedDailyLlmCap: await fleetCap.getEffective(),
     });
     if (!charge.ok) {
-      replyThrottle.refund(scope, userId);
-      if (budgetNoticeOnce(channel.id)) await sendSystem({ content: chargeRefusalNotice(charge.reason) });
+      if (!regen) replyThrottle.refund(scope, userId);
+      // The once-per-channel gate exists to keep refusal notices from
+      // spamming a channel; regen's sendSystem lands on a private ephemeral
+      // instead, so the refusal always reaches the requester.
+      if (regen || budgetNoticeOnce(channel.id)) await sendSystem({ content: chargeRefusalNotice(charge.reason) });
       return;
     }
     ledger = charge.ledger;
@@ -1630,7 +1633,7 @@ async function runCompanionTurn(opts: {
       // speaker's below.
       vecP.then(v => promptMemories(scope, userId, recallText, v, companion.id)),
       store.relevantMemories(scope, compSubj, 3, companion.id).catch(() => [] as Memory[]),
-      images.length && config.visionModel
+      (images.length || regen) && config.visionModel
         ? store.getMessage(scope, event.messageId).then(m => m?.imageContext ?? undefined)
         : Promise.resolve(undefined),
     ]);
@@ -1713,7 +1716,7 @@ async function runCompanionTurn(opts: {
     );
     const clean = text ? scrubMentions(text, lookups.names) : "";
     if (clean && looksLikeSchemaLeak(clean)) {
-      inc("reply.schema_leak"); replyThrottle.refund(scope, userId);
+      inc("reply.schema_leak"); if (!regen) replyThrottle.refund(scope, userId);
       ledger.refund();
       return;
     }
@@ -1726,7 +1729,7 @@ async function runCompanionTurn(opts: {
       const sent = await sendPersona(dmReplyText);
       if (!sent) {
         inc("reply.send_failed");
-        replyThrottle.refund(scope, userId);
+        if (!regen) replyThrottle.refund(scope, userId);
         ledger.refund();
         return;
       }
@@ -1765,17 +1768,17 @@ async function runCompanionTurn(opts: {
       }
     } else {
       inc("reply.empty");
-      replyThrottle.refund(scope, userId);
+      if (!regen) replyThrottle.refund(scope, userId);
       ledger.refund();
     }
   } catch (error) {
     if (error instanceof BudgetExceeded) {
       inc("budget.reply_blocked");
-      replyThrottle.refund(scope, userId);
+      if (!regen) replyThrottle.refund(scope, userId);
       // The ledger refuses to refund once a reply landed — a bookkeeping
       // throw after send shouldn't claw back a delivered turn.
       ledger.refund();
-      if (budgetNoticeOnce(channel.id)) {
+      if (regen || budgetNoticeOnce(channel.id)) {
         const hostedOut = error.guildId === "hosted:global";
         await sendSystem({ content: hostedOut ? HOSTED_CAPACITY() : `We've hit today's DM message limit — it resets ${dailyResetTag()}.` });
       }
@@ -1783,7 +1786,7 @@ async function runCompanionTurn(opts: {
     }
     inc("llm.reply_error");
     logError("DM reply generation failed", error);
-    replyThrottle.refund(scope, userId);
+    if (!regen) replyThrottle.refund(scope, userId);
     ledger.refund();
   } finally {
     stopTyping();
@@ -1810,20 +1813,32 @@ async function handleRegenContext(interaction: MessageContextMenuCommandInteract
   const lastAt = regenCooldownAt.get(interaction.user.id) ?? 0;
   if (Date.now() - lastAt < REGEN_COOLDOWN_MS) { await say("Give it a few seconds before regenerating again."); return; }
 
-  await interaction.deferReply({ ephemeral: true });
+  // Claim the slot before the first await — a second invocation landing
+  // inside the defer window must see it taken (double regen = double charge).
   regenInflight.add(inflightKey);
   try {
+    await interaction.deferReply({ ephemeral: true });
     const resolved = await resolveRegenTarget(interaction, store);
-    if (!resolved.ok) { await interaction.editReply({ content: REGEN_REFUSALS[resolved.reason] }); return; }
+    if (!resolved.ok) { inc(`regen.refusal.${resolved.reason}`); await interaction.editReply({ content: REGEN_REFUSALS[resolved.reason] }); return; }
     // Only real attempts consume the per-user cooldown — a refused pick
-    // shouldn't make the user wait to retry on the right message.
+    // shouldn't make the user wait to retry on the right message. Bound the
+    // map: entries past the cooldown are dead weight.
+    if (regenCooldownAt.size >= 4096) {
+      const now = Date.now();
+      for (const [k, v] of regenCooldownAt) if (now - v >= REGEN_COOLDOWN_MS) regenCooldownAt.delete(k);
+    }
     regenCooldownAt.set(interaction.user.id, Date.now());
     const { scope, channelId, requesterId, companion, targetMessageId, targetContent, trigger } = resolved.target;
 
-    const account = store.creditsSupported ? await store.accountForDiscordUser(requesterId).catch(() => null) : null;
+    const [account, ownKey] = store.creditsSupported
+      ? await Promise.all([
+          store.accountForDiscordUser(requesterId).catch(() => null),
+          store.getGuildKey(scope).catch(() => null),
+        ])
+      : [null, null];
     // The free lane gets a daily regen budget on top of the token charge;
-    // premium and BYOK lanes are bounded by their own spend instead.
-    if (store.creditsSupported && isHostedScope(scope) && account?.plan !== "premium"
+    // premium and BYOK (own dm: key) lanes are bounded by their own spend.
+    if (store.creditsSupported && !ownKey && account?.plan !== "premium"
         && (await store.regenCountToday(requesterId)) >= config.regenDailyCap) {
       await interaction.editReply({ content: `That's today's ${config.regenDailyCap} regenerations — the count resets ${dailyResetTag()}.` });
       return;
@@ -1891,12 +1906,19 @@ async function handleRegenContext(interaction: MessageContextMenuCommandInteract
       charge: { cost: 1, reason: "regen", refundReason: "regen_refund" },
     });
     if (landed) {
+      inc("regen.landed");
       await store.recordRegen({ requesterId, scope, channelId, messageId: targetMessageId, companionId: companion.id })
         .catch(() => inc("regen.record_error"));
       await interaction.editReply({ content: "Done — the reply was regenerated." }).catch(() => {});
     } else if (!noticed) {
       await interaction.editReply({ content: "Couldn't regenerate that reply — try again in a moment." }).catch(() => {});
     }
+  } catch (error) {
+    // The reply is already deferred — the outer interaction catch only
+    // handles un-deferred failures, so without this the ephemeral hangs.
+    inc("regen.error");
+    logError("Regenerate failed", error);
+    await interaction.editReply({ content: "Couldn't regenerate that reply — try again in a moment." }).catch(() => {});
   } finally {
     regenInflight.delete(inflightKey);
   }

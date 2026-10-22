@@ -118,7 +118,7 @@ export async function editCompanionMessage(
     const hook = await getOrCreateChannelWebhook(host, botUserId);
     if (!hook) break;
     try {
-      await hook.editMessage(messageId, { content, ...(threadId ? { threadId } : {}) });
+      await hook.editMessage(messageId, { content, allowedMentions: { parse: [] }, ...(threadId ? { threadId } : {}) });
       return true;
     } catch {
       // Stale or deleted webhook — evict and retry once. A 404 on the message

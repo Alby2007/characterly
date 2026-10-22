@@ -780,18 +780,30 @@ export class MemoryStore {
     trigger: { id: string; authorId: string; authorName: string; content: string; createdAt: string; replyToId: string | null } | null;
     newerCount: number;
   }> {
-    const targetRows = await this.sql<Array<{ id: string; author_id: string; content: string; created_at: string }>>`
-      SELECT id, author_id, content, created_at FROM messages
+    const targetRows = await this.sql<Array<{ id: string; author_id: string; content: string; created_at: string; reply_to_id: string | null }>>`
+      SELECT id, author_id, content, created_at, reply_to_id FROM messages
       WHERE guild_id = ${scope} AND id = ${targetId}
     `;
     const t = targetRows[0];
     if (!t) return { target: null, trigger: null, newerCount: 0 };
-    const [newer, triggers] = await Promise.all([
+    // The reply row's own reply_to_id names the exact trigger the turn
+    // answered — prefer it over guessing (a rapid second message or a purged
+    // trigger would otherwise re-answer the wrong text). Fall back to the
+    // newest non-companion row when the pointer is missing or the row is gone.
+    const [newer, direct, heuristic] = await Promise.all([
       this.sql<Array<{ n: number }>>`
         SELECT count(*)::int AS n FROM messages
         WHERE guild_id = ${scope} AND channel_id = ${channelId}
           AND (created_at, id) > (${t.created_at}, ${t.id})
       `,
+      t.reply_to_id
+        ? this.sql<Array<{ id: string; author_id: string; author_name: string; content: string; created_at: string; reply_to_id: string | null }>>`
+          SELECT id, author_id, author_name, content, created_at, reply_to_id
+          FROM messages
+          WHERE guild_id = ${scope} AND id = ${t.reply_to_id}
+            AND channel_id = ${channelId} AND author_id <> ${companionSubject}
+        `
+        : Promise.resolve([] as Array<{ id: string; author_id: string; author_name: string; content: string; created_at: string; reply_to_id: string | null }>),
       this.sql<Array<{ id: string; author_id: string; author_name: string; content: string; created_at: string; reply_to_id: string | null }>>`
         SELECT id, author_id, author_name, content, created_at, reply_to_id
         FROM messages
@@ -801,7 +813,7 @@ export class MemoryStore {
         ORDER BY created_at DESC, id DESC LIMIT 1
       `,
     ]);
-    const tr = triggers[0];
+    const tr = direct[0] ?? heuristic[0];
     return {
       target: { id: t.id, authorId: t.author_id, content: t.content, createdAt: ts(t.created_at) },
       trigger: tr

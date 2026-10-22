@@ -2,7 +2,7 @@ import "dotenv/config";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type postgres from "postgres";
-import type { MessageContextMenuCommandInteraction } from "discord.js";
+import { MessageFlags, type MessageContextMenuCommandInteraction } from "discord.js";
 import { makeTestSql, makeStore } from "./test-helpers.js";
 import { MemoryStore } from "./database.js";
 import { resolveRegenTarget } from "./regen.js";
@@ -22,6 +22,9 @@ function stubCtx(opts: {
   targetId?: string;
   targetAuthorId?: string;
   webhookId?: string | null;
+  components?: unknown[];
+  embeds?: unknown[];
+  flags?: number;
 }): MessageContextMenuCommandInteraction {
   return {
     user: { id: opts.userId ?? "u1" },
@@ -32,6 +35,9 @@ function stubCtx(opts: {
       id: opts.targetId ?? "m-reply",
       author: { id: opts.targetAuthorId ?? BOT, bot: true },
       webhookId: opts.webhookId ?? null,
+      components: opts.components ?? [],
+      embeds: opts.embeds ?? [],
+      flags: { has: (f: number) => Boolean((opts.flags ?? 0) & f) },
     },
   } as unknown as MessageContextMenuCommandInteraction;
 }
@@ -185,6 +191,34 @@ test("resolveRegenTarget: refusals — lane, not_companion, not_yours, inactive,
   } finally { await sql.end(); }
 });
 
+test("resolveRegenTarget: card chrome refused — components on a non-CV2 message", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const compId = await insertCompanion(sql, { owner: "u1" });
+    const scope = "dm:u1";
+    const compSubj = MemoryStore.companionSubjectId(compId);
+    await archiveExchange(store, scope, "c-dm", { authorId: "u1", compSubj });
+
+    // The awakened card archives under compSubj too (reply text + Summon
+    // buttons on one row) — an action row on a non-CV2 message marks it as
+    // chrome, so regen can't edit the card away.
+    const card = await resolveRegenTarget(
+      stubCtx({ userId: "u1", components: [{ type: 1 }] }), store);
+    assert.deepEqual(card, { ok: false, reason: "not_companion" });
+
+    // A CV2 reply carries components legitimately — still resolvable.
+    const cv2 = await resolveRegenTarget(
+      stubCtx({ userId: "u1", components: [{ type: 10 }], flags: MessageFlags.IsComponentsV2 }), store);
+    assert.equal(cv2.ok, true);
+
+    // A link preview embed attaches to real replies — embeds alone aren't chrome.
+    const linked = await resolveRegenTarget(
+      stubCtx({ userId: "u1", embeds: [{ type: "link" }] }), store);
+    assert.equal(linked.ok, true);
+  } finally { await sql.end(); }
+});
+
 test("resolveRegenTarget: adoptee thread refuses non-adopter, banned listing, onboarding companion", async () => {
   const sql = makeTestSql();
   try {
@@ -257,6 +291,40 @@ test("regenExchangeTail: newest non-companion row before target is the trigger",
     await archiveExchange(store, scope, "c-other", { authorId: "u9", compSubj, replyId: "m-elsewhere" });
     const again = await store.regenExchangeTail(scope, "c-dm", compSubj, "m-reply");
     assert.equal(again.newerCount, 0);
+  } finally { await sql.end(); }
+});
+
+test("regenExchangeTail: reply_to_id names the exact trigger, heuristic when it's gone", async () => {
+  const sql = makeTestSql();
+  try {
+    const { store } = await makeStore(sql);
+    const scope = "dm:u7";
+    const compSubj = "companion:7";
+    // The reply answered m-trig1 even though a rapid follow-up landed between
+    // trigger and reply — the archived reply_to_id is authoritative.
+    await store.recordMessage({
+      guildId: scope, channelId: "c-dm", messageId: "m-trig1",
+      authorId: "u7", authorName: "User", content: "the real question",
+      createdAt: new Date("2026-01-01T00:00:00Z"), mentionsBot: false,
+    });
+    await store.recordMessage({
+      guildId: scope, channelId: "c-dm", messageId: "m-trig2",
+      authorId: "u7", authorName: "User", content: "a quick follow-up",
+      createdAt: new Date("2026-01-01T00:00:05Z"), mentionsBot: false,
+    });
+    await store.recordMessage({
+      guildId: scope, channelId: "c-dm", messageId: "m-reply",
+      authorId: compSubj, authorName: "Nyx", content: "the take",
+      createdAt: new Date("2026-01-01T00:00:10Z"), mentionsBot: false,
+    }, "m-trig1", false, true);
+
+    const tail = await store.regenExchangeTail(scope, "c-dm", compSubj, "m-reply");
+    assert.equal(tail.trigger?.id, "m-trig1");
+
+    // Pointer dead (retention purge) — the heuristic takes over.
+    await sql`DELETE FROM messages WHERE id = 'm-trig1'`;
+    const fallback = await store.regenExchangeTail(scope, "c-dm", compSubj, "m-reply");
+    assert.equal(fallback.trigger?.id, "m-trig2");
   } finally { await sql.end(); }
 });
 
