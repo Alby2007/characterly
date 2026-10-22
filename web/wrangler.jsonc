@@ -12,9 +12,9 @@
     // security headers land on HTML. Hashed build assets and art skip the
     // worker (public/_headers covers their headers).
     "run_worker_first": [
-      "/", "/characters", "/characters/*", "/guides/*", "/account", "/dashboard",
+      "/", "/characters", "/characters/*", "/creators/*", "/guides/*", "/account", "/dashboard",
       "/terms", "/privacy", "/security", "/safety", "/sitemap.xml",
-      "/discord/events", "/avatar", "/avatar/gc", "/track"
+      "/discord/events", "/avatar", "/avatar/gc", "/track", "/creator-profile"
     ],
     "not_found_handling": "404-page"
   },
