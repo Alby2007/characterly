@@ -79,8 +79,10 @@ server-side. Pack fulfillment dedupes on `credit_ledger.stripe_ref`. →
 categories whitelist against `REPORT_CATEGORIES`/`HOUSE_REPORT_CATEGORIES`,
 report pings suppress mention parsing so a quote can't ping, mod-action
 targets resolve from the stored row (never the customId's author field),
-creator bans are enforced on every write path. → `docs/moderation.md`,
-`src/ops/automod.ts`.
+creator bans are enforced on every write path. Context-menu targets are
+equally unforgeable — Regenerate resolves the companion turn through the
+archived message row, so a tampered `targetMessage` id can't redo someone
+else's reply. → `docs/moderation.md`, `src/ops/automod.ts`.
 
 **House actors → moderation.** Three tiers: `/ops` (person-allowlisted
 `OPS_USER_IDS` — controls the host), marketplace mods

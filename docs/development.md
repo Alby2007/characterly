@@ -244,7 +244,7 @@ characterly/
 │   ├── db.ts                 # Shared postgres.js connection singleton
 │   ├── database.ts           # MemoryStore (Postgres: companions, journal, link codes, memories, edges)
 │   ├── events.ts             # EventStore (Postgres)
-│   ├── migrations.ts         # Versioned schema migrations (v1–v66)
+│   ├── migrations.ts         # Versioned schema migrations (v1–v67)
 │   ├── confidence.ts         # Deterministic confidence formulas
 │   ├── perception.ts         # Pre-filter regex, wake words, dismissals, tool cues
 │   ├── event-detection.ts    # EventPipeline — heuristic + LLM continuity
@@ -277,6 +277,7 @@ characterly/
 │   ├── copy.ts               # Shared house copy (welcome/deny/verify-gate strings) for bot + web
 │   ├── credit-store.ts       # Token buckets: credit_balance vs purchased_balance, grant_pack/clawback
 │   ├── turn-billing.ts       # Per-turn charge/refund orchestration for hosted replies
+│   ├── regen.ts              # "Regenerate" context-menu resolution (target → archived turn, dm: lanes)
 │   ├── fleet-cap.ts          # Revenue-aware hosted fleet cap (premium subs raise the daily ceiling)
 │   ├── prompt-safety.ts      # Injection hardening: promptInline/promptName/sanitizeBlock/wrapUntrusted
 │   ├── site-shelf.ts         # Marketplace shelf data layer shared with web/ (catalog, sitemap, labels)
@@ -293,7 +294,7 @@ characterly/
 │   ├── metrics.ts            # In-process operational counters (/status)
 │   ├── retry.ts              # Shared LLM retry helper (rate-limit aware)
 │   ├── test-helpers.ts       # Shared Postgres test utilities (TEST_DATABASE_URL)
-│   └── *.test.ts             # 51 test files, co-located with source
+│   └── *.test.ts             # 52 test files, co-located with source
 ├── web/                      # Live site — Astro on Cloudflare Workers (@astrojs/cloudflare)
 │   ├── src/pages/            # index (SSR shelf strip), characters/ (SSR), [doc] legal pages
 │   │                         #   (prerendered from the root *.md), guides/, account, dashboard,
@@ -312,7 +313,7 @@ characterly/
 ├── scripts/                  # Operational one-shots (see table above)
 ├── docs/
 │   ├── architecture.md       # Module map, companions, journal, web accounts, data flow
-│   ├── schema.md             # Database schema reference (through v66)
+│   ├── schema.md             # Database schema reference (through v67)
 │   ├── event-pipeline.md     # Event detection explainer
 │   ├── configuration.md      # Env var + website config reference
 │   ├── marketplace.md        # Marketplace end-to-end: publish/adopt, ratings, comments, tags, moderation

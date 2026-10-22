@@ -102,6 +102,35 @@ export async function sendAsCompanionInChannel(
   return null;
 }
 
+/** Edit a companion's earlier webhook post in place — Regenerate swaps the
+ *  reply text while the message keeps its id and position. A webhook can only
+ *  edit its own messages (a bot token never can), so this rides the same
+ *  per-host webhook the send path uses; false = the lane is gone. */
+export async function editCompanionMessage(
+  channel: { type: ChannelType; parent?: { type: ChannelType } | null; id: string },
+  messageId: string,
+  content: string,
+  botUserId: string,
+): Promise<boolean> {
+  const { host, threadId } = resolveWebhookHostChannel(channel);
+  if (!host) return false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const hook = await getOrCreateChannelWebhook(host, botUserId);
+    if (!hook) break;
+    try {
+      await hook.editMessage(messageId, { content, ...(threadId ? { threadId } : {}) });
+      return true;
+    } catch {
+      // Stale or deleted webhook — evict and retry once. A 404 on the message
+      // itself just costs one extra call.
+      webhookCache.delete(host.id);
+      inc("webhook.edit_retry");
+    }
+  }
+  inc("webhook.edit_unavailable");
+  return false;
+}
+
 export async function sendAsCompanion(
   triggerMessage: Message,
   companion: Pick<Companion, "id" | "name" | "avatarUrl">,

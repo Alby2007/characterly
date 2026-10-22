@@ -39,6 +39,9 @@ const env = z.object({
   // ping-pong, refill bounds the sustained drain (~1/refill per user).
   REPLY_BURST: z.coerce.number().int().min(1).max(50).default(4),
   REPLY_REFILL_MS: z.coerce.number().int().min(5_000).max(600_000).default(30_000),
+  // Daily "Regenerate" (right-click reply retry) cap — free+hosted lane only;
+  // premium and BYOK lanes are bounded by their own spend.
+  REGEN_DAILY_CAP: z.coerce.number().int().min(0).default(20),
   VISION_MODEL: z.string().optional(),
   VISION_API_KEY: z.string().optional(),
   WAKE_WORD: z.string().optional(),
@@ -246,6 +249,7 @@ export const config = {
   engagementTtlMs: env.ENGAGEMENT_TTL_MS,
   replyBurst: env.REPLY_BURST,
   replyRefillMs: env.REPLY_REFILL_MS,
+  regenDailyCap: env.REGEN_DAILY_CAP,
   // BYOK: AES-256-GCM master passphrase (SHA-256-derived in secrets.ts) and the
   // hosted-mode flag that turns off the env-key fallback for keyless guilds.
   keyEncryptionSecret: env.KEY_ENCRYPTION_SECRET,

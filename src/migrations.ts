@@ -6042,6 +6042,41 @@ export const migrations: Migration[] = [
       await sql`ALTER TABLE support_tickets DROP COLUMN IF EXISTS category`;
     },
   },
+  {
+    // v67: regenerate audit + free-lane cap. One row per Regenerate
+    // context-menu invocation — the daily cap counts these (UTC day, same
+    // boundary convention as credit refills) and the row is the audit trail
+    // of which reply was redone, by whom, and in which dm: scope channel.
+    version: 67,
+    name: "v67_reply_regens",
+    up: async (sql) => {
+      await sql`
+        CREATE TABLE IF NOT EXISTS reply_regens (
+          id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          requester_id TEXT NOT NULL,
+          scope        TEXT NOT NULL,
+          channel_id   TEXT NOT NULL,
+          message_id   TEXT NOT NULL,
+          companion_id BIGINT,
+          created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+      await sql`ALTER TABLE reply_regens ENABLE ROW LEVEL SECURITY`;
+      await sql`CREATE INDEX IF NOT EXISTS reply_regens_requester_day ON reply_regens(requester_id, created_at DESC)`;
+    },
+    down: async (sql) => {
+      await sql`
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM reply_regens) THEN
+            RAISE EXCEPTION 'v67 rollback refused: regen history exists';
+          END IF;
+        END $$
+      `;
+      await sql`DROP INDEX IF EXISTS reply_regens_requester_day`;
+      await sql`DROP TABLE IF EXISTS reply_regens`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

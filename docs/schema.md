@@ -1,6 +1,6 @@
 # Database Schema
 
-Characterly stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts` (`v1`–`v66`).
+Characterly stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts` (`v1`–`v67`).
 
 **Supabase lockdown (v23+):** every `public`-schema table has `ENABLE ROW LEVEL SECURITY` with zero Data-API policies — deny-all for `anon`/`authenticated`, while the bot's `postgres` role bypasses RLS. The exceptions are the web-account tables (`web_profiles`, `link_codes`), which have their own policy/grant design documented below. All Supabase-specific DDL is conditional on the `auth` schema existing, so plain-Postgres test/local databases run every migration unchanged.
 
@@ -927,6 +927,24 @@ House moderation ledger (v66) — one row per staff action, feeding the repeat-o
 
 ---
 
+### `reply_regens`
+
+Regenerate audit + free-lane cap (v67) — one row per **Regenerate** context-menu invocation (right-click → Apps on a companion reply in a DM or adoptee thread). The daily cap counts today's rows per requester (UTC day, same boundary as credit refills); the row is also the audit trail of which reply was redone.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT PK | `GENERATED ALWAYS AS IDENTITY` |
+| `requester_id` | TEXT | Discord user who invoked Regenerate (also the payer) |
+| `scope` | TEXT | `dm:<userId>` — DMs and adoptee threads share the scope |
+| `channel_id` | TEXT | DM channel or adoptee thread id |
+| `message_id` | TEXT | The companion reply that was regenerated (edited in place) |
+| `companion_id` | BIGINT NULL | |
+| `created_at` | TIMESTAMPTZ | |
+
+**RLS:** enabled, zero policies.
+
+---
+
 ### `schema_migrations`
 
 Version tracking for the migration system.
@@ -1008,3 +1026,4 @@ Version tracking for the migration system.
 | 64 | `v64_listing_rating_stats_view` | `listing_rating_stats` view (`security_invoker`) — server-side `GROUP BY` rating aggregates for the site shelf |
 | 65 | `v65_fleet_cap_state` | `fleet_cap_state` — persisted fleet-cap day-ratchet (`day` PK, `highwater`) so a restart can't re-anchor the cap below committed spend |
 | 66 | `v66_mod_actions_ticket_triage` | `mod_actions` ledger (house mod actions feed the repeat-offense ladder); `support_tickets` gains `category` (open-time picker), `last_staff_reply_at`, and `stale_notified_at` (unanswered-ticket nudge dedupe) |
+| 67 | `v67_reply_regens` | `reply_regens` — one row per Regenerate context-menu retry; the free-lane daily cap source and the audit trail |

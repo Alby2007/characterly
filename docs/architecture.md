@@ -31,7 +31,7 @@ Alongside the bot, `web/` is an Astro app on Cloudflare Workers (landing, SSR `/
 | `src/types.ts` | `Companion`, `CompanionPersona`, `GuildCompanion`, `MessageEvent`, … | Shared TypeScript types across modules |
 | `src/database.ts` | `MemoryStore` | Postgres persistence: companions, guild summons, webhook attribution, memory CRUD, lifecycle, conflict resolution, episode consolidation, analytics (`trackEvent`/`opsStats`/`flushMetricDeltas` — pseudonymous funnel events in `analytics_events`, opt-out gated) |
 | `src/events.ts` | `EventStore` | Postgres persistence: event CRUD, participants, message/memory attachments |
-| `src/migrations.ts` | `runMigrations`, `getMigrationVersion`, `LATEST_MIGRATION_VERSION` | Versioned schema migrations (v1–v66) with rollback support |
+| `src/migrations.ts` | `runMigrations`, `getMigrationVersion`, `LATEST_MIGRATION_VERSION` | Versioned schema migrations (v1–v67) with rollback support |
 | `src/confidence.ts` | `calculateInitialConfidence`, `updateConfidence`, `calculateDefaultImportance`, `calculateDefaultExplicitness` | Deterministic numeric formulas; no LLM involvement |
 | `src/perception.ts` | `shouldInspectForMemory`, `detectNamingRequest`, `detectSelfNaming`, `detectWakeWord`, `detectDismissal`, `contestCue`, `botMemoryCue`, `toolCues` | Cheap pre-filter: prevents LLM calls for ordinary chat; detects naming requests, self-naming, wake words, and dismissal cues |
 | `src/event-detection.ts` | `EventPipeline` | Heuristic + LLM continuity decisions; nightly maintenance |
@@ -64,6 +64,7 @@ Alongside the bot, `web/` is an Astro app on Cloudflare Workers (landing, SSR `/
 | `src/copy.ts` | house copy strings | Shared copy (welcome/deny/verify-gate text) consumed by both the bot and `web/` |
 | `src/credit-store.ts` | `spendCredits`, `refundCredits`, `grant_pack` wrappers | Token ledger — `credit_balance` total vs `purchased_balance` persistent slice (v60 two-bucket model); only the allowance refills daily |
 | `src/turn-billing.ts` | hosted turn charge/refund | Per-reply billing orchestration: token spend before send, full refund on screened/dropped replies |
+| `src/regen.ts` | `resolveRegenTarget` | **Regenerate** context-menu resolution — maps a target message to its archived companion turn in a `dm:` lane (bot DM or adoptee thread), refusing anything but the tail exchange the requester owns. Orchestration (charge → regen-mode `runCompanionTurn` → edit-in-place) lives in `index.ts` — the reply is edited, not replaced, so the archive and journal stay consistent and repeat regens keep working |
 | `src/fleet-cap.ts` | `fleetCap.getEffective` | Revenue-aware hosted fleet cap — premium subs add a computed daily bonus on `HOSTED_DAILY_LLM_CAP`; failure mode is "off", never unguarded |
 | `src/summary-job.ts` | `runSummaryJob` | `summary` worker handler — rolling "story so far" recaps in `conversation_summaries` (v55) |
 | `src/prompt-safety.ts` | `promptInline`, `promptName`, `sanitizeBlock`, `wrapUntrusted`, `sanitizeJsonValue` | Injection hardening — every member/third-party string crossing a prompt boundary is sanitized; covered by `prompt-injection.test.ts` |

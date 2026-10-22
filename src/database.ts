@@ -769,6 +769,67 @@ export class MemoryStore {
     });
   }
 
+  // ── Regenerate (right-click reply retry) ────────────────────────────────────
+
+  /** Resolve a regen attempt: the archived reply row under the cursor, whether
+   *  anything newer exists in the channel (a mid-conversation rewrite would
+   *  fork the transcript — only the tail may be redone), and the newest non-
+   *  companion row before it — the trigger the reply answered. */
+  async regenExchangeTail(scope: string, channelId: string, companionSubject: string, targetId: string): Promise<{
+    target: { id: string; authorId: string; content: string; createdAt: string } | null;
+    trigger: { id: string; authorId: string; authorName: string; content: string; createdAt: string; replyToId: string | null } | null;
+    newerCount: number;
+  }> {
+    const targetRows = await this.sql<Array<{ id: string; author_id: string; content: string; created_at: string }>>`
+      SELECT id, author_id, content, created_at FROM messages
+      WHERE guild_id = ${scope} AND id = ${targetId}
+    `;
+    const t = targetRows[0];
+    if (!t) return { target: null, trigger: null, newerCount: 0 };
+    const [newer, triggers] = await Promise.all([
+      this.sql<Array<{ n: number }>>`
+        SELECT count(*)::int AS n FROM messages
+        WHERE guild_id = ${scope} AND channel_id = ${channelId}
+          AND (created_at, id) > (${t.created_at}, ${t.id})
+      `,
+      this.sql<Array<{ id: string; author_id: string; author_name: string; content: string; created_at: string; reply_to_id: string | null }>>`
+        SELECT id, author_id, author_name, content, created_at, reply_to_id
+        FROM messages
+        WHERE guild_id = ${scope} AND channel_id = ${channelId}
+          AND author_id <> ${companionSubject}
+          AND (created_at, id) < (${t.created_at}, ${t.id})
+        ORDER BY created_at DESC, id DESC LIMIT 1
+      `,
+    ]);
+    const tr = triggers[0];
+    return {
+      target: { id: t.id, authorId: t.author_id, content: t.content, createdAt: ts(t.created_at) },
+      trigger: tr
+        ? { id: tr.id, authorId: tr.author_id, authorName: tr.author_name, content: tr.content, createdAt: ts(tr.created_at), replyToId: tr.reply_to_id }
+        : null,
+      newerCount: Number(newer[0]?.n ?? 0),
+    };
+  }
+
+  /** One Regenerate invocation — the daily cap source and the audit trail. */
+  async recordRegen(r: { requesterId: string; scope: string; channelId: string; messageId: string; companionId: number }): Promise<void> {
+    await this.sql`
+      INSERT INTO reply_regens (requester_id, scope, channel_id, message_id, companion_id)
+      VALUES (${r.requesterId}, ${r.scope}, ${r.channelId}, ${r.messageId}, ${r.companionId})
+    `;
+  }
+
+  /** Regenerations the requester used today (UTC day — the same boundary the
+   *  credit refill and dailyResetTag copy use). */
+  async regenCountToday(requesterId: string): Promise<number> {
+    const rows = await this.sql<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM reply_regens
+      WHERE requester_id = ${requesterId}
+        AND (created_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date
+    `;
+    return rows[0]?.n ?? 0;
+  }
+
   // ── Members ────────────────────────────────────────────────────────────────
   // The members table is the member registry: one row per (guild, user) tracking every
   // display name observed, message counts, and first/last activity. It backs the

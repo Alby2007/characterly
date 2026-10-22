@@ -62,7 +62,7 @@ export type EnsureAdopteeThreadResult =
  *  button keyed to the adoption's companion, reusing the market:drop path. */
 export function adopteeManagePayload(companion: Companion) {
   return {
-    content: `*Manage **${companion.name || "Companion"}** —*`,
+    content: `*Manage **${companion.name || "Companion"}** —*\n*tip — right-click a reply → Apps → Regenerate to redo it*`,
     components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId(`market:drop:${companion.id}`)

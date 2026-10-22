@@ -210,7 +210,7 @@ export function buildAwakenedCompanionPayload(
       { name: "Core Traits", value: companion.coreTraits.length ? companion.coreTraits.join(", ") : "—", inline: true },
       { name: `Bond with ${ownerName}`, value: companion.ownerDynamic || "—", inline: true },
     )
-    .setFooter({ text: "Permanently bound to your account (1 companion per account)" });
+    .setFooter({ text: "Permanently bound to your account (1 companion per account) · tip: right-click a reply → Apps → Regenerate to redo it" });
   if (companion.avatarUrl) embed.setThumbnail(companion.avatarUrl);
 
   const components: ActionRowBuilder<ButtonBuilder>[] = [];
@@ -1267,6 +1267,9 @@ export const commandDefinitions = [
   { name: "Staff pick", type: 3 },
   // "Pin to memory" — right-click any message to store it as a pinned memory.
   { name: "Pin to memory", type: 3 },
+  // "Regenerate" — redo the companion's latest reply in place (DMs + adoptee
+  // threads). Deliberately context-menu only: a retry affordance, not chrome.
+  { name: "Regenerate", type: 3 },
 ];
 
 const confidence = (value: number | undefined) => {

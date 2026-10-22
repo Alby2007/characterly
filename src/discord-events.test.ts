@@ -69,4 +69,10 @@ test("scopedCommandDefinitions scopes server-only to guild, others to guild+DM",
   // Companion must be DM-invocable — it's the onboarding surface.
   const companion = scoped.find(d => d.name === "companion");
   assert.deepEqual(companion?.contexts, [0, 1]);
+  // "Regenerate" is a message context menu (type 3), not server-only — it
+  // must resolve in guilds (adoptee threads) AND the bot DM.
+  const regen = scoped.find(d => d.name === "Regenerate");
+  assert.equal(regen?.type, 3);
+  assert.deepEqual(regen?.integrationTypes, [0, 1]);
+  assert.deepEqual(regen?.contexts, [0, 1]);
 });

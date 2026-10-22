@@ -1,4 +1,4 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client, Events, GatewayIntentBits, Options, Partials, type Guild, type Message, type MessageReplyOptions, type OmitPartialGroupDMChannel } from "discord.js";
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client, Events, GatewayIntentBits, MessageFlags, Options, Partials, type Guild, type Message, type MessageContextMenuCommandInteraction, type MessageReplyOptions, type OmitPartialGroupDMChannel } from "discord.js";
 import OpenAI from "openai";
 import { config } from "./config.js";
 import { linkSteps } from "./copy.js";
@@ -48,7 +48,8 @@ import { runSummaryJob, SUMMARY_REPLY_INTERVAL, type SummaryJobPayload } from ".
 import { runChatImportJob, type ChatImportJobPayload } from "./chat-import-job.js";
 import { greetPendingInstalls } from "./install-greet.js";
 import { selectCompanionForTurn } from "./scene-router.js";
-import { sendAsCompanion } from "./webhooks.js";
+import { editCompanionMessage, sendAsCompanion } from "./webhooks.js";
+import { REGEN_REFUSALS, resolveRegenTarget } from "./regen.js";
 import { isSelfHarmSignal, CRISIS_RESPONSE, meteredSafetyBrain, safetyBrain } from "./safety.js";
 import { TurnLedger, chargeHostedTurn, screenAdoptedReply } from "./turn-billing.js";
 import {
@@ -865,7 +866,10 @@ client.on(Events.ShardResume, (shardId, replayed) => { inc("client.shard_resume"
 client.on(Events.InteractionCreate, async interaction => {
   try {
     if (interaction.isChatInputCommand()) await handleMemoryCommand(interaction, store, brainFor, eventStore, profileStore);
-    if (interaction.isMessageContextMenuCommand()) await handleMarketplaceContext(interaction, store);
+    if (interaction.isMessageContextMenuCommand()) {
+      if (interaction.commandName === "Regenerate") await handleRegenContext(interaction);
+      else await handleMarketplaceContext(interaction, store);
+    }
     if (interaction.isStringSelectMenu()) await handleMarketSelect(interaction, store);
     if (interaction.isModalSubmit()) {
       await handleSetupModal(interaction, store, invalidateBrain);
@@ -1521,12 +1525,21 @@ async function runCompanionTurn(opts: {
   account: { plan?: string | null } | null;
   sendPersona: (text: string) => Promise<{ id: string; createdAt: Date } | null>;
   sendSystem: (payload: MessageReplyOptions) => Promise<unknown>;
+  /** Regenerate mode (right-click retry): the trigger is already archived and
+   *  extracted, and sendPersona edits the existing reply in place — so
+   *  re-archive, extraction, the reply throttle, journal and summary all skip,
+   *  and the outgoing take is filtered out of context so the model doesn't
+   *  anchor on its last answer. */
+  regen?: { targetMessageId: string; targetContent: string };
+  /** Charge override — regen bills the reply half only (the trigger already
+   *  paid when it arrived). */
+  charge?: { cost: number; reason: string; refundReason: string };
 }): Promise<void> {
-  const { scope, userId, channel, companion, event, replyToId, images, account, sendPersona, sendSystem } = opts;
+  const { scope, userId, channel, companion, event, replyToId, images, account, sendPersona, sendSystem, regen } = opts;
   const compSubj = MemoryStore.companionSubjectId(companion.id);
   const settings = await store.settings(scope, config.rawMessageRetentionDays);
   if (!settings.memoryEnabled && !settings.replyEnabled) return;
-  if (settings.memoryEnabled) {
+  if (settings.memoryEnabled && !regen) {
     await store.recordMessage(event, replyToId, true, false);
   }
 
@@ -1536,7 +1549,7 @@ async function runCompanionTurn(opts: {
     if (ref) replyToContent = `${ref.authorName}: ${ref.content}`;
   }
 
-  if (settings.memoryEnabled && (shouldInspectForMemory(event) || images.length)) {
+  if (!regen && settings.memoryEnabled && (shouldInspectForMemory(event) || images.length)) {
     try {
       // Free+hosted memory settles in hourly batches; premium/BYOK is live.
       const throttleMemory = account?.plan === "free" && isHostedScope(scope);
@@ -1557,7 +1570,9 @@ async function runCompanionTurn(opts: {
     return;
   }
 
-  if (!replyThrottle.consume(scope, userId)) { inc("reply.cooldown"); return; }
+  // Regen skips the burst throttle — it replaces a reply rather than adding
+  // one, and its own cooldown + daily cap + charge bound it instead.
+  if (!regen && !replyThrottle.consume(scope, userId)) { inc("reply.cooldown"); return; }
 
   const brain = await brainFor(scope);
   if (!brain) {
@@ -1574,7 +1589,8 @@ async function runCompanionTurn(opts: {
   let ledger = TurnLedger.free(userId);
   if (hostedDm) {
     const charge = await chargeHostedTurn(store, {
-      payerId: userId, cost: 2, reason: "dm_turn", refundReason: "dm_turn_refund",
+      payerId: userId, cost: opts.charge?.cost ?? 2, reason: opts.charge?.reason ?? "dm_turn",
+      refundReason: opts.charge?.refundReason ?? "dm_turn_refund",
       premium: account?.plan === "premium", hostedDailyLlmCap: await fleetCap.getEffective(),
     });
     if (!charge.ok) {
@@ -1625,7 +1641,12 @@ async function runCompanionTurn(opts: {
       attributes: (profileBundle.attrMap.get(p.subjectId) ?? []).map(a => ({ field: a.field, value: a.value, confidence: a.confidence })),
     }));
     const relationships = pair ? [pair] : [];
-    const context = rawContext.map(x => ({
+    const context = (regen
+      // The outgoing take stays out of context — reading its own last answer
+      // anchors the model into echoing it instead of producing a new take.
+      ? rawContext.filter(x => !(x.authorId === compSubj && x.content === regen.targetContent))
+      : rawContext
+    ).map(x => ({
       ...x,
       content: demangleMentions(x.content, lookups.names),
       replyToSnippet: x.replyToSnippet ? demangleMentions(x.replyToSnippet, lookups.names) : undefined,
@@ -1711,26 +1732,30 @@ async function runCompanionTurn(opts: {
       }
       ledger.markReplied();
       inc("reply.sent");
-      await store.recordMessage({
-        guildId: scope,
-        channelId: channel.id,
-        messageId: sent.id,
-        authorId: compSubj,
-        authorName: companion.name,
-        content: dmReplyText,
-        createdAt: sent.createdAt ?? new Date(),
-        mentionsBot: false,
-      }, event.messageId, false, true);
-      await store.setTriageResults([{ id: sent.id, result: "noise" }]);
-      // Deferrable first-person journaling — a failed enqueue must not lose
-      // the reply that already landed; the job no-ops on empty exchanges.
-      // Free+hosted owners journal on the same hourly cadence as extraction.
-      const journalDelay = account?.plan === "free" && hostedDm ? nextHourBoundary() : undefined;
-      enqueue(sql, scope, "journal-write", {
-        companionId: companion.id, triggerMessageId: event.messageId,
-        replyMessageId: sent.id, channelId: channel.id,
-      }, journalDelay).catch(() => inc("jobs.enqueue_error"));
-      void maybeEnqueueSummary(companion.id, scope, channel.id);
+      // Regen edits the existing reply — no new archive row, and the exchange
+      // already produced its journal/summary bookkeeping on the first take.
+      if (!regen) {
+        await store.recordMessage({
+          guildId: scope,
+          channelId: channel.id,
+          messageId: sent.id,
+          authorId: compSubj,
+          authorName: companion.name,
+          content: dmReplyText,
+          createdAt: sent.createdAt ?? new Date(),
+          mentionsBot: false,
+        }, event.messageId, false, true);
+        await store.setTriageResults([{ id: sent.id, result: "noise" }]);
+        // Deferrable first-person journaling — a failed enqueue must not lose
+        // the reply that already landed; the job no-ops on empty exchanges.
+        // Free+hosted owners journal on the same hourly cadence as extraction.
+        const journalDelay = account?.plan === "free" && hostedDm ? nextHourBoundary() : undefined;
+        enqueue(sql, scope, "journal-write", {
+          companionId: companion.id, triggerMessageId: event.messageId,
+          replyMessageId: sent.id, channelId: channel.id,
+        }, journalDelay).catch(() => inc("jobs.enqueue_error"));
+        void maybeEnqueueSummary(companion.id, scope, channel.id);
+      }
       if (ledger.charged) void maybeAlertLowCredit(userId, ledger.balance);
       // Free+hosted users never see tools — a once-a-day hint that Premium
       // unlocks them is the only way they'd learn the feature exists.
@@ -1762,6 +1787,118 @@ async function runCompanionTurn(opts: {
     ledger.refund();
   } finally {
     stopTyping();
+  }
+}
+
+// ── "Regenerate" context command ─────────────────────────────────────────────
+// Right-click → Apps → Regenerate on the companion's latest reply redoes the
+// turn in place: the new text edits the same message, so the transcript keeps
+// one position per exchange and repeated regens stay cheap. dm: lanes only —
+// DMs and adoptee threads (see regen.ts for the resolution rules).
+const regenInflight = new Set<string>();
+const regenCooldownAt = new Map<string, number>();
+const REGEN_COOLDOWN_MS = 15_000;
+
+async function handleRegenContext(interaction: MessageContextMenuCommandInteraction): Promise<void> {
+  const target = interaction.targetMessage;
+  const inflightKey = `${interaction.channelId}:${target.id}`;
+  const say = (content: string) => interaction.deferred
+    ? interaction.editReply({ content })
+    : interaction.reply({ content, ephemeral: true });
+
+  if (regenInflight.has(inflightKey)) { await say("That reply is already being regenerated."); return; }
+  const lastAt = regenCooldownAt.get(interaction.user.id) ?? 0;
+  if (Date.now() - lastAt < REGEN_COOLDOWN_MS) { await say("Give it a few seconds before regenerating again."); return; }
+
+  await interaction.deferReply({ ephemeral: true });
+  regenInflight.add(inflightKey);
+  try {
+    const resolved = await resolveRegenTarget(interaction, store);
+    if (!resolved.ok) { await interaction.editReply({ content: REGEN_REFUSALS[resolved.reason] }); return; }
+    // Only real attempts consume the per-user cooldown — a refused pick
+    // shouldn't make the user wait to retry on the right message.
+    regenCooldownAt.set(interaction.user.id, Date.now());
+    const { scope, channelId, requesterId, companion, targetMessageId, targetContent, trigger } = resolved.target;
+
+    const account = store.creditsSupported ? await store.accountForDiscordUser(requesterId).catch(() => null) : null;
+    // The free lane gets a daily regen budget on top of the token charge;
+    // premium and BYOK lanes are bounded by their own spend instead.
+    if (store.creditsSupported && isHostedScope(scope) && account?.plan !== "premium"
+        && (await store.regenCountToday(requesterId)) >= config.regenDailyCap) {
+      await interaction.editReply({ content: `That's today's ${config.regenDailyCap} regenerations — the count resets ${dailyResetTag()}.` });
+      return;
+    }
+
+    const channel = target.channel ?? interaction.channel;
+    if (!channel) { await interaction.editReply({ content: "Couldn't reach that channel." }); return; }
+    const liveTrigger = await channel.messages?.fetch?.(trigger.messageId).catch(() => null);
+    const images = liveTrigger && config.visionModel
+      ? qualifyingImages(liveTrigger.attachments.values(), config.imageMaxBytes, IMAGE_MAX_PER_MESSAGE)
+      : [];
+
+    let landed = false;
+    let noticed = false;
+    // Webhook-sent replies (adoptee threads) edit through the webhook — a bot
+    // token can't touch them. Bot-authored replies (DM CV2 blocks + adoptee
+    // bold-name fallbacks) edit directly, payload shape mirroring the original.
+    const viaWebhook = Boolean(target.webhookId);
+    const cv2 = Boolean(target.flags?.has?.(MessageFlags.IsComponentsV2));
+    const sendPersona = async (t: string): Promise<{ id: string; createdAt: Date } | null> => {
+      const ok = viaWebhook
+        ? await editCompanionMessage(channel, targetMessageId, t, client.user!.id)
+        : await target.edit(cv2
+            // CV2 messages require IsComponentsV2 on the edit too — the flag
+            // is idempotent on an already-CV2 message.
+            ? { ...buildCompanionDmPayload(companion, t), allowedMentions: { parse: [] } }
+            : { content: `**${companion.name}**\n${t}`, allowedMentions: { parse: [] } },
+          ).then(() => true).catch(() => false);
+      if (!ok) return null;
+      landed = true;
+      // Adoptee rows archive under dm:<adopter> — the MessageUpdate handler's
+      // guild-scoped update misses them, so write the new text directly.
+      await store.updateMessageContentById(targetMessageId, t).catch(() => {});
+      return { id: targetMessageId, createdAt: new Date(target.createdTimestamp) };
+    };
+    // System chrome (charge refusals, crisis response, budget notices) lands
+    // on the ephemeral reply — nothing public posts into the channel.
+    const sendSystem = (o: MessageReplyOptions) => {
+      noticed = true;
+      return interaction.editReply({ content: o.content ?? "", components: o.components, embeds: o.embeds }).catch(() => {});
+    };
+    const event: MessageEvent = {
+      guildId: scope,
+      channelId,
+      messageId: trigger.messageId,
+      authorId: trigger.authorId,
+      authorName: trigger.authorName,
+      content: trigger.content,
+      createdAt: new Date(trigger.createdAt),
+      mentionsBot: false,
+      imageAttachments: images.length ? images : undefined,
+    };
+    await runCompanionTurn({
+      scope,
+      userId: requesterId,
+      channel,
+      companion,
+      event,
+      replyToId: trigger.replyToId ?? undefined,
+      images,
+      account,
+      sendPersona,
+      sendSystem,
+      regen: { targetMessageId, targetContent },
+      charge: { cost: 1, reason: "regen", refundReason: "regen_refund" },
+    });
+    if (landed) {
+      await store.recordRegen({ requesterId, scope, channelId, messageId: targetMessageId, companionId: companion.id })
+        .catch(() => inc("regen.record_error"));
+      await interaction.editReply({ content: "Done — the reply was regenerated." }).catch(() => {});
+    } else if (!noticed) {
+      await interaction.editReply({ content: "Couldn't regenerate that reply — try again in a moment." }).catch(() => {});
+    }
+  } finally {
+    regenInflight.delete(inflightKey);
   }
 }
 
