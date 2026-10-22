@@ -1,13 +1,19 @@
-# Characterly website
+# ARCHIVED — old Characterly website (Vite)
 
-Marketing/landing page for Characterly — a standalone Vite + vanilla site.
+**This is the pre-Astro site. It is not deployed.** The live website is the
+Astro + Cloudflare Workers app in `web/` (worker `characterly-website`,
+`wrangler.jsonc`). The cutover happened Oct 2026 — this tree is kept for
+reference only; don't edit it to change the live site.
+
+If you ever need to resurrect it:
 
 ```bash
-cd website
+cd archive/website
 npm install
 npm run dev      # http://localhost:5173
 npm run build    # production bundle → dist/
-npm run preview  # serve the built bundle
 ```
 
-Outbound links (bot invite, Discord invite, repo URLs) live in `src/config.js`.
+Its `src/config.js` / `src/legal.js` responsibilities moved to
+`web/src/lib/config.ts` / `web/src/lib/legal.ts` (legal docs now render at
+build time instead of in the browser).
