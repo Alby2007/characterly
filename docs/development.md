@@ -34,7 +34,8 @@ On first run the bot connects to Postgres, creates all tables, and applies migra
 | Command | What it does |
 |---------|-------------|
 | `npm run dev` | Start with live reload via `tsx watch`. Restart on every file save. |
-| `npm start` | Start once (no reload). Use for production. |
+| `npm run build` | Compile to `dist/` via `tsc -p tsconfig.build.json` (tests excluded). |
+| `npm start` | Run the compiled output — `node --enable-source-maps dist/index.js`. Build first. |
 | `npm run check` | TypeScript type-check only (`tsc --noEmit`). No output = pass. |
 | `npm test` | Run the full test suite using Node's built-in test runner. |
 
@@ -328,7 +329,7 @@ npm run deploy   # cf deploy → Cloudflare Workers static assets
 
 `.github/workflows/test.yml` runs on every push and PR:
 
-1. **test** — `npm ci`, `npm run check` (tsc), then `npm test` against a Postgres 16 service (`TEST_DATABASE_URL` pointed at the service container).
-2. **deploy** — only on green pushes to `main`, gated by `environment: production` (attach required reviewers in repo settings so a push alone can't ship). SSHes to the Oracle host and runs `cd ~/characterly && git pull --ff-only && npm ci && sudo systemctl restart characterly`. Required secrets: `ORACLE_SSH_KEY`, `ORACLE_HOST_KEY` (`ssh-keyscan` output — pinned host key, fails closed), `ORACLE_SSH_HOST` (`user@ip`).
+1. **test** — `npm ci`, `npm run check` (tsc), `npm run build` (prove the production artifact compiles), then `npm test` against a Postgres 16 service (`TEST_DATABASE_URL` pointed at the service container).
+2. **deploy** — only on green pushes to `main`, gated by `environment: production` (attach required reviewers in repo settings so a push alone can't ship). SSHes to the Oracle host and runs `cd ~/characterly && git pull --ff-only && npm ci && npm run build && npm prune --omit=dev && sudo systemctl restart characterly`. Required secrets: `ORACLE_SSH_KEY`, `ORACLE_HOST_KEY` (`ssh-keyscan` output — pinned host key, fails closed), `ORACLE_SSH_HOST` (`user@ip`).
 
 The website deploys separately — `npm run deploy` inside `website/` — and is not part of CI.

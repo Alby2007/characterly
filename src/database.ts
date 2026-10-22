@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto";
-import type { AppInstall, AttributeStatus, ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, ConversationSummary, EvidenceEffect, EvidenceType, GuildCompanion, GuildDeployment, JournalCandidate, JournalEntry, ListingPost, Member, MemoryCandidate, MemoryStatus, MessageEvent, OnboardingState, ProfileAttribute, RelationshipEdge, SupportTicket, VerificationVerdict, WebhookMessageRecord } from "./types.js";
+import type { AppInstall, AttributeStatus, ChatImport, Companion, CompanionAdoption, CompanionListing, CompanionSpec, ConversationSummary, EvidenceEffect, EvidenceType, GuildCompanion, GuildDeployment, JournalCandidate, JournalEntry, ListingPost, Member, MemoryCandidate, MemoryStatus, MessageEvent, ModAction, OnboardingState, ProfileAttribute, RelationshipEdge, SupportTicket, VerificationVerdict, WebhookMessageRecord } from "./types.js";
 import { sql as defaultSql, type Sql } from "./db.js";
 import { runMigrations } from "./migrations.js";
 import { CreditStore } from "./credit-store.js";
@@ -162,7 +162,8 @@ const num = (v: unknown) => Number(v ?? 0);
 export type AnalyticsEvent =
   | "install_greeted" | "onboard_start" | "awaken"
   | "summon" | "summon_deadend" | "adopt"
-  | "house_join" | "verified" | "guild_added" | "guild_purged";
+  | "house_join" | "verified" | "guild_added" | "guild_purged"
+  | "verify_nudge";
 
 export interface OpsStats {
   dauDm: number; dauGuilds: number; wauDm: number; wauGuilds: number;
@@ -573,6 +574,22 @@ export class MemoryStore {
     } catch {
       inc("analytics.event_error");
     }
+  }
+
+  /** "Have we ever recorded this event for this user?" — the verify-nudge
+   *  sweep's once-ever dedupe. Within retention (~400d pruning) it's exact;
+   *  the nudge's 24h unverified window closes long before that horizon. */
+  async hasAnalyticsEvent(discordUserId: string, event: AnalyticsEvent): Promise<boolean> {
+    const rows = await this.sql`SELECT 1 FROM analytics_events WHERE discord_user_id = ${discordUserId} AND event = ${event} LIMIT 1`;
+    return rows.length > 0;
+  }
+
+  /** Single-user opt-out check — the verify-nudge sweep skips opted-out
+   *  users before it even considers the DM. trackEvent already refuses to
+   *  write their rows, so this is the send-side gate. */
+  async analyticsOptedOut(discordUserId: string): Promise<boolean> {
+    const rows = await this.sql`SELECT 1 FROM user_bot_settings WHERE discord_user_id = ${discordUserId} AND analytics_opt_out LIMIT 1`;
+    return rows.length > 0;
   }
 
   /** Persist the in-process counter deltas since the last drain into the
@@ -4000,17 +4017,25 @@ export class MemoryStore {
     guildId: string; marketplaceChannelId?: string | null; adopteesChannelId?: string | null;
     categoryId?: string | null; loginChannelId?: string | null;
     status?: GuildDeployment["status"]; deployedBy?: string | null; lastError?: string | null;
+  }, opts?: {
+    /** Default (false): a null channel arg preserves the existing column —
+     *  callers that only know a subset can't accidentally blank ids.
+     *  True: channel columns take the passed value verbatim, null included —
+     *  for env-authoritative seeds (the house) where a REMOVED env var must
+     *  clear the stale id instead of leaving it pointing at a dead channel. */
+    clearChannelIds?: boolean;
   }): Promise<void> {
+    const verbatim = opts?.clearChannelIds === true;
     await this.sql`
       INSERT INTO guild_deployments (guild_id, status, marketplace_channel_id, adoptees_channel_id, category_id, login_channel_id, deployed_by, deployed_at, last_error)
       VALUES (${d.guildId}, ${d.status ?? "active"}, ${d.marketplaceChannelId ?? null}, ${d.adopteesChannelId ?? null},
               ${d.categoryId ?? null}, ${d.loginChannelId ?? null}, ${d.deployedBy ?? null}, NOW(), ${d.lastError ?? null})
       ON CONFLICT (guild_id) DO UPDATE SET
         status = ${d.status ?? "active"},
-        marketplace_channel_id = coalesce(${d.marketplaceChannelId ?? null}, guild_deployments.marketplace_channel_id),
-        adoptees_channel_id    = coalesce(${d.adopteesChannelId ?? null}, guild_deployments.adoptees_channel_id),
-        category_id            = coalesce(${d.categoryId ?? null}, guild_deployments.category_id),
-        login_channel_id       = coalesce(${d.loginChannelId ?? null}, guild_deployments.login_channel_id),
+        marketplace_channel_id = ${verbatim ? this.sql`${d.marketplaceChannelId ?? null}` : this.sql`coalesce(${d.marketplaceChannelId ?? null}, guild_deployments.marketplace_channel_id)`},
+        adoptees_channel_id    = ${verbatim ? this.sql`${d.adopteesChannelId ?? null}` : this.sql`coalesce(${d.adopteesChannelId ?? null}, guild_deployments.adoptees_channel_id)`},
+        category_id            = ${verbatim ? this.sql`${d.categoryId ?? null}` : this.sql`coalesce(${d.categoryId ?? null}, guild_deployments.category_id)`},
+        login_channel_id       = ${verbatim ? this.sql`${d.loginChannelId ?? null}` : this.sql`coalesce(${d.loginChannelId ?? null}, guild_deployments.login_channel_id)`},
         deployed_by            = coalesce(${d.deployedBy ?? null}, guild_deployments.deployed_by),
         deployed_at            = coalesce(guild_deployments.deployed_at, NOW()),
         last_error             = ${d.lastError ?? null},
@@ -5172,6 +5197,9 @@ export class MemoryStore {
       openedAt: ts(r.opened_at),
       closedAt: r.closed_at ? ts(r.closed_at) : null,
       closerId: r.closer_id ?? null,
+      category: r.category ?? "other",
+      lastStaffReplyAt: r.last_staff_reply_at ? ts(r.last_staff_reply_at) : null,
+      staleNotifiedAt: r.stale_notified_at ? ts(r.stale_notified_at) : null,
     };
   }
 
@@ -5179,11 +5207,11 @@ export class MemoryStore {
    *  when the opener already holds an open ticket — the partial unique index
    *  is the race-proof arbiter (the handler archives the orphan thread). */
   async createSupportTicket(
-    guildId: string, openerId: string, threadId: string, subject: string, details: string,
+    guildId: string, openerId: string, threadId: string, subject: string, details: string, category = "other",
   ): Promise<SupportTicket | null> {
     const rows = await this.sql<Array<any>>`
-      INSERT INTO support_tickets (thread_id, guild_id, opener_id, subject, details)
-      VALUES (${threadId}, ${guildId}, ${openerId}, ${subject.slice(0, 200)}, ${details.slice(0, 2000)})
+      INSERT INTO support_tickets (thread_id, guild_id, opener_id, subject, details, category)
+      VALUES (${threadId}, ${guildId}, ${openerId}, ${subject.slice(0, 200)}, ${details.slice(0, 2000)}, ${category.slice(0, 40)})
       ON CONFLICT (opener_id) WHERE status = 'open' DO NOTHING
       RETURNING *
     `;
@@ -5218,6 +5246,101 @@ export class MemoryStore {
       ORDER BY opened_at ASC
     `;
     return rows.map(r => this.rowToSupportTicket(r));
+  }
+
+  /** A staff member posted in a ticket thread — the staleness signal for the
+   *  reaper's unanswered-ticket nudge. Every staff post re-stamps it; the
+   *  nudge only reads NULL-vs-set, so the timestamp's freshness is free. */
+  async markTicketStaffReply(threadId: string): Promise<void> {
+    await this.sql`
+      UPDATE support_tickets SET last_staff_reply_at = NOW()
+      WHERE thread_id = ${threadId} AND status = 'open'
+    `;
+  }
+
+  /** Open tickets older than `staleMs` that never got a staff reply and
+   *  haven't been nudged about yet — the reaper's work list. A ticket with
+   *  ANY staff reply is answered work (long conversations aren't "stale"). */
+  async listStaleUnansweredTickets(guildId: string, staleMs: number): Promise<SupportTicket[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM support_tickets
+      WHERE guild_id = ${guildId} AND status = 'open'
+        AND stale_notified_at IS NULL
+        AND last_staff_reply_at IS NULL
+        AND opened_at < NOW() - (${staleMs} * INTERVAL '1 millisecond')
+      ORDER BY opened_at ASC
+    `;
+    return rows.map(r => this.rowToSupportTicket(r));
+  }
+
+  /** The nudge fired — dedupe so it's once per ticket, not once per sweep. */
+  async markTicketStaleNotified(threadId: string): Promise<void> {
+    await this.sql`
+      UPDATE support_tickets SET stale_notified_at = NOW()
+      WHERE thread_id = ${threadId}
+    `;
+  }
+
+  private rowToModAction(r: any): ModAction {
+    return {
+      id: Number(r.id),
+      guildId: r.guild_id,
+      targetId: r.target_id,
+      actor: r.actor,
+      action: r.action,
+      rule: r.rule ?? null,
+      detail: r.detail ?? "",
+      messageId: r.message_id ?? null,
+      channelId: r.channel_id ?? null,
+      createdAt: ts(r.created_at),
+    };
+  }
+
+  /** Append to the moderation audit ledger — every automod action, report
+   *  resolution, and staff intervention on a house member lands here so
+   *  /ops modlog and the escalation ladder share one history. */
+  async recordModAction(a: {
+    guildId: string; targetId: string; actor: string; action: string;
+    rule?: string | null; detail?: string; messageId?: string | null; channelId?: string | null;
+  }): Promise<void> {
+    await this.sql`
+      INSERT INTO mod_actions (guild_id, target_id, actor, action, rule, detail, message_id, channel_id)
+      VALUES (${a.guildId}, ${a.targetId}, ${a.actor}, ${a.action}, ${a.rule ?? null},
+              ${(a.detail ?? "").slice(0, 500)}, ${a.messageId ?? null}, ${a.channelId ?? null})
+    `;
+  }
+
+  /** Offense count for the escalation ladder — rows in the window that
+   *  represent validated bad behavior (everything but a dismissed report).
+   *  The caller adds +1 for the action it's about to take. */
+  async modActionOffenseCount(targetId: string, windowMs: number): Promise<number> {
+    const rows = await this.sql<[{ n: number | string }]>`
+      SELECT COUNT(*) AS n FROM mod_actions
+      WHERE target_id = ${targetId} AND action <> 'report_keep'
+        AND created_at > NOW() - (${windowMs} * INTERVAL '1 millisecond')
+    `;
+    return Number(rows[0].n);
+  }
+
+  /** The /ops modlog view — newest-first history for one member. */
+  async listModActionsFor(targetId: string, limit = 15): Promise<ModAction[]> {
+    const rows = await this.sql<Array<any>>`
+      SELECT * FROM mod_actions WHERE target_id = ${targetId}
+      ORDER BY created_at DESC LIMIT ${limit}
+    `;
+    return rows.map(r => this.rowToModAction(r));
+  }
+
+  /** Automod-rule rollup for the /ops house dashboard — today's action
+   *  counts keyed by rule so the panel shows what's actually firing. */
+  async modActionsByRule(guildId: string, sinceMs: number): Promise<Array<{ rule: string; n: number }>> {
+    const rows = await this.sql<Array<{ rule: string | null; n: number | string }>>`
+      SELECT COALESCE(rule, 'manual') AS rule, COUNT(*) AS n FROM mod_actions
+      WHERE guild_id = ${guildId} AND created_at > NOW() - (${sinceMs} * INTERVAL '1 millisecond')
+        AND action <> 'report_keep'
+      GROUP BY 1 ORDER BY n DESC LIMIT 10
+    `;
+    return rows.map(r => ({ rule: r.rule ?? "manual", n: Number(r.n) }));
   }
 
   async recordWebhookMessage(

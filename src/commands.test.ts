@@ -1052,15 +1052,22 @@ test("Report message: only marketplace-thread comments are reportable", async ()
     await handleMarketplaceContext(foreign.interaction, nullCtxStore);
     assert.equal(foreign.replies[0]?.ephemeral, true);
 
-    // A regular (non-thread, or other-parent) channel in the house.
+    // A regular (non-thread, or other-parent) channel in the house —
+    // reportable now: the picker files house:reportcat (listing_id NULL).
     const channelMsg = stubCtxMenu({ target: { id: "m1", author: { id: "u-a" }, channel: { id: "c-chat", parentId: null, isThread: () => false } } });
     await handleMarketplaceContext(channelMsg.interaction, nullCtxStore);
-    assert.match(channelMsg.replies[0]?.content ?? "", /only works/i);
+    assert.equal(channelMsg.replies[0]?.ephemeral, true);
+    assert.match(JSON.stringify(channelMsg.replies[0]?.components), /house:reportcat:c-chat:m1:/);
 
-    // A thread in some other forum.
+    // A thread in some other forum inside the house — still reportable.
     const otherThread = stubCtxMenu({ target: { id: "m1", author: { id: "u-a" }, channel: { id: "t-y", parentId: "c-elsewhere" } } });
     await handleMarketplaceContext(otherThread.interaction, nullCtxStore);
-    assert.match(otherThread.replies[0]?.content ?? "", /only works/i);
+    assert.match(JSON.stringify(otherThread.replies[0]?.components), /house:reportcat:t-y:m1:/);
+
+    // The same channel outside both surfaces (foreign guild) still refuses.
+    const foreignChannel = stubCtxMenu({ guildId: "g-other", target: { id: "m1", author: { id: "u-a" }, channel: { id: "c-x", parentId: null, isThread: () => false } } });
+    await handleMarketplaceContext(foreignChannel.interaction, nullCtxStore);
+    assert.match(foreignChannel.replies[0]?.content ?? "", /only works/i);
 
     // Own comment + bot messages refused.
     const self = stubCtxMenu({ userId: "u-a", target: { id: "m1", author: { id: "u-a" }, channel: { id: "t-1", parentId: "c-forum" } } });

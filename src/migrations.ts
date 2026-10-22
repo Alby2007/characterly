@@ -5983,6 +5983,65 @@ export const migrations: Migration[] = [
       await sql`DROP TABLE IF EXISTS fleet_cap_state`;
     },
   },
+  {
+    // v66: moderation audit ledger + ticket triage. mod_actions is the
+    // durable "who did what to whom" — automod deletes/timeouts, report
+    // resolutions, kicks — powering /ops modlog and the automod escalation
+    // ladder (repeat offenses in a window earn longer timeouts, then a
+    // kick). support_tickets gains category (picker at open), a
+    // last_staff_reply_at staleness signal, and stale_notified_at — the
+    // unanswered-ticket nudge's dedupe (one alert per ticket).
+    version: 66,
+    name: "v66_mod_actions_ticket_triage",
+    up: async (sql) => {
+      await sql`
+        CREATE TABLE IF NOT EXISTS mod_actions (
+          id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          guild_id    TEXT NOT NULL,
+          target_id   TEXT NOT NULL,
+          actor       TEXT NOT NULL,
+          action      TEXT NOT NULL,
+          rule        TEXT,
+          detail      TEXT NOT NULL DEFAULT '',
+          message_id  TEXT,
+          channel_id  TEXT,
+          created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+      await sql`ALTER TABLE mod_actions ENABLE ROW LEVEL SECURITY`;
+      await sql`CREATE INDEX IF NOT EXISTS mod_actions_target ON mod_actions(target_id, created_at DESC)`;
+      await sql`CREATE INDEX IF NOT EXISTS mod_actions_guild ON mod_actions(guild_id, created_at DESC)`;
+
+      await sql`ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'other'`;
+      await sql`ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS last_staff_reply_at TIMESTAMPTZ`;
+      await sql`ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS stale_notified_at TIMESTAMPTZ`;
+      // The reaper's stale scan — open tickets past the nudge window that
+      // haven't been pinged yet. Partial so closed/notified rows stay out.
+      await sql`
+        CREATE INDEX IF NOT EXISTS support_tickets_stale
+          ON support_tickets (guild_id, opened_at)
+          WHERE status = 'open' AND stale_notified_at IS NULL
+      `;
+    },
+    down: async (sql) => {
+      // Audit ledgers aren't dropped silently — same data guard as v48.
+      await sql`
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM mod_actions) THEN
+            RAISE EXCEPTION 'v66 rollback refused: mod action history exists';
+          END IF;
+        END $$
+      `;
+      await sql`DROP INDEX IF EXISTS mod_actions_guild`;
+      await sql`DROP INDEX IF EXISTS mod_actions_target`;
+      await sql`DROP TABLE IF EXISTS mod_actions`;
+      await sql`DROP INDEX IF EXISTS support_tickets_stale`;
+      await sql`ALTER TABLE support_tickets DROP COLUMN IF EXISTS stale_notified_at`;
+      await sql`ALTER TABLE support_tickets DROP COLUMN IF EXISTS last_staff_reply_at`;
+      await sql`ALTER TABLE support_tickets DROP COLUMN IF EXISTS category`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

@@ -186,7 +186,7 @@ git clone https://github.com/Alby2007/characterly.git
 cd characterly
 npm install
 cp .env.example .env   # fill in DISCORD_TOKEN, KEY_ENCRYPTION_SECRET, DATABASE_URL (and optional GROQ_API_KEY)
-npm run dev            # or: npm start
+npm run dev            # or: npm run build && npm start
 ```
 
 Migrations (`v1`–`v61`) apply automatically on first boot — no manual SQL.

@@ -1,5 +1,9 @@
 # Characterly — dev notes
 
+## Build
+
+`npm run build` compiles `src/` to `dist/` via `tsconfig.build.json` (tests + `test-helpers.ts` excluded; `allowImportingTsExtensions` is dev-only because `stripe-webhook.test.ts` imports a Deno `.ts` edge function). `npm start` runs `node --enable-source-maps dist/index.js` — **not** tsx. Both deploy paths (CI ssh + `/ops deploy`) run `npm ci && npm run build && npm prune --omit=dev` before restart; tsx stays in `dependencies` for the `ops:*` scripts, which import `src/*.ts` directly.
+
 ## Tests
 
 `npm test` — the suite includes DB-backed tests that only run when `TEST_DATABASE_URL` is set.

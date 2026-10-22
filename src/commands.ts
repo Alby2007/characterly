@@ -13,7 +13,7 @@ import { config } from "./config.js";
 import { linkSteps } from "./copy.js";
 import { checkListingFields, REPORT_CATEGORIES, safetyBrain } from "./safety.js";
 import { TurnLedger } from "./turn-billing.js";
-import { handleOpsCommand, handleHouseButton, handleTicketButton, isHouse, isMarketplaceThread, getOpsDeps, ensureAdopteeThread, ensureAdopteeThreadsForUser, setAdopteeThreadLocked, adopteeManagePayload, deployedGuildIds, deploymentFor, deployMarketplace, removeDeployment, houseAdopteesPressure } from "./ops.js";
+import { handleOpsCommand, handleHouseButton, handleTicketButton, isHouse, isMarketplaceThread, getOpsDeps, ensureAdopteeThread, ensureAdopteeThreadsForUser, setAdopteeThreadLocked, adopteeManagePayload, deployedGuildIds, deploymentFor, deployMarketplace, removeDeployment, houseAdopteesPressure, safeTrunc } from "./ops.js";
 import { CURATED_TAGS, PARTNER_TAG_SET, archiveListingPosts, postListingToDeployments, buildListingCard, buildListingComponents } from "./marketplace.js";
 import { parseCardFile, cardToPersona, cardImportMeta, cardFileHash, CARD_MAX_BYTES, type ImportPersona, type CardImportMeta, type ParsedCard } from "./charcard.js";
 import { parseChatFile, chatImportMeta, chatFileHash, type ParsedChat, type ChatImportMeta } from "./chathist.js";
@@ -1242,7 +1242,7 @@ export const commandDefinitions = [
       { name: "stats — funnel + activity metrics", value: "stats" },
       { name: "logs — last N journal lines", value: "logs" },
       { name: "restart — restart the bot onto the same code", value: "restart" },
-      { name: "deploy — git pull + npm ci + restart", value: "deploy" },
+      { name: "deploy — pull + install + build + restart", value: "deploy" },
       { name: "announce — post an announcement (optional channel)", value: "announce" },
       { name: "layout — reconcile house channels, perms + resource posts", value: "layout" },
       { name: "guide — apply the house Server Guide (featured channels + join prompt)", value: "guide" },
@@ -1250,11 +1250,14 @@ export const commandDefinitions = [
       { name: "deploygrant — approve a partner server for marketplace deploy", value: "deploygrant" },
       { name: "deploystatus — show a server's marketplace deployment state", value: "deploystatus" },
       { name: "deployrevoke — pull a server's marketplace deployment", value: "deployrevoke" },
+      { name: "modlog — moderation history for a member", value: "modlog" },
+      { name: "house — house health dashboard (members, tickets, automod, sweeps)", value: "house" },
     ] },
     { name: "text", description: "Announcement text (action=announce)", type: 3, required: false },
     { name: "channel", description: "Post here instead of #announcements (action=announce)", type: 7, required: false },
     { name: "lines", description: "Journal lines for action=logs (default 30, max 200)", type: 4, required: false },
     { name: "guild", description: "Target server id (deploygrant/deploystatus/deployrevoke)", type: 3, required: false },
+    { name: "user", description: "Target member (action=modlog)", type: 6, required: false },
   ] },
   // Message context menu — right-click → Apps → "Report message" on a comment
   // inside a marketplace listing thread. Validated to that surface in the
@@ -3753,9 +3756,17 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
       return interaction.reply({ content: "Moderator role required.", ephemeral: true });
     }
     const stamp = `by <@${userId}> · <t:${Math.floor(Date.now() / 1000)}:R>`;
+    // The update re-sends the relay's quoted excerpt — mentions were
+    // suppressed on the original post and must stay suppressed, or an edit
+    // re-parses an @everyone/role ping the reporter smuggled into the quote.
+    const resolve = (line: string) => interaction.update({
+      content: `${interaction.message.content}\n—\n${line}`,
+      components: [],
+      allowedMentions: { parse: [] },
+    });
     if (action === "keep") {
       inc("market.modmsg_keep");
-      return interaction.update({ content: `${interaction.message.content}\n—\n**Comment kept** — report dismissed ${stamp}`, components: [] });
+      return resolve(`**Comment kept** — report dismissed ${stamp}`);
     }
     if (action === "del") {
       const channel = await interaction.client.channels.fetch(channelId).catch(() => null);
@@ -3763,10 +3774,7 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
         ? await (channel as TextChannel).messages.fetch(messageId).then(m => m.delete()).then(() => true).catch(() => false)
         : false;
       inc("market.modmsg_del");
-      return interaction.update({
-        content: `${interaction.message.content}\n—\n**Comment ${target ? "deleted" : "already gone"}** ${stamp}`,
-        components: [],
-      });
+      return resolve(`**Comment ${target ? "deleted" : "already gone"}** ${stamp}`);
     }
     if (action === "timeout") {
       const rec = await store.commentReportFor(messageId).catch(() => null);
@@ -3778,10 +3786,7 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
           }).then(() => true).catch(() => false)
         : false;
       inc("market.modmsg_timeout");
-      return interaction.update({
-        content: `${interaction.message.content}\n—\n**Author ${timedOut ? "timed out for 10m" : "timeout failed — they may have left"}** ${stamp}`,
-        components: [],
-      });
+      return resolve(`**Author ${timedOut ? "timed out for 10m" : "timeout failed — they may have left"}** ${stamp}`);
     }
     return interaction.reply({ content: "Unknown moderation action.", ephemeral: true });
   }
@@ -3834,7 +3839,7 @@ async function handleMarketButtons(interaction: ButtonInteraction, store: Memory
       if (modChannel?.isTextBased() && "send" in modChannel) {
         // Quoted content can carry mentions — suppress parsing entirely, then
         // allow-list just the author/reporter pings we emit ourselves.
-        const excerpt = escapeMarkdown(target.content.trim().replace(/\n+/g, " ")).slice(0, 400) || "*(no text)*";
+        const excerpt = escapeMarkdown(safeTrunc(target.content.trim().replace(/\n+/g, " "), 400)) || "*(no text)*";
         await (modChannel as TextChannel).send({
           allowedMentions: { parse: [], users: [target.author.id, userId] },
           content:
@@ -4650,28 +4655,34 @@ export async function handleMarketSelect(interaction: StringSelectMenuInteractio
     components: [],
   });
 }
-/** "Report message" context-menu entry. Only meaningful on a comment inside
- *  a marketplace listing thread — everywhere else it declines. Shows the
- *  ephemeral category picker; the `market:commentcat` button does the write. */
+/** "Report message" context-menu entry. Works on marketplace listing
+ *  comments AND anywhere in the house guild — harassment in #the-hub gets
+ *  the same flag path as a bad comment. Marketplace picks file via
+ *  `market:commentcat` (listing-resolved); house picks via `house:reportcat`
+ *  (listing_id NULL — same table, same daily cap). */
 async function handleReportMessageCommand(interaction: MessageContextMenuCommandInteraction) {
   const target = interaction.targetMessage;
   const channel = target.channel ?? interaction.channel;
+  const onMarketplace = isMarketplaceThread(channel);
   // Deployment-aware: any mirrored listing thread is reportable — the report
   // still lands in the house's mod queue (moderation is central).
-  if (!isMarketplaceThread(channel)) {
+  if (!onMarketplace && !isHouse(interaction.guildId)) {
     return interaction.reply({ content: "This only works on comments inside marketplace listings.", ephemeral: true });
   }
   if (target.author.id === interaction.user.id) {
     return interaction.reply({ content: "You can't report your own comment.", ephemeral: true });
   }
   if (target.author.bot) {
-    return interaction.reply({ content: "That's a system message — use **Report** on the listing card for listing issues.", ephemeral: true });
+    return interaction.reply({ content: onMarketplace
+      ? "That's a system message — use **Report** on the listing card for listing issues."
+      : "That's a bot message — flag it in a ticket if something's wrong with it.", ephemeral: true });
   }
+  const prefix = onMarketplace ? "market:commentcat" : "house:reportcat";
   const catRows = [0, 3].map(offset =>
     new ActionRowBuilder<ButtonBuilder>().addComponents(
       ...COMMENT_REPORT_CATEGORIES.slice(offset, offset + 3).map(([cat, label]) =>
         new ButtonBuilder()
-          .setCustomId(`market:commentcat:${channel.id}:${target.id}:${cat}`)
+          .setCustomId(`${prefix}:${channel.id}:${target.id}:${cat}`)
           .setLabel(label)
           .setStyle(cat === "minor" ? ButtonStyle.Danger : ButtonStyle.Secondary),
       ),
@@ -4679,7 +4690,7 @@ async function handleReportMessageCommand(interaction: MessageContextMenuCommand
   );
   return interaction.reply({
     ephemeral: true,
-    content: "What's wrong with this comment? Pick the closest reason:",
+    content: `What's wrong with this ${onMarketplace ? "comment" : "message"}? Pick the closest reason:`,
     components: catRows,
   });
 }

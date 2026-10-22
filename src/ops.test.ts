@@ -8,6 +8,8 @@ import {
   ensureTicketPanel, handleTicketButton, handleTicketModal,
   ensureAdopteeThread, setAdopteeThreadLocked, backfillAdopteeThreads,
   removeDeployment, syncDeployments, deployMarketplace, houseAdopteesPressure,
+  reapOrphanTicketThreads, refreshDeploymentCache, handleHouseReportCategory, handleHouseModAction, startLinkSweep,
+  noteTicketStaffReply, runVerifyNudgeSweep,
   TERMS_VERSION, RESOURCE_POSTS,
   type OpsDeps, type AutomodMessage, type MemberLike,
 } from "./ops.js";
@@ -29,6 +31,8 @@ const prev = {
   hostHeapPct: config.hostHeapPct, hostDiskPct: config.hostDiskPct, hostLagMs: config.hostLagMs,
   opsRepoDir: config.opsRepoDir, marketplaceChannelId: config.marketplaceChannelId,
   houseAdopteesChannelId: config.houseAdopteesChannelId, houseInviteUrl: config.houseInviteUrl,
+  automodKickThreshold: config.automodKickThreshold, marketReportDailyCap: config.marketReportDailyCap,
+  houseVerifyNudge: config.houseVerifyNudge,
 };
 
 const HOUSE = "g-house";
@@ -55,6 +59,9 @@ beforeEach(() => {
   config.opsRepoDir = "~/characterly";
   config.marketplaceChannelId = "c-forum";
   config.houseAdopteesChannelId = "c-adoptees";
+  config.automodKickThreshold = 4;
+  config.marketReportDailyCap = 5;
+  config.houseVerifyNudge = true;
 });
 
 process.on("exit", () => Object.assign(config, prev));
@@ -308,7 +315,7 @@ test("house:verify — linked account grants Member; unlinked gets the signup po
   const ix = makeButtonIx();
   await handleHouseButton(ix as any);
   assert.deepEqual(linked.added, ["r-member"], "linked+consented account ⇒ Member granted");
-  assert.match(ix.replies[0].content, /Verified/);
+  assert.match(ix.replies[0].content, /You're in|Welcome to Characterly/);
 
   const unlinked = makeMember();
   initOps(makeDeps({ fetchMember: async () => unlinked }));
@@ -422,7 +429,7 @@ test("house:consent — accept records the stamped version, then grants Member",
   await handleHouseButton(ix as any);
   assert.deepEqual(recorded, [{ user: "u1", account: "acc-1", version: TERMS_VERSION, source: "discord_verify" }]);
   assert.deepEqual(member.added, ["r-member"], "accepted ⇒ Member granted");
-  assert.match(ix.replies[0].content, /Verified/);
+  assert.match(ix.replies[0].content, /You're in|Welcome to Characterly/);
 });
 
 test("house:consent — record failure grants nothing; pending/unlinked refuse", async () => {
@@ -525,7 +532,7 @@ test("house:verify — BYOK-only users (no account, personal key) verify through
   await handleHouseButton(ix2 as any);
   assert.deepEqual(recorded, [{ user: "u1", account: null, version: TERMS_VERSION, source: "discord_verify" }]);
   assert.deepEqual(member.added, ["r-member"], "BYOK + consent ⇒ Member granted");
-  assert.match(ix2.replies[0].content, /Verified/);
+  assert.match(ix2.replies[0].content, /You're in|Welcome to Characterly/);
 });
 
 test("member link sweep: unconsented holder is revoked; consent error keeps the role", async () => {
@@ -587,6 +594,60 @@ test("member link sweep: a lookup error keeps the role — outages must not mass
   assert.equal(revoked, 0);
   assert.equal(holder.removed.length, 0, "a DB hiccup is not an unlink — keep the role");
   assert.doesNotMatch(opsAlertText(deps), /Member role removed/);
+});
+
+test("member link sweep: BYOK-only holder keeps Member; key-lookup error keeps it too; no key + no account revokes", async () => {
+  const byok = makeMember({ id: "u-key", hasRole: true });
+  const errored = makeMember({ id: "u-err", hasRole: true });
+  const gone = makeMember({ id: "u-gone2", hasRole: true });
+  const deps = makeDeps({
+    listMembers: async () => [byok, errored, gone],
+    store: {
+      accountForDiscordUser: async () => null, // nobody has a linked web account
+      getGuildKey: async (scope: string) => {
+        if (scope === "dm:u-err") throw new Error("db is down");
+        return scope === "dm:u-key" ? { keyEnc: Buffer.from("k"), keyHint: "h" } : null;
+      },
+      tosAcceptance: async () => ({ version: TERMS_VERSION, acceptedAt: "2026-01-01T00:00:00Z" }),
+    } as unknown as MemoryStore,
+  });
+  const revoked = await runMemberLinkSweep(deps);
+  assert.equal(revoked, 1);
+  assert.equal(byok.removed.length, 0, "the gate admits a personal key — the sweep must not revoke on a missing account alone");
+  assert.equal(errored.removed.length, 0, "a key-lookup error is 'unknown' — same fail-safe as the account check");
+  assert.deepEqual(gone.removed, ["r-member"], "no account AND no key ⇒ revoked");
+});
+
+test("member link sweep: BYOK holders are consent-checked like linked members", async () => {
+  const stale = makeMember({ id: "u-old", hasRole: true });
+  const deps = makeDeps({
+    listMembers: async () => [stale],
+    store: {
+      accountForDiscordUser: async () => null,
+      getGuildKey: async () => ({ keyEnc: Buffer.from("k"), keyHint: "h" }),
+      tosAcceptance: async () => null, // verified BYOK-side but never accepted
+    } as unknown as MemoryStore,
+  });
+  const revoked = await runMemberLinkSweep(deps);
+  assert.equal(revoked, 1);
+  assert.deepEqual(stale.removed, ["r-member"], "BYOK verification still required consent — a missing acceptance revokes");
+});
+
+test("house:verify — a BYOK key-lookup error says retry, not 'no account'", async () => {
+  const member = makeMember();
+  initOps(makeDeps({
+    fetchMember: async () => member,
+    store: {
+      creditsSupported: true,
+      accountForDiscordUser: async () => null,
+      getGuildKey: async () => { throw new Error("db is down"); },
+    } as unknown as MemoryStore,
+  }));
+  const ix = makeButtonIx();
+  await handleHouseButton(ix as any);
+  assert.match(ix.replies[0].content, /try again in a moment/);
+  assert.doesNotMatch(ix.replies[0].content, /No linked/);
+  assert.equal(member.added.length, 0);
 });
 
 // ── Automod ──────────────────────────────────────────────────────────────────
@@ -724,6 +785,256 @@ test("automod: hard-line blocklist content is deleted + 30m timeout", async () =
   assert.equal(await automodMessage(makeMsg({ content: "this character's backstory is dark but well written" }), deps), false);
 });
 
+test("automod: scam text bundled with an invite classifies as SCAM — the timeout lands, not just a delete", async () => {
+  const deps = makeDeps();
+  // Ordering matters: scam authors ride invites, and classifying them under
+  // the generic invite rule (delete only) would dodge the scam sanction.
+  const m = makeMsg({ content: "FREE nitro for everyone, join https://discord.gg/x" });
+  assert.equal(await automodMessage(m, deps), true);
+  assert.deepEqual(m.timeouts, [600_000], "the scam rule's 10m timeout applies");
+  assert.match(opsAlertText(deps), /nitro scam/);
+});
+
+test("automod: channel-overwrite ManageMessages exempts — permissionsIn beats role-level perms", async () => {
+  const deps = makeDeps();
+  // A mod whose ManageMessages comes from a channel overwrite (not a role)
+  // reports false at role level — the effective-permissions check must still
+  // treat them as staff.
+  const overwriteMod = makeMsg({
+    content: "https://discord.gg/x",
+    member: {
+      permissions: { has: () => false },
+      permissionsIn: () => ({ has: (f: bigint) => f === PermissionFlagsBits.ManageMessages }),
+      timeout: async () => {},
+    },
+  });
+  assert.equal(await automodMessage(overwriteMod, deps), false, "channel-granted perms are still staff");
+  assert.equal(overwriteMod.deleted, false);
+});
+
+// ── Automod escalation + house reports (v66) ────────────────────────────────
+
+test("automod escalation: repeat offenses lengthen the timeout; the ledger records the action", async () => {
+  const ledger: any[] = [];
+  const store = {
+    modActionOffenseCount: async () => 1, // one prior offense in the window
+    recordModAction: async (a: any) => { ledger.push(a); },
+  };
+  const deps = makeDeps({ store: store as any });
+  const scam = makeMsg({ content: "free nitro here https://discord.gg/x" });
+  assert.equal(await automodMessage(scam, deps), true);
+  assert.deepEqual(scam.timeouts, [3_600_000], "offense 2 → 1h rung (scam's 10m base is outranked)");
+  const row = ledger.find(a => a.targetId === "u1");
+  assert.ok(row, "the action lands in the mod ledger");
+  assert.equal(row.actor, "automod");
+  assert.equal(row.action, "timeout");
+  assert.equal(row.rule, "nitro scam");
+  assert.equal(row.channelId, "c1");
+  assert.match(opsAlertText(deps), /offense 2\/24h/, "the alert names the offense count");
+
+  // A missing ledger method means first-offense behavior — under-escalate,
+  // never guess at a count that wasn't read.
+  const noLedger = makeDeps();
+  const scam2 = makeMsg({ content: "free nitro here https://discord.gg/x", author: { id: "u2", bot: false } });
+  assert.equal(await automodMessage(scam2, noLedger), true);
+  assert.deepEqual(scam2.timeouts, [600_000], "no ledger → base 10m, no fabricated count");
+});
+
+test("automod escalation: 4th offense kicks; a failed kick falls back to the 24h timeout", async () => {
+  const ledger: any[] = [];
+  const store = {
+    modActionOffenseCount: async () => 3,
+    recordModAction: async (a: any) => { ledger.push(a); },
+  };
+  const deps = makeDeps({ store: store as any });
+  const kicked: string[] = [];
+  const scam = makeMsg({
+    content: "free nitro https://discord.gg/x",
+    member: {
+      permissions: { has: () => false },
+      timeout: async (ms: number) => { scam.timeouts.push(ms); },
+      kick: async () => { kicked.push("kick"); },
+    },
+  });
+  assert.equal(await automodMessage(scam, deps), true);
+  assert.equal(kicked.length, 1, "offense 4 ≥ threshold → kick");
+  assert.equal(scam.timeouts.length, 0, "kick replaces the timeout");
+  assert.equal(ledger[0]?.action, "kick");
+
+  // Threshold 0 disables kicking entirely — the ladder caps at 24h.
+  config.automodKickThreshold = 0;
+  const noKick = makeMsg({ content: "free nitro https://discord.gg/x", author: { id: "u3", bot: false } });
+  assert.equal(await automodMessage(noKick, deps), true);
+  assert.deepEqual(noKick.timeouts, [86_400_000], "kick disabled → 24h cap");
+  config.automodKickThreshold = 4;
+
+  // A kick that fails (perms, left-guild race) falls back to the cap.
+  const failKick = makeMsg({
+    content: "free nitro https://discord.gg/x",
+    author: { id: "u4", bot: false },
+    member: {
+      permissions: { has: () => false },
+      timeout: async (ms: number) => { failKick.timeouts.push(ms); },
+      kick: async () => { throw new Error("missing perms"); },
+    },
+  });
+  assert.equal(await automodMessage(failKick, deps), true);
+  assert.deepEqual(failKick.timeouts, [86_400_000], "failed kick → 24h timeout fallback");
+});
+
+test("house report: category pick files the row and relays to ops with mod buttons", async () => {
+  const reports: any[] = [];
+  const target = { id: "m-report", content: "harassing stuff", author: { id: "u-bad", bot: false }, deleted: false,
+    delete: async function () { (this as any).deleted = true; } };
+  const deps = makeDeps({
+    store: { reportComment: async (r: any) => { reports.push(r); return { ok: true }; } } as any,
+  });
+  initOps(deps);
+  const updates: any[] = [];
+  const ix = {
+    customId: "house:reportcat:c-hub:m-report:hate",
+    user: { id: "u-reporter" },
+    guildId: HOUSE,
+    client: { channels: { fetch: async (id: string) => id === "c-hub" ? { messages: { fetch: async () => target } } : null } },
+    update: async (r: any) => { updates.push(r); return r; },
+  };
+  await handleHouseReportCategory(ix as any);
+  assert.equal(reports.length, 1, "one report filed");
+  assert.equal(reports[0].listingId, null, "house reports carry listing_id NULL");
+  assert.equal(reports[0].threadId, "c-hub");
+  assert.equal(reports[0].messageId, "m-report");
+  assert.equal(reports[0].authorUserId, "u-bad");
+  assert.equal(reports[0].reporterUserId, "u-reporter");
+  assert.equal(reports[0].category, "hate");
+  const relay = deps.sent.find(s => s.id === OPS);
+  assert.ok(relay, "the report relays to the ops channel");
+  assert.match(relay.payload.content, /house report/);
+  assert.match(relay.payload.content, /<@u-bad>/);
+  assert.match(JSON.stringify(relay.payload.components), /house:modmsg:(keep|del|timeout)/);
+  assert.match(updates[0].content, /report is with the mods/);
+});
+
+test("house report: forged or self-report clicks refuse; resolved rows don't double-file", async () => {
+  const deps = makeDeps({
+    store: { reportComment: async () => ({ ok: false as const, reason: "dup" as const }) } as any,
+  });
+  initOps(deps);
+  const target = { id: "m1", content: "x", author: { id: "u-bad", bot: false } };
+  const mkIx = (customId: string, userId = "u-reporter") => ({
+    customId, user: { id: userId }, guildId: HOUSE,
+    client: { channels: { fetch: async () => ({ messages: { fetch: async () => target } }) } },
+    update: async (r: any) => r,
+    reply: async (r: any) => r,
+  });
+  // Unknown category falls back to "other", missing message declines, and a
+  // dup row tells the reporter the team already has it.
+  const dup = mkIx("house:reportcat:c1:m1:hate");
+  const res = await handleHouseReportCategory(dup as any) as any;
+  assert.match(res.content, /already reported/);
+  // A foreign-guild forged id refuses before touching the store.
+  const foreign = { ...mkIx("house:reportcat:c1:m1:hate"), guildId: "g-other" };
+  const fres = await handleHouseReportCategory(foreign as any) as any;
+  assert.match(fres.content, /community server/);
+});
+
+test("house modmsg: staff gate, del removes + logs, timeout edits + logs", async () => {
+  const ledger: any[] = [];
+  const target = { id: "m-report", content: "bad", author: { id: "u-bad" }, deleted: false,
+    delete: async function () { (this as any).deleted = true; } };
+  const memberEdits: any[] = [];
+  const deps = makeDeps({
+    store: {
+      commentReportFor: async () => ({ authorUserId: "u-bad" }),
+      recordModAction: async (a: any) => { ledger.push(a); },
+    } as any,
+  });
+  initOps(deps);
+  const mkIx = (customId: string, admin: boolean) => ({
+    customId, user: { id: "u-mod" }, guildId: HOUSE,
+    memberPermissions: { has: (f: bigint) => admin && f === PermissionFlagsBits.ManageMessages },
+    guild: { members: { edit: async (id: string, o: any) => { memberEdits.push({ id, ...o }); return {}; } } },
+    client: { channels: { fetch: async () => ({ messages: { fetch: async () => target } }) } },
+    message: { content: "report ping" },
+    update: async (r: any) => r,
+    reply: async (r: any) => r,
+  });
+  // Non-staff can't click.
+  const denied = await handleHouseModAction(mkIx("house:modmsg:del:c1:m-report:u-bad", false) as any) as any;
+  assert.match(denied.content, /Moderator role required/);
+  assert.equal(target.deleted, false);
+  // Del removes the message and writes the ledger row.
+  await handleHouseModAction(mkIx("house:modmsg:del:c1:m-report:u-bad", true) as any);
+  assert.equal(target.deleted, true);
+  assert.equal(ledger.at(-1)?.action, "report_del");
+  assert.equal(ledger.at(-1)?.actor, "u-mod");
+  // Timeout resolves the author from the report row (not the customId).
+  await handleHouseModAction(mkIx("house:modmsg:timeout:c1:m-report:u-FORGED", true) as any);
+  assert.equal(memberEdits[0]?.id, "u-bad", "author resolved from the report row — a forged customId gains nothing");
+  assert.ok(memberEdits[0]?.communicationDisabledUntil, "10m timeout applied");
+  assert.equal(ledger.at(-1)?.action, "report_timeout");
+  // Keep is audited but doesn't count as an offense.
+  await handleHouseModAction(mkIx("house:modmsg:keep:c1:m-report:u-bad", true) as any);
+  assert.equal(ledger.at(-1)?.action, "report_keep");
+});
+
+test("/ops house renders members, tickets, automod rules and sweep health", async () => {
+  const deps = makeDeps({
+    listMembers: async () => [
+      makeMember({ id: "u1", hasRole: true }),
+      makeMember({ id: "u2" }),
+    ],
+    store: {
+      opsStats: async () => ({ funnel: { house_join: { users: 10 }, verified: { users: 7 } } }),
+      listOpenSupportTickets: async () => [{ threadId: "t1", guildId: HOUSE, openerId: "u1", subject: "s", details: "d", status: "open", openedAt: new Date(Date.now() - 3_600_000).toISOString(), closedAt: null, closerId: null, category: "bug", lastStaffReplyAt: null, staleNotifiedAt: null }],
+      modActionsByRule: async () => [{ rule: "nitro scam", n: 3 }, { rule: "invite link", n: 1 }],
+    } as any,
+  });
+  initOps(deps);
+  // A registered sweep gives the Sweeps field a row — the interval never
+  // fires inside the test (unref'd, cadence is minutes).
+  startLinkSweep(deps);
+  const ix = makeIx({ strings: { action: "house" } });
+  await handleOpsCommand(ix as any);
+  const fields = ix.edits[0].embeds[0].data.fields;
+  const field = (n: string) => fields.find((f: any) => f.name === n)?.value ?? "";
+  assert.match(field("Members"), /2 total · 1 verified/);
+  assert.match(field("Funnel \(7d\)"), /join 10 → verified 7 \(70%\)/);
+  assert.match(field("Tickets"), /1\*\* open/);
+  assert.match(field("Automod \(24h\)"), /nitro scam 3/);
+  assert.match(field("Sweeps"), /memberlinks — never ran|memberlinks — ok/);
+});
+
+test("/ops modlog renders a member's ledger history", async () => {
+  const deps = makeDeps({
+    store: {
+      listModActionsFor: async () => [
+        { id: 2, guildId: HOUSE, targetId: "u-bad", actor: "automod", action: "timeout", rule: "nitro scam", detail: "free nitro", messageId: "m1", channelId: "c1", createdAt: new Date().toISOString() },
+        { id: 1, guildId: HOUSE, targetId: "u-bad", actor: "u-mod", action: "report_del", rule: null, detail: "", messageId: "m0", channelId: "c1", createdAt: new Date().toISOString() },
+      ],
+    } as any,
+  });
+  initOps(deps);
+  const ix = makeIx({
+    strings: { action: "modlog" },
+    options: { getUser: () => ({ id: "u-bad" }) },
+  });
+  await handleOpsCommand(ix as any);
+  const text = ix.replies[0].content;
+  assert.match(text, /Mod log/);
+  assert.match(text, /timeout.*automod|automod.*timeout/);
+  assert.match(text, /nitro scam/);
+  assert.match(text, /report_del/);
+  // No target → usage hint; clean member → friendly line.
+  const noUser = makeIx({ strings: { action: "modlog" }, options: { getUser: () => null } });
+  await handleOpsCommand(noUser as any);
+  assert.match(noUser.replies[0].content, /user.*option/i);
+  const cleanDeps = makeDeps({ store: { listModActionsFor: async () => [] } as any });
+  initOps(cleanDeps);
+  const clean = makeIx({ strings: { action: "modlog" }, options: { getUser: () => ({ id: "u-good" }) } });
+  await handleOpsCommand(clean as any);
+  assert.match(clean.replies[0].content, /clean record/);
+});
+
 test("isMarketplaceThread matches only threads under the marketplace forum", () => {
   const thread = { isThread: () => true, parentId: "c-forum" };
   assert.equal(isMarketplaceThread(thread), true);
@@ -793,6 +1104,49 @@ test("ensureHouseLayout creates only what's missing; idempotent on second run", 
   assert.deepEqual(nonHouse, [], "refuses to touch a foreign guild");
 });
 
+test("WANTED_LAYOUT: rules + log-in are read-only lobbies; #characters declares the tag taxonomy", () => {
+  const system = WANTED_LAYOUT.find(g => g.category === "SYSTEM");
+  assert.ok(system, "SYSTEM group exists");
+  // A writable gate channel lets chatter bury the verify card past the
+  // reconcile's 20-message window — these must stay locked like #welcome.
+  assert.equal(system.channels.find(c => c.name === "rules")?.readOnly, "everyone");
+  assert.equal(system.channels.find(c => c.name === "log-in")?.readOnly, "everyone");
+  const forum = WANTED_LAYOUT.flatMap(g => g.channels).find(c => c.name === "characters");
+  assert.ok(forum?.forumTags?.length, "the house forum seeds the taxonomy like partner deployments — a tagless shelf drops badges and creator picks silently");
+  const names = forum!.forumTags!.map(t => t.name);
+  for (const wanted of ["New", "Top Rated", "Trending", "Staff Pick"]) {
+    assert.ok(names.includes(wanted), `taxonomy missing ${wanted}`);
+  }
+});
+
+test("ensureHouseLayout seeds missing forum tags by name — existing tags keep their ids", async () => {
+  const tagCalls: Array<Array<{ id?: string; name: string; moderated?: boolean }>> = [];
+  const forum = {
+    id: "c-forum", name: "characters", type: ChannelType.GuildForum, parentId: "cat-market",
+    defaultForumLayout: 2, // already Gallery
+    availableTags: [{ id: "tag-new", name: "New", moderated: true }],
+    setAvailableTags: async (tags: any[]) => { tagCalls.push(tags); },
+  };
+  const existing: any[] = [
+    { id: "cat-market", name: "[characterly marketplace]", type: 4 },
+    forum,
+  ];
+  const guild = {
+    id: HOUSE,
+    channels: {
+      cache: { find: (fn: (c: any) => boolean) => existing.find(fn) },
+      create: async (o: any) => { const c = { id: `n-${existing.length}`, ...o }; existing.push(c); return c; },
+    },
+  };
+  await ensureHouseLayout(guild as any);
+  assert.equal(tagCalls.length, 1, "the missing taxonomy is merged in one write");
+  const merged = tagCalls[0];
+  assert.deepEqual(merged.find(t => t.name === "New"), { id: "tag-new", name: "New", moderated: true },
+    "existing tags pass through with their ids — applied tags reference them");
+  assert.ok(merged.some(t => t.name === "Top Rated") && merged.some(t => t.name === "Trending"),
+    "missing curated names are appended");
+});
+
 test("ensureHouseLayout copies the category's overwrites to created channels", async () => {
   // A rebuilt mods-chat must not come up public — children inherit the
   // private category's permission overwrites at create time.
@@ -823,9 +1177,11 @@ test("ensureHouseLayout copies the category's overwrites to created channels", a
     "created under the private category's overwrites — not default-public");
 });
 
-test("ensureHouseLayout denies Member typing on readOnly surfaces; synced children inherit", async () => {
+/** A fully-populated house guild whose overwrite edits are recorded —
+ *  `mkOw` upserts a per-role entry per channel so a second reconcile
+ *  no-ops. Shared by the per-flag assertions and the full-write snapshot. */
+function makeLayoutProbe() {
   const edits: Array<{ target: string; id: string; perms: Record<string, unknown> }> = [];
-  // Overwrite fake: edits upsert a per-role entry so a second run no-ops.
   const mkOw = (tag: string, deny = 0n) => {
     const ows: Array<{ id: string; allow: bigint; deny: bigint }> = [{ id: "r-member", allow: 1024n, deny }];
     return {
@@ -864,6 +1220,11 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
     },
     roles: { cache: { find: (fn: (r: any) => boolean) => [{ id: "r-mod", name: "Mod" }, { id: "r-admin", name: "Admin" }].find(fn) } },
   };
+  return { guild, edits };
+}
+
+test("ensureHouseLayout denies Member typing on readOnly surfaces; synced children inherit", async () => {
+  const { guild, edits } = makeLayoutProbe();
 
   await ensureHouseLayout(guild as any);
 
@@ -990,6 +1351,43 @@ test("ensureHouseLayout denies Member typing on readOnly surfaces; synced childr
   assert.deepEqual(second, []);
 });
 
+test("ensureHouseLayout: the complete overwrite write set is exactly this (snapshot)", async () => {
+  // Every overwrite the reconcile writes on a fully-populated house. The
+  // per-flag test above asserts the writes it names — this snapshot fails on
+  // ANY extra write (a silently widened channel) or ANY missing one (a deny
+  // that stopped being enforced), whichever direction a layout edit drifts.
+  const { guild, edits } = makeLayoutProbe();
+  await ensureHouseLayout(guild as any);
+  const snap = edits.map(e => `${e.target}|${e.id}|${JSON.stringify(e.perms)}`).sort();
+  assert.deepEqual(snap, [
+    'adoptees|g-house|{"ViewChannel":false,"SendMessages":false,"SendMessagesInThreads":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+    'adoptees|r-admin|{"ViewChannel":true,"SendMessagesInThreads":true,"ManageThreads":true}',
+    'adoptees|r-member|{"ViewChannel":true,"SendMessagesInThreads":true,"SendMessages":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+    'announcements|r-member|{"ViewChannel":true,"SendMessages":false,"SendMessagesInThreads":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+    'cat:HELP|r-member|{"ViewChannel":true,"SendMessages":false,"SendMessagesInThreads":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+    'cat:RESOURCES|g-house|{"ViewChannel":true,"SendMessages":false,"SendMessagesInThreads":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+    'characterly-web|g-house|{"ViewChannel":true,"SendMessages":false,"SendMessagesInThreads":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+    'characterly-web|r-admin|{"ViewChannel":true,"SendMessages":true,"SendMessagesInThreads":true}',
+    'characterly-web|r-mod|{"ViewChannel":true,"SendMessages":true,"SendMessagesInThreads":true}',
+    'events|r-member|{"ViewChannel":true,"SendMessages":false,"SendMessagesInThreads":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+    'faqs|g-house|{"ViewChannel":true,"SendMessages":false,"SendMessagesInThreads":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+    'get-companionly|g-house|{"ViewChannel":false,"SendMessages":false,"SendMessagesInThreads":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+    'how-to-publish-bots|g-house|{"ViewChannel":false,"SendMessages":false,"SendMessagesInThreads":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+    'log-in|g-house|{"ViewChannel":true,"SendMessages":false,"SendMessagesInThreads":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+    'rules|g-house|{"ViewChannel":true,"SendMessages":false,"SendMessagesInThreads":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+    'suggest-a-feature|g-house|{"ViewChannel":false,"SendMessages":false,"SendMessagesInThreads":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+    'suggest-a-feature|r-admin|{"ViewChannel":true,"SendMessagesInThreads":true,"ManageThreads":true}',
+    'suggest-a-feature|r-member|{"ViewChannel":true,"SendMessages":true,"SendMessagesInThreads":true,"CreatePublicThreads":true,"CreatePrivateThreads":false}',
+    'suggest-a-feature|r-mod|{"ViewChannel":true,"SendMessagesInThreads":true,"ManageThreads":true}',
+    'support-ticket|g-house|{"ViewChannel":true,"SendMessagesInThreads":true,"SendMessages":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+    'support-ticket|r-admin|{"ViewChannel":true,"SendMessagesInThreads":true,"ManageThreads":true}',
+    'support-ticket|r-member|{"ViewChannel":true,"SendMessagesInThreads":true,"SendMessages":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+    'support-ticket|r-mod|{"ViewChannel":true,"SendMessagesInThreads":true,"ManageThreads":true}',
+    'updates|r-member|{"ViewChannel":true,"SendMessages":false,"SendMessagesInThreads":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+    'welcome|g-house|{"ViewChannel":true,"SendMessages":false,"SendMessagesInThreads":false,"CreatePublicThreads":false,"CreatePrivateThreads":false}',
+  ].sort());
+});
+
 test("staffModerate grant list: stale Mod thread perms on #adoptees get revoked", async () => {
   // The Admin-only grant must be convergent — a pre-existing broad Mod
   // overwrite on the channel gets its managed bits denied on reconcile.
@@ -1097,15 +1495,27 @@ const ticketStore = () => {
       return tid ? byThread.get(tid) : null;
     },
     supportTicketByThread: async (tid: string) => byThread.get(tid) ?? null,
-    createSupportTicket: async (g: string, uid: string, tid: string, subject: string, details: string) => {
+    createSupportTicket: async (g: string, uid: string, tid: string, subject: string, details: string, category = "other") => {
       if (openByUser.has(uid)) return null; // partial-unique-index semantics
-      const t = { threadId: tid, guildId: g, openerId: uid, subject, details, status: "open", openedAt: "", closedAt: null, closerId: null };
+      const t = { threadId: tid, guildId: g, openerId: uid, subject, details, status: "open", openedAt: new Date().toISOString(), closedAt: null, closerId: null, category, lastStaffReplyAt: null, staleNotifiedAt: null };
       byThread.set(tid, t); openByUser.set(uid, tid);
       return t;
     },
     closeSupportTicket: async (tid: string, uid: string) => {
       const t = byThread.get(tid);
       if (t?.status === "open") { t.status = "closed"; t.closerId = uid; openByUser.delete(t.openerId); }
+    },
+    listOpenSupportTickets: async (g: string) => [...byThread.values()].filter(t => t.guildId === g && t.status === "open"),
+    markTicketStaffReply: async (tid: string) => {
+      const t = byThread.get(tid);
+      if (t?.status === "open") t.lastStaffReplyAt = new Date().toISOString();
+    },
+    listStaleUnansweredTickets: async (g: string, staleMs: number) =>
+      [...byThread.values()].filter(t => t.guildId === g && t.status === "open" && !t.staleNotifiedAt && !t.lastStaffReplyAt
+        && Date.now() - Date.parse(t.openedAt) > staleMs),
+    markTicketStaleNotified: async (tid: string) => {
+      const t = byThread.get(tid);
+      if (t) t.staleNotifiedAt = new Date().toISOString();
     },
   } as unknown as MemoryStore;
 };
@@ -1198,7 +1608,7 @@ test("ensureTicketPanel posts the card once; dedupes duplicates", async () => {
   assert.equal(sent.length, sentBefore2);
 });
 
-test("ticket:open — shows the modal; existing ticket + lookup error refused", async () => {
+test("ticket:open — category picker then the modal; existing ticket + lookup error refused", async () => {
   const { deps } = ticketWorld();
   initOps(deps);
   const modals: string[] = [];
@@ -1209,7 +1619,18 @@ test("ticket:open — shows the modal; existing ticket + lookup error refused", 
     showModal: async (m: any) => { modals.push(m.data?.custom_id ?? "?"); },
   };
   await handleTicketButton(ix as any);
-  assert.deepEqual(modals, ["ticket:new"], "open click shows the intake modal");
+  const picker = replies.at(-1);
+  assert.ok(picker?.ephemeral, "picker is ephemeral");
+  assert.match(picker.content, /What's the ticket about/);
+  assert.ok(JSON.stringify(picker.components).includes("ticket:opencat:billing"), "picker carries category buttons");
+
+  // A category pick shows the intake modal carrying that category.
+  await handleTicketButton({ ...ix, customId: "ticket:opencat:billing" } as any);
+  assert.deepEqual(modals, ["ticket:new:billing"], "opencat click shows the categorized modal");
+
+  // An unknown category slug falls back to 'other' — customIds are forgeable.
+  await handleTicketButton({ ...ix, customId: "ticket:opencat:hax" } as any);
+  assert.deepEqual(modals[1], "ticket:new:other");
 
   // Already-open ticket → pointer, no modal.
   await deps.store.createSupportTicket(HOUSE, "u1", "t-existing", "x", "y");
@@ -1244,9 +1665,10 @@ test("ticket modal — creates the private thread, adds member, files row, pings
   assert.match(JSON.stringify(opener.embeds), /Billing question/);
   const ticket = await deps.store.openSupportTicketFor("u1");
   assert.equal(ticket?.threadId, "t-1", "row filed with the thread id");
+  assert.equal((ticket as any)?.category, "other", "bare legacy modal id files as 'other'");
   const alert = sent.find(s => s.id === OPS);
   assert.ok(alert, "ops channel got the staff ping");
-  assert.match(alert!.payload.content, /Ticket opened/);
+  assert.match(alert!.payload.content, /Something else ticket/);
   assert.deepEqual(alert!.payload.allowedMentions.roles, ["r-mod"], "Mod role pinged");
   assert.match(ix.edits[0].content, /t-1/, "user gets the thread link");
 });
@@ -1325,6 +1747,203 @@ test("ticket:close — opener + staff close; strangers refused; locks + archives
   await handleTicketButton(notThread as any);
 });
 
+test("ticket:close — a DB failure leaves the thread open for retry (the survivable divergence)", async () => {
+  const { deps } = ticketWorld();
+  await deps.store.createSupportTicket(HOUSE, "u1", "t-1", "help", "pls");
+  (deps.store as any).closeSupportTicket = async () => { throw new Error("db is down"); };
+  initOps(deps);
+  const state = { locked: false, archived: false, replies: [] as any[] };
+  const ix = {
+    customId: "ticket:close", guildId: HOUSE, user: { id: "u1" },
+    channel: {
+      id: "t-1", isThread: () => true,
+      send: async () => {},
+      setLocked: async (v: boolean) => { state.locked = v; },
+      setArchived: async (v: boolean) => { state.archived = v; },
+    },
+    memberPermissions: { has: () => false },
+    update: async () => {},
+    reply: async (r: any) => { state.replies.push(r); return r; },
+  };
+  await handleTicketButton(ix as any);
+  assert.match(state.replies[0].content, /try again in a moment/);
+  // Row-open + thread-sealed is the unrecoverable side (the dedupe check
+  // would point at a dead thread forever) — sealing must wait on the row.
+  assert.equal(state.locked, false, "thread stays open");
+  assert.equal(state.archived, false);
+  assert.equal((await deps.store.supportTicketByThread("t-1"))?.status, "open");
+});
+
+test("ticket:close — unknown ticket:* ids answer instead of failing silently", async () => {
+  const { deps } = ticketWorld();
+  initOps(deps);
+  const replies: any[] = [];
+  await handleTicketButton({ customId: "ticket:bogus", guildId: HOUSE, user: { id: "u1" }, reply: async (r: any) => { replies.push(r); return r; } } as any);
+  assert.match(replies[0].content, /stale/);
+});
+
+test("ticket reaper: open rows with dead threads close; live threads with no row seal; mid-create threads are skipped", async () => {
+  const { deps } = ticketWorld();
+  const store = deps.store as any;
+  // Row-open + thread-gone — a mod deleted the thread out from under the
+  // row, which would otherwise block the opener from ever filing again.
+  await store.createSupportTicket(HOUSE, "u1", "t-dead", "gone", "pls");
+  // Row-less live thread past the create grace — a create-side failure left
+  // it standing; the reaper seals it.
+  const orphan = { id: "t-orphan", createdTimestamp: Date.now() - 30 * 60_000, locked: false, archived: false,
+    setLocked: async (v: boolean) => { orphan.locked = v; }, setArchived: async (v: boolean) => { orphan.archived = v; } };
+  // A thread mid-create looks row-less too — the grace window skips it.
+  const fresh = { id: "t-fresh", createdTimestamp: Date.now(), locked: false, archived: false,
+    setLocked: async (v: boolean) => { fresh.locked = v; }, setArchived: async (v: boolean) => { fresh.archived = v; } };
+  // Open + thread live — untouched.
+  await store.createSupportTicket(HOUSE, "u2", "t-live", "hi", "pls");
+  const live = { id: "t-live", createdTimestamp: Date.now() - 30 * 60_000, locked: false, archived: false,
+    setLocked: async (v: boolean) => { live.locked = v; }, setArchived: async (v: boolean) => { live.archived = v; } };
+  deps.fetchChannel = async (id: string) => id === "c-support-ticket"
+    ? { id, send: async () => {}, threads: { fetchActive: async () => ({ threads: [orphan, fresh, live] }) } } as any
+    : id === "t-live" ? live as any
+    : id === "t-dead" ? null // the dead thread resolves nothing — that's the divergence being reaped
+    : { id, send: async (p: any) => { deps.sent.push({ id, payload: p }); } } as any; // ops channel + anything else
+  await reapOrphanTicketThreads(deps);
+  assert.equal((await store.supportTicketByThread("t-dead"))?.status, "closed", "dead-thread row closes so the opener can file again");
+  assert.equal(orphan.locked && orphan.archived, true, "the row-less live thread is sealed");
+  assert.equal(fresh.locked, false, "a thread younger than the create grace is left alone");
+  assert.equal(live.locked, false, "a live ticket's thread is untouched");
+  assert.match(opsAlertText(deps), /Ticket reaped/);
+});
+
+test("ticket modal — category rides the modal customId into the row + ping", async () => {
+  const thread = mkTicketThread();
+  const sent: Array<{ id: string; payload: any }> = [];
+  const { deps } = ticketWorld({ thread, sent });
+  initOps(deps);
+  const ix = mkModalIx({ subject: "Refund please", details: "Charged twice" }, { customId: "ticket:new:billing" });
+  await handleTicketModal(ix as any);
+
+  const ticket = await deps.store.openSupportTicketFor("u1") as any;
+  assert.equal(ticket?.category, "billing", "category persisted on the row");
+  assert.match(JSON.stringify(thread.state.sent[0].embeds), /Billing & credits ticket/, "thread embed labels the category");
+  assert.match(sent.find(s => s.id === OPS)!.payload.content, /Billing & credits ticket/, "ops ping labels the category");
+
+  // A forged slug in the modal id is allowlisted back to 'other'.
+  const ix2 = mkModalIx({ subject: "x", details: "y" }, { customId: "ticket:new:hax", user: { id: "u2", username: "Bob" } });
+  await handleTicketModal(ix2 as any);
+  assert.equal(((await deps.store.openSupportTicketFor("u2")) as any)?.category, "other");
+});
+
+test("ticket modal — FAQ keywords drop the matching resource post into the thread", async () => {
+  const thread = mkTicketThread();
+  const { deps } = ticketWorld({ thread });
+  initOps(deps);
+  await handleTicketModal(mkModalIx({ subject: "refund my credits", details: "charged twice" }) as any);
+  assert.equal(thread.state.sent.length, 2, "opener card + FAQ hint");
+  assert.match(thread.state.sent[1].content, /While you wait/);
+  assert.ok(thread.state.sent[1].embeds?.length > 0, "hint carries the resource embed");
+
+  // No keyword → no extra post.
+  const t2 = mkTicketThread();
+  const { deps: deps2 } = ticketWorld({ thread: t2 });
+  initOps(deps2);
+  await handleTicketModal(mkModalIx({ subject: "weird edge case", details: "something unique" }, { user: { id: "u9" } }) as any);
+  assert.equal(t2.state.sent.length, 1, "no hint for unmatched subjects");
+});
+
+test("noteTicketStaffReply — staff posts stamp the row; members + other threads don't", async () => {
+  const { deps } = ticketWorld();
+  const store = deps.store as any;
+  await store.createSupportTicket(HOUSE, "u1", "t-1", "help", "pls");
+
+  const staffMsg = {
+    guildId: HOUSE, channelId: "t-1", author: { id: "u-mod", bot: false },
+    member: { permissionsIn: () => ({ has: (f: bigint) => f === PermissionFlagsBits.ManageThreads }) },
+    channel: { type: ChannelType.PrivateThread, parent: { name: "support-ticket" } },
+  };
+  await noteTicketStaffReply(staffMsg as any, deps);
+  assert.ok((await store.supportTicketByThread("t-1")).lastStaffReplyAt, "a staff post marks the ticket answered");
+
+  // A member (no staff perms) posting doesn't stamp — they aren't staff.
+  await store.createSupportTicket(HOUSE, "u2", "t-2", "help", "pls");
+  const memberMsg = { ...staffMsg, channelId: "t-2", member: { permissionsIn: () => ({ has: () => false }) } };
+  await noteTicketStaffReply(memberMsg as any, deps);
+  assert.equal((await store.supportTicketByThread("t-2")).lastStaffReplyAt, null);
+
+  // A staff post outside the ticket channel's threads doesn't stamp either.
+  const wrong = { ...staffMsg, channelId: "t-3", channel: { type: ChannelType.PrivateThread, parent: { name: "adoptees" } } };
+  await noteTicketStaffReply(wrong as any, deps);
+  assert.equal(await store.supportTicketByThread("t-3"), null, "no row exists — but even the lookup never ran");
+});
+
+test("ticket reaper — stale unanswered tickets ping ops once", async () => {
+  const { deps } = ticketWorld();
+  const store = deps.store as any;
+  await store.createSupportTicket(HOUSE, "u1", "t-stale", "unanswered", "pls");
+  (await store.supportTicketByThread("t-stale")).openedAt = new Date(Date.now() - 80 * 3_600_000).toISOString(); // 80h old
+  // An answered old ticket isn't stale.
+  await store.createSupportTicket(HOUSE, "u2", "t-answered", "done", "pls");
+  const answered = await store.supportTicketByThread("t-answered");
+  answered.openedAt = new Date(Date.now() - 80 * 3_600_000).toISOString();
+  answered.lastStaffReplyAt = new Date().toISOString();
+
+  deps.fetchChannel = async (id: string) => id === "c-support-ticket"
+    ? { id, send: async () => {}, threads: { fetchActive: async () => ({ threads: [] }) } } as any
+    : id === "t-stale" || id === "t-answered" ? { id } as any
+    : { id, send: async (p: any) => { deps.sent.push({ id, payload: p }); } } as any;
+
+  await reapOrphanTicketThreads(deps);
+  assert.match(opsAlertText(deps), /Ticket unanswered/, "ops pinged about the stale ticket");
+  assert.ok((await store.supportTicketByThread("t-stale")).staleNotifiedAt, "marked so it doesn't re-ping");
+
+  deps.sent.length = 0;
+  await reapOrphanTicketThreads(deps);
+  assert.doesNotMatch(opsAlertText(deps), /Ticket unanswered/, "second sweep stays quiet");
+});
+
+test("verify nudge — unverified >24h members get one DM, once ever", async () => {
+  const sentDMs: string[] = [];
+  const events: Array<[string, string]> = [];
+  const old = (d: number) => Date.now() - d * 3_600_000;
+  const stale = makeMember({ id: "u-stale" });
+  stale.joinedTimestamp = old(48);
+  stale.send = async () => { sentDMs.push("u-stale"); };
+  const fresh = makeMember({ id: "u-fresh" });
+  fresh.joinedTimestamp = old(2); // under 24h — skip
+  fresh.send = async () => { sentDMs.push("u-fresh"); };
+  const verified = makeMember({ id: "u-ver", hasRole: true });
+  verified.joinedTimestamp = old(48);
+  verified.send = async () => { sentDMs.push("u-ver"); };
+  const closedDM = makeMember({ id: "u-closed" });
+  closedDM.joinedTimestamp = old(48);
+  closedDM.send = async () => { throw new Error("Cannot send messages to this user"); };
+  const already = makeMember({ id: "u-already" });
+  already.joinedTimestamp = old(48);
+  already.send = async () => { sentDMs.push("u-already"); };
+  const optedOut = makeMember({ id: "u-opt" });
+  optedOut.joinedTimestamp = old(48);
+  optedOut.send = async () => { sentDMs.push("u-opt"); };
+
+  const deps = makeDeps({
+    listMembers: async () => [stale, fresh, verified, closedDM, already, optedOut],
+    store: {
+      trackEvent: async (u: string, e: string) => { events.push([u, e]); },
+      hasAnalyticsEvent: async (u: string) => u === "u-already",
+      analyticsOptedOut: async (u: string) => u === "u-opt",
+    } as unknown as MemoryStore,
+  });
+  await runVerifyNudgeSweep(deps);
+  assert.deepEqual(sentDMs, ["u-stale"], "only the old unverified member with open DMs is messaged");
+  assert.deepEqual(events.filter(e => e[1] === "verify_nudge").map(e => e[0]).sort(), ["u-closed", "u-stale"],
+    "closed-DM users still mark once-ever — retrying is pointless");
+
+  // Once-ever: a second sweep sends nothing (u-stale now has the event).
+  const store2 = deps.store as any;
+  store2.hasAnalyticsEvent = async (u: string) => u === "u-already" || u === "u-stale" || u === "u-closed";
+  await runVerifyNudgeSweep(deps);
+  assert.deepEqual(sentDMs, ["u-stale"], "no repeat DMs");
+
+  // Missing dedupe methods on a partial store → the sweep degrades to a no-op.
+  await runVerifyNudgeSweep(makeDeps({ listMembers: async () => [stale] }));
+  assert.deepEqual(sentDMs, ["u-stale"], "partial store ⇒ no-op, never a blind DM");
+});
 
 test("collectHostHealth reports proc/disk/db/queue", async () => {
   let queueArg: unknown = "unset";
@@ -1531,7 +2150,10 @@ test("/ops restart replies then exits; /ops deploy pulls, then exits", async () 
 
   const deploy = makeIx({ strings: { action: "deploy" } });
   await handleOpsCommand(deploy as any);
-  assert.ok(cmds.some(c => c.includes("git pull --ff-only") && c.includes("npm ci")), "deploy runs pull+ci");
+  assert.ok(
+    cmds.some(c => c.includes("git pull --ff-only") && c.includes("npm ci") && c.includes("npm run build")),
+    "deploy runs pull+ci+build — npm start runs dist/, so a build must land before the exit-restart",
+  );
   assert.match(deploy.edits[0] as string, /Deployed `deadbeef`/);
   await new Promise(r => setTimeout(r, 400));
   assert.deepEqual(exits, [1, 1]);
@@ -1952,6 +2574,27 @@ test("ensureAdopteeThread: existing chat_thread_id short-circuits; reopen unlock
   assert.equal(existing.sentPayloads.length, 1, "no duplicate manage row");
 });
 
+test("ensureAdopteeThread: manage-row detection checks pins — a scrolled-out row isn't duplicated", async () => {
+  // The row is pinned — scanning the last N messages misses it on a busy
+  // thread and posted a duplicate. fetchPinned is the dup-proof check.
+  const live = makeAdopteeThread("t-pins");
+  const pinnedRow = {
+    id: "m-pin", pinned: true,
+    components: [{ components: [{ custom_id: "market:drop:11" }] }],
+    pin: async () => {},
+  };
+  (live as { messages: object }).messages = {
+    fetch: async () => [], // scrolled out of the recent window
+    fetchPinned: async () => [pinnedRow],
+  };
+  const { deps } = adopteeDeps({ channels: { "t-pins": live } });
+  const fixture = adopteeFixture();
+  (fixture.adoption as { chatThreadId: string | null }).chatThreadId = "t-pins";
+  const res = await ensureAdopteeThread(deps, { ...fixture, reopen: true } as never);
+  assert.ok("thread" in res);
+  assert.equal(live.sentPayloads.length, 0, "the pinned row was seen — no duplicate posted");
+});
+
 test("ensureAdopteeThread: member-add failure tears the thread down and fails", async () => {
   const thread = makeAdopteeThread("t-bad", { addFails: true });
   const { deps, stamped } = adopteeDeps({ thread });
@@ -2002,6 +2645,39 @@ test("ensureAdopteeThread: a dead partner deployment relocates the adoption to t
   const clear = cleared.find(([, loc]) => (loc as { guildId?: string | null }).guildId === null && (loc as { threadId?: string | null }).threadId === null);
   assert.ok(clear, "partner location cleared during relocation");
   assert.deepEqual(stamped, [[7, "t-home"]]);
+});
+
+test("ensureAdopteeThread: a live thread in a DISABLED deployment seals + relocates, never reuses", async () => {
+  // The membership check alone isn't enough — a deployment row disabled
+  // outside removeDeployment (manual SQL, a status flip) leaves an open
+  // thread whose channel stopped matching isAdopteeThread. Reusing it would
+  // drop DM-scope chat into the normal guild pipeline where partner admins
+  // read it. The live branch must check deployment status too.
+  const stranded = makeAdopteeThread("t-dead-host");
+  const created: Array<Record<string, unknown>> = [];
+  const stamped: Array<[number, string]> = [];
+  const cleared: Array<[number, unknown]> = [];
+  const thread = makeAdopteeThread("t-home2");
+  const { deps } = adopteeDeps({ thread, created, stamped, channels: { "t-dead-host": stranded } });
+  (deps.store as { setAdoptionLocation(a: number, loc: unknown): Promise<void> })
+    .setAdoptionLocation = async (a, loc) => {
+      cleared.push([a, loc]);
+      const t = (loc as { threadId?: string | null }).threadId;
+      if (t) stamped.push([a, t]);
+    };
+  (deps.store as { deployments(): Promise<unknown[]> }).deployments = async () => [
+    { guildId: "g-partner", status: "disabled", marketplaceChannelId: "c-x", adopteesChannelId: "c-ad" },
+  ];
+  await refreshDeploymentCache(deps.store);
+  const fixture = adopteeFixture({ allowCreate: true });
+  (fixture.adoption as unknown as { chatGuildId: string | null }).chatGuildId = "g-partner";
+  (fixture.adoption as unknown as { chatThreadId: string | null }).chatThreadId = "t-dead-host";
+  const res = await ensureAdopteeThread(deps, fixture as never);
+  assert.equal(stranded.locked, true, "the stranded thread is locked");
+  assert.equal(stranded.archived, true, "and archived — partner admins don't keep reading it");
+  assert.ok("thread" in res && res.created, "a fresh thread is built in the house");
+  assert.equal(created.length, 1);
+  assert.deepEqual(stamped, [[7, "t-home2"]]);
 });
 
 test("backfillAdopteeThreads: creates threads for members, skips non-members", async () => {
@@ -2090,6 +2766,20 @@ test("house member update: gaining the Member role re-attaches adoptee threads",
     await handleHouseMemberUpdate(hasRole, makeMember({ id: "u-adopter", hasRole: true }), deps);
     assert.deepEqual(live.addedMembers, []);
   } finally { config.houseMemberRoleId = saved; }
+});
+
+test("house member update: an uncached oldMember (roles unknown) does NOT trigger the adoptee sweep", async () => {
+  // oldMember arrives without `roles` when the member wasn't cached — that's
+  // UNKNOWN state, not "no role held". Treating it as a transition re-ran
+  // the adoptee-ensure sweep on every unrelated update (nickname, timeout)
+  // of every verified member.
+  let ensureCalls = 0;
+  const { deps } = adopteeDeps();
+  (deps.store as { activeAdoptionsForUser(u: string): Promise<unknown[]> })
+    .activeAdoptionsForUser = async () => { ensureCalls++; return []; };
+  const partialOld = { pending: false }; // no `roles` — the uncached shape
+  await handleHouseMemberUpdate(partialOld as any, makeMember({ id: "u-adopter", hasRole: true }), deps);
+  assert.equal(ensureCalls, 0, "unknown old role state isn't a transition — the backfill sweep covers the rare real grant");
 });
 
 // ── Deployment lifecycle (v59) ───────────────────────────────────────────────
@@ -2288,6 +2978,27 @@ test("deployMarketplace: rerun is idempotent — stored ids reused, no second lo
   assert.equal(login.sent.length, 0, "the standing card is kept, not duplicated");
 });
 
+test("/ops deploystatus reports the house via the env-synthesized row; grant/revoke stay refused", async () => {
+  initOps(makeDeps({
+    store: {
+      deploymentFor: async () => null, // no seeded DB row — the env synth fills in
+      listingPostsForGuild: async () => [{ status: "live" }, { status: "failed" }],
+    } as unknown as MemoryStore,
+  }));
+  const ix = makeIx({ strings: { action: "deploystatus", guild: HOUSE } });
+  await handleOpsCommand(ix as any);
+  assert.match(ix.replies[0].content, /status `active`/);
+  assert.match(ix.replies[0].content, /posts: live=1 failed=1/);
+  // Grant/revoke on the house itself remain refused — the house doesn't
+  // take the deployment path.
+  const grant = makeIx({ strings: { action: "deploygrant", guild: HOUSE } });
+  await handleOpsCommand(grant as any);
+  assert.match(grant.replies[0].content, /doesn't need a deployment/);
+  const revoke = makeIx({ strings: { action: "deployrevoke", guild: HOUSE } });
+  await handleOpsCommand(revoke as any);
+  assert.match(revoke.replies[0].content, /doesn't need a deployment/);
+});
+
 // ── Floodgate (v63) ──────────────────────────────────────────────────────────
 
 function adopteesChannelCapture() {
@@ -2401,4 +3112,20 @@ test("floodgate: guild-wide total trips the card even when #adoptees is quiet", 
     config.houseGuildThreadWarnCount = saved.w;
     config.houseGuildThreadClearCount = saved.c;
   }
+});
+
+test("floodgate: pressure sweeps even with MARKET_DEPLOY_ENABLED off — the ceiling is house-scoped", async () => {
+  const adoptees = adopteesChannelCapture();
+  // Partner mirror work is the flag's domain, but Discord's ~1,000
+  // active-thread ceiling applies to the house either way — the gauge must
+  // keep sweeping. The CARD doesn't post though: its only call-to-action is
+  // /marketplace deploy, which the flag disables — a pinned dead-end.
+  const { deps, restore } = pressureDeps(710, adoptees);
+  config.marketDeployEnabled = false; // pressureDeps defaults it on
+  try {
+    await syncDeployments(deps);
+  } finally { restore(); }
+  assert.equal(houseAdopteesPressure().active, true);
+  assert.equal(houseAdopteesPressure().count, 710);
+  assert.equal(adoptees.sent.length, 0, "no card — its remediation is unavailable with deploys off");
 });

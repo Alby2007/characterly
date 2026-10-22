@@ -168,8 +168,12 @@ const env = z.object({
   // Public invite for non-member adopters who need to join the house to meet
   // their companions (falls back to SITE_URL in copy when unset).
   HOUSE_INVITE_URL: z.string().optional(),
+  // One-time DM nudge to members who joined >24h ago and never verified.
+  // "0" disables; the sweep is capped per run and deduped once-ever.
+  HOUSE_VERIFY_NUDGE: z.string().optional(),
   // Where ops alerts/host breaches go — defaults to the marketplace mod channel.
   OPS_CHANNEL_ID: z.string().optional(),
+  OPS_ALERT_CHANNEL_ID: z.string().optional(),
   // Discord user ids allowed to run /ops (controls the host — person-level,
   // tighter than ManageGuild).
   OPS_USER_IDS: z.string().optional(),
@@ -184,6 +188,9 @@ const env = z.object({
   // "1" auto-kicks new joins while the raid window is hot — default OFF
   // (kicking is one-way; alerts alone usually suffice).
   AUTOMOD_RAID_KICK: z.string().optional(),
+  // Repeat-offense count within 24h that escalates to a kick — the
+  // mod_actions ledger supplies the count. 0 disables (timeouts cap at 24h).
+  AUTOMOD_KICK_THRESHOLD: z.coerce.number().int().min(0).default(4),
   // Host watchdog thresholds (heap %, disk %, event-loop lag ms, tick ms).
   HOST_HEAP_PCT: z.coerce.number().int().min(1).max(100).default(90),
   HOST_DISK_PCT: z.coerce.number().int().min(1).max(100).default(85),
@@ -309,7 +316,12 @@ export const config = {
   // active pool. 3d default — validated to Discord's allowed minute set.
   adopteeThreadArchiveMinutes: env.ADOPTEE_THREAD_ARCHIVE_MINUTES,
   houseInviteUrl: env.HOUSE_INVITE_URL,
+  houseVerifyNudge: env.HOUSE_VERIFY_NUDGE !== "0",
   opsChannelId: env.OPS_CHANNEL_ID ?? env.MARKETPLACE_MOD_CHANNEL_ID,
+  // High-signal alerts (raid, breach, kicks, filed reports) can route to a
+  // separate channel so they don't drown in the ops log — falls back to
+  // OPS_CHANNEL_ID when unset.
+  opsAlertChannelId: env.OPS_ALERT_CHANNEL_ID,
   opsUserIds: (env.OPS_USER_IDS ?? "").split(",").map(s => s.trim()).filter(Boolean),
   opsRepoDir: env.OPS_REPO_DIR,
   automodBurstCount: env.AUTOMOD_BURST_COUNT,
@@ -318,6 +330,7 @@ export const config = {
   automodNewAccountDays: env.AUTOMOD_NEW_ACCOUNT_DAYS,
   automodRaidJoins: env.AUTOMOD_RAID_JOINS,
   automodRaidKick: env.AUTOMOD_RAID_KICK === "1",
+  automodKickThreshold: env.AUTOMOD_KICK_THRESHOLD,
   hostHeapPct: env.HOST_HEAP_PCT,
   hostDiskPct: env.HOST_DISK_PCT,
   hostLagMs: env.HOST_LAG_MS,

@@ -54,10 +54,11 @@ import { TurnLedger, chargeHostedTurn, screenAdoptedReply } from "./turn-billing
 import {
   initOps, automodMessage, isHouse, isMarketplaceThread, isAdopteeThread, opsAlert,
   handleHouseMemberAdd, handleHouseMemberUpdate, handleHouseMemberRemove,
-  ensureHouseLayout, ensureResourcePosts, ensureTicketPanel, handleTicketModal, startHostWatchdog, ensureVerifyGate, startLinkSweep,
+  ensureHouseLayout, ensureResourcePosts, ensureTicketPanel, handleTicketModal, startHostWatchdog, ensureVerifyGate, startLinkSweep, startVerifyNudgeSweep, noteTicketStaffReply,
   startTagSweep, backfillAdopteeThreads, ensureAdopteeThreadsForUser,
+  reapOrphanTicketThreads, startTicketReaper,
   handleDeploymentMemberAdd, handleDeploymentMemberRemove, refreshDeploymentCache,
-  startDeploymentSync, syncDeployments, untrackDeployment,
+  startDeploymentSync, syncDeployments, untrackDeployment, validateHouseConfig,
   type OpsDeps, type GuildLike,
 } from "./ops.js";
 import { exec as cpExec } from "node:child_process";
@@ -271,6 +272,8 @@ let watchdog: { stop: () => void } | undefined;
 let linkSweep: { stop: () => void } | undefined;
 let tagSweep: { stop: () => void } | undefined;
 let deploySweep: { stop: () => void } | undefined;
+let ticketReaper: { stop: () => void } | undefined;
+let verifyNudge: { stop: () => void } | undefined;
 
 async function init() {
   store = await MemoryStore.create();
@@ -350,6 +353,10 @@ client.once(Events.ClientReady, async ready => {
   opsDeps.gitSha = await opsDeps.exec(`cd "${repoDir}" && git rev-parse --short HEAD`)
     .then(r => r.stdout.trim()).catch(() => null);
   if (config.houseGuildId) {
+    // Half-wired house envs degrade features silently — name what's off
+    // before anything tries to use it (also surfaces in /ops status).
+    const configIssues = validateHouseConfig();
+    for (const issue of configIssues) console.warn(`[house] config gap: ${issue}`);
     try {
       const house = await opsDeps.fetchGuild(config.houseGuildId);
       if (house) {
@@ -358,6 +365,9 @@ client.once(Events.ClientReady, async ready => {
         const changed = [...made, ...posted];
         // Ticket panel — the persistent Open-a-ticket card in #support-ticket.
         await ensureTicketPanel(opsDeps, house).catch(e => { inc("ops.init_error"); logError("ticket panel failed", e); return false; });
+        // Reconcile rows↔threads left diverged by a mid-flight failure or a
+        // mod-deleted thread — runs again on the sweep cadence below.
+        await reapOrphanTicketThreads(opsDeps).catch(e => { inc("ops.init_error"); logError("ticket reaper failed", e); });
         if (changed.length) await opsAlert(opsDeps, `🧱 House layout — ${changed.join(", ")}`);
         // Verify gate card — posted once if missing; pending members see it
         // but the button refuses until screening passes.
@@ -367,21 +377,24 @@ client.once(Events.ClientReady, async ready => {
       }
       watchdog = startHostWatchdog(opsDeps);
       linkSweep = startLinkSweep(opsDeps); // Member role ↔ account-link reconciliation
+      verifyNudge = startVerifyNudgeSweep(opsDeps); // one-ever DM to unverified >24h joins
       tagSweep = startTagSweep(opsDeps);   // Curated marketplace badges ↔ live stats
-      await opsAlert(opsDeps, `🟢 Characterly online — sha \`${opsDeps.gitSha ?? "?"}\` · migrations applied · host watchdog armed`);
+      ticketReaper = startTicketReaper(opsDeps); // support_tickets rows ↔ live threads
+      await opsAlert(opsDeps, `🟢 Characterly online — sha \`${opsDeps.gitSha ?? "?"}\` · migrations applied · host watchdog armed` +
+        (configIssues.length ? `\n⚠️ ${configIssues.length} house config gap(s) — /ops status lists them` : ""));
 
       // Partner deployments (v59): seed the house row from env, warm the
       // in-process cache, register /marketplace in every granted guild, and
       // arm the mirror-sync sweep. The house row is env-authoritative —
-      // renames in the house reconcile here each boot.
-      if (config.marketplaceChannelId || config.houseAdopteesChannelId) {
-        await store.upsertDeployment({
-          guildId: config.houseGuildId,
-          status: "active",
-          marketplaceChannelId: config.marketplaceChannelId ?? null,
-          adopteesChannelId: config.houseAdopteesChannelId ?? null,
-        }).catch(e => { inc("ops.init_error"); logError("house deployment seed failed", e); });
-      }
+      // renames reconcile here each boot and clearChannelIds makes a REMOVED
+      // env clear the stale column instead of leaving a dead channel id
+      // behind (the default upsert coalesce preserves it forever).
+      await store.upsertDeployment({
+        guildId: config.houseGuildId,
+        status: "active",
+        marketplaceChannelId: config.marketplaceChannelId ?? null,
+        adopteesChannelId: config.houseAdopteesChannelId ?? null,
+      }, { clearChannelIds: true }).catch(e => { inc("ops.init_error"); logError("house deployment seed failed", e); });
       await refreshDeploymentCache(store).catch(e => { inc("ops.init_error"); logError("deployment cache warm failed", e); });
       if (config.marketDeployEnabled) {
         // /marketplace is a global command now — clear the legacy
@@ -393,9 +406,12 @@ client.once(Events.ClientReady, async ready => {
           await ready.application.commands.set([], d.guildId)
             .catch(e => { inc("ops.init_error"); logError(`legacy marketplace command clear failed for ${d.guildId}`, e); });
         }
-        deploySweep = startDeploymentSync(opsDeps);
-        void syncDeployments(opsDeps).catch(e => { inc("ops.sweep_error"); logError("deployment sync boot run failed", e); });
       }
+      // The sweep runs whenever the house exists — partner mirror work
+      // inside it is flag-gated, but it also owns the deployment cache
+      // refresh and the house thread-pressure gauge, both live either way.
+      deploySweep = startDeploymentSync(opsDeps);
+      void syncDeployments(opsDeps).catch(e => { inc("ops.sweep_error"); logError("deployment sync boot run failed", e); });
     } catch (error) { inc("ops.init_error"); logError("house ops init failed", error); }
   }
   // Backfill Discord display fields for code-linked accounts predating v38 —
@@ -1045,9 +1061,22 @@ const opsDeps: OpsDeps = {
   listMembers: async guildId => {
     const g = await client.guilds.fetch(guildId).catch(() => null);
     if (!g) return [];
-    // members.list caps at 1000/page — plenty for the house server.
-    const coll = await g.members.list({ limit: 1000 }).catch(() => null);
-    return coll ? [...coll.values()] as unknown as import("./ops.js").MemberLike[] : [];
+    // members.list is paged at 1000 — a single fetch silently drops the tail
+    // past that, which would leave Members unreconciled by the link sweep.
+    // Follow `after` until a short page; a page cap bounds a pathological
+    // always-full response.
+    const out: import("./ops.js").MemberLike[] = [];
+    let after: string | undefined;
+    for (let page = 0; page < 50; page++) {
+      const coll = await g.members.list({ limit: 1000, ...(after ? { after } : {}) }).catch(() => null);
+      if (!coll) break;
+      const batch = [...coll.values()] as unknown as import("./ops.js").MemberLike[];
+      out.push(...batch);
+      const last = batch[batch.length - 1];
+      if (batch.length < 1000 || !last?.user?.id) break;
+      after = last.user.id;
+    }
+    return out;
   },
   get botId() { return client.user?.id ?? null; },
   // OAuth install link — same bare shape as the website's "Add to Discord"
@@ -1059,7 +1088,10 @@ const opsDeps: OpsDeps = {
   // Bounded: a stalled `git pull` or hung `npm ci` must not freeze the /ops
   // console forever — a timeout lands as a catchable error instead.
   exec: cmd => execAsync(cmd, { maxBuffer: 4 * 1024 * 1024, timeout: 300_000 }),
-  exit: code => process.exit(code),
+  // Signal, don't exit — /ops restart/deploy take the SIGTERM handler's
+  // graceful path (drain in-flight jobs, flush metrics, close Discord + the
+  // pool) instead of severing everything mid-write.
+  exit: () => { process.kill(process.pid, "SIGTERM"); },
   dbPing: async () => { const t = Date.now(); await sql`SELECT 1`; return Date.now() - t; },
   lagMs: () => { const ms = lagHistogram.mean / 1e6; lagHistogram.reset(); return ms; },
   gitSha: null,
@@ -1763,7 +1795,12 @@ async function handleMessage(message: OmitPartialGroupDMChannel<Message>) {
       // private content as server memory.
       return;
     }
-    if (isHouse(message.guild.id)) return;
+    if (isHouse(message.guild.id)) {
+      // Staff posts in ticket threads stamp last_staff_reply_at — the
+      // reaper's unanswered-ticket nudge reads it. Everything else skips.
+      void noteTicketStaffReply(message, opsDeps).catch(() => {});
+      return;
+    }
   }
   // House automod runs before archive/LLM work — a deleted scam never enters
   // the memory pipeline or spends a credit. Bots/webhook-echoes are skipped

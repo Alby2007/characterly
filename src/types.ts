@@ -498,7 +498,9 @@ export type AppInstall = {
 
 /** A house support ticket (v48) — one private thread per ticket under
  *  #support-ticket. `status` is 'open' | 'closed'; the partial unique index
- *  enforces one open ticket per opener. */
+ *  enforces one open ticket per opener. `category` (v66) comes from the
+ *  open-time picker; `lastStaffReplyAt`/`staleNotifiedAt` feed the reaper's
+ *  unanswered-ticket nudge. */
 export type SupportTicket = {
   threadId: string;
   guildId: string;
@@ -509,6 +511,28 @@ export type SupportTicket = {
   openedAt: string;
   closedAt: string | null;
   closerId: string | null;
+  category: string;
+  lastStaffReplyAt: string | null;
+  staleNotifiedAt: string | null;
+};
+
+/** One row of the moderation audit ledger (v66) — automod actions, report
+ *  resolutions, and staff actions on house members. `actor` is "automod"
+ *  for rule-driven actions, the mod's user id otherwise. `action` is the
+ *  verb ('delete' | 'timeout' | 'kick' | 'warn' | 'report_keep' |
+ *  'report_del' | 'report_timeout'); `rule` names the automod rule or the
+ *  report category that motivated it. */
+export type ModAction = {
+  id: number;
+  guildId: string;
+  targetId: string;
+  actor: string;
+  action: string;
+  rule: string | null;
+  detail: string;
+  messageId: string | null;
+  channelId: string | null;
+  createdAt: string;
 };
 
 export type CompanionPersona = {
