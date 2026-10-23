@@ -192,6 +192,7 @@ bonus   = floor(premiumSubs * FLEET_PREMIUM_DAILY_REVENUE_USD / FLEET_COST_PER_H
 | `STRIPE_SECRET_KEY` | Supabase fn secrets | Restricted key (`rk_live_…`, Checkout Sessions write only). Rotate in Stripe → Developers → API keys; no session flow works until re-set. |
 | `SITE_URL` | Supabase fn secrets | Checkout return URLs + CORS origin for `create-checkout`. |
 | GitHub deploy secrets | repo settings | `ORACLE_SSH_KEY` rotation = update the secret; `ORACLE_HOST_KEY` must be refreshed if the VM is rebuilt. |
+| Managed env (`PROD_*` secrets) | repo secrets → VM `.env` via deploy | `PROD_DATABASE_URL` / `PROD_GROQ_API_KEY` / `PROD_DISCORD_TOKEN` / `PROD_AVATAR_UPLOAD_SECRET`, when set, overwrite the matching `~/characterly/.env` key on every deploy — set a secret and its VM value can never drift back. Rotate = `gh secret set PROD_<KEY>` + `gh workflow run` (or any push). Unset secrets leave `.env` untouched. |
 
 ## Scheduled work (in-process)
 

@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual runs exist so secret rotation (PROD_* env provisioning below) can
+  # be applied without waiting for a push.
+  workflow_dispatch:
 
 # Least privilege — no job needs more than read access to the repo contents.
 permissions:
@@ -73,7 +76,7 @@ jobs:
   # repo settings so a push alone can't ship without approval.
   deploy:
     needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     environment: production
     runs-on: ubuntu-latest
     concurrency:
@@ -108,12 +111,49 @@ jobs:
       # verified against nodejs.org's SHASUMS256.txt; EOL/odd lines move to
       # 22 LTS. Floors: 22.23.4 / 24.22.1 / 26.12.1 — see
       # docs/security-node-oct2026.md.
+      # Managed env: each PROD_* repo secret, when set, overwrites its key in
+      # ~/characterly/.env on every deploy; unset secrets leave the file
+      # alone. Values travel over scp — never in the ssh command line or
+      # step logs. Rotate a key = set the PROD_* secret + run the workflow.
       - name: Pull, install, build, and restart on Oracle
+        env:
+          P_DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          P_GROQ_API_KEY: ${{ secrets.PROD_GROQ_API_KEY }}
+          P_DISCORD_TOKEN: ${{ secrets.PROD_DISCORD_TOKEN }}
+          P_AVATAR_UPLOAD_SECRET: ${{ secrets.PROD_AVATAR_UPLOAD_SECRET }}
         run: |
+          umask 077
+          : > provided.env
+          [ -n "${P_DATABASE_URL:-}" ] && printf 'DATABASE_URL=%s\n' "$P_DATABASE_URL" >> provided.env
+          [ -n "${P_GROQ_API_KEY:-}" ] && printf 'GROQ_API_KEY=%s\n' "$P_GROQ_API_KEY" >> provided.env
+          [ -n "${P_DISCORD_TOKEN:-}" ] && printf 'DISCORD_TOKEN=%s\n' "$P_DISCORD_TOKEN" >> provided.env
+          [ -n "${P_AVATAR_UPLOAD_SECRET:-}" ] && printf 'AVATAR_UPLOAD_SECRET=%s\n' "$P_AVATAR_UPLOAD_SECRET" >> provided.env
+          if [ -s provided.env ]; then
+            scp -o StrictHostKeyChecking=yes provided.env ${{ secrets.ORACLE_SSH_HOST }}:/tmp/provided.env
+            echo "staged $(wc -l < provided.env | tr -d ' ') managed env keys"
+          fi
+          rm -f provided.env
+
           ssh -o StrictHostKeyChecking=yes ${{ secrets.ORACLE_SSH_HOST }} 'bash -s' <<'REMOTE'
           set -euo pipefail
           cd ~/characterly
           git pull --ff-only
+
+          # Apply provisioned env keys — drop each named line, append the new
+          # one (no sed quoting traps: values arrive in the file verbatim).
+          if [ -f /tmp/provided.env ]; then
+            touch .env
+            while IFS= read -r line || [ -n "$line" ]; do
+              [ -z "$line" ] && continue
+              key="${line%%=*}"
+              grep -v "^${key}=" .env > .env.next || true
+              printf '%s\n' "$line" >> .env.next
+              mv .env.next .env
+            done < /tmp/provided.env
+            rm -f /tmp/provided.env
+            chmod 600 .env
+            echo "applied managed env keys to ~/characterly/.env"
+          fi
 
           # Patched iff: 22.23.4+ / 24.22.1+ / 26.12.1+ / anything newer.
           # EOL and odd lines (20.x, 23.x, 25.x) jump to the 22 LTS patch.
