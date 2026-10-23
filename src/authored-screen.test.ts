@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   checkMessageContent, buildSafetyVerdictPrompt, parseSafetyVerdict, SAFETY_VERDICT_SCHEMA,
   CREATOR_SLUG_RE, RESERVED_CREATOR_SLUGS, normalizeCreatorSlug, validateCreatorFields,
-  creatorProfileSubject,
+  creatorProfileSubject, creatorSlugify,
 } from "./authored-screen.js";
 
 // The shared screening module is the contract between the bot (safetyVerdict,
@@ -59,6 +59,19 @@ test("normalizeCreatorSlug trims and lowercases; empty becomes null", () => {
   assert.equal(normalizeCreatorSlug("  Night-Forge  "), "night-forge");
   assert.equal(normalizeCreatorSlug("   "), null);
   assert.equal(normalizeCreatorSlug(""), null);
+});
+
+test("creatorSlugify turns human input into a page address", () => {
+  assert.equal(creatorSlugify("Night Forge"), "night-forge");
+  assert.equal(creatorSlugify("NightForge"), "nightforge");
+  assert.equal(creatorSlugify("  --hi!! there-- "), "hi-there");
+  assert.equal(creatorSlugify("!!!"), "");
+  assert.equal(creatorSlugify("x".repeat(40)), "x".repeat(32));
+  // Derived slugs are valid by construction (or empty).
+  for (const s of ["Night Forge", "A!B?C", "a—b—c", "ok-name-2"]) {
+    const slug = creatorSlugify(s);
+    assert.ok(slug === "" || CREATOR_SLUG_RE.test(slug), s);
+  }
 });
 
 test("reserved slugs refuse at validation, format errors name the field", () => {

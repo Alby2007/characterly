@@ -110,6 +110,16 @@ export const CREATOR_SLUG_RE = /^[a-z0-9][a-z0-9-]{2,31}$/;
 export const CREATOR_NAME_MAX = 48;
 export const CREATOR_BIO_MAX = 500;
 
+/** Turn human input into a page address: "Night Forge" → "night-forge".
+ *  Used for the dashboard's name→address auto-fill — the save endpoint itself
+ *  stays strict (normalizeCreatorSlug + CREATOR_SLUG_RE reject, never mutate). */
+export function creatorSlugify(raw: string): string {
+  return raw.trim().toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32);
+}
+
 /** Slugs that can never be claimed — first-party routes, trust signals, and
  *  obvious impersonation handles. Mirrored verbatim in the v70 CHECK. */
 export const RESERVED_CREATOR_SLUGS = [
@@ -131,16 +141,16 @@ export type CreatorFields = { slug: string | null; name: string; bio: string; pu
  *  feedback. Returns the first problem, or null when clean. A public page
  *  requires a slug; a private profile may keep everything else empty. */
 export function validateCreatorFields(f: CreatorFields): { field: string; error: string } | null {
-  if (f.public && !f.slug) return { field: "slug", error: "A public creator page needs a slug. It's the page URL." };
+  if (f.public && !f.slug) return { field: "slug", error: "A public page needs an address — the link people visit." };
   if (f.slug != null) {
     if (!CREATOR_SLUG_RE.test(f.slug)) {
-      return { field: "slug", error: "Slugs are 3-32 chars: lowercase letters, numbers, hyphens (no leading hyphen)." };
+      return { field: "slug", error: "Addresses use 3-32 lowercase letters, numbers or hyphens." };
     }
     if ((RESERVED_CREATOR_SLUGS as readonly string[]).includes(f.slug)) {
-      return { field: "slug", error: "That slug is reserved." };
+      return { field: "slug", error: "That address is reserved." };
     }
   }
-  if (f.name.length > CREATOR_NAME_MAX) return { field: "name", error: `Creator name is capped at ${CREATOR_NAME_MAX} characters.` };
+  if (f.name.length > CREATOR_NAME_MAX) return { field: "name", error: `Public name is capped at ${CREATOR_NAME_MAX} characters.` };
   if (f.bio.length > CREATOR_BIO_MAX) return { field: "bio", error: `Bio is capped at ${CREATOR_BIO_MAX} characters.` };
   return null;
 }

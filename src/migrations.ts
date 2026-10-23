@@ -7240,6 +7240,74 @@ export const migrations: Migration[] = [
       await sql`DROP FUNCTION IF EXISTS public.claim_daily_grant()`;
     },
   },
+  // ── v72: creator_slug_available — live handle-picker feedback ─────────────
+  // The dashboard's page-address field debounces into this so "taken" is
+  // known while typing, not after save. Read-only, own-row-excepted (your
+  // current slug reads available), one indexed EXISTS lookup. It does reveal
+  // whether a private (unpublished) slug is claimed — accepted as the cost of
+  // handle-picker UX; format/reserved answers leak nothing new.
+  {
+    version: 72,
+    name: "v72_creator_slug_available",
+    up: async (sql) => {
+      await sql`
+        DO $web$
+        BEGIN
+          -- to_regclass (not ::regclass): the plain-Postgres CI database has no
+          -- web_profiles at all, and the cast form throws instead of skipping.
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_attribute
+                          WHERE attrelid = to_regclass('public.web_profiles')
+                            AND attname = 'creator_slug' AND NOT attisdropped) THEN
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION public.creator_slug_available(p_slug text)
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                norm text;
+              BEGIN
+                IF auth.uid() IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                norm := lower(btrim(coalesce(p_slug, '')));
+                -- Mirrors CREATOR_SLUG_RE + RESERVED_CREATOR_SLUGS in
+                -- src/authored-screen.ts and the v70 CHECK — keep in sync.
+                IF norm = '' OR norm !~ '^[a-z0-9][a-z0-9-]{2,31}$' THEN
+                  RETURN json_build_object('available', false, 'reason', 'invalid', 'slug', norm);
+                END IF;
+                IF norm = ANY (ARRAY[
+                  'admin','administrator','api','characterly','characters','creator',
+                  'creators','help','mod','moderator','official','root','staff',
+                  'support','system','team','www'
+                ]) THEN
+                  RETURN json_build_object('available', false, 'reason', 'reserved', 'slug', norm);
+                END IF;
+                IF EXISTS (SELECT 1 FROM public.web_profiles
+                            WHERE creator_slug = norm AND id <> auth.uid()) THEN
+                  RETURN json_build_object('available', false, 'reason', 'taken', 'slug', norm);
+                END IF;
+                RETURN json_build_object('available', true, 'slug', norm);
+              END
+              $body$
+            $fn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.creator_slug_available(text) FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.creator_slug_available(text) FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.creator_slug_available(text) TO authenticated';
+            END IF;
+          END IF;
+        END $web$
+      `;
+    },
+    down: async (sql) => {
+      await sql`DROP FUNCTION IF EXISTS public.creator_slug_available(text)`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a

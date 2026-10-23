@@ -50,6 +50,7 @@ async function fixture(sql: ReturnType<typeof makeTestSql>) {
     )
   `;
   await sql`ALTER TABLE web_profiles ADD COLUMN IF NOT EXISTS purchased_balance INT NOT NULL DEFAULT 0`;
+  await sql`ALTER TABLE web_profiles ADD COLUMN IF NOT EXISTS creator_slug TEXT`;
   const { store } = await makeStore(sql);
   assert.equal(await store.initCreditsSupport(GRANTS), true);
   return store;
@@ -477,6 +478,38 @@ test("v71 claim_daily_grant: fill on read, idempotent, mirrors spendCredits math
     await assert.rejects(claim(null), /not authenticated/);
   } finally {
     await sql`DROP FUNCTION IF EXISTS public.claim_daily_grant()`;
+    await sql`DROP SCHEMA IF EXISTS auth CASCADE`;
+    await sql.end();
+  }
+});
+
+// v72: creator_slug_available feeds the dashboard's live address check —
+// same auth stub + migration-up pattern as v71.
+test("v72 creator_slug_available: taken, reserved, invalid, own", async () => {
+  const sql = makeTestSql();
+  await fixture(sql);
+  await sql`CREATE SCHEMA IF NOT EXISTS auth`;
+  await sql`CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS $s$ SELECT nullif(current_setting('app.claim_uid', true), '')::uuid $s$`;
+  const check = (uid: string | null, slug: string) => sql.begin(async tx => {
+    await tx`SELECT set_config('app.claim_uid', ${uid ?? ""}, true)`;
+    const r = await tx`SELECT public.creator_slug_available(${slug}) AS r`;
+    return r[0].r;
+  });
+  try {
+    await migrations.find(m => m.version === 72)!.up(sql as never);
+    const owner = await addAccount(sql, "u-owner");
+    await sql`UPDATE web_profiles SET creator_slug = 'night-forge' WHERE id = ${owner}`;
+    const other = await addAccount(sql, "u-other");
+
+    assert.deepEqual(await check(other, "night-forge"), { available: false, reason: "taken", slug: "night-forge" });
+    assert.equal((await check(owner, "night-forge")).available, true, "own slug reads free");
+    assert.deepEqual(await check(other, "Admin"), { available: false, reason: "reserved", slug: "admin" });
+    assert.equal((await check(other, "has space")).reason, "invalid");
+    assert.equal((await check(other, "ab")).reason, "invalid");
+    assert.deepEqual(await check(other, "  Free-Name  "), { available: true, slug: "free-name" });
+    await assert.rejects(check(null, "anything-ok"), /not authenticated/);
+  } finally {
+    await sql`DROP FUNCTION IF EXISTS public.creator_slug_available(text)`;
     await sql`DROP SCHEMA IF EXISTS auth CASCADE`;
     await sql.end();
   }

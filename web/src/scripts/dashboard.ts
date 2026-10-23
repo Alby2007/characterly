@@ -8,9 +8,10 @@ import {
   requireAuth, getProfile, updateDisplayName, updatePassword, deleteAccount, signOut,
   linkDiscord, getIdentities, unlinkDiscord, unlinkDiscordLink, claimLinkCode, withTimeout,
   getBotSettings, saveBotSettings, getByokStatus, getCreditLedger, ensureConsent, myCompanions, beacon,
-  claimDailyGrant,
+  claimDailyGrant, creatorSlugAvailable,
   type Profile,
 } from "./auth";
+import { CREATOR_SLUG_RE, creatorSlugify } from "../../../src/authored-screen.ts";
 import { supabase } from "./supabase";
 import { showLoader, hideLoader } from "./loader";
 import { TERMS_VERSION, PLANS } from "../lib/config";
@@ -365,41 +366,93 @@ function setStep(id: string, done: boolean) {
 // ── Creator page ───────────────────────────────────────────────────────────
 // The opt-in public profile at /creators/<slug>. Saves go through POST
 // /creator-profile (the only write path — the columns reject direct updates)
-// so public text always passes the listing screen.
+// so public text always passes the listing screen. The address field
+// auto-fills from the public name until the user overrides it, normalizes
+// while typing, and a debounced creator_slug_available rpc flags
+// taken/reserved before save ever happens.
+const slugInput = () => $<HTMLInputElement>("#creator-slug");
+const CREATOR_FIELDS: Record<string, string> = { slug: "#creator-slug", name: "#creator-name", bio: "#creator-bio" };
+let slugTouched = false;
+let slugCheckTimer: ReturnType<typeof setTimeout> | undefined;
 function renderCreator() {
   const on = linked() && !profileUnknown();
   $("#creator-body").hidden = !on;
   $("#creator-locked").hidden = on;
   if (!on) return;
   $<HTMLInputElement>("#creator-public").checked = profile?.creator_public === true;
-  $<HTMLInputElement>("#creator-slug").value = profile?.creator_slug ?? "";
+  slugInput().value = profile?.creator_slug ?? "";
   $<HTMLInputElement>("#creator-name").value = profile?.creator_name ?? "";
   $<HTMLInputElement>("#creator-bio").value = profile?.creator_bio ?? "";
+  slugTouched = !!profile?.creator_slug;
+  const live = profile?.creator_public === true && !!profile?.creator_slug;
   const badge = $("#creator-state");
-  const live = profile?.creator_public === true && profile?.creator_slug;
-  badge.textContent = live ? "Live" : "Off";
+  badge.textContent = live ? "Live" : (profile?.creator_slug || profile?.creator_name ? "Draft" : "Off");
   badge.className = live ? "badge badge-go" : "badge";
   const view = $<HTMLAnchorElement>("#creator-view");
   view.hidden = !live;
+  $<HTMLButtonElement>("#creator-copy").hidden = !live;
   if (live) view.href = `/creators/${profile!.creator_slug}`;
   updateSlugPreview();
 }
 function updateSlugPreview() {
-  const raw = $<HTMLInputElement>("#creator-slug").value.trim().toLowerCase();
+  const raw = slugInput().value.trim().toLowerCase();
   const pv = $("#creator-url-preview");
   pv.hidden = !raw;
-  if (raw) pv.textContent = `Your page: ${location.origin}/creators/${raw}`;
+  const av = $("#creator-avail");
+  av.textContent = "";
+  av.className = "";
+  clearTimeout(slugCheckTimer);
+  $("#creator-url-text").textContent = raw ? `${location.host}/creators/${raw}` : "";
+  if (!raw || profile?.creator_slug === raw) return; // your own saved address — no availability tag needed
+  slugCheckTimer = setTimeout(async () => {
+    try {
+      const { data } = await creatorSlugAvailable(raw);
+      if (slugInput().value.trim().toLowerCase() !== raw) return; // stale keystroke
+      if (!data) return;
+      if (data.available) { av.textContent = " — available"; av.className = "ok"; }
+      else if (data.reason === "taken") { av.textContent = " — taken, try another"; av.className = "bad"; }
+      else if (data.reason === "reserved") { av.textContent = " — not available"; av.className = "bad"; }
+      else { av.textContent = " — letters, numbers, hyphens (3–32)"; av.className = "bad"; }
+    } catch { /* availability is a nicety — the save check still guards */ }
+  }, 300);
 }
-$("#creator-slug").addEventListener("input", updateSlugPreview);
+// Typing a public name offers an address until the user overrides the field.
+$<HTMLInputElement>("#creator-name").addEventListener("input", () => {
+  if (!slugTouched) {
+    slugInput().value = creatorSlugify($<HTMLInputElement>("#creator-name").value);
+    updateSlugPreview();
+  }
+});
+slugInput().addEventListener("input", () => {
+  // Live-normalize so the field can never hold a shape the server rejects.
+  const v = slugInput().value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+/, "").slice(0, 32);
+  if (v !== slugInput().value) slugInput().value = v;
+  slugTouched = v !== "";
+  updateSlugPreview();
+});
+for (const sel of Object.values(CREATOR_FIELDS)) {
+  $(sel).addEventListener("input", () => $(sel).removeAttribute("aria-invalid"));
+}
+$<HTMLButtonElement>("#creator-copy").addEventListener("click", async () => {
+  const btn = $<HTMLButtonElement>("#creator-copy");
+  try {
+    await navigator.clipboard.writeText($<HTMLAnchorElement>("#creator-view").href);
+    btn.textContent = "Copied!";
+    setTimeout(() => { btn.textContent = "Copy link"; }, 1600);
+  } catch { /* clipboard denied — the link is right above to copy */ }
+});
 $("#form-creator").addEventListener("submit", async e => {
   e.preventDefault();
   const msg = $("#creator-msg");
   msg.hidden = true;
   msg.classList.remove("ok");
-  const slug = $<HTMLInputElement>("#creator-slug").value.trim().toLowerCase();
-  if (slug && !/^[a-z0-9][a-z0-9-]{2,31}$/.test(slug)) {
-    msg.textContent = "Slugs are 3-32 chars: lowercase letters, numbers, hyphens (no leading hyphen).";
+  const slug = creatorSlugify(slugInput().value);
+  slugInput().value = slug;
+  if (slug && !CREATOR_SLUG_RE.test(slug)) {
+    msg.textContent = "Addresses use 3–32 lowercase letters, numbers or hyphens.";
     msg.hidden = false;
+    slugInput().setAttribute("aria-invalid", "true");
+    slugInput().focus();
     return;
   }
   const btn = e.submitter as HTMLButtonElement | null;
@@ -420,6 +473,9 @@ $("#form-creator").addEventListener("submit", async e => {
     if (!res.ok) {
       msg.textContent = data.error || "Save didn't go through. Try again.";
       msg.hidden = false;
+      // The endpoint names the offending field — light it up and land focus.
+      const bad = data.field ? $(CREATOR_FIELDS[data.field] ?? "#creator-slug") as HTMLInputElement | null : null;
+      if (bad) { bad.setAttribute("aria-invalid", "true"); bad.focus(); }
       return;
     }
     msg.textContent = "Saved.";

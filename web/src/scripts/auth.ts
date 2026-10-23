@@ -151,6 +151,8 @@ export const getByokStatus = () => supabase.rpc("my_byok_status");
 // chat of the day. claim_daily_grant runs the same grant under the account
 // row lock on read — call it before rendering balances.
 export const claimDailyGrant = () => supabase.rpc("claim_daily_grant");
+// Live feedback for the creator-page address field: { available, reason?, slug }
+export const creatorSlugAvailable = (slug: string) => supabase.rpc("creator_slug_available", { p_slug: slug });
 export const getCreditLedger = (limit = 8) =>
   supabase.from("credit_ledger")
     .select("delta,kind,reason,balance_after,created_at")

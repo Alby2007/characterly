@@ -217,17 +217,17 @@ export const prerender = true;
         <section class="side-sec" aria-labelledby="creator-h">
           <div class="panel-head"><h2 id="creator-h">Creator page</h2><span class="badge" id="creator-state">Off</span></div>
           <div id="creator-body" hidden>
-            <p class="small muted">An opt-in public page at <code>/creators/&lt;slug&gt;</code> showing your live characters and their ratings. Your Discord name stays out of it. You pick a public brand.</p>
+            <p class="small muted">One link that shows all your live shelf characters, under a name you choose — your Discord name never appears. The page fills in as you publish.</p>
             <form id="form-creator" class="stack" novalidate>
-              <label class="toggle-row"><input type="checkbox" id="creator-public" role="switch" /><span><strong>Public page</strong><small>On: your page is live and listings can link to it. Off: the page 404s and bylines stay anonymous.</small></span></label>
-              <label class="field"><span>Slug <span class="muted">(the page URL)</span></span><input class="input" type="text" id="creator-slug" maxlength="32" autocomplete="off" spellcheck="false" placeholder="night-forge" /></label>
-              <p class="small muted" id="creator-url-preview" hidden></p>
-              <label class="field"><span>Public name</span><input class="input" type="text" id="creator-name" maxlength="48" placeholder="NightForge" /></label>
-              <label class="field"><span>Bio <span class="muted">(optional)</span></span><textarea class="input" id="creator-bio" rows="3" maxlength="520" placeholder="What kind of characters do you make?"></textarea></label>
+              <label class="field"><span>Public name</span><input class="input" type="text" id="creator-name" maxlength="48" autocomplete="off" placeholder="NightForge" /></label>
+              <label class="field"><span>Page address</span><input class="input" type="text" id="creator-slug" maxlength="32" autocomplete="off" spellcheck="false" placeholder="night-forge" aria-describedby="creator-url-preview" /></label>
+              <p class="small" id="creator-url-preview" hidden><span id="creator-url-text"></span><span id="creator-avail"></span></p>
+              <label class="field"><span>Bio <span class="muted">(optional)</span></span><textarea class="input" id="creator-bio" rows="3" maxlength="500" placeholder="What kind of characters do you make?"></textarea></label>
+              <label class="toggle-row"><input type="checkbox" id="creator-public" role="switch" /><span><strong>Publish my page</strong><small>On: your shelf characters show this name and link here. Off: the link stops working and they credit &ldquo;a community creator&rdquo; again.</small></span></label>
               <button class="btn btn-sm" type="submit">Save creator page</button>
-              <p class="small"><a class="link" id="creator-view" href="#" target="_blank" rel="noopener noreferrer" hidden>View your page ↗</a></p>
+              <p class="small creator-actions"><a class="link" id="creator-view" href="#" target="_blank" rel="noopener noreferrer" hidden>View your page ↗</a><button class="link-btn link" id="creator-copy" type="button" hidden>Copy link</button></p>
             </form>
-            <p class="small muted">Public text is screened on save, with the same check that guards marketplace listings.</p>
+            <p class="small muted">Text on this page is checked against the same content rules as the shelf.</p>
           </div>
           <div class="state locked" id="creator-locked" hidden><Icon name="lock" size={18} /><p>Link Discord to claim a creator page. It sits on top of your published characters.</p></div>
           <div class="msg" id="creator-msg" role="alert" hidden></div>
@@ -357,6 +357,15 @@ export const prerender = true;
   .inline .btn { min-height: 48px; }
   .stack { display: grid; gap: 12px; margin-top: 12px; justify-items: start; }
   .stack .field { width: 100%; }
+
+  /* Creator page — the address preview doubles as the field's help/error slot */
+  #creator-url-preview { margin: -5px 0 0; color: var(--ink-2); overflow-wrap: anywhere; }
+  #creator-url-text { font-weight: 650; }
+  #creator-avail.ok { color: var(--ok); font-weight: 700; }
+  #creator-avail.bad { color: var(--danger); font-weight: 650; }
+  .input[aria-invalid="true"] { border-color: var(--danger); }
+  .input[aria-invalid="true"]:focus { box-shadow: 0 0 0 3px var(--danger-tint); }
+  .creator-actions { display: flex; gap: 14px; align-items: center; }
   #discord-unlinked > .btn { margin-top: 12px; }
   #discord-linked .btn { margin-top: 12px; }
   .del-input { margin-top: 16px; }

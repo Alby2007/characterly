@@ -132,9 +132,11 @@ export async function handleCreatorProfileSave(request: Request, env: CreatorPro
   if (!saveAllowed(uid)) return err(429, "Too many saves. Try again in a bit.");
 
   // Deterministic first line on every field, every save — public or not.
+  // Field names are user-facing here, so they get the page's own labels.
+  const FIELD_LABEL = { slug: "page address", name: "public name", bio: "bio" } as const;
   for (const [field, text] of [["slug", fields.slug ?? ""], ["name", fields.name], ["bio", fields.bio]] as const) {
     const hit = checkMessageContent(text);
-    if (!hit.ok) return err(422, `That can't go on a public page: the ${field} trips the content policy (${hit.category}).`, { field, category: hit.category });
+    if (!hit.ok) return err(422, `That can't go on a public page: the ${FIELD_LABEL[field]} trips the content policy (${hit.category}).`, { field, category: hit.category });
   }
 
   // The model screen only guards text that's actually going public — a save
@@ -161,13 +163,13 @@ export async function handleCreatorProfileSave(request: Request, env: CreatorPro
     }),
   }).catch(() => null);
   if (!patch) return err(502, "upstream error");
-  if (patch.status === 409) return err(409, "That slug is taken.", { field: "slug" });
+  if (patch.status === 409) return err(409, "That address is taken — try another.", { field: "slug" });
   if (patch.status === 400 || patch.status === 422) {
     // CHECK violation (format/reserved — defense in depth behind validation)
     // or unique violation reported as 400 by PostgREST.
     const t = await patch.text().catch(() => "");
-    if (/web_profiles_creator_slug_key|duplicate key/i.test(t)) return err(409, "That slug is taken.", { field: "slug" });
-    if (/creator_slug_format|check constraint/i.test(t)) return err(400, "That slug isn't available.", { field: "slug" });
+    if (/web_profiles_creator_slug_key|duplicate key/i.test(t)) return err(409, "That address is taken — try another.", { field: "slug" });
+    if (/creator_slug_format|check constraint/i.test(t)) return err(400, "That address isn't available.", { field: "slug" });
     return err(400, "Save rejected.");
   }
   if (!patch.ok) return err(502, "upstream error");
