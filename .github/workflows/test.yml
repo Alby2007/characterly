@@ -115,12 +115,15 @@ jobs:
       # ~/characterly/.env on every deploy; unset secrets leave the file
       # alone. Values travel over scp — never in the ssh command line or
       # step logs. Rotate a key = set the PROD_* secret + run the workflow.
+      # NOTE on PROD_KEY_ENCRYPTION_SECRET: it encrypts every BYOK guild_keys
+      # row — rotating it while rows exist orphans them (users re-run /setup).
       - name: Pull, install, build, and restart on Oracle
         env:
           P_DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
           P_GROQ_API_KEY: ${{ secrets.PROD_GROQ_API_KEY }}
           P_DISCORD_TOKEN: ${{ secrets.PROD_DISCORD_TOKEN }}
           P_AVATAR_UPLOAD_SECRET: ${{ secrets.PROD_AVATAR_UPLOAD_SECRET }}
+          P_KEY_ENCRYPTION_SECRET: ${{ secrets.PROD_KEY_ENCRYPTION_SECRET }}
         run: |
           umask 077
           : > provided.env
@@ -128,6 +131,7 @@ jobs:
           [ -n "${P_GROQ_API_KEY:-}" ] && printf 'GROQ_API_KEY=%s\n' "$P_GROQ_API_KEY" >> provided.env
           [ -n "${P_DISCORD_TOKEN:-}" ] && printf 'DISCORD_TOKEN=%s\n' "$P_DISCORD_TOKEN" >> provided.env
           [ -n "${P_AVATAR_UPLOAD_SECRET:-}" ] && printf 'AVATAR_UPLOAD_SECRET=%s\n' "$P_AVATAR_UPLOAD_SECRET" >> provided.env
+          [ -n "${P_KEY_ENCRYPTION_SECRET:-}" ] && printf 'KEY_ENCRYPTION_SECRET=%s\n' "$P_KEY_ENCRYPTION_SECRET" >> provided.env
           if [ -s provided.env ]; then
             scp -o StrictHostKeyChecking=yes provided.env ${{ secrets.ORACLE_SSH_HOST }}:/tmp/provided.env
             echo "staged $(wc -l < provided.env | tr -d ' ') managed env keys"
