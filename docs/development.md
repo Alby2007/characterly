@@ -6,7 +6,7 @@ Everything you need to work on Characterly locally.
 
 ## Prerequisites
 
-- **Node.js** 20+ (the project uses ES modules and `node:test`)
+- **Node.js** 22.23.4+, 24.22.1+, or 26.12.1+ (Oct 2026 security floor — see `docs/security-node-oct2026.md`; the project uses ES modules and `node:test`)
 - A **Discord bot token** — see [configuration.md](configuration.md) for setup
 - A **Groq API key** (or OpenRouter / OpenAI / xAI key) — free at [console.groq.com](https://console.groq.com)
 - A **Postgres database** — a free [Supabase](https://supabase.com) project works. Use the Session pooler connection string (port 5432).
