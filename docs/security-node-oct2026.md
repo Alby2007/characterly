@@ -59,12 +59,14 @@ they patch their own V8/`nodejs_compat` layer independently).
 ## Actions taken / required
 
 Done in-repo: `engines` floor `^22.23.4 || ^24.22.1 || >=26.12.1`,
-`.nvmrc` → 22.23.4, vendored `undici ^6.29.1`, this note.
+`.nvmrc` → 22.23.4, vendored `undici ^6.29.1`, this note. **The deploy
+pipeline now provisions the runtime too** — the SSH step checks `node -v`
+on the VM and installs the patch for its LTS line (checksum-verified)
+before rebuilding, so the next green push lands the fix automatically.
 
 **Required — outside the repo:**
-1. **Prod VM** (`/usr/local/bin/node`, systemd unit): `node -v`; upgrade to
-   22.23.4+ or 24.22.1+, `sudo systemctl restart characterly`. The deploy
-   pipeline never provisions Node — this is manual.
+1. ~~Prod VM manual upgrade~~ — handled by the deploy floor enforcement
+   (only needed again when the floor itself moves).
 2. **Dev machines**: same check (`node -v`).
 3. **CI**: `node-version: 22` floats → now resolves to 22.23.4. No change
    needed; any run before Oct 21 briefly ran unpatched but CI runners are
