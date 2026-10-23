@@ -8,6 +8,7 @@ import {
   requireAuth, getProfile, updateDisplayName, updatePassword, deleteAccount, signOut,
   linkDiscord, getIdentities, unlinkDiscord, unlinkDiscordLink, claimLinkCode, withTimeout,
   getBotSettings, saveBotSettings, getByokStatus, getCreditLedger, ensureConsent, myCompanions, beacon,
+  claimDailyGrant,
   type Profile,
 } from "./auth";
 import { supabase } from "./supabase";
@@ -288,6 +289,14 @@ async function renderTokens() {
   plan.textContent = premium ? "Premium" : "Free";
   plan.className = premium ? "badge badge-go" : "badge";
   if (!linked() || profileUnknown()) return;
+  // Balance reads go through the claim rpc — the lazy grant fires on read,
+  // so the number can never lag the spendable reality (0 for a never-spent
+  // account, stale remainder before today's first chat).
+  const { data: claim } = await claimDailyGrant().then(r => r, () => ({ data: null })) as any;
+  if (profile && claim && typeof claim.credit_balance === "number") {
+    profile.credit_balance = claim.credit_balance;
+    profile.purchased_balance = claim.purchased_balance;
+  }
   const total = Number(profile?.credit_balance ?? 0);
   const purchased = Math.min(Math.max(Number(profile?.purchased_balance ?? 0), 0), Math.max(total, 0));
   $("#tokens-balance").textContent = total.toLocaleString();

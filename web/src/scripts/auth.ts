@@ -146,6 +146,11 @@ export const claimLinkCode = (code: string) => supabase.rpc("claim_link_code", {
 export const getBotSettings = () => supabase.rpc("my_bot_settings");
 export const saveBotSettings = (patch: Record<string, unknown>) => supabase.rpc("upsert_my_settings", { patch });
 export const getByokStatus = () => supabase.rpc("my_byok_status");
+// The daily grant is lazy (it fires inside spend txs), so a raw balance read
+// lies: 0 for a never-spent account, yesterday's remainder before the first
+// chat of the day. claim_daily_grant runs the same grant under the account
+// row lock on read — call it before rendering balances.
+export const claimDailyGrant = () => supabase.rpc("claim_daily_grant");
 export const getCreditLedger = (limit = 8) =>
   supabase.from("credit_ledger")
     .select("delta,kind,reason,balance_after,created_at")

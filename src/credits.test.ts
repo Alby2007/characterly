@@ -417,6 +417,71 @@ test("v60 grant_pack / clawback_pack: exact payment_intent match, proration, bon
   }
 });
 
+// v71: claim_daily_grant applies spendCredits' lazy refill on read — the
+// dashboard calls it so a balance display can't lag the spendable reality.
+// auth.uid() is stubbed from a tx-local setting; the gate + schema get torn
+// down so later test files see a plain database again.
+test("v71 claim_daily_grant: fill on read, idempotent, mirrors spendCredits math", async () => {
+  const sql = makeTestSql();
+  await fixture(sql);
+  await sql`CREATE SCHEMA IF NOT EXISTS auth`;
+  await sql`CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS $s$ SELECT nullif(current_setting('app.claim_uid', true), '')::uuid $s$`;
+  const claim = (id: string | null) => sql.begin(async tx => {
+    await tx`SELECT set_config('app.claim_uid', ${id ?? ""}, true)`;
+    const r = await tx`SELECT public.claim_daily_grant() AS r`;
+    return r[0].r;
+  });
+  try {
+    await migrations.find(m => m.version === 71)!.up(sql as never);
+
+    // Never-spent free account: 0 raw → 30 after claim, marker stamped, ledger written.
+    const fresh = await addAccount(sql, "u-fresh", "free", 0);
+    let res = await claim(fresh);
+    assert.equal(res.credit_balance, 30);
+    assert.equal(res.purchased_balance, 0);
+    const ledger = await sql`SELECT kind, delta, balance_after FROM credit_ledger WHERE account_id = ${fresh}`;
+    assert.deepEqual(ledger.map(l => ({ ...l, balance_after: Number(l.balance_after) })), [{ kind: "grant_daily", delta: 30, balance_after: 30 }]);
+    const marker = await sql`SELECT last_daily_grant_on FROM web_profiles WHERE id = ${fresh}`;
+    assert.ok(marker[0].last_daily_grant_on, "marker stamped");
+
+    // Same-day second claim is a no-op — no double grant.
+    res = await claim(fresh);
+    assert.equal(res.credit_balance, 30);
+    assert.equal((await sql`SELECT count(*)::int c FROM credit_ledger WHERE account_id = ${fresh}`)[0].c, 1);
+
+    // Stale marker + drained allowance: tops back up to the floor.
+    await sql`UPDATE web_profiles SET credit_balance = 4, last_daily_grant_on = current_date - 1 WHERE id = ${fresh}`;
+    res = await claim(fresh);
+    assert.equal(res.credit_balance, 30);
+
+    // The purchased slice never suppresses the refill: 25 pack tokens + 0 allowance → +30.
+    const packed = await addAccount(sql, "u-packed", "free", 25);
+    await sql`UPDATE web_profiles SET purchased_balance = 25, last_daily_grant_on = current_date - 1 WHERE id = ${packed}`;
+    res = await claim(packed);
+    assert.deepEqual({ t: res.credit_balance, p: res.purchased_balance }, { t: 55, p: 25 });
+
+    // Clawback debt: a −50 allowance gets the full 30 paid down, not topped to floor.
+    const debtor = await addAccount(sql, "u-debtor", "free", -50);
+    await sql`UPDATE web_profiles SET last_daily_grant_on = current_date - 1 WHERE id = ${debtor}`;
+    res = await claim(debtor);
+    assert.equal(res.credit_balance, -20);
+
+    // Premium floor is 150.
+    const prem = await addAccount(sql, "u-prem", "premium", 0);
+    res = await claim(prem);
+    assert.equal(res.credit_balance, 150);
+
+    // No profile row → zeros, not an error. No auth → the function raises.
+    res = await claim("00000000-0000-0000-0000-000000000099");
+    assert.deepEqual({ t: res.credit_balance, p: res.purchased_balance }, { t: 0, p: 0 });
+    await assert.rejects(claim(null), /not authenticated/);
+  } finally {
+    await sql`DROP FUNCTION IF EXISTS public.claim_daily_grant()`;
+    await sql`DROP SCHEMA IF EXISTS auth CASCADE`;
+    await sql.end();
+  }
+});
+
 test("userBotSettings defaults then persists toggles", async () => {
   const sql = makeTestSql();
   const store = await fixture(sql);

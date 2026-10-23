@@ -7155,6 +7155,91 @@ export const migrations: Migration[] = [
       `;
     },
   },
+  // ── v71: claim_daily_grant — the lazy refill applied on READ ────────────────
+  // spendCredits is the only place the daily grant fires (inside the spend
+  // tx), so a raw web_profiles read lies: 0 for a user who has never spent,
+  // yesterday's remainder before today's first chat. This rpc runs the
+  // identical grant under the account row lock and returns true balances —
+  // the dashboard calls it on every token render. Same auth-gate pattern as
+  // the other web rpcs: plain Postgres (CI, local Docker) skips it.
+  {
+    version: 71,
+    name: "v71_claim_daily_grant",
+    up: async (sql) => {
+      await sql`
+        DO $web$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'web_profiles') THEN
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION public.claim_daily_grant()
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                acct record;
+                floor_n int;
+                daily int;
+                delta int;
+                bal int;
+                pur int;
+              BEGIN
+                IF auth.uid() IS NULL THEN
+                  RAISE EXCEPTION 'not authenticated';
+                END IF;
+                SELECT id, plan, credit_balance, purchased_balance, last_daily_grant_on
+                  INTO acct FROM public.web_profiles
+                  WHERE id = auth.uid() FOR UPDATE;
+                IF NOT FOUND THEN
+                  RETURN json_build_object('credit_balance', 0, 'purchased_balance', 0);
+                END IF;
+                -- Mirrors spendCredits (src/credit-store.ts): the allowance
+                -- (credit_balance − purchased_balance) refills to the plan
+                -- floor; the purchased slice never suppresses it, and a
+                -- negative allowance is clawback debt the grant pays down
+                -- instead of erasing. Floors mirror the
+                -- FREE_DAILY_CREDITS/PREMIUM_DAILY_CREDITS defaults in
+                -- config.ts — keep in sync (same convention as the import
+                -- caps).
+                IF acct.last_daily_grant_on IS DISTINCT FROM (now() AT TIME ZONE 'UTC')::date THEN
+                  floor_n := CASE WHEN acct.plan = 'premium' THEN 150 ELSE 30 END;
+                  daily := acct.credit_balance - acct.purchased_balance;
+                  delta := CASE WHEN daily < 0 THEN floor_n ELSE greatest(0, floor_n - daily) END;
+                  IF delta > 0 THEN
+                    UPDATE public.web_profiles
+                      SET credit_balance = credit_balance + delta, updated_at = now()
+                      WHERE id = acct.id;
+                    INSERT INTO public.credit_ledger (account_id, delta, kind, balance_after)
+                      VALUES (acct.id, delta, 'grant_daily', acct.credit_balance + delta);
+                  END IF;
+                  UPDATE public.web_profiles
+                    SET last_daily_grant_on = (now() AT TIME ZONE 'UTC')::date
+                    WHERE id = acct.id;
+                END IF;
+                SELECT credit_balance, purchased_balance INTO bal, pur
+                  FROM public.web_profiles WHERE id = acct.id;
+                RETURN json_build_object('credit_balance', bal, 'purchased_balance', pur);
+              END
+              $body$
+            $fn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.claim_daily_grant() FROM PUBLIC';
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+              EXECUTE 'REVOKE ALL ON FUNCTION public.claim_daily_grant() FROM anon';
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+              EXECUTE 'GRANT EXECUTE ON FUNCTION public.claim_daily_grant() TO authenticated';
+            END IF;
+          END IF;
+        END $web$
+      `;
+    },
+    down: async (sql) => {
+      // DROP IF EXISTS is a no-op on plain Postgres — no auth gate needed.
+      await sql`DROP FUNCTION IF EXISTS public.claim_daily_grant()`;
+    },
+  },
 ];
 
 /** Highest known migration version — tests assert against this instead of a
