@@ -549,7 +549,9 @@ export class MemoryStore {
     });
     this.invalidateGuildCompanions(guildId);
     this.settingsCache.delete(guildId);
-    void this.trackEvent(null, "guild_purged", guildId);
+    // Awaited — a fire-and-forget tombstone can lose to the caller's next
+    // query on a pooled connection and vanish the churn signal entirely.
+    await this.trackEvent(null, "guild_purged", guildId).catch(() => {});
   }
 
   /** Guild ids present in guild-scoped tables but absent from the given set —
