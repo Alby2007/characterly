@@ -10,14 +10,14 @@ file a fix, don't trust prose.
 | New contributor | `development.md` → `architecture.md` → `schema.md` |
 | Operating prod | `operations.md` → `configuration.md` |
 | Security/audit review | `security-model.md` → `schema.md` (RLS) → `moderation.md` |
-| Touching the site | `website.md` → `frontend-spec.md` → `../web/README.md` |
+| Touching the site | `website.md` → `frontend-spec.md` → `../web/README.md`; chat UI → `web-chat-frontend.md` |
 
 ## Reference
 
 | Doc | What it covers |
 |-----|----------------|
 | `architecture.md` | Module map, companions/onboarding, marketplace summary, scene routing, journal, story continuity, data-flow diagrams, consent model, web accounts |
-| `schema.md` | Every table, column, index + migration history (through v66) |
+| `schema.md` | Every table, column, index + migration history (through v74) |
 | `configuration.md` | Every env var + runtime `/server` settings + website config |
 | `development.md` | Scripts, test suite, migrations, debugging, project structure, CI/CD |
 
@@ -29,6 +29,7 @@ file a fix, don't trust prose.
 | `moderation.md` | Content policy + enforcement: screening lanes, report→review, rate limits, NSFW-lane shape, SQL runbook |
 | `event-pipeline.md` | Event detection: heuristic scoring, continuity decisions, significance formula |
 | `website.md` | The `web/` Astro site: pages, worker lanes, account linking, Supabase Auth setup |
+| `web-chat-frontend.md` | The `/chat` surface's contract: RPCs, realtime channel, client states, send/give-up flow |
 | `security-model.md` | Trust boundaries and the defenses on each — a map that points at the detailed sections |
 
 ## Ops
@@ -36,6 +37,7 @@ file a fix, don't trust prose.
 | Doc | What it covers |
 |-----|----------------|
 | `operations.md` | The runbook: deploy pipeline, VM/systemd, `/ops` console, common failures, billing, fleet cap, secrets, scheduled work |
+| `security-node-oct2026.md` | Node runtime floors for the Oct 2026 undici advisories + the deploy-pipeline enforcement |
 
 ## Historical (point-in-time, don't cite as current)
 

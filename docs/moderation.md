@@ -61,9 +61,11 @@ untouched and their private memories are never scanned.
 first-party, consented, private content — the same privacy posture as their
 memories.
 
-### Self-harm triage (all DMs + adoptee threads)
+### Self-harm triage (all DMs + adoptee threads + web chat)
 
-Deterministic phrase triage on every DM turn and every adoptee-thread turn.
+Deterministic phrase triage on every DM turn, every adoptee-thread turn, and
+every web-chat turn (it runs inside `runCompanionTurn`, so `web:` scopes get
+it for free).
 On a hit the
 companion breaks character briefly to deliver a scripted crisis-resource
 response (988 US/CA, Samaritans 116 123 UK/IE, findahelpline.com
@@ -128,6 +130,14 @@ action buttons — **Keep up** (unflag: `flagged→active`, mod-delisted→
 `active`, `banned→flagged`), **Delist**, **Ban listing**, **Ban creator** —
 gated to `MARKETPLACE_MOD_ROLE_IDS` (fallback: ManageGuild). Every mod
 action writes a `moderation_events` row with the actor, action, and note.
+
+**Web lane (v73).** Site report buttons hit `web_report_listing`
+(security-definer, `authenticated`) with the same category allowlist —
+`harmful / sexual / minor / hate / spam / theft / other` — validated
+server-side, deduped per `(listing, reporter)`, and counted against the same
+`report:<userId>` daily budget the Discord lanes share. They land in the
+same `listing_reports` table and ping the same mod channel, so a web report
+auto-flags at the threshold identically.
 
 **Imported personas.** Character-card imports (v42) stamp `persona_source` /
 `import_meta` at ingest — card spec, claimed creator, source filename, and

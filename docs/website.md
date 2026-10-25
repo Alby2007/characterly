@@ -3,9 +3,11 @@
 `web/` is an Astro app on Cloudflare Workers (`@astrojs/cloudflare`), worker
 name `characterly-website`, live at `https://characterly.app` (non-apex hosts
 301 to the apex). It replaced the old Vite build (archived at
-`archive/website/`) and owns four surfaces: the marketing pages, the SSR
-marketplace **shelf** under `/characters`, the **account**/**dashboard**
-plates, and the worker-only API lanes.
+`archive/website/`) and owns five surfaces: the marketing pages, the SSR
+marketplace **shelf** under `/characters`, opt-in public **creator pages**
+under `/creators/<slug>`, **web chat** under `/chat` (v73 — full contract in
+`docs/web-chat-frontend.md`), the **account**/**dashboard** plates, and the
+worker-only API lanes.
 
 ## How a page is built
 
@@ -17,6 +19,7 @@ plates, and the worker-only API lanes.
 | `/terms` `/privacy` `/security` `/safety` | `src/pages/[doc].astro` | prerendered at build time from the repo-root `*.md` files via `src/lib/legal.ts` |
 | `/guides/...` | `src/pages/guides/*` | prerendered |
 | `/account`, `/dashboard`, `/404` | matching `.astro` + `src/scripts/*.ts` | prerendered shells — all auth/data work is client-side supabase-js (creator-page saves ride `POST /creator-profile`, see below) |
+| `/chat`, `/chat/[id]` | `src/pages/chat/*` + `src/scripts/chat*.ts` | prerendered shells — web chat (v73): roster + thread against `web_*` RPCs, private realtime `web-messages:<uid>` + polling fallback, consent-gated like the dashboard. Full contract: `docs/web-chat-frontend.md` |
 | `/sitemap.xml` | `src/pages/sitemap.xml.ts` | generated from `sitemapXml` in the bot's `src/site-shelf.ts` — static paths, live listings, and public creator slugs (banned creators excluded) |
 
 Shared code is imported cross-tree, never duplicated: `web/src/lib/shelf.ts`

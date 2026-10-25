@@ -3,8 +3,10 @@
 The marketplace is a Character.AI-style discovery layer built on top of (never
 replacing) the permanent awakened-companion bond. Creators publish characters
 into a forum channel in the hub Discord server; adopters add them and chat in
-a private `#adoptees` thread in the hub server — then can summon them into
-other servers. This doc is the end-to-end reference.
+a private `#adoptees` thread in the hub server — or, since v73, adopt straight
+from a `/characters/<id>` card on the website and chat in the browser (`/chat`,
+no slot cap). Discord adoptees can then be summoned into other servers. This
+doc is the end-to-end reference.
 
 ## The mental model — three different things
 
@@ -12,7 +14,7 @@ other servers. This doc is the end-to-end reference.
 |---------|-----------|-------------|
 | **Awakened companion** | Your one permanent bonded companion. Sacred, locked on activation. | 1 per account, forever |
 | **Listing** (`companion_listings`) | A character *on the shelf* — authored, publishable content. May or may not project an awakened companion. | `FREE_LISTING_SLOTS` (default 2) live per free account; unlimited on Premium |
-| **Adoption** (`companion_adoptions` + a cloned `companions` row) | A *copy* of a listing owned by the adopter — their own relationship, memories, journal, billing. | `FREE_ADOPTION_SLOTS` (default 1) active per free account; unlimited on Premium |
+| **Adoption** (`companion_adoptions` + a cloned `companions` row) | A *copy* of a listing owned by the adopter — their own relationship, memories, journal, billing. | `FREE_ADOPTION_SLOTS` (default 1) active per free account on Discord; **uncapped on the website** (v73); unlimited on Premium |
 
 Adoption ≠ awakening. An adopted companion is a `companions` row with
 `kind='adopted'` owned by the adopter — all the existing machinery (memories,
@@ -504,6 +506,29 @@ links vs "not met yet" Meet rows, plus a Drop button per adoptee), `drop`
 `status`. `market:talk` buttons are the Meet surface — they open or create
 the thread.
 
+### Adopting on the website (v73–v74)
+
+`/characters/<id>` cards carry **Adopt & chat** / **Open chat** buttons. The
+web lane calls the `web_adopt_listing` security-definer RPC instead of
+`store.adoptListing`, with deliberate differences:
+
+- **No slot cap.** Web adoption is uncapped for every tier — the free-tier
+  `FREE_ADOPTION_SLOTS` check is Discord-side only. The clone still gets
+  `kind='adopted'`, `web_profile_id` set, `origin='web'`.
+- **Cooldown still applies** (`ADOPTION_COOLDOWN_MS`), and a dropped-then-
+  re-adopted listing revives the *same* adoption + clone + bond (the same
+  reuse rule as Discord).
+- **No thread/Meet** — the conversation is a `web_conversations` row and the
+  greeting lands as the first `web_messages` row, not a Discord thread.
+- **Scope:** the clone's bond is `dm:<did>` when the *adoption* is
+  discord-keyed, `web:<uuid>` when web-keyed — and v74 pins the
+  conversation scope to the adoption's stored key, so a pre-link web
+  adoption stays `web:`-scoped (and visible to `web_my_adoptions` via the
+  either-key match) after the user links Discord. No silent merge.
+- **BYOK:** web chat is hosted-credits only — BYOK key management stays on
+  the Discord side. Dropping/archiving go through `web_drop_adoption` /
+  `web_archive_conversation` (12h cooldown identical).
+
 ## Dropping & cooldown
 
 Every Drop button (`market:drop`) — the pinned thread manage row, `homes`,
@@ -723,3 +748,6 @@ in the forum channel.
   hard removal of a listing's clone rows remains a later decision.
 - The NSFW lane (verified-age, BYOK-only, separate forum) is deliberately
   deferred — its agreed shape is in docs/moderation.md.
+- Web-side adoptions never get a Discord adoptee thread (they live in
+  `web_conversations`); linking Discord later keeps them web-scoped — the
+  `web:`→`dm:` bond merge job is deferred work.

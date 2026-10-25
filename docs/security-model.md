@@ -51,10 +51,15 @@ exceptions are deliberately narrow and documented per table. →
 **Browser → Supabase.** The publishable key is public by design — access is
 RLS, not secrecy. Direct client writes are almost nothing: the security-definer
 RPCs are the write lanes (`claim_link_code`, `record_consent`,
-`import_companion_card`, `import_chat_history`, `my_*` editors,
-`delete_own_account`), each `auth.uid()`-keyed and server-validated.
+`import_companion_card`, `import_chat_history`, `my_*` editors, the `web_*`
+chat family — adopt/open/send/archive/drop/report — `delete_own_account`),
+each `auth.uid()`-keyed and server-validated under `search_path=''`.
 `web_profiles.discord_user_id` is trigger-written only; users can never
-write it on their own row. → `docs/website.md`, `docs/schema.md`,
+write it on their own row. Web-chat reads are own-row RLS on
+`web_conversations`/`web_messages`; live delivery rides private Realtime
+channels `web-messages:<uid>` gated by the `web_messages_channel_auth`
+policy — a subscriber can only ever land on their own topic.
+→ `docs/website.md`, `docs/web-chat-frontend.md`, `docs/schema.md`,
 `docs/architecture.md` § Web accounts.
 
 **Discord → worker.** `POST /discord/events` verifies Discord's Ed25519

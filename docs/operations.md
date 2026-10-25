@@ -148,6 +148,8 @@ SELECT kind, sum(delta) FROM credit_ledger
 | Companion ignores other companions | `c2c_enabled` off for the replying companion's owner | `SELECT * FROM user_bot_settings WHERE discord_user_id = '<owner snowflake>'` — owner toggles on the dashboard |
 | Paid, no tokens/plan | `stripe-webhook` edge fn missing `STRIPE_WEBHOOK_SECRET`, or `grant_pack` rejected | Check Stripe → Developers → Webhooks `we_…` delivery log for the session id; replay the event there. Pack grants dedupe on `credit_ledger.stripe_ref`, so replays are safe. |
 | Free users blocked while premium works | `hosted:global` past ~90% of the effective cap | Intended shedding — free lane pauses under fleet pressure. Check `/ops stats` → Fleet cap: if premium growth isn't lifting the bonus, the cap envs or the premium-count query are the suspects. |
+| Web chat bubble stuck on "…" then `no_reply` | The `web-turn` job dead-lettered or hit the ~2-min client give-up | `SELECT * FROM jobs WHERE kind='web-turn' AND attempts >= 5` + `journalctl -u characterly | grep web-turn`; `onDeadLetter` settles the row, so a stuck `generating` row means the bot was down mid-claim — fix cause, `ops:requeue-dead-jobs` |
+| Web chat replies all `no_reply`, no charge | Ambient Groq flake (`reply.parse_failed`/`reply.empty` in `/ops stats`) or `server_settings` row seeded dormant | Metrics distinguish: parse failures refund cleanly and a retry works; `memory_enabled=0/reply_enabled=0` on a `web:` scope means the row predates v74 — set both to 1 |
 
 ## Billing (Stripe)
 
@@ -196,8 +198,8 @@ bonus   = floor(premiumSubs * FLEET_PREMIUM_DAILY_REVENUE_USD / FLEET_COST_PER_H
 
 ## Scheduled work (in-process)
 
-- **Job worker** — `LISTEN`/`NOTIFY` + 3s poll; per-guild serial, global cap 8, 10-min claim lease, dead-letter at 5 attempts.
-- **Nightly maintenance** — retention purge, memory lifecycle, verification/dedup, event maintenance, profile rebuilds, journal prune, pair-analysis enqueue.
+- **Job worker** — `LISTEN`/`NOTIFY` + 3s poll; per-guild serial, global cap 8, 10-min claim lease, dead-letter at 5 attempts (`onDeadLetter` settles `web_messages` placeholders). `web-turn` jobs claim ahead of the per-scope serial cap so live chat isn't queued behind its own extract backlog.
+- **Nightly maintenance** — retention purge, memory lifecycle, verification/dedup, event maintenance, profile rebuilds, journal prune, pair-analysis enqueue. All of it treats `dm:`/`web:` as user scopes (`isUserScope`): raw web-chat rows hit the same retention window as DMs, and the zombie-guild sweep deliberately skips both prefixes.
 - **15-min sweep** — missed-signal triage reconciliation (`repairQueuedMarks`), embedding backfill (bounded batch of NULL-embedding memories/journal rows per tick).
 
 Ops utilities — npm scripts under the `ops:` namespace (env loaded from `.env`, `GUILD_ID` scopes the per-guild ones): `npm run ops:maintain` (event maintenance for a guild), `ops:build-profiles`, `ops:verify-memories` (LLM re-verification of candidate memories), `ops:contest-sweep` (retroactive denial/correction evidence), `ops:backfill-relationships` (one-off observation backfill), `ops:requeue-dead-jobs` (reset dead-lettered jobs after fixing the cause), `ops:purge-nonopted` (**destructive — `PURGE_CONFIRM=1`**), `ops:seo` (Search Console report — sitemap status, 28-day queries/pages, index inspection; needs `GOOGLE_APPLICATION_CREDENTIALS` + the SA email added as a GSC user — header comment in `scripts/seo-report.mjs`). Raw form: `npx tsx scripts/<name>.mjs`.
@@ -280,6 +282,14 @@ One-time setup — **deploy order matters** (Discord health-checks the URL when 
 Slash-command registration now tags install contexts (`scopedCommandDefinitions`): DM-safe commands are invocable in the App DM on user installs; server-only commands stay guild-scoped. No portal action needed beyond the URL — but note user installs only grant the `applications.commands` scope, so anything needing a bot scope stays guild-side.
 
 Failure modes: send errors record `attempts`/`last_error` and retry ≤5 (~20s apart); a missing `DISCORD_APP_PUBLIC_KEY` fails the endpoint closed (401); a missing Supabase secret 500s so Discord retries delivery rather than losing the install.
+
+## Web chat (v73)
+
+`/chat` is served by Astro pages + Supabase RPCs — no worker lane of its own; the only worker dependency is the shared Supabase config. Browser → security-definer RPC → `jobs` row (`web-turn`) → bot `runCompanionTurn` → `web_messages` placeholder resolves → realtime broadcast to `web-messages:<uid>`.
+
+- **No realtime infra to run** — private-channel broadcast authorization ships in v73 (the `web_messages_realtime` trigger + `web_messages_channel_auth` policy); Supabase Realtime just needs to be enabled on the project (it is by default). If broadcasts stop landing, `realtime.messages` rows still being written means the DB side is fine — check the client's `realtime.setAuth()` timing; polling covers the gap anyway.
+- **Billing is the shared hosted lane** — web turns spend the account's tokens through `payerAccountId`, same as Discord DMs. `hosted:global` shedding applies identically; there is no web BYOK.
+- **Debug a dead chat:** `SELECT status, fail_reason FROM web_messages WHERE conversation_id=<id> ORDER BY id DESC` — `generating` with no movement = bot down mid-claim or dead-letter; `failed`+reason is the vocabulary in `docs/web-chat-frontend.md`.
 
 ## Semantic recall (v40) — embeddings via local Ollama
 

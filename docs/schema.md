@@ -2,7 +2,7 @@
 
 Characterly stores all state in Postgres — Supabase in production, or any Postgres via `DATABASE_URL`. Tables are created on first run and evolved by the versioned migration system in `src/migrations.ts` (`v1`–`v70`).
 
-**Supabase lockdown (v23+):** every `public`-schema table has `ENABLE ROW LEVEL SECURITY` with zero Data-API policies — deny-all for `anon`/`authenticated`, while the bot's `postgres` role bypasses RLS. The exceptions are the web-account tables (`web_profiles`, `link_codes`), which have their own policy/grant design documented below. All Supabase-specific DDL is conditional on the `auth` schema existing, so plain-Postgres test/local databases run every migration unchanged.
+**Supabase lockdown (v23+):** every `public`-schema table has `ENABLE ROW LEVEL SECURITY` with zero Data-API policies — deny-all for `anon`/`authenticated`, while the bot's `postgres` role bypasses RLS. The exceptions are the web-account tables (`web_profiles`, `link_codes`) and the web-chat transport tables (`web_conversations`, `web_messages` — own-row SELECT policies, writes only via security-definer RPCs), which have their own policy/grant design documented below. All Supabase-specific DDL is conditional on the `auth` schema existing, so plain-Postgres test/local databases run every migration unchanged.
 
 ---
 
@@ -10,7 +10,7 @@ Characterly stores all state in Postgres — Supabase in production, or any Post
 
 ### `companions`
 
-Each user awakens **one permanent companion per account** in 1:1 DMs (`dm:<owner_user_id>`); once `onboarding_state = 'active'`, an awakened companion's identity is permanently locked. Marketplace adoptions (v34) add **cloned rows** for the same owner with `kind = 'adopted'` — one clone per adoption, owned by the adopter so billing, memories, journals, and guild presence all resolve per-adopter with zero special cases.
+Each user awakens **one permanent companion per account** in 1:1 DMs (`dm:<owner_user_id>`); once `onboarding_state = 'active'`, an awakened companion's identity is permanently locked. Website chat (v73) rides the same scope model — an unlinked account's adoption bonds live under `web:<uuid>`, and a linked user's Discord bond stays `dm:<did>`; the two are deliberately not merged on link. Marketplace adoptions (v34) add **cloned rows** for the same owner with `kind = 'adopted'` — one clone per adoption, owned by the adopter so billing, memories, journals, and guild presence all resolve per-adopter with zero special cases.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -193,11 +193,11 @@ Append-only audit trail of every lifecycle transition.
 
 ### `server_settings`
 
-One row per guild. Controls pause state and retention.
+One row per **scope** — a Discord guild id, `dm:<did>`, or `web:<uuid>`. Controls pause state and retention.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `guild_id` | TEXT PK | Discord server ID |
+| `guild_id` | TEXT PK | The scope id |
 | `memory_enabled` | INTEGER | 0 = paused; 1 = active |
 | `reply_enabled` | INTEGER | 0 = silent; 1 = replies allowed |
 | `proactive_enabled` | INTEGER | **Legacy/inert (v13).** The proactive-speaking feature was removed when the bot became pure plumbing; the column remains for schema compatibility but nothing reads it to send a message |
@@ -207,22 +207,22 @@ One row per guild. Controls pause state and retention.
 | `quiet_channels` | TEXT[] | Channels where companions stay silent (no replies or system cards) while archiving/extraction continue — managed via `/server quiet` / `/server unquiet`; threads inherit their parent's listing |
 | `llm_daily_cap` | INTEGER | Per-guild LLM call budget per UTC day (default 1000; 0 = all calls blocked) — set via `/server limits` |
 
-Row is created with dormant defaults (`memory_enabled=0`, `reply_enabled=0`) on first sight of a guild — an admin enables observation via `/server resume`. Administrators can override via `/server pause`, `/server resume`, `/server companions-pause` (`reply_enabled` only), and the `RAW_MESSAGE_RETENTION_DAYS` env variable.
+Row is created with dormant defaults (`memory_enabled=0`, `reply_enabled=0`) on first sight of a **guild** — an admin enables observation via `/server resume`. **User scopes (`dm:`/`web:`) seed live defaults (`1`,`1`) instead** — a 1:1 bond is self-consenting (v74 extended this to `web:`; a dormant `web:` row silently dead-ends every turn). Administrators can override guild rows via `/server pause`, `/server resume`, `/server companions-pause` (`reply_enabled` only), and the `RAW_MESSAGE_RETENTION_DAYS` env variable.
 
 ---
 
 ### `jobs`
 
-The deferred-cognition queue (v17). One row per pending unit of background work — `extract` (a `message_id` payload), `journal-write` (companion journal entries after a reply), and `pair-analysis` (holistic relationship reads). A legacy `proactive-fire` type survives as an inert no-op.
+The deferred-cognition queue (v17). One row per pending unit of work — `extract` (a `message_id` payload), `journal-write` (companion journal entries after a reply), `pair-analysis` (holistic relationship reads), `summary` (rolling `conversation_summaries` recaps), `chat-import` (transcript → journal distillation), and `web-turn` (v73 — a `web_messages` placeholder payload; the one *live-latency* kind, claims ahead of the per-scope serial cap). A legacy `proactive-fire` type survives as an inert no-op.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | BIGINT PK | `GENERATED ALWAYS AS IDENTITY` |
-| `guild_id` | TEXT | Owning guild — claims exclude at-cap guilds; `purgeGuild` deletes the guild's rows |
-| `type` | TEXT | Job kind — the worker dispatches on it (`extract`) |
-| `payload` | JSONB | Handler input (`{ message_id }` for extract) |
+| `guild_id` | TEXT | Owning **scope** (guild id, `dm:<did>`, or `web:<uuid>`) — claims exclude at-cap scopes; `purgeGuild` deletes the scope's rows |
+| `type` | TEXT | Job kind — the worker dispatches on it (`extract`, `journal-write`, `pair-analysis`, `summary`, `chat-import`, `web-turn`) |
+| `payload` | JSONB | Handler input (`{ message_id }` for extract, `{ message_id, conversation_id, … }` for web-turn) |
 | `run_after` | TIMESTAMPTZ | Earliest claim time — backoff delays and claim leases live here |
-| `attempts` | INTEGER | Claim count; `attempts >= 5` dead-letters the row (kept for inspection, never claimed) |
+| `attempts` | INTEGER | Claim count; `attempts >= 5` dead-letters the row (kept for inspection, never claimed) and fires `onDeadLetter` — the web-turn hook settles the placeholder to `failed`/`no_reply` |
 | `created_at` | TIMESTAMPTZ | Enqueue time |
 
 **Index:** `jobs_claim (run_after) WHERE attempts < 5` — the claim query touches only live jobs.
@@ -233,7 +233,7 @@ Claim protocol (`src/jobs.ts`): `UPDATE … SET attempts+1, run_after = now()+10
 
 ### `guild_usage`
 
-Per-guild daily LLM-call counters (v17) — the `meteredClient` seam charges here before every `responses.create`/`chat.completions.create`.
+Per-scope daily LLM-call counters (v17) — the `meteredClient` seam charges here before every `responses.create`/`chat.completions.create`. `guild_id` holds the scope (guild id, `dm:<did>`, `web:<uuid>`) plus two synthetic ledgers: `hosted:global` (the fleet cap — every hosted call) and `hosted:background` (the cognition-lane share of it).
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -585,7 +585,7 @@ Pseudonymous product-funnel events (v62) — which product step a Discord id rea
 |--------|------|-------|
 | `discord_user_id` | TEXT NULL | The actor; NULL for guild-level events (`guild_added`, `guild_purged`) |
 | `event` | TEXT | One of the `AnalyticsEvent` names — `install_greeted`, `onboard_start`, `awaken`, `summon`, `summon_deadend`, `adopt`, `house_join`, `verified`, `guild_added`, `guild_purged` |
-| `scope` | TEXT NULL | Guild id or `dm:<uid>` when the event is scope-bound |
+| `scope` | TEXT NULL | Guild id, `dm:<uid>`, or `web:<uuid>` when the event is scope-bound |
 | `meta` | JSONB | Coarse ids/counts only (`{}` default) |
 | `created_at` | TIMESTAMPTZ | |
 
@@ -651,6 +651,7 @@ Web account profiles for Supabase Auth users (v26) — the "real life user" half
 - `public.claim_link_code(p_code)` (v27; v28 adds a rowcount check so a missing `web_profiles` row raises `no_profile` instead of silently consuming the code) — `EXECUTE` granted to `authenticated`; validates a `/link` code (exists, unclaimed, unexpired, Discord account not already linked elsewhere) and stamps `discord_user_id` plus — since v38 — the `discord_username`/`discord_avatar_url` snapshot the bot stored on the code at mint. Errors are `tag: message` strings (`invalid_code`, `code_used`, `code_expired`, `discord_already_linked`, `no_profile`).
 - `public.unlink_discord()` (v28) — `EXECUTE` granted to `authenticated`; clears the caller's `discord_user_id` and, since v38, the display snapshot too. Needed because code-claimed links have no `auth.identities` row for `unlinkIdentity` to remove (identity-backed links should unlink via `unlinkIdentity`, which the trigger mirrors).
 - `public.delete_own_account()` (v26) — `EXECUTE` granted to `authenticated`; deletes the caller's `auth.users` row (cascades to `web_profiles`).
+- `internal.web_profiles_clean_name()` + `web_profiles_clean_name` trigger (v74) — `BEFORE INSERT OR UPDATE OF display_name` scrubs display names through `web_clean_name` (collapse whitespace, strip emoji-control chars, cap 80, fall back to `Characterly user`): `handle_new_user` and the UpdateAccount PATCH both land cleaned.
 
 ---
 
@@ -787,6 +788,9 @@ One row per (user, listing) adoption relationship (v34). `companion_id` points a
 | `dropped_at` / `cooldown_until` | TIMESTAMPTZ NULL | Set together by `dropAdoption`; re-adoption clears both and reuses the same clone |
 | `dm_introduced_at` | TIMESTAMPTZ NULL | Stamped by `markDmIntroduced` after the greeting send succeeds |
 | `chat_thread_id` | TEXT NULL | The adoption's private thread under `#adoptees` (v54, partial index `adoptions_thread`). Persists across drop→re-adopt so history continues |
+| `chat_guild_id` / `chat_channel_id` | TEXT NULL | Which deployment's `#adoptees` homes the thread (v59) — NULL = the house server; a dead partner guild lazily relocates back home |
+| `web_profile_id` | UUID NULL | The `web_profiles.id` that adopted via the site (v73) — set on web adoptions/revives so web turns bill the account row directly |
+| `origin` | TEXT | `'discord'` (default) or `'web'` (v73) — which surface minted the adoption |
 
 **RLS:** enabled, zero policies.
 
@@ -951,6 +955,49 @@ Regenerate audit + free-lane cap (v67) — one row per **Regenerate** context-me
 
 ---
 
+### `web_conversations`
+
+One browser chat thread per adoption (v73) — the transport half of web chat; the memory/scope side reuses the bond tables (`messages`, `memories`, `journal`) keyed by `scope`. Created unconditionally (plain Postgres gets it too); the RLS/RPC surface is auth-gated.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT PK | `GENERATED ALWAYS AS IDENTITY` |
+| `web_profile_id` | UUID | FK → `web_profiles(id) ON DELETE CASCADE` (v74) — the account that owns the chat |
+| `adoption_id` | BIGINT NULL | FK → `companion_adoptions(id) ON DELETE SET NULL` (v74) — the bond this chat lives on |
+| `companion_id` | BIGINT NULL | FK → `companions(id) ON DELETE SET NULL` (v74) — denormalized for roster reads |
+| `scope` | TEXT | The bond scope: `dm:<did>` when the ADOPTION is discord-keyed, `web:<uuid>` when web-keyed (v74 — follows the adoption row, not the caller's current link state, so a pre-link `web:` bond never silently merges) |
+| `created_at` / `last_activity_at` | TIMESTAMPTZ | `last_activity_at` bumps on send and on reply delivery (v74) — the roster's sort key |
+| `archived_at` | TIMESTAMPTZ NULL | "Close chat" — the partial unique index only counts open rows |
+
+**Indexes:** `web_conversations_owner (web_profile_id, last_activity_at DESC)`, `web_conversations_adoption (adoption_id)`, and `web_conversations_one_open (adoption_id, web_profile_id) WHERE archived_at IS NULL` (v74 — enforces the one-live-chat-per-adoption invariant at the DB level; `web_open_conv_for`'s `ON CONFLICT` arm returns the winner's row on a race).
+
+**RLS:** own-row `SELECT` for `authenticated` (`web_profile_id = auth.uid()`); **no direct write path** — inserts/updates go through the security-definer RPCs or the bot.
+
+---
+
+### `web_messages`
+
+Chat rows inside a web conversation (v73) — greeting, user text, companion placeholder/reply, system notices. The companion row is the delivery receipt: `pending` → `generating` → `done`/`failed`(+`fail_reason`), and `web-turn` jobs treat it as the source of truth (retries no-op on resolved rows).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BIGINT PK | `GENERATED ALWAYS AS IDENTITY` |
+| `conversation_id` | BIGINT | FK → `web_conversations(id) ON DELETE CASCADE` |
+| `role` | TEXT | `user` / `companion` / `system` (CHECK) |
+| `content` | TEXT | Empty until the turn delivers; max 4000 on send |
+| `status` | TEXT | `pending`/`generating`/`done`/`failed` (CHECK) — only companion rows use the in-flight states |
+| `fail_reason` | TEXT NULL | `archived` / `no_companion` / `banned` / `no_trigger` / `no_reply` (vocabulary lives in `web-turn.ts` + the frontend's FAIL_COPY) |
+| `client_msg_id` | UUID NULL | Client-generated send idempotency key — partial unique index `web_messages_client_dedupe (conversation_id, client_msg_id) WHERE client_msg_id IS NOT NULL`; `web_send_message` returns `{reused:true}` on a replay (v74 adds the concurrent-collision `unique_violation` arm) |
+| `created_at` | TIMESTAMPTZ | |
+
+**Index:** `web_messages_conv (conversation_id, id)` — oldest-first paging.
+
+**Realtime:** `web_messages_realtime` trigger (v73) — every INSERT/UPDATE broadcasts the row to the owner's private channel `web-messages:<uid>` via `realtime.send`; the `web_messages_channel_auth` policy on `realtime.messages` restricts subscribers to their own topic. Polling via `web_conversation_messages` is the fallback.
+
+**RLS:** own rows via `EXISTS` on `web_conversations`; no direct write path.
+
+---
+
 ### `schema_migrations`
 
 Version tracking for the migration system.
@@ -1039,3 +1086,4 @@ Version tracking for the migration system.
 | 71 | `v71_claim_daily_grant` | `public.claim_daily_grant()` rpc (authenticated) — applies `spendCredits`' lazy refill under the account row lock on READ and returns true balances, so the dashboard can never display a pre-grant balance (0 for never-spent accounts, stale remainder before today's first chat) |
 | 72 | `v72_creator_slug_available` | `public.creator_slug_available(p_slug)` rpc (authenticated) — normalized format/reserved/taken answer for the dashboard's live page-address feedback (debounced, before save); the caller's own slug reads available |
 | 73 | `v73_web_chat` | `web_conversations` + `web_messages` (website chat transport: own-row RLS reads, writes only via security-definer RPCs — `web_adopt_listing`, `web_my_adoptions`, `web_open_conversation`, `web_my_conversations`, `web_send_message`, `web_conversation_messages`, `web_archive_conversation`, `web_drop_adoption`, `web_report_listing`), `companion_adoptions.web_profile_id`/`origin`, `realtime.messages`-authorized private broadcast (`web_messages_realtime` trigger → `realtime.send` → `web-messages:<uid>` channels gated by the `web_messages_channel_auth` policy; clients subscribe `private: true`), send-time `client_msg_id` idempotency, no adoption slot cap on web; linked accounts ride the `dm:<did>` bond, unlinked get `web:<uuid>` |
+| 74 | `v74_web_chat_hardening` | Audit fixes: `web_conversations_one_open` partial unique index (one live chat per adoption, enforced not wished), FKs on `web_conversations` (profile CASCADE; adoption/companion SET NULL — gated on `web_profiles` for plain Postgres), `web_profiles_clean_name` trigger (display_name hygiene via `web_clean_name`), RPC re-issues — adoption reads match either owned key (`web:<uid>` or bare did) so pre-link adoptions stay visible/droppable post-link and their conversations keep the `web:` scope; `web_send_message` catches `unique_violation` into `reused:true`; `web_open_conv_for` `ON CONFLICT`s into the race winner; `web_clean_name` re-created to repair the template-literal `\s`→`s` corruption (was stripping literal s-es from names) |

@@ -113,6 +113,14 @@ Tests live alongside source files as `*.test.ts`. Run them all with `npm test`.
 | `install-greet.test.ts` | `greetPendingInstalls` sweep: install-greeting payload and narrow store surface |
 | `avatars.test.ts` | `rehostAvatar` never throws — secret unset, fetch failure, and bad payloads all resolve to `null` so callers keep the source URL |
 | `stripe-webhook.test.ts` | Webhook signature verification and `classifySubscription` — every premium price id, dunning statuses keep perks, foreign products never touch plan |
+| `web-chat.test.ts` | The v73/v74 surface: RPC arg/ownership shapes, `web:` scope defaults (memory/reply live), zombie-sweep + retention inclusion, link-later adoption visibility, one-open-conversation invariant, `sendPersona` status guard, dead-letter placeholder settling, `web_clean_name` regression |
+| `regen.test.ts` | Regenerate resolution — tail-exchange targeting, requester ownership, the free-lane daily cap accounting |
+| `turn-billing.test.ts` | Hosted turn charge/refund: reserve→settle ordering, refund-on-screened/dropped replies, once-only semantics |
+| `fleet-cap.test.ts` | Revenue-aware cap math: premium-subs bonus, ratchet floor, failure mode "off" |
+| `prompt-injection.test.ts` | The prompt-safety contract: structure guarantees, reserved-name rejects, digest edge-consent, storage-boundary scrubs |
+| `metrics.test.ts` | `inc`/snapshot/drain counters and the `metrics_daily` rollup shape |
+| `analytics.test.ts` | Pseudonymous funnel events — `analytics_opt_out` gate, event shape, purgeGuild tombstone write ordering |
+| `site-shelf.test.ts` | Shelf data layer: catalog query, creator-page lookups, sitemap, label helpers |
 
 ### Adding a test
 
@@ -247,7 +255,7 @@ characterly/
 │   ├── db.ts                 # Shared postgres.js connection singleton
 │   ├── database.ts           # MemoryStore (Postgres: companions, journal, link codes, memories, edges)
 │   ├── events.ts             # EventStore (Postgres)
-│   ├── migrations.ts         # Versioned schema migrations (v1–v69)
+│   ├── migrations.ts         # Versioned schema migrations (v1–v74)
 │   ├── confidence.ts         # Deterministic confidence formulas
 │   ├── perception.ts         # Pre-filter regex, wake words, dismissals, tool cues
 │   ├── event-detection.ts    # EventPipeline — heuristic + LLM continuity
@@ -257,6 +265,9 @@ characterly/
 │   ├── extract-job.ts        # Worker handler for 'extract' jobs
 │   ├── journal-job.ts        # Worker handler for 'journal-write' jobs
 │   ├── pair-analysis-job.ts  # Worker handler for 'pair-analysis' jobs
+│   ├── web-turn.ts           # Worker handler for 'web-turn' jobs (website chat via web_messages)
+│   ├── companion-turn.ts     # The shared reply pipeline (DM/thread/regen/web transports over one body)
+│   ├── scopes.ts             # isUserScope() — dm:/web: user-bond predicate (never bare startsWith)
 │   ├── jobs.ts               # Postgres job queue (SKIP LOCKED, leases, dead-letter)
 │   ├── contest.ts            # Bot-addressed denial/correction detection
 │   ├── profiles.ts           # ProfileStore — cards + dossiers
@@ -301,17 +312,18 @@ characterly/
 │   ├── metrics.ts            # In-process operational counters (/status)
 │   ├── retry.ts              # Shared LLM retry helper (rate-limit aware)
 │   ├── test-helpers.ts       # Shared Postgres test utilities (TEST_DATABASE_URL)
-│   └── *.test.ts             # 52 test files, co-located with source
+│   └── *.test.ts             # 56 test files, co-located with source
 ├── web/                      # Live site — Astro on Cloudflare Workers (@astrojs/cloudflare)
-│   ├── src/pages/            # index (SSR shelf strip), characters/ (SSR), [doc] legal pages
-│   │                         #   (prerendered from the root *.md), guides/, account, dashboard,
-│   │                         #   404, sitemap.xml
-│   ├── src/worker.ts         # Worker entry: /discord/events, /avatar(+gc), /track, host redirect,
-│   │                         #   CSP/security headers, Analytics Engine beacons
+│   ├── src/pages/            # index (SSR shelf strip), characters/ (SSR), creators/[slug],
+│   │                         #   chat/ (roster + thread), [doc] legal pages (prerendered
+│   │                         #   from the root *.md), guides/, account, dashboard, 404, sitemap.xml
+│   ├── src/worker.ts         # Worker entry: /discord/events, /avatar(+gc), /track, /creator-profile,
+│   │                         #   host redirect, CSP/security headers, Analytics Engine beacons
 │   ├── src/lib/              # config.ts (links/plans/Supabase public config), shelf.ts, legal.ts,
 │   │                         #   charcard.ts/chathist.ts re-exports, supabase client env
 │   ├── src/scripts/          # Browser code: auth.ts, account.ts, dashboard.ts, memories.ts,
-│   │                         #   import-card.ts, import-history.ts, nav.ts, archive-tabs.ts
+│   │                         #   import-card.ts, import-history.ts, chat-roster.ts, chat-thread.ts,
+│   │                         #   nav.ts, archive-tabs.ts
 │   ├── src/styles/global.css # Design tokens + shared components
 │   └── wrangler.jsonc        # characterly-website (+ -preview); run_worker_first API lanes
 ├── archive/website/          # Legacy Vite site — kept for reference, superseded by web/
@@ -320,7 +332,7 @@ characterly/
 ├── scripts/                  # Operational one-shots (see table above)
 ├── docs/
 │   ├── architecture.md       # Module map, companions, journal, web accounts, data flow
-│   ├── schema.md             # Database schema reference (through v69)
+│   ├── schema.md             # Database schema reference (through v74)
 │   ├── event-pipeline.md     # Event detection explainer
 │   ├── configuration.md      # Env var + website config reference
 │   ├── marketplace.md        # Marketplace end-to-end: publish/adopt, ratings, comments, tags, moderation
@@ -329,6 +341,8 @@ characterly/
 │   ├── website.md            # Web stack: pages, Supabase Auth setup, linking, deploy
 │   ├── operations.md         # Runbook: deploys, VM/systemd, DB access, failure modes, secrets
 │   ├── frontend-spec.md      # The Astro rebuild spec (shipped; design rationale)
+│   ├── web-chat-frontend.md  # The /chat surface contract — RPCs, realtime channel, client states
+│   ├── security-node-oct2026.md # Node runtime floors (undici advisories) + deploy enforcement
 │   ├── README.md             # Docs index — start-here paths by reader
 │   ├── development.md        # This file
 │   └── phase-*.md            # Historical phase reports (point-in-time, Sep 2026)
@@ -361,6 +375,6 @@ npm run deploy    # astro build + wrangler deploy → characterly-website
 `.github/workflows/test.yml` runs on every push and PR:
 
 1. **test** — `npm ci`, `npm run check` (tsc), `npm run build` (prove the production artifact compiles), then `npm test` against a Postgres 16 service (`TEST_DATABASE_URL` pointed at the service container).
-2. **deploy** — only on green pushes to `main`, gated by `environment: production` (attach required reviewers in repo settings so a push alone can't ship). SSHes to the Oracle host and runs `cd ~/characterly && git pull --ff-only && npm ci && npm run build && npm prune --omit=dev && sudo systemctl restart characterly`. Required secrets: `ORACLE_SSH_KEY`, `ORACLE_HOST_KEY` (`ssh-keyscan` output — pinned host key, fails closed), `ORACLE_SSH_HOST` (`user@ip`).
+2. **deploy** — only on green pushes to `main`, gated by `environment: production` (attach required reviewers in repo settings so a push alone can't ship). SSHes to the Oracle host and runs `cd ~/characterly && git pull --ff-only && npm ci && npm run build && npm prune --omit=dev && sudo systemctl restart characterly`. Before the rebuild it enforces the Node runtime floor (self-heals the VM's `node` to a patched release — see `docs/security-node-oct2026.md`) and writes any `PROD_*` repo secrets into `~/characterly/.env`. Required secrets: `ORACLE_SSH_KEY`, `ORACLE_HOST_KEY` (`ssh-keyscan` output — pinned host key, fails closed), `ORACLE_SSH_HOST` (`user@ip`); the `PROD_*` set is optional managed provisioning.
 
 The website deploys separately — `npm run deploy` inside `web/` — and is not part of CI.

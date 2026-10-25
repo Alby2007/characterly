@@ -1,6 +1,6 @@
-# Web chat — frontend contract (v73)
+# Web chat — frontend contract (v73–v74)
 
-Backend for companion chat on the website. Live as of migration v73; turns run
+Backend for companion chat on the website. Live as of migration v73 (hardened in v74); turns run
 on the bot VM through the existing jobs queue — the website never forks the
 pipeline. **This document is the contract the web chat UI is built against.**
 
