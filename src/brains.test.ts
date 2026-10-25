@@ -158,3 +158,17 @@ test("user keys (dm:<userId>) power DMs, brainForUser in servers, and guild plum
   assert.equal(await brainFor("g-empty"), null);
   assert.deepEqual(meteredScopes, ["dm:u-alice", "g-hangout", "g-hangout"]);
 });
+
+test("web:<uuid> is a user scope — env fallback like dm:, immune to requireGuildKeys", async () => {
+  // hosted-only v1: no stored key → env brain, marked hosted for billing.
+  const { brainFor, isHostedScope } = resolver(async () => null, true);
+  const brain = await brainFor("web:00000000-0000-0000-0000-0000000000aa");
+  assert.ok(brain, "web: scope falls back to the env key even with requireGuildKeys");
+  assert.equal(isHostedScope("web:00000000-0000-0000-0000-0000000000aa"), true);
+
+  // A key row on the web scope still wins — the structural slot web BYOK fills later.
+  const keyed = resolver(async scope => scope === "web:acct" ? row("web-user-key") : null, true);
+  const byokBrain = await keyed.brainFor("web:acct");
+  assert.ok(byokBrain);
+  assert.equal(keyed.isHostedScope("web:acct"), false);
+});

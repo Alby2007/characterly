@@ -150,34 +150,78 @@ export class CreditStore {
       // Live miss evicts any cached positive — a just-unlinked user must fail
       // the gate on their next turn, not ride the stale entry.
       if (!acct) { this.accountCache.delete(discordUserId); return { ok: false, balance: 0, purchased: 0 }; }
-      // postgres.js returns computed ::date columns as strings but stored date
-      // columns as Date objects — normalize both to YYYY-MM-DD before comparing.
-      const isoDay = (v: string | Date | null): string | null =>
-        v == null ? null : v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10);
-      const day = isoDay(acct.today)!;
-      const lastDaily = isoDay(acct.last_daily_grant_on);
-      let balance = Number(acct.credit_balance);
-      const purchased = Math.max(0, Number(acct.purchased_balance ?? 0));
-      // Two buckets in one total: the daily allowance (credit_balance −
-      // purchased_balance) REFILLS to the plan floor; the purchased slice
-      // (packs, bonuses) never expires and never suppresses that refill.
-      // A negative allowance is debt (a clawed-back pack already spent) —
-      // the grant pays it down instead of erasing it.
-      if (lastDaily !== day) {
-        const g = acct.plan === "premium" ? this.creditGrants.premiumDaily : this.creditGrants.freeDaily;
-        const daily = balance - purchased;
-        const delta = daily < 0 ? g : Math.max(0, g - daily);
-        if (delta > 0) balance = await this.writeLedger(tx, acct.id, delta, "grant_daily", null);
-        await tx`UPDATE public.web_profiles SET last_daily_grant_on = ${day} WHERE id = ${acct.id}`;
-      }
-      if (balance < n) return { ok: false, balance, purchased: 0 };
-      // Allowance first — it's use-it-or-lose-it; packs only cover the rest.
-      const fromDaily = Math.max(0, Math.min(n, balance - purchased));
-      const fromPurchased = n - fromDaily;
-      balance = await this.writeLedger(tx, acct.id, -n, "spend", reason, -fromPurchased);
+      const out = await this.spendLocked(tx, acct, n, reason);
       this.accountCache.delete(discordUserId);
-      return { ok: true, balance, purchased: fromPurchased };
+      return out;
     });
+  }
+
+  /** Account-UUID-keyed twin of spendCredits — web chat bills web_profiles.id
+   *  directly (the row may have no discord_user_id at all). The grant/debit
+   *  math is shared verbatim so a billing fix can't diverge by key path. */
+  async spendCreditsForAccount(
+    accountId: string,
+    n: number,
+    reason: string,
+  ): Promise<{ ok: boolean; balance: number; purchased: number }> {
+    if (!this.creditsEnabled) return { ok: true, balance: 0, purchased: 0 };
+    return this.sql.begin(async tx => {
+      const rows = await tx<Array<{
+        id: string; plan: string; credit_balance: number; purchased_balance: number;
+        last_daily_grant_on: string | Date | null;
+        today: string;
+      }>>`
+        SELECT id, plan, credit_balance, purchased_balance, last_daily_grant_on,
+               (now() AT TIME ZONE 'UTC')::date AS today
+        FROM public.web_profiles WHERE id = ${accountId}
+        FOR UPDATE
+      `;
+      const acct = rows[0];
+      if (!acct) return { ok: false, balance: 0, purchased: 0 };
+      const out = await this.spendLocked(tx, acct, n, reason);
+      this.accountCache.clear(); // accountId is a uuid — evict broadly, cheap at chat volume
+      return out;
+    });
+  }
+
+  /** Grant-then-debit against an account row already locked FOR UPDATE. The
+   *  caller picks the key column (discord_user_id or id); the money math —
+   *  lazy daily grant, allowance-first spend — lives only here. */
+  private async spendLocked(
+    tx: Sql,
+    acct: {
+      id: string; plan: string; credit_balance: number; purchased_balance: number;
+      last_daily_grant_on: string | Date | null; today: string;
+    },
+    n: number,
+    reason: string,
+  ): Promise<{ ok: boolean; balance: number; purchased: number }> {
+    // postgres.js returns computed ::date columns as strings but stored date
+    // columns as Date objects — normalize both to YYYY-MM-DD before comparing.
+    const isoDay = (v: string | Date | null): string | null =>
+      v == null ? null : v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10);
+    const day = isoDay(acct.today)!;
+    const lastDaily = isoDay(acct.last_daily_grant_on);
+    let balance = Number(acct.credit_balance);
+    const purchased = Math.max(0, Number(acct.purchased_balance ?? 0));
+    // Two buckets in one total: the daily allowance (credit_balance −
+    // purchased_balance) REFILLS to the plan floor; the purchased slice
+    // (packs, bonuses) never expires and never suppresses that refill.
+    // A negative allowance is debt (a clawed-back pack already spent) —
+    // the grant pays it down instead of erasing it.
+    if (lastDaily !== day) {
+      const g = acct.plan === "premium" ? this.creditGrants.premiumDaily : this.creditGrants.freeDaily;
+      const daily = balance - purchased;
+      const delta = daily < 0 ? g : Math.max(0, g - daily);
+      if (delta > 0) balance = await this.writeLedger(tx, acct.id, delta, "grant_daily", null);
+      await tx`UPDATE public.web_profiles SET last_daily_grant_on = ${day} WHERE id = ${acct.id}`;
+    }
+    if (balance < n) return { ok: false, balance, purchased: 0 };
+    // Allowance first — it's use-it-or-lose-it; packs only cover the rest.
+    const fromDaily = Math.max(0, Math.min(n, balance - purchased));
+    const fromPurchased = n - fromDaily;
+    balance = await this.writeLedger(tx, acct.id, -n, "spend", reason, -fromPurchased);
+    return { ok: true, balance, purchased: fromPurchased };
   }
 
   /** Credit n back — a companion message that never sent didn't happen.
@@ -189,6 +233,18 @@ export class CreditStore {
       if (!rows[0]) return { ok: false, balance: 0 };
       const balance = await this.writeLedger(tx, rows[0].id, n, "refund", reason, Math.max(0, Math.min(n, purchased)));
       this.accountCache.delete(discordUserId);
+      return { ok: true, balance };
+    });
+  }
+
+  /** Account-UUID-keyed twin of refundCredits (web chat path). */
+  async refundCreditsForAccount(accountId: string, n: number, reason: string, purchased = 0): Promise<{ ok: boolean; balance: number }> {
+    if (!this.creditsEnabled) return { ok: true, balance: 0 };
+    return this.sql.begin(async tx => {
+      const rows = await tx<Array<{ id: string }>>`SELECT id FROM public.web_profiles WHERE id = ${accountId} FOR UPDATE`;
+      if (!rows[0]) return { ok: false, balance: 0 };
+      const balance = await this.writeLedger(tx, rows[0].id, n, "refund", reason, Math.max(0, Math.min(n, purchased)));
+      this.accountCache.clear();
       return { ok: true, balance };
     });
   }

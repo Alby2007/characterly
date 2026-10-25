@@ -200,7 +200,10 @@ export function createBrainResolver(opts: {
 
     let brain: Brain | null = null;
     let hosted = false;
-    if (guildId.startsWith("dm:")) {
+    // dm: and web: are user scopes — a personal key slot plus the operator
+    // env fallback, regardless of requireGuildKeys (web chat is hosted-only
+    // v1, but the key row check keeps the future web BYOK path structural).
+    if (guildId.startsWith("dm:") || guildId.startsWith("web:")) {
       const userRow = await opts.getKey(guildId);
       if (userRow) {
         brain = buildFromRow(guildId, guildId, userRow);

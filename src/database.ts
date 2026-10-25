@@ -198,7 +198,7 @@ export type AnalyticsEvent =
   | "install_greeted" | "onboard_start" | "awaken"
   | "summon" | "summon_deadend" | "adopt"
   | "house_join" | "verified" | "guild_added" | "guild_purged"
-  | "verify_nudge";
+  | "verify_nudge" | "web_turn";
 
 export interface OpsStats {
   dauDm: number; dauGuilds: number; wauDm: number; wauGuilds: number;
@@ -5547,7 +5547,9 @@ export class MemoryStore {
   linkedProfilesMissingDiscordIdentity() { return this.credits.linkedProfilesMissingDiscordIdentity(); }
   syncDiscordIdentity(...a: Parameters<CreditStore["syncDiscordIdentity"]>) { return this.credits.syncDiscordIdentity(...a); }
   spendCredits(...a: Parameters<CreditStore["spendCredits"]>) { return this.credits.spendCredits(...a); }
+  spendCreditsForAccount(...a: Parameters<CreditStore["spendCreditsForAccount"]>) { return this.credits.spendCreditsForAccount(...a); }
   refundCredits(...a: Parameters<CreditStore["refundCredits"]>) { return this.credits.refundCredits(...a); }
+  refundCreditsForAccount(...a: Parameters<CreditStore["refundCreditsForAccount"]>) { return this.credits.refundCreditsForAccount(...a); }
   grantBonus(...a: Parameters<CreditStore["grantBonus"]>) { return this.credits.grantBonus(...a); }
   purchaseCredits(...a: Parameters<CreditStore["purchaseCredits"]>) { return this.credits.purchaseCredits(...a); }
   hostedUsageToday() { return this.credits.hostedUsageToday(); }

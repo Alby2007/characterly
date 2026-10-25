@@ -12,7 +12,10 @@ import type { Companion } from "./types.js";
 // the neutral refusal and refunds). Keeping it in one place means a billing
 // fix can't land in one lane and miss the other.
 
-export type TurnBillingStore = Pick<MemoryStore, "hostedUsageToday" | "spendCredits" | "refundCredits" | "accountForDiscordUser">;
+export type TurnBillingStore = Pick<MemoryStore, "hostedUsageToday" | "spendCredits" | "refundCredits" | "accountForDiscordUser"> & {
+  spendCreditsForAccount?: MemoryStore["spendCreditsForAccount"];
+  refundCreditsForAccount?: MemoryStore["refundCreditsForAccount"];
+};
 
 /** Free lanes shed once hosted:global passes this fraction of the fleet cap;
  *  premium keeps spending until the hard cap trips inside the metered wrap. */
@@ -63,19 +66,27 @@ export type ChargeOutcome =
  *  spendCredits evicted it, so the re-check picks the right notice). */
 export async function chargeHostedTurn(
   store: TurnBillingStore,
-  opts: { payerId: string; cost: number; reason: string; refundReason: string; premium: boolean; hostedDailyLlmCap: number },
+  opts: { payerId: string; payerAccountId?: string; cost: number; reason: string; refundReason: string; premium: boolean; hostedDailyLlmCap: number },
 ): Promise<ChargeOutcome> {
   if (!opts.premium && (await store.hostedUsageToday()) >= opts.hostedDailyLlmCap * HOSTED_PRESSURE_SHED) {
     inc("gate.hosted_pressure");
     return { ok: false, reason: "pressure" };
   }
-  const spend = await store.spendCredits(opts.payerId, opts.cost, opts.reason);
+  // payerAccountId keys the spend on web_profiles.id directly (web chat) —
+  // the account exists by construction, so a failed spend is just broke.
+  const spend = opts.payerAccountId
+    ? await store.spendCreditsForAccount!(opts.payerAccountId, opts.cost, opts.reason)
+    : await store.spendCredits(opts.payerId, opts.cost, opts.reason);
   if (!spend.ok) {
     inc("credits.insufficient");
+    if (opts.payerAccountId) return { ok: false, reason: "insufficient" };
     const stillLinked = await store.accountForDiscordUser(opts.payerId).catch(() => null);
     return { ok: false, reason: stillLinked ? "insufficient" : "unlinked" };
   }
-  return { ok: true, ledger: new TurnLedger(store, opts.payerId, opts.refundReason, opts.cost, spend.purchased ?? 0, spend.balance) };
+  const ledgerStore: Pick<MemoryStore, "refundCredits"> = opts.payerAccountId
+    ? { refundCredits: (_payerId, n, reason, purchased) => store.refundCreditsForAccount!(opts.payerAccountId!, n, reason, purchased) }
+    : store;
+  return { ok: true, ledger: new TurnLedger(ledgerStore, opts.payerId, opts.refundReason, opts.cost, spend.purchased ?? 0, spend.balance) };
 }
 
 /** Adopted companions are third-party authored personas — their replies get
