@@ -7469,7 +7469,7 @@ export const migrations: Migration[] = [
                       ) t), '');
                 s := replace(s, '@', '');
                 s := regexp_replace(s, '<[!#&]?[0-9]{1,25}>', '', 'g');
-                s := btrim(regexp_replace(s, '\s+', ' ', 'g'));
+                s := btrim(regexp_replace(s, '\\s+', ' ', 'g'));
                 IF length(s) > p_max THEN s := btrim(left(s, p_max)); END IF;
                 RETURN nullif(s, '');
               END
@@ -8013,6 +8013,438 @@ export const migrations: Migration[] = [
       await sql`DROP TABLE IF EXISTS public.web_conversations`;
       await sql`ALTER TABLE public.companion_adoptions DROP COLUMN IF EXISTS web_profile_id`;
       await sql`ALTER TABLE public.companion_adoptions DROP COLUMN IF EXISTS origin`;
+    },
+  },
+  {
+    version: 74,
+    name: "v74_web_chat_hardening",
+    up: async (sql) => {
+      // One open conversation per (adoption, profile) — web_open_conv_for's
+      // check-then-insert raced on parallel opens; the partial index is the
+      // enforcement point, the function's ON CONFLICT arm the graceful path.
+      await sql`
+        CREATE UNIQUE INDEX IF NOT EXISTS web_conversations_one_open
+        ON public.web_conversations(adoption_id, web_profile_id)
+        WHERE archived_at IS NULL
+      `;
+      // Referential integrity (v73 shipped plain columns). adoption/companion
+      // SET NULL keeps the conversation readable after its target is deleted
+      // (send then returns companion_gone); profile delete cascades history.
+      // The profile FK is gated: web_profiles only exists where auth does
+      // (Supabase); plain Postgres test DBs skip it.
+      await sql`
+        DO $fk$
+        BEGIN
+          IF to_regclass('public.web_profiles') IS NOT NULL THEN
+            EXECUTE 'ALTER TABLE public.web_conversations DROP CONSTRAINT IF EXISTS web_conversations_profile_fk';
+            EXECUTE 'ALTER TABLE public.web_conversations ADD CONSTRAINT web_conversations_profile_fk FOREIGN KEY (web_profile_id) REFERENCES public.web_profiles(id) ON DELETE CASCADE';
+          END IF;
+        END $fk$
+      `;
+      await sql`ALTER TABLE public.web_conversations DROP CONSTRAINT IF EXISTS web_conversations_adoption_fk`;
+      await sql`
+        ALTER TABLE public.web_conversations
+        ADD CONSTRAINT web_conversations_adoption_fk
+        FOREIGN KEY (adoption_id) REFERENCES public.companion_adoptions(id) ON DELETE SET NULL
+      `;
+      await sql`ALTER TABLE public.web_conversations DROP CONSTRAINT IF EXISTS web_conversations_companion_fk`;
+      await sql`
+        ALTER TABLE public.web_conversations
+        ADD CONSTRAINT web_conversations_companion_fk
+        FOREIGN KEY (companion_id) REFERENCES public.companions(id) ON DELETE SET NULL
+      `;
+      // display_name lands in prompts (author_name on the turn event) and on
+      // the site — run every write through the same hygiene helper companion
+      // names get. Gated on web_clean_name existing (v73 created it inside an
+      // auth-schema gate; plain Postgres skips all of this).
+      await sql`
+        DO $dn$
+        BEGIN
+          IF to_regprocedure('public.web_clean_name(text,integer)') IS NOT NULL THEN
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION public.web_clean_profile_name()
+              RETURNS trigger
+              LANGUAGE plpgsql
+              AS $body$
+              BEGIN
+                NEW.display_name := coalesce(public.web_clean_name(NEW.display_name, 64), '');
+                RETURN NEW;
+              END
+              $body$
+            $fn$;
+            EXECUTE 'DROP TRIGGER IF EXISTS web_profiles_clean_name ON public.web_profiles';
+            EXECUTE 'CREATE TRIGGER web_profiles_clean_name BEFORE INSERT OR UPDATE OF display_name ON public.web_profiles FOR EACH ROW EXECUTE FUNCTION public.web_clean_profile_name()';
+            EXECUTE 'REVOKE ALL ON FUNCTION public.web_clean_profile_name() FROM PUBLIC';
+          END IF;
+        END $dn$
+      `;
+      // Function replaces — every body lives inside the same auth-schema gate
+      // as v73 so plain Postgres test DBs skip them cleanly.
+      await sql`
+        DO $web$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+             AND to_regclass('public.web_profiles') IS NOT NULL
+             AND to_regclass('public.web_conversations') IS NOT NULL THEN
+
+            -- Bugfix re-apply: v73's whitespace-collapse regex lost its
+            -- backslash in the JS template literal ('\s' → 's'), so the
+            -- deployed function strips literal s-es instead of whitespace.
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION public.web_clean_name(p_name text, p_max int DEFAULT 64)
+              RETURNS text
+              LANGUAGE plpgsql
+              IMMUTABLE
+              AS $body$
+              DECLARE
+                s text;
+              BEGIN
+                s := coalesce(p_name, '');
+                s := translate(s, (SELECT string_agg(chr(c), '') FROM (
+                        SELECT generate_series(1, 31) AS c
+                        UNION ALL SELECT generate_series(127, 159)
+                        UNION ALL SELECT unnest(ARRAY[
+                          173,8203,8204,8205,8206,8207,8232,8233,8234,8235,8236,8237,8238,
+                          8288,8289,8290,8291,8294,8295,8296,8297,65279,65534,65535])
+                      ) t), '');
+                s := replace(s, '@', '');
+                s := regexp_replace(s, '<[!#&]?[0-9]{1,25}>', '', 'g');
+                s := btrim(regexp_replace(s, '\\s+', ' ', 'g'));
+                IF length(s) > p_max THEN s := btrim(left(s, p_max)); END IF;
+                RETURN nullif(s, '');
+              END
+              $body$
+            $fn$;
+            EXECUTE 'REVOKE ALL ON FUNCTION public.web_clean_name(text, int) FROM PUBLIC';
+
+            -- Owner keying after account-linking: a caller can own bonds on
+            -- BOTH keys — adoptions made pre-link stay 'web:<uid>'; post-link
+            -- ones key to the bare discord id. Read paths match either.
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION public.web_open_conv_for(p_uid uuid, p_adoption_id bigint)
+              RETURNS bigint
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                v_did text;
+                v_ad record;
+                v_conv bigint;
+                v_greeting text;
+              BEGIN
+                SELECT discord_user_id INTO v_did FROM public.web_profiles WHERE id = p_uid;
+                SELECT * INTO v_ad FROM public.companion_adoptions a
+                  WHERE a.id = p_adoption_id
+                    AND a.user_id IN (v_did, 'web:' || p_uid::text)
+                    AND a.dropped_at IS NULL;
+                IF v_ad.id IS NULL THEN RETURN NULL; END IF;
+                SELECT c.id INTO v_conv FROM public.web_conversations c
+                  WHERE c.adoption_id = p_adoption_id AND c.web_profile_id = p_uid AND c.archived_at IS NULL
+                  ORDER BY c.id DESC LIMIT 1;
+                IF v_conv IS NULL THEN
+                  -- Scope follows the ADOPTION's bond, not the caller's
+                  -- current link state: a web:-keyed adoption keeps its own
+                  -- memory (the deferred merge job owns merging); a discord-
+                  -- keyed one rides dm:<did> like Discord threads do.
+                  INSERT INTO public.web_conversations (web_profile_id, adoption_id, companion_id, scope)
+                  VALUES (p_uid, p_adoption_id, v_ad.companion_id,
+                          CASE WHEN v_ad.user_id LIKE 'web:%' THEN v_ad.user_id
+                               ELSE 'dm:' || v_ad.user_id END)
+                  ON CONFLICT (adoption_id, web_profile_id) WHERE archived_at IS NULL DO NOTHING
+                  RETURNING id INTO v_conv;
+                  IF v_conv IS NULL THEN
+                    -- A parallel open won the one-open-conversation race.
+                    SELECT c.id INTO v_conv FROM public.web_conversations c
+                      WHERE c.adoption_id = p_adoption_id AND c.web_profile_id = p_uid AND c.archived_at IS NULL
+                      ORDER BY c.id DESC LIMIT 1;
+                  ELSE
+                    SELECT greeting INTO v_greeting FROM public.companion_listings WHERE id = v_ad.listing_id;
+                    IF coalesce(v_greeting, '') <> '' THEN
+                      INSERT INTO public.web_messages (conversation_id, role, content, status)
+                      VALUES (v_conv, 'companion', left(v_greeting, 4000), 'done');
+                    END IF;
+                  END IF;
+                END IF;
+                RETURN v_conv;
+              END
+              $body$
+            $fn$;
+
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION public.web_adopt_listing(p_listing_id bigint)
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                v_uid uuid := auth.uid();
+                v_did text;
+                v_owner text;
+                v_listing record;
+                v_ad record;
+                v_companion_id bigint;
+                v_conv bigint;
+                v_name text;
+                v_reused boolean := false;
+                v_revived boolean := false;
+              BEGIN
+                IF v_uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO v_did FROM public.web_profiles WHERE id = v_uid;
+                v_owner := coalesce(v_did, 'web:' || v_uid::text);
+                PERFORM pg_advisory_xact_lock(hashtext('adopt:' || v_owner));
+                SELECT * INTO v_listing FROM public.companion_listings WHERE id = p_listing_id FOR UPDATE;
+                IF v_listing.id IS NULL THEN
+                  RETURN json_build_object('ok', false, 'reason', 'not_found');
+                END IF;
+                -- unlisted = a private card import: adoptable only by its own
+                -- creator (mirrors adoptListing's selfImport carve-out). The
+                -- creator check matches either owned key — a listing created
+                -- pre-link is still theirs post-link.
+                IF v_listing.status = 'unlisted' AND v_listing.creator_user_id IN (v_did, 'web:' || v_uid::text) THEN
+                  NULL; -- self-import: allowed through
+                ELSIF v_listing.status <> 'active' THEN
+                  RETURN json_build_object('ok', false, 'reason', 'delisted');
+                ELSIF v_listing.creator_user_id IN (v_did, 'web:' || v_uid::text) THEN
+                  RETURN json_build_object('ok', false, 'reason', 'own_listing');
+                END IF;
+
+                -- Reuse checks either owned key so a pre-link web: adoption
+                -- is still 'already adopted' after linking (its bond stays
+                -- web:-scoped — see web_open_conv_for).
+                SELECT * INTO v_ad FROM public.companion_adoptions a
+                  WHERE a.user_id IN (v_did, 'web:' || v_uid::text) AND a.listing_id = p_listing_id
+                  ORDER BY (a.dropped_at IS NULL) DESC, a.id DESC LIMIT 1;
+                IF v_ad.id IS NOT NULL AND v_ad.dropped_at IS NULL THEN
+                  v_reused := true;
+                  v_companion_id := v_ad.companion_id;
+                ELSE
+                  IF v_ad.id IS NOT NULL AND v_ad.cooldown_until IS NOT NULL AND v_ad.cooldown_until > now() THEN
+                    RETURN json_build_object('ok', false, 'reason', 'cooldown',
+                                             'cooldown_until', v_ad.cooldown_until);
+                  END IF;
+                  v_name := coalesce(public.web_clean_name(v_listing.name, 64), 'Companion');
+                  IF v_ad.id IS NOT NULL THEN
+                    v_revived := true;
+                    v_companion_id := v_ad.companion_id;
+                    UPDATE public.companions SET
+                      name = v_name, voice_persona = v_listing.voice_persona,
+                      core_traits = v_listing.core_traits, owner_dynamic = v_listing.owner_dynamic,
+                      backstory = v_listing.backstory, avatar_url = v_listing.avatar_url,
+                      listing_version = v_listing.version, updated_at = now()
+                    WHERE id = v_companion_id;
+                    UPDATE public.companion_adoptions SET
+                      dropped_at = NULL, cooldown_until = NULL, adopted_at = now(),
+                      web_profile_id = v_uid, origin = 'web'
+                    WHERE id = v_ad.id;
+                  ELSE
+                    INSERT INTO public.companions (
+                      owner_user_id, name, avatar_url, voice_persona, core_traits,
+                      owner_dynamic, backstory, onboarding_state, onboarding_turns,
+                      kind, adopted_from_listing_id, listing_version,
+                      persona_source, import_meta, created_at, updated_at)
+                    VALUES (
+                      v_owner, v_name, v_listing.avatar_url, v_listing.voice_persona,
+                      v_listing.core_traits, v_listing.owner_dynamic, v_listing.backstory,
+                      'active', 0, 'adopted', p_listing_id, v_listing.version,
+                      coalesce(v_listing.persona_source, 'authored'), v_listing.import_meta, now(), now())
+                    RETURNING id INTO v_companion_id;
+                    INSERT INTO public.companion_adoptions (user_id, listing_id, companion_id, adopted_at, web_profile_id, origin)
+                    VALUES (v_owner, p_listing_id, v_companion_id, now(), v_uid, 'web');
+                    UPDATE public.companion_listings SET add_count = add_count + 1
+                      WHERE id = p_listing_id AND status = 'active';
+                  END IF;
+                END IF;
+
+                v_conv := public.web_open_conv_for(v_uid, (SELECT a.id FROM public.companion_adoptions a
+                                                           WHERE a.user_id IN (v_did, 'web:' || v_uid::text)
+                                                             AND a.listing_id = p_listing_id
+                                                             AND a.dropped_at IS NULL
+                                                           ORDER BY a.id DESC LIMIT 1));
+                RETURN json_build_object(
+                  'ok', true, 'adoption_id', (SELECT a.id FROM public.companion_adoptions a
+                                              WHERE a.user_id IN (v_did, 'web:' || v_uid::text)
+                                                AND a.listing_id = p_listing_id
+                                                AND a.dropped_at IS NULL
+                                              ORDER BY a.id DESC LIMIT 1),
+                  'companion_id', v_companion_id, 'conversation_id', v_conv,
+                  'name', coalesce((SELECT c.name FROM public.companions c WHERE c.id = v_companion_id), 'Companion'),
+                  'reused', v_reused, 'revived', v_revived);
+              END
+              $body$
+            $fn$;
+
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION public.web_my_adoptions()
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                v_uid uuid := auth.uid();
+                v_did text;
+              BEGIN
+                IF v_uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO v_did FROM public.web_profiles WHERE id = v_uid;
+                RETURN coalesce((
+                  SELECT jsonb_agg(jsonb_build_object(
+                      'adoption_id', a.id,
+                      'companion_id', a.companion_id,
+                      'listing_id', a.listing_id,
+                      'name', comp.name,
+                      'avatar_url', comp.avatar_url,
+                      'tagline', l.tagline,
+                      'listing_status', l.status,
+                      'origin', a.origin,
+                      'adopted_at', a.adopted_at,
+                      'open_conversation_id', (
+                        SELECT c.id FROM public.web_conversations c
+                        WHERE c.adoption_id = a.id AND c.web_profile_id = v_uid AND c.archived_at IS NULL
+                        ORDER BY c.id DESC LIMIT 1))
+                    ORDER BY a.adopted_at DESC)
+                  FROM public.companion_adoptions a
+                  JOIN public.companions comp ON comp.id = a.companion_id
+                  LEFT JOIN public.companion_listings l ON l.id = a.listing_id
+                  WHERE a.user_id IN (v_did, 'web:' || v_uid::text) AND a.dropped_at IS NULL
+                ), '[]'::jsonb)::json;
+              END
+              $body$
+            $fn$;
+
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION public.web_drop_adoption(p_adoption_id bigint)
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                v_uid uuid := auth.uid();
+                v_did text;
+                v_n int;
+              BEGIN
+                IF v_uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT discord_user_id INTO v_did FROM public.web_profiles WHERE id = v_uid;
+                UPDATE public.companion_adoptions
+                  SET dropped_at = now(), cooldown_until = now() + interval '12 hours'
+                  WHERE id = p_adoption_id
+                    AND user_id IN (v_did, 'web:' || v_uid::text)
+                    AND dropped_at IS NULL;
+                GET DIAGNOSTICS v_n = ROW_COUNT;
+                IF v_n = 0 THEN RETURN json_build_object('ok', false, 'reason', 'no_adoption'); END IF;
+                UPDATE public.web_conversations SET archived_at = now()
+                  WHERE adoption_id = p_adoption_id AND web_profile_id = v_uid AND archived_at IS NULL;
+                RETURN json_build_object('ok', true);
+              END
+              $body$
+            $fn$;
+
+            -- Same-dedupe concurrent sends: the unique index is the arbiter —
+            -- the loser takes the exception arm and returns the winner's pair
+            -- instead of erroring.
+            EXECUTE $fn$
+              CREATE OR REPLACE FUNCTION public.web_send_message(p_conversation_id bigint, p_text text, p_client_msg_id uuid DEFAULT NULL)
+              RETURNS json
+              LANGUAGE plpgsql
+              SECURITY DEFINER
+              SET search_path = ''
+              AS $body$
+              DECLARE
+                v_uid uuid := auth.uid();
+                v_conv record;
+                v_ad record;
+                v_text text;
+                v_umid bigint;
+                v_cmid bigint;
+                v_job bigint;
+              BEGIN
+                IF v_uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+                SELECT * INTO v_conv FROM public.web_conversations
+                  WHERE id = p_conversation_id AND web_profile_id = v_uid;
+                IF v_conv.id IS NULL THEN RAISE EXCEPTION 'not your conversation'; END IF;
+                IF v_conv.archived_at IS NOT NULL THEN
+                  RETURN json_build_object('ok', false, 'reason', 'archived');
+                END IF;
+
+                v_text := btrim(coalesce(p_text, ''));
+                IF v_text = '' THEN RETURN json_build_object('ok', false, 'reason', 'empty'); END IF;
+                IF length(v_text) > 4000 THEN RETURN json_build_object('ok', false, 'reason', 'too_long'); END IF;
+
+                -- Send-time idempotency — a retried send returns the pair it
+                -- already enqueued instead of doubling the charge.
+                IF p_client_msg_id IS NOT NULL THEN
+                  SELECT m.id INTO v_umid FROM public.web_messages m
+                    WHERE m.conversation_id = p_conversation_id AND m.client_msg_id = p_client_msg_id AND m.role = 'user';
+                  IF v_umid IS NOT NULL THEN
+                    SELECT m.id INTO v_cmid FROM public.web_messages m
+                      WHERE m.conversation_id = p_conversation_id AND m.role = 'companion' AND m.id > v_umid
+                      ORDER BY m.id LIMIT 1;
+                    RETURN json_build_object('ok', true, 'user_message_id', v_umid,
+                                             'companion_message_id', v_cmid, 'reused', true);
+                  END IF;
+                END IF;
+
+                -- The companion must still exist and be adoptable — dropped
+                -- adoptions and banned listings freeze their chats.
+                SELECT a.id, a.dropped_at, l.status INTO v_ad
+                  FROM public.companion_adoptions a
+                  LEFT JOIN public.companion_listings l ON l.id = a.listing_id
+                  WHERE a.id = v_conv.adoption_id;
+                IF v_ad.id IS NULL OR v_ad.dropped_at IS NOT NULL THEN
+                  RETURN json_build_object('ok', false, 'reason', 'companion_gone');
+                END IF;
+                IF v_ad.status = 'banned' THEN
+                  RETURN json_build_object('ok', false, 'reason', 'banned');
+                END IF;
+
+                BEGIN
+                  INSERT INTO public.web_messages (conversation_id, role, content, status, client_msg_id)
+                  VALUES (p_conversation_id, 'user', v_text, 'done', p_client_msg_id)
+                  RETURNING id INTO v_umid;
+                EXCEPTION WHEN unique_violation THEN
+                  -- Same client_msg_id in flight elsewhere committed first.
+                  SELECT m.id INTO v_umid FROM public.web_messages m
+                    WHERE m.conversation_id = p_conversation_id AND m.client_msg_id = p_client_msg_id AND m.role = 'user';
+                  SELECT m.id INTO v_cmid FROM public.web_messages m
+                    WHERE m.conversation_id = p_conversation_id AND m.role = 'companion' AND m.id > v_umid
+                    ORDER BY m.id LIMIT 1;
+                  RETURN json_build_object('ok', true, 'user_message_id', v_umid,
+                                           'companion_message_id', v_cmid, 'reused', true);
+                END;
+
+                INSERT INTO public.web_messages (conversation_id, role, content, status)
+                VALUES (p_conversation_id, 'companion', '', 'pending')
+                RETURNING id INTO v_cmid;
+                UPDATE public.web_conversations SET last_activity_at = now() WHERE id = p_conversation_id;
+
+                INSERT INTO public.jobs (guild_id, type, payload, run_after)
+                VALUES (v_conv.scope, 'web-turn',
+                        jsonb_build_object('userMessageId', v_umid, 'companionMessageId', v_cmid),
+                        now())
+                RETURNING id INTO v_job;
+                PERFORM pg_notify('jobs', v_job::text);
+
+                RETURN json_build_object('ok', true, 'user_message_id', v_umid,
+                                         'companion_message_id', v_cmid, 'reused', false);
+              END
+              $body$
+            $fn$;
+          END IF;
+        END $web$
+      `;
+    },
+    down: async (sql) => {
+      await sql`DROP TRIGGER IF EXISTS web_profiles_clean_name ON public.web_profiles`;
+      await sql`DROP FUNCTION IF EXISTS public.web_clean_profile_name()`;
+      await sql`ALTER TABLE public.web_conversations DROP CONSTRAINT IF EXISTS web_conversations_profile_fk`;
+      await sql`ALTER TABLE public.web_conversations DROP CONSTRAINT IF EXISTS web_conversations_adoption_fk`;
+      await sql`ALTER TABLE public.web_conversations DROP CONSTRAINT IF EXISTS web_conversations_companion_fk`;
+      await sql`DROP INDEX IF EXISTS public.web_conversations_one_open`;
+      // Function bodies stay at the hardened versions — down() reverting
+      // them would reintroduce the races/seam they fix, and v73's own down()
+      // drops the functions outright anyway.
     },
   },
 ];

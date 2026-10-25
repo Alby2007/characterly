@@ -49,20 +49,25 @@ async function webFixture() {
   await sql`CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS $s$ SELECT nullif(current_setting('app.claim_uid', true), '')::uuid $s$`;
   const { store, eventStore } = await makeStore(sql);
   // Tables already exist from makeStore's full migration run — re-running v73
-  // adds the auth-gated objects (CREATE OR REPLACE/IF NOT EXISTS throughout).
+  // then v74 re-adds the auth-gated objects in order so the hardened function
+  // bodies win (CREATE OR REPLACE/IF NOT EXISTS throughout).
   await migrations.find(m => m.version === 73)!.up(sql as never);
+  await migrations.find(m => m.version === 74)!.up(sql as never);
   return { store, eventStore };
 }
 
 async function teardownWeb() {
   await sql`DROP POLICY IF EXISTS web_messages_select_own ON public.web_messages`;
   await sql`DROP POLICY IF EXISTS web_conversations_select_own ON public.web_conversations`;
+  // Trigger before the function it depends on.
+  await sql`DROP TRIGGER IF EXISTS web_profiles_clean_name ON public.web_profiles`;
   for (const sig of [
     "web_adopt_listing(bigint)", "web_my_adoptions()", "web_open_conversation(bigint)",
     "web_my_conversations()", "web_send_message(bigint, text, uuid)",
     "web_conversation_messages(bigint, bigint, int)", "web_archive_conversation(bigint, boolean)",
     "web_drop_adoption(bigint)", "web_report_listing(bigint, text, text)",
     "web_open_conv_for(uuid, bigint)", "web_clean_name(text, int)",
+    "web_clean_profile_name()",
   ]) {
     await sql.unsafe(`DROP FUNCTION IF EXISTS public.${sig}`);
   }
@@ -433,6 +438,145 @@ test("spendCreditsForAccount/refundCreditsForAccount: account-keyed twin of spen
     assert.equal(refund.balance, 30);
     const missing = await store.spendCreditsForAccount("00000000-0000-0000-0000-000000000099", 2, "x");
     assert.equal(missing.ok, false);
+  } finally {
+    await teardownWeb();
+  }
+});
+
+// ── v74 hardening ───────────────────────────────────────────────────────────
+
+test("v74: user scopes survive the zombie-guild sweep", async () => {
+  const { store } = await webFixture();
+  try {
+    // The sweep only knows Discord guild ids — every non-cached scope looked
+    // 'orphaned' to it, and purgeGuild wipes a scope entirely. web: bonds
+    // must be exempt like dm:, not treated as dead guilds.
+    await store.settings("guild-zombie");
+    await store.settings("dm:user-1");
+    await store.settings("web:user-2");
+    const zombies = await store.guildsNotIn(["guild-live"]);
+    assert.ok(zombies.includes("guild-zombie"), "real orphans still sweep");
+    assert.ok(!zombies.includes("dm:user-1"));
+    assert.ok(!zombies.includes("web:user-2"), "web scope must not be swept");
+  } finally {
+    await teardownWeb();
+  }
+});
+
+test("v74: web scopes participate in the maintenance sweep", async () => {
+  const { store } = await webFixture();
+  try {
+    // Retention/cognition enumerate user scopes — a web bond invisible to the
+    // sweep keeps raw messages forever (retention silently doesn't apply).
+    await store.settings("web:swept");
+    const scopes = await store.listDmScopes();
+    assert.ok(scopes.includes("web:swept"), "listDmScopes must see web scopes");
+    await sql`INSERT INTO guild_usage (guild_id, day, llm_calls) VALUES ('web:busy', current_date, 1)
+              ON CONFLICT (guild_id, day) DO UPDATE SET llm_calls = guild_usage.llm_calls + 1`;
+    const active = await store.dmScopesActiveSince(new Date(Date.now() - 86_400_000));
+    assert.ok(active.includes("web:busy"), "web usage must count as active");
+  } finally {
+    await teardownWeb();
+  }
+});
+
+test("v74: adoptions made pre-link stay visible + scoped web: after linking", async () => {
+  const { store } = await webFixture();
+  try {
+    const uid = await addProfile(null);
+    const listing = await seedListing(store, "u-linktest", "Ghost");
+    const adopt = await rpc<any>(uid, tx => tx`SELECT public.web_adopt_listing(${listing.id}) AS r`);
+    assert.equal(adopt.ok, true);
+    const conv0 = await sql`SELECT scope FROM web_conversations WHERE id = ${adopt.conversation_id}`;
+    assert.equal(conv0[0].scope, `web:${uid}`);
+
+    // Link Discord — the web: bond keeps its own scope and stays visible:
+    // no silent merge, and no UI-vanish because the owner key flipped.
+    await sql`UPDATE web_profiles SET discord_user_id = 'd-9' WHERE id = ${uid}`;
+    const mine = await rpc<any[]>(uid, tx => tx`SELECT public.web_my_adoptions() AS r`);
+    assert.equal(mine.length, 1, "pre-link adoption must still list");
+    assert.equal(mine[0].adoption_id, adopt.adoption_id);
+
+    // Re-adopting the same listing reuses the web: bond — it does NOT mint a
+    // second adoption keyed to the freshly-linked discord id.
+    const again = await rpc<any>(uid, tx => tx`SELECT public.web_adopt_listing(${listing.id}) AS r`);
+    assert.equal(again.reused, true);
+    assert.equal(again.conversation_id, adopt.conversation_id);
+    const convs = await sql`SELECT count(*)::int c FROM web_conversations WHERE adoption_id = ${adopt.adoption_id} AND archived_at IS NULL`;
+    assert.equal(convs[0].c, 1);
+
+    // Still droppable post-link.
+    const dropped = await rpc<any>(uid, tx => tx`SELECT public.web_drop_adoption(${adopt.adoption_id}) AS r`);
+    assert.equal(dropped.ok, true);
+  } finally {
+    await teardownWeb();
+  }
+});
+
+test("v74: one open conversation per (adoption, profile)", async () => {
+  const { store } = await webFixture();
+  try {
+    const uid = await addProfile(null);
+    const listing = await seedListing(store, "u-race", "Ghost2");
+    const adopt = await rpc<any>(uid, tx => tx`SELECT public.web_adopt_listing(${listing.id}) AS r`);
+    // A second unarchived row for the same pair violates the index.
+    await assert.rejects(
+      sql`INSERT INTO web_conversations (web_profile_id, adoption_id, companion_id, scope)
+          VALUES (${uid}, ${adopt.adoption_id}, ${adopt.companion_id}, 'web:x')`);
+    // Archiving frees the slot — a new open conversation is allowed.
+    await rpc<any>(uid, tx => tx`SELECT public.web_archive_conversation(${adopt.conversation_id}) AS r`);
+    const reopened = await rpc<any>(uid, tx => tx`SELECT public.web_open_conversation(${adopt.adoption_id}) AS r`);
+    assert.equal(reopened.ok, true);
+    assert.notEqual(reopened.conversation_id, adopt.conversation_id);
+  } finally {
+    await teardownWeb();
+  }
+});
+
+test("v74: sendPersona loses to a placeholder already resolved (lease race)", async () => {
+  const { store } = await webFixture();
+  try {
+    const uid = await addProfile(null);
+    const listing = await seedListing(store, "u-race2", "Race");
+    const adopt = await rpc<any>(uid, tx => tx`SELECT public.web_adopt_listing(${listing.id}) AS r`);
+    const sent = await rpc<any>(uid, tx => tx`SELECT public.web_send_message(${adopt.conversation_id}, ${"hi"}, ${crypto.randomUUID()}::uuid) AS r`);
+
+    // Simulate the lease-expiry twin: another instance of this same job
+    // delivered the reply first. This instance's sendPersona must lose.
+    let landed: unknown = "unset";
+    await runWebTurnJob("web:x", fakeJob({ companionMessageId: sent.companion_message_id, userMessageId: sent.user_message_id }), {
+      sql: sql as never, store,
+      runTurn: async opts => {
+        await sql`UPDATE web_messages SET status = 'done', content = 'twin won' WHERE id = ${sent.companion_message_id}`;
+        landed = await opts.sendPersona("loser text");
+      },
+    });
+    assert.equal(landed, null, "sendPersona must refuse to overwrite a resolved placeholder");
+    const row = await sql`SELECT status, content FROM web_messages WHERE id = ${sent.companion_message_id}`;
+    assert.equal(row[0].status, "done");
+    assert.equal(row[0].content, "twin won");
+  } finally {
+    await teardownWeb();
+  }
+});
+
+test("v74: contentless system payloads still land a row", async () => {
+  const { store } = await webFixture();
+  try {
+    const uid = await addProfile(null);
+    const listing = await seedListing(store, "u-sys", "Sys");
+    const adopt = await rpc<any>(uid, tx => tx`SELECT public.web_adopt_listing(${listing.id}) AS r`);
+    const sent = await rpc<any>(uid, tx => tx`SELECT public.web_send_message(${adopt.conversation_id}, ${"hi"}, ${crypto.randomUUID()}::uuid) AS r`);
+    // The Discord api-key payload is a CV2 object with no `content` string —
+    // web used to drop it entirely (silent failure). Now it lands generic.
+    await runWebTurnJob("web:x", fakeJob({ companionMessageId: sent.companion_message_id, userMessageId: sent.user_message_id }), {
+      sql: sql as never, store,
+      runTurn: async opts => { await opts.sendSystem({}); },
+    });
+    const sys = await sql`SELECT content, status FROM web_messages WHERE conversation_id = ${adopt.conversation_id} AND role = 'system'`;
+    assert.equal(sys.length, 1);
+    assert.ok(sys[0].content.length > 0);
+    assert.equal(sys[0].status, "done");
   } finally {
     await teardownWeb();
   }

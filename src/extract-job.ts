@@ -12,6 +12,7 @@ import { runContestCheck } from "./contest.js";
 import { withRetry } from "./retry.js";
 import { inc } from "./metrics.js";
 import { logError } from "./secrets.js";
+import { isUserScope } from "./scopes.js";
 
 // ── Extract job handler ──────────────────────────────────────────────────────
 // Everything deferrable about a durable message runs here, off the live path:
@@ -123,7 +124,7 @@ export async function runExtractJob(payload: ExtractJobPayload, deps: ExtractJob
     if (!imageContext && images.length && deps.visionModel) {
       const scopeMetered = deps.visionClient
         ? meteredClient(deps.visionClient, { guildId, store: deps.store, getCap: async () =>
-            guildId.startsWith("dm:") && deps.dmLlmDailyCap !== undefined
+            isUserScope(guildId) && deps.dmLlmDailyCap !== undefined
               ? deps.dmLlmDailyCap
               : (await deps.store.settings(guildId)).llmDailyCap })
         : undefined;

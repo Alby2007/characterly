@@ -119,15 +119,26 @@ export async function runWebTurnJob(_guildId: string, job: Job, deps: WebTurnDep
     account: row.plan ? { plan: row.plan } : null,
     charge: { cost: 2, reason: "web_turn", refundReason: "web_turn_refund", payerAccountId: row.web_profile_id },
     sendPersona: async text => {
+      // status guard: if this turn outlived the claim lease and a retry
+      // already delivered (or failed) the placeholder, this instance loses
+      // the race — returning null makes the turn take the refund path.
       const done = await deps.sql`
         UPDATE public.web_messages SET content = ${text}, status = 'done'
-        WHERE id = ${companionMessageId} RETURNING id
+        WHERE id = ${companionMessageId} AND status = 'generating' RETURNING id
       `;
+      if (done.length) {
+        await deps.sql`
+          UPDATE public.web_conversations SET last_activity_at = now() WHERE id = ${row.conversation_id}
+        `;
+      }
       return done.length ? { id: `webmsg:${companionMessageId}`, createdAt: new Date() } : null;
     },
     sendSystem: async o => {
-      const content = typeof o?.content === "string" ? o.content : null;
-      if (!content) return;
+      // Payloads without a content string (e.g. the Discord api-key CV2 card)
+      // have no web rendering — write a generic notice rather than dropping
+      // the failure silently.
+      const raw = typeof o?.content === "string" ? o.content.trim() : "";
+      const content = raw || "Something went wrong on our side — please try sending again.";
       await deps.sql`
         INSERT INTO public.web_messages (conversation_id, role, content, status)
         VALUES (${row.conversation_id}, 'system', ${content}, 'done')

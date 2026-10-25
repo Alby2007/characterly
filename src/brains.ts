@@ -4,6 +4,7 @@ import { Brain, type LlmClient } from "./brain.js";
 import { decryptSecret, warnError } from "./secrets.js";
 import { inc } from "./metrics.js";
 import { isSafeUrl, safeLookup } from "./tools.js";
+import { isUserScope } from "./scopes.js";
 
 // Per-guild base URLs are untrusted input — a guild admin can point them
 // anywhere, and every call carries that guild's API key. isSafeUrl +
@@ -203,7 +204,7 @@ export function createBrainResolver(opts: {
     // dm: and web: are user scopes — a personal key slot plus the operator
     // env fallback, regardless of requireGuildKeys (web chat is hosted-only
     // v1, but the key row check keeps the future web BYOK path structural).
-    if (guildId.startsWith("dm:") || guildId.startsWith("web:")) {
+    if (isUserScope(guildId)) {
       const userRow = await opts.getKey(guildId);
       if (userRow) {
         brain = buildFromRow(guildId, guildId, userRow);

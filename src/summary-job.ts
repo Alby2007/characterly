@@ -4,6 +4,7 @@ import type { MemoryStore } from "./database.js";
 import { FatalJobError } from "./jobs.js";
 import { inc } from "./metrics.js";
 import { promptInline, promptName } from "./prompt-safety.js";
+import { isUserScope } from "./scopes.js";
 import { logError } from "./secrets.js";
 
 // ── Story-summary job handler ────────────────────────────────────────────────
@@ -55,7 +56,7 @@ export async function runSummaryJob(scope: string, payload: SummaryJobPayload, d
   // The fold boundary must match the lane's live transcript window — a
   // smaller keepRecent here would fold messages that are still on-screen
   // verbatim, duplicating them in the prompt.
-  const keepRecent = scope.startsWith("dm:") ? config.dmContextMessages : STORY_KEEP_RECENT;
+  const keepRecent = isUserScope(scope) ? config.dmContextMessages : STORY_KEEP_RECENT;
   const window = await store.storyWindow(scope, payload.channelId, existing?.coveredUntil ?? null, keepRecent, STORY_WINDOW_LIMIT);
   if (!window.length) { inc("jobs.dropped_stale"); return; }
 
@@ -72,7 +73,7 @@ export async function runSummaryJob(scope: string, payload: SummaryJobPayload, d
     priorSummary: existing?.summary ?? "",
     userEdited: existing?.userEdited ?? false,
     transcript,
-    isDm: scope.startsWith("dm:"),
+    isDm: isUserScope(scope),
   });
   if (!summary.trim()) return;
 

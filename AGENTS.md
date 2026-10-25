@@ -34,6 +34,10 @@
 - Flow: **self-serve (v63)** — a guild admin with a linked account runs `/marketplace deploy` and is granted on the spot (`grant_kind='self'`); or ops path — `/ops deploygrant <guild_id>` → admin runs `/marketplace deploy` (requires Community mode + bot perms) → idempotent category/`#characters` forum/`#adoptees`/`#log-in` layout → catalog backfill. `/ops deploystatus|deployrevoke` inspect/undo; a `disabled` row can't be self-resurrected.
 - Everything fans out by tag NAME (ids differ per forum); delist/ban archive every mirror. Details: `docs/marketplace.md` → Partner deployments.
 
+## Scopes
+
+`guild_id` everywhere is a *scope*: a Discord guild id, `dm:<discord_id>`, or `web:<uuid>` (the last two are 1:1 user bonds — live memory/reply defaults, DM daily cap, exempt from the zombie-guild sweep). Use `isUserScope()` from `src/scopes.ts` — never `startsWith("dm:")`; a bare `dm:` check forgetting `web:` is a repeat bug class (v74 shipped several fixes for it).
+
 ## Prompt hygiene (injection hardening)
 
 - **Every** member- or third-party-authored string must pass a `src/prompt-safety.ts` helper before entering an LLM prompt — never interpolate raw. `promptInline` for values (single-line guarantee), `promptName` for speaker/label positions (reserved names → fallback, markup stripped), `sanitizeBlock` + `wrapUntrusted` for inherently multi-line tool/web output, `sanitizeJsonValue` for JSON evidence payloads.

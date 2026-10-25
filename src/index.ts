@@ -52,6 +52,7 @@ import { editCompanionMessage, sendAsCompanion } from "./webhooks.js";
 import { REGEN_REFUSALS, resolveRegenTarget } from "./regen.js";
 import { isSelfHarmSignal, CRISIS_RESPONSE, meteredSafetyBrain, safetyBrain } from "./safety.js";
 import { TurnLedger, chargeHostedTurn, screenAdoptedReply } from "./turn-billing.js";
+import { isUserScope } from "./scopes.js";
 import {
   initOps, automodMessage, isHouse, isMarketplaceThread, isAdopteeThread, opsAlert,
   handleHouseMemberAdd, handleHouseMemberUpdate, handleHouseMemberRemove,
@@ -150,7 +151,7 @@ const { brainFor, brainForUser, invalidate: invalidateBrain, isHostedScope, isHo
   // getCap reads settings() (60s cache — fine for a daily bound).
   meter: (scopeId, c) => meteredClient(c, {
     guildId: scopeId, store,
-    getCap: async () => scopeId.startsWith("dm:")
+    getCap: async () => isUserScope(scopeId)
       ? config.dmLlmDailyCap
       : (await store.settings(scopeId, config.rawMessageRetentionDays)).llmDailyCap,
   }),
@@ -160,7 +161,7 @@ const { brainFor, brainForUser, invalidate: invalidateBrain, isHostedScope, isHo
   // share of the fleet cap so jobs can't starve live chat.
   meterHosted: (scopeId, c) => backgroundCapped(meteredClient(meteredClient(c, {
     guildId: scopeId, store,
-    getCap: async () => scopeId.startsWith("dm:")
+    getCap: async () => isUserScope(scopeId)
       ? config.dmLlmDailyCap
       : (await store.settings(scopeId, config.rawMessageRetentionDays)).llmDailyCap,
   }), {
@@ -333,6 +334,18 @@ async function init() {
       });
     },
     onError: (m, e) => logError(m, e),
+    // A dead-lettered web-turn would leave its placeholder 'generating'
+    // forever — the client polls until the row resolves. Flip it to the
+    // same no_reply state the turn's own fail-safe would have written.
+    onDeadLetter: async job => {
+      if (job.type !== "web-turn") return;
+      const id = Number((job.payload as { companionMessageId?: unknown })?.companionMessageId);
+      if (!Number.isFinite(id)) return;
+      await sql`
+        UPDATE web_messages SET status = 'failed', fail_reason = 'no_reply'
+        WHERE id = ${id} AND status IN ('pending', 'generating')
+      `.catch(e => logError("web-turn dead-letter placeholder flip failed", e));
+    },
   });
 }
 
@@ -537,7 +550,7 @@ async function applyRetentionOnce() {
   // passes below only run for DM scopes active since yesterday (UTC) — an
   // idle DM has no new input to verify, dedup, or profile.
   const dmScopes = await store.listDmScopes().catch(() => [] as string[]);
-  const activeDm = new Set(await store.dmScopesActiveSince(new Date(Date.now() - 86_400_000)).catch(() => dmScopes));
+  const activeUserScopes = new Set(await store.dmScopesActiveSince(new Date(Date.now() - 86_400_000)).catch(() => dmScopes));
   const scopes: Array<{ id: string; name: string }> = [
     ...[...client.guilds.cache.values()].map(g => ({ id: g.id, name: g.name })),
     ...dmScopes.map(id => ({ id, name: id })),
@@ -562,7 +575,7 @@ async function applyRetentionOnce() {
     // Hoisted so the relationship rebuild and the pair-analysis enqueue share
     // one archive scan — interactionPairs reads every 90d message.
     let guildInteractions: Array<{ aId: string; bId: string; count: number; firstAt: string; lastAt: string }> = [];
-    if (guild.id.startsWith("dm:") && !activeDm.has(guild.id)) continue;
+    if (isUserScope(guild.id) && !activeUserScopes.has(guild.id)) continue;
     // Dormant guilds (no key) skip every LLM pass — retention/pruning above
     // still ran; they're lifecycle ops, not cognition.
     const brain = await brainFor(guild.id);

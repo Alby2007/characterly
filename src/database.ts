@@ -563,7 +563,9 @@ export class MemoryStore {
   async guildsNotIn(guildIds: string[]): Promise<string[]> {
     if (!guildIds.length) return [];
     const rows = await this.sql<{ guild_id: string }[]>`
-      SELECT guild_id FROM server_settings WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
+      -- User scopes (dm:/web:) aren't Discord guilds — they're never in the
+      -- cache and must never be swept as zombies (they'd lose the bond data).
+      SELECT guild_id FROM server_settings WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%' AND guild_id NOT LIKE 'web:%'
       UNION SELECT guild_id FROM members WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
       UNION SELECT guild_id FROM memories WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
       UNION SELECT guild_id FROM events WHERE NOT (guild_id = ANY(${guildIds})) AND guild_id NOT LIKE 'dm:%'
@@ -2941,9 +2943,9 @@ export class MemoryStore {
     const attributes = await listAttributes(this.sql, guildId, subjectId);
     const journal = await this.journalAboutSubject(guildId, subjectId);
     // Story summaries hold no per-subject link — they're exported only when
-    // the scope IS the subject's own DM (where they're their companion's recap
-    // of their shared conversation).
-    const summaries = guildId === `dm:${subjectId}` ? await this.summariesForScope(guildId) : [];
+    // the scope IS the subject's own 1:1 bond (dm:<id> for Discord subjects,
+    // web:<uuid> for web accounts — web subjects carry their own prefix).
+    const summaries = guildId === `dm:${subjectId}` || guildId === subjectId ? await this.summariesForScope(guildId) : [];
     return { memories, attributes, journal, summaries };
   }
 
@@ -3242,21 +3244,24 @@ export class MemoryStore {
   async dmScopesActiveSince(sinceDay: Date): Promise<string[]> {
     const rows = await this.sql<Array<{ guild_id: string }>>`
       SELECT DISTINCT guild_id FROM guild_usage
-      WHERE guild_id LIKE 'dm:%' AND day >= ${sinceDay.toISOString().slice(0, 10)}::date AND llm_calls > 0
+      WHERE (guild_id LIKE 'dm:%' OR guild_id LIKE 'web:%') AND day >= ${sinceDay.toISOString().slice(0, 10)}::date AND llm_calls > 0
     `;
     return rows.map(r => r.guild_id);
   }
 
+  // dm: AND web: — both 1:1 user bonds; the name predates web chat.
   async listDmScopes(): Promise<string[]> {
     const rows = await this.sql<Array<{ guild_id: string }>>`
       SELECT guild_id FROM (
-        SELECT DISTINCT guild_id FROM messages WHERE guild_id LIKE 'dm:%'
+        SELECT DISTINCT guild_id FROM messages WHERE guild_id LIKE 'dm:%' OR guild_id LIKE 'web:%'
         UNION
-        SELECT DISTINCT guild_id FROM members WHERE guild_id LIKE 'dm:%'
+        SELECT DISTINCT guild_id FROM members WHERE guild_id LIKE 'dm:%' OR guild_id LIKE 'web:%'
         UNION
-        SELECT DISTINCT guild_id FROM server_settings WHERE guild_id LIKE 'dm:%'
+        SELECT DISTINCT guild_id FROM server_settings WHERE guild_id LIKE 'dm:%' OR guild_id LIKE 'web:%'
         UNION
-        SELECT DISTINCT ('dm:' || owner_user_id) AS guild_id FROM companions
+        -- owner_user_id already carries the web: prefix for web adoptions;
+        -- bare ids are Discord snowflakes needing the dm: prefix.
+        SELECT DISTINCT (CASE WHEN owner_user_id LIKE 'web:%' THEN owner_user_id ELSE 'dm:' || owner_user_id END) AS guild_id FROM companions
       ) scopes
     `;
     return rows.map(r => r.guild_id);

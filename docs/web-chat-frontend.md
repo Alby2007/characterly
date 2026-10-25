@@ -17,7 +17,10 @@ are `SECURITY DEFINER`; tables are RLS-gated (own rows only). Anon gets nothing.
 - **Linked** accounts (`web_profiles.discord_user_id` set) chat on the
   `dm:<discord_id>` bond — same companion bond, memory, journal and credits as
   their Discord DMs. **Unlinked** accounts get a separate `web:<uuid>` bond.
-  Linking Discord later does NOT merge the two.
+  Linking Discord later does NOT merge the two — and since v74 the scope is
+  per-ADOPTION, not per-account-state: a bond created pre-link keeps its
+  `web:<uuid>` scope (and stays visible/droppable/chat-able) after linking.
+  A listing adopted fresh post-link keys to `dm:<did>` instead.
 - v1 is **hosted-only**: every reply costs 2 tokens from `credit_balance`
   (daily allowance first, then purchased packs — server-side, invisible to the
   client beyond balance). No BYOK UI yet.
@@ -155,7 +158,15 @@ sidebar signal.
   realtime/poll resolves it.
 - **Linked Discord users:** their `dm:`-scope adoptions appear in
   `web_my_adoptions` — opening one continues the same bond (memory carries).
-  Their Discord-side adoptions show `origin:'discord'`.
+  Their Discord-side adoptions show `origin:'discord'`. Adoptions made on the
+  web before linking keep their `web:` scope and still list here.
+- **One open conversation per adoption** is DB-enforced — racing
+  `web_open_conversation` calls can't mint doubles; they converge on the
+  same conversation_id.
+- **Stuck replies:** if a companion row stays `pending`/`generating` past
+  ~2 min it's almost certainly a dead-lettered job — render it as the
+  `no_reply` failure state client-side rather than polling forever (a late
+  `done` still applies over it if the turn eventually lands).
 
 ## Explicitly NOT in v1 (don't build UI for these)
 

@@ -23,6 +23,7 @@ setTimeout(hideLoader, 12_000);
 const convId = Number(location.pathname.match(/^\/chat\/(\d+)\/?$/)?.[1] ?? NaN);
 const user = await requireAuth();
 if (!user) { showLoader("Taking you to sign in…"); throw new Error("redirecting"); }
+const uid = user.id;
 $("#consent-signout").addEventListener("click", goHome);
 for (const b of document.querySelectorAll("[data-signout]")) b.addEventListener("click", goHome);
 await ensureConsent(TERMS_VERSION);
@@ -96,6 +97,13 @@ $("#drop-text").textContent = `Their chat closes and ${name} leaves your charact
 const rows = new Map<number, Message>();
 const nodes = new Map<number, HTMLElement>();
 const optimistic = new Map<string, { node: HTMLElement; text: string }>();
+// Give-up bookkeeping: a placeholder stuck pending/generating past this age
+// (dead-lettered job, crashed worker) renders as a local failure so the page
+// doesn't spin forever — the row itself is untouched, so a late reply still
+// lands over it.
+const GIVE_UP_MS = 120_000;
+const pendingSince = new Map<number, number>();
+const gaveUp = new Set<number>();
 let frozen: "archived" | "banned" | "gone" | null = null;
 
 const FAIL_COPY: Record<string, string> = {
@@ -143,6 +151,15 @@ function renderRow(m: Message, fresh: boolean): HTMLElement {
 function apply(m: Message, fresh = true) {
   const prev = rows.get(m.id);
   rows.set(m.id, m);
+  if (m.role === "companion") {
+    if (m.status === "pending" || m.status === "generating") {
+      if (!pendingSince.has(m.id)) pendingSince.set(m.id, Date.now());
+    } else {
+      pendingSince.delete(m.id);
+      gaveUp.delete(m.id);
+      if (prev && prev.status !== m.status) refreshBalance();
+    }
+  }
   const stick = nearBottom();
   // An optimistic user row is replaced by its server twin.
   if (m.role === "user" && m.client_msg_id && optimistic.has(m.client_msg_id)) {
@@ -172,7 +189,21 @@ function apply(m: Message, fresh = true) {
 }
 
 const maxId = () => Math.max(0, ...rows.keys());
-const inFlight = () => [...rows.values()].filter(m => m.role === "companion" && (m.status === "pending" || m.status === "generating"));
+const inFlight = () => [...rows.values()].filter(m => m.role === "companion" && (m.status === "pending" || m.status === "generating") && !gaveUp.has(m.id));
+
+// Anything in flight past the give-up age renders as a local no_reply. The
+// server row stays pending/generating — a late done applies over it.
+function markStale() {
+  const now = Date.now();
+  for (const m of rows.values()) {
+    if (m.role !== "companion" || (m.status !== "pending" && m.status !== "generating") || gaveUp.has(m.id)) continue;
+    if (now - (pendingSince.get(m.id) ?? now) <= GIVE_UP_MS) continue;
+    gaveUp.add(m.id);
+    const node = renderRow({ ...m, status: "failed", fail_reason: "no_reply" }, false);
+    nodes.get(m.id)?.replaceWith(node);
+    nodes.set(m.id, node);
+  }
+}
 
 async function loadHistory() {
   let after = 0;
@@ -197,6 +228,7 @@ function schedulePoll() {
   if (!busy && live) return;
   pollTimer = window.setTimeout(async () => {
     pollTimer = null;
+    markStale();
     if (document.visibilityState !== "visible") { schedulePoll(); return; }
     const pend = inFlight();
     const from = pend.length ? Math.min(...pend.map(m => m.id)) - 1 : maxId();
@@ -206,6 +238,22 @@ function schedulePoll() {
   }, inFlight().length ? 2500 : 10000);
 }
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") schedulePoll(); });
+
+// ── Balance chip ───────────────────────────────────────────────────────────
+// The charge/refund lands server-side when the turn ends — refetch the chip
+// shortly after a reply resolves rather than waiting for a page reload.
+let balanceTimer: number | null = null;
+function refreshBalance() {
+  if (balanceTimer !== null) return;
+  balanceTimer = window.setTimeout(() => {
+    balanceTimer = null;
+    getProfile(uid).then(p => {
+      if (!p) return;
+      const b = $("#t-balance");
+      b.replaceChildren(document.createTextNode(`${Number(p.credit_balance ?? 0).toLocaleString()} left · `), Object.assign(el("a", "", "Get more"), { href: "/dashboard#billing" }));
+    }, () => {});
+  }, 2000);
+}
 
 // ── Composer ───────────────────────────────────────────────────────────────
 function autosize() {
@@ -401,13 +449,11 @@ moreBtn.hidden = !adoption;
 if (!adoption?.listing_id) $("#t-report").hidden = true;
 schedulePoll();
 
-subscribeMessages(user.id, m => { if (m.conversation_id === convId) apply(m, true); }, state => {
+subscribeMessages(uid, m => { if (m.conversation_id === convId) apply(m, true); }, state => {
   live = state;
   schedulePoll();
 }).catch(() => {});
 
-getProfile(user.id).then(p => {
-  if (!p) return;
-  const b = $("#t-balance");
-  b.replaceChildren(document.createTextNode(`${Number(p.credit_balance ?? 0).toLocaleString()} left · `), Object.assign(el("a", "", "Get more"), { href: "/dashboard#billing" }));
-}, () => {});
+refreshBalance();
+
+// (moved above the boot section — see "Balance" below)

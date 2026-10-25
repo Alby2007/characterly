@@ -70,8 +70,10 @@ export async function claimNext(sql: Sql, excludeGuilds: ReadonlySet<string>): P
     WHERE id = (
       SELECT id FROM jobs
       WHERE run_after <= now() AND attempts < ${MAX_JOB_ATTEMPTS}
-        AND NOT (guild_id = ANY(${excluded}))
-      ORDER BY run_after, id
+        -- web-turn is live chat, not serial pipeline cognition — it must not
+        -- queue behind the same scope's extract/journal backlog.
+        AND NOT (guild_id = ANY(${excluded}) AND type <> 'web-turn')
+      ORDER BY (type = 'web-turn') DESC, run_after, id
       FOR UPDATE SKIP LOCKED
       LIMIT 1
     )
@@ -101,6 +103,10 @@ export interface WorkerDeps {
   maxPerGuild?: number;
   pollMs?: number;
   onError?: (message: string, error: unknown) => void;
+  /** A job left the runnable set for good (FatalJobError or attempts
+   * exhausted). Lets handlers settle external state the job row can't —
+   * e.g. web-turn flips its placeholder so no reply spins forever. */
+  onDeadLetter?: (job: Job) => Promise<void> | void;
 }
 
 /**
@@ -134,6 +140,7 @@ export function startWorker(deps: WorkerDeps): { stop: () => Promise<void> } {
         await sql`UPDATE jobs SET attempts = ${MAX_JOB_ATTEMPTS} WHERE id = ${job.id}`;
         inc("jobs.dead_letter");
         onError(`job ${job.id} (${job.type}) dead-lettered: ${error.message}`, error);
+        try { await deps.onDeadLetter?.(job); } catch (e) { onError(`onDeadLetter hook failed for job ${job.id}`, e); }
       } else if (error instanceof BudgetExceeded) {
         // Cap is not a fault: un-burn the claim attempt and park the job until
         // the UTC-day counter resets. No log spam — this is expected flow.
@@ -151,6 +158,7 @@ export function startWorker(deps: WorkerDeps): { stop: () => Promise<void> } {
           // failure mode nobody notices for weeks.
           inc("jobs.dead_letter");
           onError(`job ${job.id} (${job.type}) dead-lettered after ${job.attempts} attempts`, error);
+          try { await deps.onDeadLetter?.(job); } catch (e) { onError(`onDeadLetter hook failed for job ${job.id}`, e); }
         } else {
           onError(`job ${job.id} (${job.type}) failed — attempt ${job.attempts}/${MAX_JOB_ATTEMPTS}`, error);
         }

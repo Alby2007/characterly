@@ -16,7 +16,7 @@ const GRANTS = { freeDaily: 30, premiumDaily: 150 };
 // credit_ledger's FK would block migration rollback tests that drop web_profiles.
 after(async () => {
   const sql = makeTestSql();
-  await sql`DROP TABLE IF EXISTS credit_ledger, web_profiles`;
+  await sql`DROP TABLE IF EXISTS credit_ledger, web_profiles CASCADE`;
   await sql.end();
 });
 
@@ -69,7 +69,8 @@ test("creditsSupported is false without web_profiles and degrades gracefully", a
   const sql = makeTestSql();
   const { store } = await makeStore(sql);
   await sql`DROP TABLE IF EXISTS credit_ledger`;
-  await sql`DROP TABLE IF EXISTS web_profiles`;
+  // CASCADE: v74's web_conversations.profile FK would otherwise pin the table.
+  await sql`DROP TABLE IF EXISTS web_profiles CASCADE`;
   assert.equal(await store.initCreditsSupport(GRANTS), false);
   // Self-host lane: everyone reads as premium, spends always succeed.
   const acct = await store.accountForDiscordUser("u-nobody");

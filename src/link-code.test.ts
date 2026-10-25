@@ -98,7 +98,8 @@ test("syncDiscordIdentity fills the snapshot; missing-scan only lists the gaps",
     const none = await sql`SELECT discord_username FROM web_profiles WHERE discord_user_id IS NULL`;
     assert.equal(none[0].discord_username, null);
   } finally {
-    await sql`DROP TABLE IF EXISTS web_profiles`;
+    // CASCADE: v74's web_conversations.profile FK would otherwise pin it.
+    await sql`DROP TABLE IF EXISTS web_profiles CASCADE`;
     await sql.end();
   }
 });
