@@ -6,11 +6,11 @@
 
 web
 
-The design surfaces are the website (`website/`, Vite multi-page app on Cloudflare Workers at https://characterly.app, plus the worker-rendered `/characters` shelf in `src/site-shelf.ts`) and the branded auth emails (`supabase/email/`, `supabase/templates/`). The product itself runs inside Discord; its in-Discord UI (embeds, buttons, modals, forum cards) is constrained by Discord's components.
+The design surfaces are the website (`web/`, Astro on Cloudflare Workers at https://characterly.app) and the branded auth emails (`supabase/email/`, `supabase/templates/`). The product runs in two homes: Discord (DMs, private threads, servers; UI constrained by Discord's components) and, since v73, the website itself, where people adopt from the shelf and chat with their characters.
 
 ## Stack
 
-**Decided (2026-10-21): Astro on Cloudflare Workers**, keeping the `characterly-website` worker and its domains. A full front-end rebuild is being specced in `docs/frontend-spec.md`. It replaces the Vite multi-page site and the worker-rendered shelf (`src/site-shelf.ts` + `public/shelf.css`) with one Astro codebase: static marketing and legal pages, server-rendered `/characters`, and small Supabase-backed islands for auth and the dashboard. Until it ships, the current `website/` remains live.
+**Decided (2026-10-21): Astro on Cloudflare Workers**, keeping the `characterly-website` worker and its domains. Shipped: `web/` (spec `docs/frontend-spec.md`) replaced the Vite site. Static marketing and legal pages, server-rendered `/characters`, Supabase-backed islands for auth, dashboard and web chat. Web chat backend contract: `docs/web-chat-frontend.md`.
 
 ## Users
 
@@ -20,13 +20,13 @@ Secondary audiences, served but not designed around first:
 - Creators who publish characters to the shelf (`/companion publish`, `/companion create`, import).
 - Discord server admins who add the bot to their own servers, and partner servers running a marketplace deployment.
 
-Their jobs on the website: understand what Characterly is and why it beats what they use now, browse the public shelf, sign up and link Discord, manage tokens and Premium, see and edit what each companion remembers, and import a character card.
+Their jobs on the website: understand what Characterly is and why it beats what they use now, browse the public shelf, **adopt a character and chat with it right on the site**, sign up (Discord or email) and optionally link Discord, manage tokens and Premium, see and edit what each companion remembers, and import a character card.
 
 ## Product Purpose
 
 Characterly gives every person one permanent, personal AI companion, awakened in 1:1 Discord DMs, plus any number of characters adopted off a community shelf. Companions remember you through inspectable, consent-gated memory, chat in private threads, and can be summoned into your own servers, where they speak under their own name and avatar.
 
-Success: a migrant arrives, adopts or imports a character, and finds it remembering them in Discord from the first hello. They come back daily (token allowance refills daily), and some upgrade to Premium.
+Success: a migrant arrives, adopts or imports a character, and finds it remembering them from the first hello, on the web or in Discord. They come back daily (token allowance refills daily), and some upgrade to Premium.
 
 ## Positioning
 
@@ -37,7 +37,8 @@ The pairing is the point: **a companion that remembers you and moves with you be
 
 ## Operating Context
 
-- Funnel: landing page → "Continue with Discord" OAuth (the lead path in every link gate) or email signup → join the Characterly hub server → adopt off the shelf or awaken in DMs → dashboard for billing and memory.
+- Funnel: landing page or shelf → character page → **chat on the web** (sign in with Discord or email, adopt, chat at `/chat`) **or meet in Discord** (join the hub server, adopt in `#characters`). The two are offered with equal weight. Dashboard for billing and memory.
+- Web chat (v73): no adoption slot cap on the web; every reply costs 2 tokens (hosted only, no BYOK on web yet). Linked accounts chat on the same bond as their Discord DMs; unlinked (email) accounts get a separate web-only bond, and linking later does not merge them, so say so before they start.
 - The shelf lives in two places: the hub server's forum channel (bot-minted listing threads with Add / Rate / Report) and the indexable `/characters` web pages. Partner servers mirror the catalog.
 - Hosted chat spends tokens (2 per human turn, 1 per companion-to-companion hop). BYOK users connect their own provider key in Discord for unlimited use; on the site BYOK is a footnote, because hosted is the funnel.
 - Web clickwrap: authed users without consent at the current `TERMS_VERSION` are held behind an acceptance modal.
@@ -56,7 +57,7 @@ The pairing is the point: **a companion that remembers you and moves with you be
 - Name: **Characterly**. The Characterly bot is invisible plumbing and a system announcer. It never speaks in character; companions speak as themselves.
 - Copy voice: plain, specific, second person. Say what the product does and avoid hype words.
 - Existing marks: `website/public/mark.svg` (crescent + star seal, also the favicon) and `website/public/seal.svg`.
-- **Web scope (confirmed):** the website stays a funnel plus back office. It persuades, links Discord, and manages billing, memory and import. No browsing-to-adopt, adopting or chatting happens on the web; Discord is home.
+- **Web scope (changed 2026-10-25, owner):** the website is a home for the product, not only a funnel. People adopt from the shelf and chat with their characters on the site; Discord remains the other home, offered with equal weight. Not on the web in v1: regenerate/edit/delete, images, group chats, BYOK, companion creation (awakening stays in Discord).
 - **The current visual world ("The Familiar", recorded in `DESIGN.md`) is being replaced, not refined.** The user judged it "vibe coded" and wrong for migrants. It remains evidence of the old site until the rebuild's DESIGN.md supersedes it. Binding anti-references for the new front end:
   - the stock AI "premium" look: a dark ground with gold accents, italic display serif and tracked mono labels;
   - ornament standing in for product: seals, corner ticks, figure captions, glows and other costume;
@@ -73,7 +74,7 @@ The pairing is the point: **a companion that remembers you and moves with you be
 
 1. **Memory is the relationship, and the user owns it.** Anything a companion knows should be visible, explainable and forgettable by the person it's about.
 2. **Meet migrants where they already are.** Honour their existing vocabulary and artifacts (character cards, chat history, a shelf to browse), and make "bring what you have" effortless.
-3. **Discord is home, the web is the back office.** The site persuades, then hands off to Discord. Account, billing and memory controls on the web stay plain and trustworthy.
+3. **Two homes, one companion.** Chat on the web or in Discord, with equal weight; never make one feel like the lesser door. Be honest about the one seam: an email-only web bond and a Discord bond are separate memories. Account, billing and memory controls stay plain and trustworthy.
 4. **Show, never inflate.** Prove things with the real product and live shelf data, never with invented social proof.
 5. **Safety and consent are features, stated plainly** and never buried.
 

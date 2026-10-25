@@ -26,7 +26,7 @@ const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashb
 ---
 <Base
   title="The shelf: AI characters for Discord · Characterly"
-  description="Browse community-made AI characters for Discord. Adopt one into a private thread, and it remembers you and follows you into your servers."
+  description="Browse community-made AI characters. Adopt one and chat on the web or in Discord, and it remembers you."
   path="/characters"
   jsonLd={[itemList]}
   current="/characters"
@@ -34,7 +34,7 @@ const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashb
   <section class="wrap shelf-top">
     <div class="section-head">
       <h1>The shelf.</h1>
-      <p class="lede">Characters made and published by the community. Adopt one in the Characterly server and you get your own version, with its own memory of you, in a private thread.</p>
+      <p class="lede">Characters made and published by the community. Adopt one and you get your own version, with its own memory of you. Chat with them right here, or in a private thread in the Characterly server.</p>
     </div>
     <div class="shelf-actions">
       <a class="btn btn-go" href={discordStart} data-beacon="discord_signin_click"><Icon name="discord" size={18} />Continue with Discord</a>

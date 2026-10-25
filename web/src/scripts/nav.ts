@@ -70,11 +70,22 @@ if (session?.user) {
     chip.append(av, label);
     slot.replaceChildren(chip);
   }
+  // Signed in: your characters are one click from anywhere.
+  for (const links of document.querySelectorAll<HTMLElement>(".nav-links:not(.nav-links-app)")) {
+    if (links.querySelector('a[href="/chat"]')) continue;
+    const a = Object.assign(document.createElement("a"), { href: "/chat", textContent: "Your characters" });
+    if (location.pathname.startsWith("/chat")) a.setAttribute("aria-current", "page");
+    links.prepend(a);
+  }
   const mobile = document.querySelector<HTMLAnchorElement>("[data-account-mobile]");
-  if (mobile) { mobile.textContent = "Your dashboard"; mobile.href = "/dashboard"; }
+  if (mobile) {
+    mobile.textContent = "Your dashboard"; mobile.href = "/dashboard";
+    const chats = Object.assign(document.createElement("a"), { href: "/chat", textContent: "Your characters" });
+    mobile.before(chats);
+  }
   for (const cta of document.querySelectorAll<HTMLAnchorElement>("[data-primary-cta]")) {
-    cta.href = "/dashboard";
-    cta.lastChild!.textContent = "Open your dashboard";
+    cta.href = "/chat";
+    cta.lastChild!.textContent = "Your characters";
     cta.removeAttribute("data-beacon");
   }
   // Signed in already: "Meet X in Discord" goes straight to the server.

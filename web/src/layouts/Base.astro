@@ -30,10 +30,16 @@ const image = ogImage ?? `${SITE_ORIGIN}/og.png?v=2`;
 // probe fetch. The ?v= busts embed caches (Discord keys unfurls by image URL).
 const isDefaultCard = image.startsWith(`${SITE_ORIGIN}/og.png`);
 const navLinks = [
-  { href: "/characters", label: "The shelf" },
+  { href: "/characters", label: "The shelf", short: "Shelf" },
   { href: "/#how", label: "How it works" },
   { href: "/#pricing", label: "Pricing" },
   { href: "/safety", label: "Safety" },
+];
+// Signed-in back office: where your characters, the shelf and the account live.
+const appLinks = [
+  { href: "/chat", label: "Your characters", short: "Characters" },
+  { href: "/characters", label: "The shelf", short: "Shelf" },
+  { href: "/dashboard", label: "Dashboard", short: "Account" },
 ];
 // Primary path: Discord sign-in → dashboard first-run guide. /account starts
 // the OAuth hop itself, so marketing pages never load the Supabase client.
@@ -92,6 +98,11 @@ const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashb
             <span class="sr-only">Open menu</span><Icon name="menu" size={22} />
           </button>
         </>
+      )}
+      {chrome === "app" && (
+        <nav class="nav-links nav-links-app" aria-label="Main">
+          {appLinks.map(l => <a href={l.href} aria-current={current === l.href ? "page" : undefined}><span class="nl-long">{l.label}</span>{l.short && <span class="nl-short" aria-hidden="true">{l.short}</span>}</a>)}
+        </nav>
       )}
       {chrome === "app" && (
         <div class="nav-end nav-app">

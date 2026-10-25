@@ -2,11 +2,12 @@
 // website/src/account.js. New: ?start=discord begins the Discord sign-in on
 // load, so every "Continue with Discord" button on the site is a plain link.
 import {
-  getSession, onAuthChange, authRedirectTarget, signIn, signUp, magicLink,
+  getSession, signOut, onAuthChange, authRedirectTarget, signIn, signUp, magicLink,
   resendVerification, signInWithDiscord, resetPassword, updatePassword, recordConsent, beacon,
 } from "./auth";
 import { TERMS_VERSION } from "../lib/config";
 import { showLoader, hideLoader } from "./loader";
+import { supabase } from "./supabase";
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) => document.querySelector(sel) as T;
 type Mode = "signin" | "signup" | "magic" | "forgot" | "recovery";
@@ -117,12 +118,23 @@ const inRecovery = params.get("mode") === "recovery";
 let recoveryReady = false;
 if (inRecovery) setMode("recovery");
 
-getSession().then(session => {
+getSession().then(async session => {
   if (inRecovery) { if (session) recoveryReady = true; return; }
   if (session) {
-    showLoader("Taking you to your dashboard…");
-    location.replace(authRedirectTarget());
-    return;
+    // A stored session can be dead (expired, revoked, user deleted). Protected
+    // pages check with the server and send dead sessions here, so redirecting
+    // on the stored copy alone would bounce between the two forever. Confirm
+    // with the server first; drop a dead session and show the form.
+    const { data, error } = await supabase.auth.getUser().catch(e => ({ data: { user: null }, error: e }));
+    if (data?.user) {
+      showLoader("Taking you to your dashboard…");
+      location.replace(authRedirectTarget());
+      return;
+    }
+    // Only a session the server rejects is dropped; a network blip keeps it
+    // (and still doesn't redirect, so there's no loop either way).
+    const status = (error as { status?: number } | null)?.status;
+    if (status === 401 || status === 403) signOut();
   }
   if (params.get("start") === "discord" && !urlError) startDiscord();
   else hideLoader(); // e.g. a cached ?start page whose session check failed

@@ -7,7 +7,7 @@
 import Base from "../../layouts/Base.astro";
 import Archive from "../../components/Archive.astro";
 import Icon from "../../components/Icon.astro";
-import { SITE_ORIGIN } from "../../lib/config";
+import { SITE_ORIGIN, PLANS } from "../../lib/config";
 import { getListingPage, SHELF_CACHE, ratingLabel, addsLabel, initial } from "../../lib/shelf";
 
 export const prerender = false;
@@ -23,7 +23,7 @@ Astro.response.headers.set("cache-control", SHELF_CACHE);
 const { listing: l, rating, related, ratings, creator } = res.data;
 const canonical = `${SITE_ORIGIN}/characters/${l.id}`;
 const traitLine = l.coreTraits.length ? ` Traits: ${l.coreTraits.slice(0, 5).join(", ")}.` : "";
-const description = `${l.tagline ? `${l.tagline}.` : `${l.name} is a community AI character on the Characterly shelf.`}${traitLine} Adopt ${l.name} into a private Discord thread, and they remember you from the first hello.`;
+const description = `${l.tagline ? `${l.tagline}.` : `${l.name} is a community AI character on the Characterly shelf.`}${traitLine} Chat with ${l.name} right here on the web or in a private Discord thread, and they remember you from the first hello.`;
 const r = ratingLabel(rating);
 const product: Record<string, unknown> = {
   "@context": "https://schema.org", "@type": "Product",
@@ -51,7 +51,7 @@ const openings = l.openings.map(renderOpening);
 const paras = (s: string) => s.split(/\n+/).map(t => t.trim()).filter(Boolean);
 const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashboard?welcome=1");
 ---
-<Base title={`${l.name}, an AI character for Discord · Characterly`} description={description} path={`/characters/${l.id}`} ogType="product" ogImage={l.avatarUrl} ogImageAlt={`${l.name}'s portrait`} jsonLd={[product, crumbs]} current="/characters">
+<Base title={`${l.name}, an AI character to chat with · Characterly`} description={description} path={`/characters/${l.id}`} ogType="product" ogImage={l.avatarUrl} ogImageAlt={`${l.name}'s portrait`} jsonLd={[product, crumbs]} current="/characters">
   <div class="wrap">
     <nav class="crumbs" aria-label="Breadcrumb"><a href="/">Home</a><span aria-hidden="true">/</span><a href="/characters">The shelf</a><span aria-hidden="true">/</span><span aria-current="page">{l.name}</span></nav>
   </div>
@@ -74,8 +74,21 @@ const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashb
         {l.openings.length > 0 && <div slot={slotOf("More ways to meet")} class="hellos">{openings.map(o => <blockquote class="hello">{o.map(p => p.act ? <em>{p.text}</em> : <span>{p.text}</span>)}</blockquote>)}</div>}
       </Archive>
       <div class="meet">
-        <a class="btn btn-go btn-lg" href={discordStart} data-meet data-beacon="discord_signin_click"><Icon name="discord" size={20} />Meet {l.name} in Discord</a>
-        <p class="muted small">Adopting is free. {l.name} opens a private thread with you in the Characterly server, and remembers you from the first hello.</p>
+        <h2 class="meet-h" id="meet-h">Adopt {l.name}</h2>
+        <div class="choices" role="group" aria-labelledby="meet-h">
+          <button class="choice" type="button" data-adopt={l.id} data-adopt-name={l.name}>
+            <Icon name="send" size={22} />
+            <span class="choice-t">Chat on the web</span>
+            <span class="choice-s">Right here, in your browser</span>
+          </button>
+          <a class="choice" href={discordStart} data-meet data-beacon="discord_signin_click">
+            <Icon name="discord" size={22} />
+            <span class="choice-t">Meet in Discord</span>
+            <span class="choice-s">In a private thread in the Characterly server</span>
+          </a>
+        </div>
+        <div class="msg" data-adopt-msg role="alert" hidden></div>
+        <p class="muted small">Adopting is free, and either way {l.name} remembers you from the first hello. Replies use tokens: you get {PLANS.free.dailyTokens} free a day.</p>
       </div>
     </div>
   </section>
@@ -122,9 +135,21 @@ const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashb
   .hellos { display: grid; gap: 20px; padding: 16px 0 4px; }
   .hellos .hello { padding: 0; margin: 0; border-left: 3px solid var(--line); padding-left: 14px; }
   .char-grid > div { min-width: 0; }
-  .meet { margin-top: 24px; display: grid; gap: 10px; justify-items: start; }
-  .meet .btn { white-space: normal; text-align: left; max-width: 100%; }
-  .meet p { max-width: 52ch; }
+  .meet { margin-top: 28px; display: grid; gap: 12px; }
+  .meet-h { font-size: 22px; }
+  /* Two equal doors: neither is gold, neither is the lesser one. */
+  .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .choice { display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; column-gap: 14px; row-gap: 2px; align-items: center; min-height: 84px; padding: 14px 18px; text-align: left; text-decoration: none; color: var(--ink); background: var(--panel); border: 2px solid var(--ink); border-radius: var(--radius-s); cursor: pointer; font: inherit; transition: background 0.18s, transform 0.18s var(--ease); }
+  .choice:hover { background: var(--field-deep); }
+  .choice:active { transform: translateY(1px); }
+  .choice:disabled { opacity: 0.6; cursor: progress; }
+  .choice :global(svg) { grid-row: 1 / span 2; }
+  .choice-t { font-size: 17px; font-weight: 750; }
+  .choice-s { font-size: 14px; color: var(--ink-2); line-height: 1.35; }
+  .meet > .msg { margin-top: 0; }
+  .meet > .msg :global(a) { font-weight: 700; }
+  .meet p { max-width: 60ch; }
+  @media (max-width: 600px) { .choices { grid-template-columns: 1fr; } }
   .related h2 { font-size: clamp(26px, 2.6vw, 36px); margin-bottom: 24px; }
   .rel { list-style: none; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; margin-bottom: 24px; }
   .rel-card { display: grid; gap: 3px; text-decoration: none; }
@@ -141,3 +166,7 @@ const discordStart = "/account?start=discord&next=" + encodeURIComponent("/dashb
   }
   @media (max-width: 600px) { .row { grid-template-columns: 1fr; gap: 6px; } }
 </style>
+
+<script>
+  import "../../scripts/adopt";
+</script>

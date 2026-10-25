@@ -1,0 +1,168 @@
+---
+// /chat/<conversation_id>: one conversation. Surface brief:
+// .impeccable/surfaces/web-src-pages-chat-index-astro.md. A static shell
+// rendered per request (the id is only read client-side); scripts/chat-thread.ts
+// does the rest under the visitor's own session.
+import Base from "../../layouts/Base.astro";
+import Icon from "../../components/Icon.astro";
+import ConsentGate from "../../components/ConsentGate.astro";
+import { REPORT_CATEGORIES } from "../../scripts/webchat";
+export const prerender = false;
+Astro.response.headers.set("cache-control", "no-store");
+---
+<Base title="Chat · Characterly" description="A conversation with one of your characters." noindex chrome="app" current="/chat" loading="Opening your chat…">
+  <div class="thread-page">
+    <section class="thread" aria-labelledby="t-name">
+      <header class="t-head">
+        <a class="back link small" href="/chat"><Icon name="back" size={16} />Your characters</a>
+        <div class="t-who">
+          <span class="t-av" id="t-av" aria-hidden="true"></span>
+          <div class="t-id">
+            <h1 class="t-name" id="t-name">Your chat</h1>
+            <p class="t-meta" id="t-meta"></p>
+          </div>
+        </div>
+        <div class="t-actions">
+          <a class="link small" id="t-profile" href="/characters" hidden>Profile</a>
+          <button class="btn btn-sm" type="button" id="t-close" hidden>Close chat</button>
+          <button class="btn btn-sm t-more" type="button" id="t-more" popovertarget="t-menu" aria-label="More options" hidden><Icon name="more" size={20} /></button>
+          <div class="t-menu" id="t-menu" popover>
+            <a class="m-only" id="t-profile-m" href="/characters" hidden>Profile</a>
+            <button type="button" class="m-only" id="t-close-m" hidden>Close chat</button>
+            <button type="button" id="t-report">Report this character</button>
+            <button type="button" id="t-drop" class="danger">Give them back</button>
+          </div>
+        </div>
+      </header>
+
+      <div class="t-scroll" id="t-scroll" tabindex="-1">
+        <ol class="t-msgs" id="t-msgs" aria-label="Messages" aria-live="off" aria-relevant="additions"></ol>
+      </div>
+
+      <footer class="t-foot">
+        <div class="msg" id="t-error" role="alert" hidden></div>
+        <form class="composer" id="composer" hidden>
+          <label class="sr-only" for="t-input" id="t-input-label">Message</label>
+          <textarea class="input t-input" id="t-input" rows="1" maxlength="4000" placeholder="Message…" autocomplete="off"></textarea>
+          <button class="btn btn-go t-send" type="submit" id="t-send"><Icon name="send" size={18} /><span>Send</span></button>
+        </form>
+        <p class="t-cost small" id="t-cost" hidden><span>Each reply costs 2 tokens</span><span id="t-balance"></span><span class="t-count" id="t-count" hidden></span></p>
+        <div class="t-closed" id="t-closed" hidden>
+          <p id="t-closed-text"></p>
+          <div class="t-closed-actions" id="t-closed-actions"></div>
+        </div>
+      </footer>
+    </section>
+  </div>
+
+  <dialog class="modal" id="drop-modal" aria-labelledby="drop-h">
+    <h2 id="drop-h">Give them back?</h2>
+    <p id="drop-text">Their chat closes and they leave your characters. You can adopt them again after 12 hours, and they'll remember you.</p>
+    <div class="msg" id="drop-error" role="alert" hidden></div>
+    <div class="modal-actions">
+      <button class="btn" type="button" id="drop-cancel">Keep them</button>
+      <button class="btn btn-danger" type="button" id="drop-do">Give them back</button>
+    </div>
+  </dialog>
+
+  <dialog class="modal" id="report-modal" aria-labelledby="rep-h">
+    <form method="dialog" id="report-form">
+      <h2 id="rep-h">Report this character</h2>
+      <p>Reports go to the moderators. Tell us what's wrong.</p>
+      <fieldset class="rep-cats">
+        <legend class="sr-only">What's wrong</legend>
+        {REPORT_CATEGORIES.map(([value, label], i) => (
+          <label class="check"><input type="radio" name="category" value={value} required={i === 0} /><span>{label}</span></label>
+        ))}
+      </fieldset>
+      <label class="field"><span>Anything else <span class="muted">(optional)</span></span><textarea class="input" name="reason" rows="3" maxlength="500"></textarea></label>
+      <div class="msg" id="report-msg" role="status" hidden></div>
+      <div class="modal-actions">
+        <button class="btn" type="button" id="report-cancel">Cancel</button>
+        <button class="btn btn-danger" type="submit" id="report-send">Send report</button>
+      </div>
+    </form>
+  </dialog>
+  <ConsentGate />
+</Base>
+
+<style>
+  /* The thread fills the viewport under the nav; only the messages scroll. */
+  .thread-page { height: calc(100dvh - var(--nav-h)); padding: 16px var(--gutter) 20px; }
+  .thread { height: 100%; max-width: 1000px; margin: 0 auto; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 30px 60px -40px rgba(20, 24, 58, 0.45); }
+
+  .t-head { display: grid; grid-template-columns: 1fr auto; grid-template-areas: "back back" "who actions"; gap: 6px 16px; align-items: center; padding: 14px 24px 16px; border-bottom: 1px solid var(--line); }
+  .back { grid-area: back; justify-self: start; min-height: 32px; color: var(--ink-2); }
+  .t-who { grid-area: who; display: flex; gap: 14px; align-items: center; min-width: 0; }
+  .t-av { width: 56px; height: 56px; flex: none; border-radius: var(--radius-s); overflow: hidden; background: var(--field-deep); display: grid; place-items: center; font-variation-settings: var(--wide); font-weight: 850; font-size: 26px; color: var(--ink-3); }
+  .t-av :global(img) { width: 100%; height: 100%; object-fit: cover; }
+  .t-id { min-width: 0; }
+  .t-name { font-size: clamp(26px, 3vw, 38px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .t-meta { margin-top: 4px; font-size: 14px; font-weight: 650; color: var(--ink-2); display: flex; flex-wrap: wrap; gap: 4px 14px; }
+  .t-actions { grid-area: actions; display: flex; align-items: center; gap: 10px; position: relative; }
+  .t-more { width: 40px; padding: 0; }
+  .t-menu { margin: 0; inset: auto; position: fixed; min-width: 220px; padding: 6px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--panel); box-shadow: 0 20px 40px -24px rgba(20, 24, 58, 0.5); }
+  .t-menu:popover-open { display: grid; }
+  .t-menu a { display: flex; align-items: center; min-height: 44px; padding: 0 14px; border-radius: 6px; font-weight: 650; text-decoration: none; }
+  .t-menu a:hover { background: var(--field); }
+  .t-menu .m-only { display: none; }
+  .t-menu button { min-height: 44px; padding: 0 14px; border: 0; border-radius: 6px; background: none; text-align: left; font-weight: 650; cursor: pointer; }
+  .t-menu button:hover { background: var(--field); }
+  .t-menu .danger { color: var(--danger); }
+
+  .t-scroll { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+  .t-scroll:focus { outline: none; }
+  .t-msgs { list-style: none; max-width: 760px; margin: 0 auto; padding: 24px 24px 12px; display: flex; flex-direction: column; gap: 12px; }
+  .t-msgs :global(.m) { max-width: min(78%, 560px); padding: 11px 15px; border-radius: var(--radius); font-size: 16.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .t-msgs :global(.m-companion) { align-self: flex-start; background: var(--field); border-top-left-radius: 4px; }
+  .t-msgs :global(.m-companion em) { color: var(--ink-3); }
+  .t-msgs :global(.m-user) { align-self: flex-end; background: var(--ink); color: #fff; border-top-right-radius: 4px; }
+  .t-msgs :global(.m-user em) { color: #c8cdf0; }
+  .t-msgs :global(.m-user.sending) { opacity: 0.6; }
+  .t-msgs :global(.m-system) { align-self: center; border-radius: 0; max-width: 520px; text-align: center; padding: 8px 18px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); font-size: 14.5px; font-weight: 600; color: var(--ink-2); white-space: pre-wrap; }
+  .t-msgs :global(.m-system a) { font-weight: 750; color: var(--ink); }
+  .t-msgs :global(.m-failed) { align-self: flex-start; display: grid; gap: 4px; max-width: 520px; padding: 10px 14px; border-radius: var(--radius-s); background: var(--danger-tint); color: #7d1220; font-size: 14.5px; font-weight: 600; }
+  .t-msgs :global(.m-new) { animation: unlock 0.5s var(--ease); }
+  .t-msgs :global(.typing) { align-self: flex-start; display: inline-flex; gap: 5px; padding: 15px 16px; border-radius: var(--radius); border-top-left-radius: 4px; background: var(--field); }
+  .t-msgs :global(.typing i) { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); animation: dots 1.2s var(--ease) infinite; }
+  .t-msgs :global(.typing i:nth-child(2)) { animation-delay: 0.15s; }
+  .t-msgs :global(.typing i:nth-child(3)) { animation-delay: 0.3s; }
+  @keyframes dots { 30% { transform: translateY(-4px); opacity: 0.5; } }
+
+  .t-foot { border-top: 1px solid var(--line); padding: 14px 24px 16px; display: grid; gap: 8px; }
+  .t-foot > .msg { margin-top: 0; }
+  .composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: end; max-width: 760px; width: 100%; margin: 0 auto; }
+  .t-input { resize: none; min-height: 52px; max-height: 180px; line-height: 1.45; padding-top: 13px; overflow-y: auto; }
+  .t-send { min-height: 52px; }
+  .t-cost { max-width: 760px; width: 100%; margin: 0 auto; display: flex; gap: 6px 14px; flex-wrap: wrap; color: var(--ink-3); font-weight: 600; }
+  .t-cost :global(a) { color: var(--ink); font-weight: 700; }
+  .t-count { margin-left: auto; font-weight: 750; }
+  .t-count.over { color: var(--danger); }
+  .t-closed { max-width: 760px; width: 100%; margin: 0 auto; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 20px; padding: 4px 0; }
+  .t-closed p { color: var(--ink-2); font-weight: 600; max-width: 56ch; }
+  .t-closed-actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+
+  .rep-cats { border: 0; padding: 0; margin: 16px 0; display: grid; gap: 10px; }
+  #report-form .field { margin-top: 4px; }
+  #report-form .msg { margin-top: 12px; }
+
+  @media (max-width: 600px) {
+    .thread-page { padding: 0; height: calc(100dvh - var(--nav-h)); }
+    .thread { border-radius: 0; border-left: 0; border-right: 0; box-shadow: none; }
+    .t-head { padding: 10px 16px 12px; grid-template-areas: "back actions" "who who"; }
+    /* Phones: Profile and Close chat move into the menu so the head stays one line. */
+    .t-actions > #t-profile, .t-actions > #t-close { display: none !important; }
+    .t-menu .m-only:not([hidden]) { display: flex; }
+    .t-av { width: 44px; height: 44px; font-size: 20px; }
+    .t-msgs { padding: 16px 14px 10px; }
+    .t-msgs :global(.m) { max-width: 86%; font-size: 16px; }
+    .t-foot { padding: 10px 14px 12px; }
+    .t-send span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    .t-send { width: 52px; padding: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) { .t-msgs :global(.typing i) { animation: none; } }
+</style>
+
+<script>
+  import "../../scripts/chat-thread";
+</script>

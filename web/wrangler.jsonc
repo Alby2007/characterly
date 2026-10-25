@@ -13,7 +13,7 @@
     // worker (public/_headers covers their headers).
     "run_worker_first": [
       "/", "/characters", "/characters/*", "/creators/*", "/guides/*", "/account", "/dashboard",
-      "/terms", "/privacy", "/security", "/safety", "/sitemap.xml",
+      "/terms", "/privacy", "/security", "/safety", "/sitemap.xml", "/chat", "/chat/*",
       "/discord/events", "/avatar", "/avatar/gc", "/track", "/creator-profile"
     ],
     "not_found_handling": "404-page"

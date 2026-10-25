@@ -8,6 +8,8 @@ import Icon from "../components/Icon.astro";
 // already up: the email form never flashes before the hop to Discord.
 export const prerender = false;
 const q = Astro.url.searchParams;
+// Arriving from "Chat on the web": say plainly what each sign-in means for memory.
+const forAdopt = q.get("for") === "adopt";
 const startingDiscord = q.get("start") === "discord" && !q.has("error") && !q.has("error_description");
 Astro.response.headers.set("cache-control", "no-store");
 ---
@@ -23,6 +25,7 @@ Astro.response.headers.set("cache-control", "no-store");
       </div>
 
       <div class="or" id="or-divider"><span>or use email</span></div>
+      {forAdopt && <p class="memory-note small">With Discord, your web chats share one memory with your Discord DMs. With email, your characters keep a separate memory on the web, and linking Discord later won't merge the two.</p>}
 
       <div class="email-tabs" id="tab-bar" role="tablist" aria-label="Email options">
         <button class="etab" type="button" role="tab" aria-selected="true" data-tab="signin" id="t-signin" aria-controls="form-signin">Sign in</button>
@@ -84,6 +87,7 @@ Astro.response.headers.set("cache-control", "no-store");
   #discord-block { margin-top: 26px; }
   .full { width: 100%; }
   .fine { margin-top: 10px; }
+  .memory-note { margin: -6px 0 16px; color: var(--ink-2); }
   .or { display: flex; align-items: center; gap: 12px; margin: 28px 0 18px; font-size: 13.5px; font-weight: 700; color: var(--ink-3); }
   .or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
   .email-tabs { display: flex; gap: 4px; padding: 4px; background: var(--field); border-radius: 10px; }

@@ -1,0 +1,100 @@
+---
+// /chat: your characters. Surface brief: .impeccable/surfaces/web-src-pages-chat-index-astro.md
+// (locked sketch .impeccable/mocks/decision/chat-roster.html). Prerendered
+// shell; scripts/chat-roster.ts fills it for the signed-in visitor.
+import Base from "../../layouts/Base.astro";
+
+import ConsentGate from "../../components/ConsentGate.astro";
+export const prerender = true;
+---
+<Base title="Your characters · Characterly" description="Chat with the characters you've adopted." noindex chrome="app" current="/chat" loading="Loading your characters…">
+  <div class="wrap roster-page">
+    <header class="roster-head">
+      <div>
+        <h1>Your characters.</h1>
+        <p class="lede">Pick up where you left off. Each one keeps its own memory of you.</p>
+      </div>
+      <div class="head-side">
+        <a class="btn" href="/characters">Find more on the shelf</a>
+        <p class="tokens small" id="roster-tokens" hidden></p>
+      </div>
+    </header>
+
+    <div class="msg" id="roster-error" role="alert" hidden></div>
+
+    <ul class="roster" id="roster" aria-label="Your characters" hidden></ul>
+
+    <section class="empty" id="roster-empty" hidden>
+      <h2>No characters yet.</h2>
+      <p class="lede">Adopt one from the shelf and your conversation opens here, with their first hello already waiting.</p>
+      <p class="empty-actions"><a class="btn btn-go" href="/characters">Browse the shelf</a><a class="link" href="/guides/import-character-cards">Bring a character you already have</a></p>
+    </section>
+
+    <section class="closed" id="closed" aria-labelledby="closed-h" hidden>
+      <h2 class="closed-h" id="closed-h">Closed chats</h2>
+      <p class="muted small">Read-only. Open one to start a new chat with that character.</p>
+      <ul class="closed-list" id="closed-list"></ul>
+    </section>
+
+    <p class="bond-note small" id="bond-note" hidden></p>
+  </div>
+  <ConsentGate />
+</Base>
+
+<style>
+  .roster-page { padding-top: 40px; }
+  .roster-head { display: flex; align-items: end; justify-content: space-between; gap: 20px 40px; flex-wrap: wrap; padding-bottom: 20px; border-bottom: 2px solid var(--ink); }
+  .roster-head h1 { font-size: clamp(40px, 5vw, 64px); }
+  .roster-head .lede { margin-top: 12px; }
+  .head-side { display: grid; gap: 8px; justify-items: end; }
+  .tokens { color: var(--ink-3); font-weight: 650; }
+  .tokens :global(a) { font-weight: 700; color: var(--ink); }
+  #roster-error { margin-top: 24px; }
+
+  .roster { list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 32px 20px; margin-top: 32px; }
+  .roster :global(.rc) { display: grid; gap: 3px; width: 100%; padding: 0; border: 0; background: none; text-align: left; cursor: pointer; text-decoration: none; color: inherit; font: inherit; }
+  .roster :global(.rc-art) { position: relative; display: block; aspect-ratio: 1; border-radius: var(--radius); overflow: hidden; background: var(--field-deep); }
+  .roster :global(.rc-art img) { width: 100%; height: 100%; object-fit: cover; transition: transform 0.35s var(--ease); }
+  .roster :global(.rc:hover .rc-art img) { transform: scale(1.04); }
+  .roster :global(.rc-ph) { display: grid; place-items: center; height: 100%; font-variation-settings: var(--wide); font-weight: 850; font-size: 64px; color: var(--ink-3); }
+  .roster :global(.rc-live) { position: absolute; left: 12px; bottom: 12px; display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 6px; background: var(--panel); font-size: 12px; font-weight: 800; box-shadow: 0 6px 14px -8px rgba(20, 24, 58, 0.5); }
+  .roster :global(.rc-live i) { width: 8px; height: 8px; border-radius: 50%; background: var(--ink); animation: breathe 1.4s var(--ease) infinite; }
+  .roster :global(.rc-name) { margin-top: 10px; font-variation-settings: "wdth" 112; font-weight: 800; font-size: 19px; letter-spacing: -0.01em; }
+  .roster :global(.rc:hover .rc-name) { text-decoration: underline; }
+  .roster :global(.rc-line) { color: var(--ink-2); font-size: 15px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .roster :global(.rc-meta) { font-size: 13px; font-weight: 700; color: var(--ink-3); margin-top: 2px; }
+  .roster :global(.rc-add) { display: grid; place-items: center; gap: 6px; align-content: center; aspect-ratio: 1; border: 2px dashed var(--line-strong); border-radius: var(--radius); color: var(--ink-2); font-weight: 750; text-decoration: none; transition: border-color 0.18s, background 0.18s; }
+  .roster :global(.rc-add:hover) { border-color: var(--ink-3); background: var(--panel); }
+  @keyframes breathe { 50% { opacity: 0.35; } }
+
+  .empty { padding: 48px 0; max-width: 640px; }
+  .empty .lede { margin-top: 14px; }
+  .empty-actions { display: flex; align-items: center; gap: 10px 22px; flex-wrap: wrap; margin-top: 22px; }
+
+  /* Closed chats stay quiet: a hairline, not the head's signature rule. */
+  .closed { margin-top: 56px; border-top: 1px solid var(--line); padding-top: 16px; max-width: 760px; }
+  .closed-h { font-size: 17px; font-weight: 750; font-variation-settings: "wdth" 100; }
+  .closed .muted { margin-top: 6px; }
+  .closed-list { list-style: none; margin-top: 12px; }
+  .closed-list :global(li) { border-bottom: 1px solid var(--line); }
+  .closed-list :global(a) { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 12px 0; text-decoration: none; }
+  .closed-list :global(.cl-av) { width: 40px; height: 40px; border-radius: var(--radius-s); object-fit: cover; background: var(--field-deep); display: grid; place-items: center; font-weight: 850; color: var(--ink-3); }
+  .closed-list :global(.cl-name) { font-weight: 750; }
+  .closed-list :global(.cl-line) { display: block; font-size: 14px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .closed-list :global(.cl-when) { font-size: 13px; color: var(--ink-3); font-weight: 650; }
+
+  .bond-note { margin-top: 48px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--ink-2); max-width: 70ch; }
+  .bond-note :global(a) { font-weight: 700; color: var(--ink); }
+
+  @media (max-width: 600px) {
+    .roster-page { padding-top: 24px; }
+    .head-side { justify-items: start; }
+    .roster { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 14px; }
+    .roster :global(.rc-name) { font-size: 17px; }
+  }
+  @media (prefers-reduced-motion: reduce) { .roster :global(.rc-live i) { animation: none; } }
+</style>
+
+<script>
+  import "../../scripts/chat-roster";
+</script>

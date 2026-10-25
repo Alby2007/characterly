@@ -238,6 +238,22 @@ dialog.modal p { margin-top: 12px; color: var(--ink-2); }
 
 /* ── Responsive ───────────────────────────────────────────────────────── */
 .nav-app { display: flex; }
+.nl-short { display: none; }
+/* Signed-in links stay visible on phones: they are the app's only navigation. */
+@media (max-width: 960px) {
+  .nav-inner .nav-links-app { display: flex; gap: 16px; margin-left: 8px; overflow-x: auto; scrollbar-width: none; }
+}
+@media (max-width: 600px) {
+  .nav-inner:has(.nav-links-app) .brand span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .nav-inner:has(.nav-links-app) { gap: 14px; }
+  .nav-inner .nav-links-app { gap: 14px; margin-left: 0; }
+  .nav-links-app a { font-size: 14px; white-space: nowrap; }
+  /* Short labels so all three app links fit at 360px without a hidden scroll. */
+  .nav-links-app a:has(.nl-short) .nl-long { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .nav-app .btn { display: none; }
+  .nav-app .link-btn { white-space: nowrap; }
+  .nav-links-app .nl-short { display: inline; }
+}
 @media (max-width: 960px) {
   .nav-links, .nav-end:not(.nav-app) { display: none; }
   .menu-btn { display: inline-flex; }

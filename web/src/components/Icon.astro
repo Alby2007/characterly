@@ -1,6 +1,6 @@
 ---
 // One stroke icon set (24px grid, 2px stroke) so marks read as a family.
-interface Props { name: "arrow" | "pin" | "edit" | "forget" | "discord" | "menu" | "close" | "upload" | "lock" | "check" | "plus"; size?: number; label?: string }
+interface Props { name: "arrow" | "pin" | "edit" | "forget" | "discord" | "menu" | "close" | "upload" | "lock" | "check" | "plus" | "more" | "back" | "send"; size?: number; label?: string }
 const { name, size = 18, label } = Astro.props;
 const paths: Record<Props["name"], string> = {
   arrow: "M4 12h15M13 6l6 6-6 6",
@@ -13,6 +13,9 @@ const paths: Record<Props["name"], string> = {
   lock: "M7 11V8a5 5 0 0110 0v3M6 11h12v9H6z",
   check: "M5 12.5l4.5 4.5L19 7.5",
   plus: "M12 5v14M5 12h14",
+  more: "M5 12h.01M12 12h.01M19 12h.01",
+  back: "M20 12H5M11 6l-6 6 6 6",
+  send: "M4 12l16-8-6 16-2.5-6.5z",
   discord: "",
 };
 ---

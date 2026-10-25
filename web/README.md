@@ -19,8 +19,8 @@ Without `SUPABASE_SERVICE_ROLE_KEY` in `.dev.vars`, `npm run dev` shows the firs
 | Path | What |
 |---|---|
 | `src/worker.ts` | Worker entry: `/discord/events`, `/avatar`, `/avatar/gc`, `/track`, canonical-host redirect (API paths exempt), security headers, `page_view`. Everything else goes to Astro's handler. |
-| `src/pages/` | `index` (SSR, live shelf strip), `characters/` (SSR), `[doc]` (terms/privacy/security/safety, prerendered from the root `.md` files), `guides/`, `account`, `dashboard`, `404`, `sitemap.xml` |
-| `src/scripts/` | Browser code: `auth.ts` (Supabase helpers), `account.ts`, `dashboard.ts`, `memories.ts`, `import-card.ts`, `import-history.ts`, `nav.ts`, `archive-tabs.ts` |
+| `src/pages/` | `index` (SSR, live shelf strip), `characters/` (SSR), `[doc]` (terms/privacy/security/safety, prerendered from the root `.md` files), `guides/`, `account`, `dashboard`, `chat/` (web chat: roster prerendered, `chat/[id]` SSR shell; both in `run_worker_first`), `404`, `sitemap.xml` |
+| `src/scripts/` | Browser code: `auth.ts` (Supabase helpers), `account.ts`, `dashboard.ts`, `memories.ts`, `import-card.ts`, `import-history.ts`, `nav.ts`, `archive-tabs.ts`, `webchat.ts` (web chat RPCs + Realtime, contract in `docs/web-chat-frontend.md`), `chat-roster.ts`, `chat-thread.ts`, `adopt.ts` |
 | `src/lib/config.ts` | Links, Supabase public config, `TERMS_VERSION`, plans and prices: the only place prices live |
 | `src/styles/global.css` | Tokens and shared components |
 

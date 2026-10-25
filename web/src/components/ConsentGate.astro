@@ -1,0 +1,13 @@
+---
+// The post-sign-in clickwrap (auth.ts ensureConsent shows it). Any signed-in
+// page that acts for the user includes this once.
+---
+<dialog class="modal" id="consent-gate" aria-labelledby="cg-h">
+  <h2 id="cg-h">Before you continue</h2>
+  <p>Read the <a href="/terms" target="_blank" rel="noopener noreferrer">Terms of Service</a> and <a href="/privacy" target="_blank" rel="noopener noreferrer">Privacy Policy</a>, then confirm you agree.</p>
+  <div class="msg" id="consent-error" role="alert" hidden></div>
+  <div class="modal-actions">
+    <button class="btn" id="consent-signout" type="button">Sign out</button>
+    <button class="btn btn-go" id="consent-accept" type="button">I agree, continue</button>
+  </div>
+</dialog>

@@ -229,7 +229,7 @@ export function initMemories({ linked }: { linked: boolean }) {
     loading.hidden = true;
     if (error) return fail(explain(error));
     if (!Array.isArray(data) || !data.length) {
-      fail("No characters yet. Adopt one in the Characterly server, or import a card below, and their memory shows up here.");
+      fail("No characters yet. Adopt one from the shelf, or import a card below, and their memory shows up here.");
       msg.classList.add("ok");
       return;
     }
