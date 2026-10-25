@@ -287,6 +287,20 @@ test("v73 rpcs: gates — own listing, delisted, banned send, report flags", asy
 
 // ── runWebTurnJob ───────────────────────────────────────────────────────────
 
+test("web: scopes start live — memory and reply enabled like dm:", async () => {
+  // The v1 silent-failure class: a web scope seeded with guild defaults
+  // (0,0) makes runCompanionTurn exit before billing with no metric — the
+  // placeholder just reads no_reply forever. Guard the settings seam itself.
+  const { store } = await webFixture();
+  try {
+    const s = await store.settings("web:00000000-0000-0000-0000-000000000042");
+    assert.equal(s.memoryEnabled, 1);
+    assert.equal(s.replyEnabled, 1);
+  } finally {
+    await teardownWeb();
+  }
+});
+
 test("web-turn job: unlinked scope, status transitions, row writes", async () => {
   const { store } = await webFixture();
   try {

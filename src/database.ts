@@ -274,7 +274,10 @@ export class MemoryStore {
   // ── Settings ───────────────────────────────────────────────────────────────
 
   private async ensureSettings(guildId: string, retentionDays = 30): Promise<void> {
-    if (guildId.startsWith("dm:")) {
+    // User scopes (dm:<discord_id>, web:<uuid>) are 1:1 bonds — the user opted
+    // in by starting the conversation, so they start live like DMs. Guild
+    // scopes stay dormant until a member opts in (the 0 column defaults).
+    if (guildId.startsWith("dm:") || guildId.startsWith("web:")) {
       await this.sql`
         INSERT INTO server_settings (guild_id, memory_enabled, reply_enabled, raw_retention_days)
         VALUES (${guildId}, 1, 1, ${retentionDays})
